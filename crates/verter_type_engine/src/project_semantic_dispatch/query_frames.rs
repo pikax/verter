@@ -165,6 +165,10 @@ pub(super) enum FrameBuild {
     /// A family build waiting on its file's load, to read that file next
     /// from the load's terminal outcome.
     FamilySource(Box<FamilyBuild>, Arc<str>, LoadEnded),
+    /// A family build at a resolver port whose file is still loading,
+    /// waiting on that load, to answer the port next over the load's
+    /// terminal outcome.
+    FamilyPort(Box<FamilyBuild>, Arc<str>, LoadEnded),
 }
 
 /// Where a load's terminal outcome is kept for the frame that waited on it:
@@ -2605,6 +2609,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.advance_family_frame(key, build, step, suspends_loads)
     }
 
+    /// The load of `canonical` a family's step waits on, on a production
+    /// poll's drive, when the file is still loading: `None` when it is
+    /// servable, when this frame already consumed a load of it — the
+    /// retained outcome answers every read of the file by this build, and
+    /// is never loaded again — or on the synchronous entry's drive.
+    fn family_file_load(&self, canonical: &str, suspends_loads: bool) -> Option<LoadWait<'a>> {
+        if !suspends_loads
+            || crate::resolver_core::request_ports::consumed_load_known(|file| file == canonical)
+        {
+            return None;
+        }
+        match self.ctx.begin_indexed_load(canonical) {
+            IndexedReadiness::Loading(load) => Some(LoadWait {
+                load,
+                ended: LoadEnded::default(),
+            }),
+            IndexedReadiness::Settled => None,
+        }
+    }
+
     /// Carry a family build on from `step`: its output, or the query it
     /// reads next as the frame's need, the build retained by the frame. A
     /// read whose entry first normalizes its subject keeps the prelude that
@@ -2612,7 +2636,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// synchronous build reads it, and the build goes on. A file it reads
     /// next is read at once when no load is needed; on a production poll's
     /// drive the frame otherwise waits on the file's load, the build
-    /// retained, while the synchronous entry's drive loads it in place.
+    /// retained, while the synchronous entry's drive loads it in place. A
+    /// resolver port it stands at is answered in place over the files the
+    /// build loaded; a port whose file is still loading waits the same way.
     fn advance_family_frame(
         &self,
         key: &SemanticQueryKey,
@@ -2623,27 +2649,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         loop {
             match step {
                 FamilyStep::Load(canonical, family) => {
-                    if suspends_loads {
-                        if let IndexedReadiness::Loading(load) =
-                            self.ctx.begin_indexed_load(&canonical)
-                        {
-                            let ended = LoadEnded::default();
-                            *build = Some(FrameBuild::FamilySource(
-                                family,
-                                canonical,
-                                Arc::clone(&ended),
-                            ));
-                            return FramePoll::Await(LoadWait { load, ended });
-                        }
+                    if let Some(wait) = self.family_file_load(&canonical, suspends_loads) {
+                        *build = Some(FrameBuild::FamilySource(
+                            family,
+                            canonical,
+                            Arc::clone(&wait.ended),
+                        ));
+                        return FramePoll::Await(wait);
                     }
                     let serve = self.ctx.ensure_indexed_ready_serve(&canonical);
                     step = self.resume_family_source(*family, serve);
                 }
-                FamilyStep::Global(read, family) => {
-                    step = self.resume_family_global(*family, read);
-                }
-                FamilyStep::Declarations(family) => {
-                    step = self.resume_family_declarations(*family);
+                FamilyStep::Port(family) => {
+                    let file = family.port_read().reads_file().map(Arc::<str>::from);
+                    if let Some(file) = file {
+                        if let Some(wait) = self.family_file_load(&file, suspends_loads) {
+                            *build = Some(FrameBuild::FamilyPort(
+                                family,
+                                file,
+                                Arc::clone(&wait.ended),
+                            ));
+                            return FramePoll::Await(wait);
+                        }
+                    }
+                    let answer = self.answer_port_in_place(&family.port_read());
+                    step = self.resume_family_port(*family, answer);
                 }
                 FamilyStep::Done(output) => {
                     return FramePoll::Done(Box::new(self.family_value_output(key, *output)))
@@ -2688,8 +2718,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !suspends_loads {
             return None;
         }
+        // A declaration lookup names its scope and every route hop as the
+        // `Load` transitions of its own continuation, so nothing is loaded
+        // for it ahead of its reads.
         let canonical: &str = match key {
-            SemanticQueryKey::ResolveDecl(key) => key.scope.canonical_id.as_ref(),
             SemanticQueryKey::Instantiate(key) => key.base().defining_canonical.as_ref(),
             SemanticQueryKey::TypeOf { value_root, .. } => {
                 value_root.root.scope.canonical_id.as_ref()
@@ -2714,21 +2746,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         let pending = {
             let _tracer = tracer.install();
-            self.observe_read(|| {
-                if let SemanticQueryKey::ResolveDecl(declaration) = key {
-                    // A terminal preload failure is consumed by the builder;
-                    // probing it here must not start a synchronous retry.
-                    self.ctx.authoritative_current_content_hash(canonical)?;
-                    let serve = self.ctx.ensure_indexed_ready_serve(canonical)?;
-                    if !Self::resolve_decl_needs_route(declaration, &serve.indexed.shallow_state) {
-                        return None;
-                    }
-                }
-                self.ctx.begin_prepared_bundle_load(canonical, &files)
-            })
-            .discard()
-            .ok()
-            .flatten()
+            self.observe_read(|| self.ctx.begin_prepared_bundle_load(canonical, &files))
+                .discard()
+                .ok()
+                .flatten()
         }?;
         let ended = LoadEnded::default();
         awaited.push((pending.canonical, Some(Arc::clone(&ended))));
@@ -2763,6 +2784,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         failed.push((Arc::clone(file), ConsumedLoad::Indexed(serve.clone())));
                     }
                 }
+            }
+        }
+    }
+
+    /// Consume the terminal outcome of a family's load of `canonical` into
+    /// the frame's retained loads, so every later read of the file by this
+    /// build — the family's own, or a port's in-place read — answers from
+    /// it and never begins the load again: an integrated file is served as
+    /// loaded, and a load that ended without integrating it answers every
+    /// read with no input for the file. `true` when the file integrated.
+    fn consume_family_load(canonical: &Arc<str>, ended: &LoadEnded) -> bool {
+        use crate::resolver_core::request_ports::{retain_consumed_load, ConsumedLoad};
+        let completion = ended.get().expect("a load resumes after completion");
+        match completion.outcome {
+            IndexedLoadOutcome::Integrated => {
+                if let Some(serve) = &completion.indexed {
+                    retain_consumed_load(
+                        Arc::clone(canonical),
+                        ConsumedLoad::Indexed(serve.clone()),
+                    );
+                }
+                true
+            }
+            IndexedLoadOutcome::NotIntegrated(end) => {
+                retain_consumed_load(Arc::clone(canonical), ConsumedLoad::End(end));
+                false
             }
         }
     }
@@ -2824,9 +2871,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // answers every load of it by this build, including later scope reads:
         // the terminal outcome stays with the frame until it finishes.
         let mut consumed_loads = std::mem::take(&mut frame.consumed_loads);
-        let poll: FramePoll<'a> = crate::resolver_core::request_ports::with_consumed_loads(
-            &mut consumed_loads,
-            || {
+        let poll: FramePoll<'a> =
+            crate::resolver_core::request_ports::with_consumed_loads(&mut consumed_loads, || {
                 match frame.build.as_mut() {
                     Some(FrameBuild::Instantiate(build)) => self
                         .drain_instantiate(
@@ -2884,21 +2930,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         else {
                             unreachable!("the build was just matched")
                         };
-                        let completion = ended.get().expect("a load resumes after completion");
-                        let serve = match completion.outcome {
-                            IndexedLoadOutcome::Integrated => {
-                                let mut retained = completion.indexed.as_ref().map(|serve| vec![(
-                                    Arc::clone(&canonical),
-                                    crate::resolver_core::request_ports::ConsumedLoad::Indexed(serve.clone()),
-                                )]).unwrap_or_default();
-                                crate::resolver_core::request_ports::with_consumed_loads(
-                                    &mut retained,
-                                    || self.ctx.ensure_indexed_ready_serve(&canonical),
-                                )
-                            }
-                            IndexedLoadOutcome::NotIntegrated(_) => None,
-                        };
+                        let serve = Self::consume_family_load(&canonical, &ended)
+                            .then(|| self.ctx.ensure_indexed_ready_serve(&canonical))
+                            .flatten();
                         let step = self.resume_family_source(*family, serve);
+                        self.advance_family_frame(
+                            &frame.key,
+                            &mut frame.build,
+                            step,
+                            suspends_loads,
+                        )
+                    }
+                    // A family build at a port whose file's load ended answers
+                    // the port over that terminal outcome, once, exactly as a
+                    // file read would: the port's in-place reads of the file
+                    // consume the retained delivery or failure and begin no
+                    // load.
+                    Some(FrameBuild::FamilyPort(..)) => {
+                        let Some(FrameBuild::FamilyPort(family, canonical, ended)) =
+                            frame.build.take()
+                        else {
+                            unreachable!("the build was just matched")
+                        };
+                        Self::consume_family_load(&canonical, &ended);
+                        let answer = self.answer_port_in_place(&family.port_read());
+                        let step = self.resume_family_port(*family, answer);
                         self.advance_family_frame(
                             &frame.key,
                             &mut frame.build,
@@ -2914,8 +2970,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         suspends_loads,
                     ),
                 }
-            },
-        );
+            });
         frame.consumed_loads = consumed_loads;
         let step = crate::request_context::current_cold_compute_completeness();
         if step.is_partial() {

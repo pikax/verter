@@ -135,6 +135,7 @@ pub mod evaluate;
 // runtime.
 mod family_continuation;
 pub use family_continuation::ContinuationStage;
+mod port_continuations;
 // The stages of those family builds, written against the stage capability.
 mod continuation_stages;
 pub mod locator_shape;

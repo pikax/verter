@@ -521,6 +521,16 @@ impl RouteLookup for crate::VerterHost {
         ))
     }
 
+    fn resolve_type_dependency_canonical_witnessed(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+    ) -> Option<String> {
+        witnessed_route_edge(|| {
+            RouteLookup::resolve_type_dependency_canonical(self, owner_canonical, import_source)
+        })
+    }
+
     #[inline]
     fn routed_shallow_state(
         &self,
@@ -1313,6 +1323,16 @@ where
         )
     }
 
+    fn resolve_type_dependency_canonical_witnessed(
+        &self,
+        owner_canonical: &str,
+        import_source: &str,
+    ) -> Option<String> {
+        witnessed_route_edge(|| {
+            RouteLookup::resolve_type_dependency_canonical(self, owner_canonical, import_source)
+        })
+    }
+
     #[inline]
     fn routed_shallow_state(&self, canonical_id: &str) -> Option<Arc<ShallowInputRecord>> {
         verter_type_engine::count_resolver_context_call!("RouteLookup::routed_shallow_state");
@@ -1439,6 +1459,18 @@ where
 /// refused route never becomes a cacheable "not found". Every context
 /// answers through this, whichever resolution snapshot produced the
 /// publication.
+/// Resolve one route edge under a resolution witness scope and observe the
+/// facts the resolution read onto the active tracer, as the host's route
+/// walk does for each edge it traverses.
+fn witnessed_route_edge(resolve: impl FnOnce() -> Option<String>) -> Option<String> {
+    let witness = crate::host_manage::import_route_witness::ResolutionWitnessScope::enter();
+    let answer = resolve();
+    for fact in witness.collected() {
+        verter_type_engine::resolver_core::resolver_context::observe_fan_out(fact);
+    }
+    answer
+}
+
 pub(crate) fn type_route_answer(
     publication: verter_workspace::ResolutionPublication<String>,
 ) -> Option<String> {
@@ -1938,7 +1970,7 @@ where
 /// without a delivery. The reader answers with that outcome, as after a
 /// synchronous load that ended the same way, and never materializes the file
 /// again on the polling thread.
-fn consumed_load_ended(host: &crate::VerterHost, canonical: &str) -> bool {
+pub(crate) fn consumed_load_ended(host: &crate::VerterHost, canonical: &str) -> bool {
     let canonical = host.normalized_analysis_canonical(canonical);
     verter_type_engine::resolver_core::request_ports::consumed_load_end(|file| {
         host.normalized_analysis_canonical(file) == canonical

@@ -2611,6 +2611,14 @@ impl VerterHost {
         canonical_id: &str,
         held_source: Option<&HeldIndexedSource>,
     ) -> Option<LocatedIndexedServe> {
+        // A semantic reader that already waited on an owned load of this file
+        // which ended without integrating it answers from that outcome at
+        // every in-place serve it reaches — a prepared bundle's source read,
+        // a contributor's materialization — and never loads the file again
+        // on the polling thread.
+        if crate::resolver_core::request_bound::consumed_load_ended(self, canonical_id) {
+            return None;
+        }
         let _task = verter_execution::tasks::ExecutionScope::enter(&self.task_registry);
         verter_execution::blocking::drive_pending(
             verter_execution::blocking::WaitFamily::DeclLowering,

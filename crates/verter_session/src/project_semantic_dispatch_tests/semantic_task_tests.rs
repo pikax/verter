@@ -3213,8 +3213,8 @@ mod semantic_poll_contract {
             assert_eq!(apparent.0, apparent.1, "{point:?}: an apparent type");
             assert_eq!(
                 apparent.2,
-                (1, 7),
-                "{point:?}: the apparent type's six reads, and its anchor list once more after the retirement"
+                (1, 13),
+                "{point:?}: the apparent type's twelve reads, and its anchor list once more after the retirement"
             );
         }
     }
@@ -3356,8 +3356,8 @@ mod semantic_poll_contract {
             let after = continuation_stages(&host);
             assert_eq!(
                 (after.0 - before.0, after.1 - before.1),
-                (1, 6),
-                "the apparent type begins once, then reads its anchor list, its call and construct lists for the strict interface, looks up `CallableFunction` and then `Function`, and reads the interface, each once"
+                (1, 12),
+                "the apparent type begins once, then reads its anchor list, its call and construct lists for the strict interface, looks up `CallableFunction` (its library and contributor indexes) and then `Function` (both indexes and its contributing module), and reads the interface, each once"
             );
             read_summary(&dispatch, &read)
         };
@@ -3422,8 +3422,8 @@ mod semantic_poll_contract {
         let after = continuation_stages(&host);
         assert_eq!(
             (after.0 - before.0, after.1 - before.1),
-            (1, 6),
-            "no stage runs again: every list, lookup and the interface are each read once"
+            (1, 12),
+            "no stage runs again: every list, lookup read and the interface are each read once"
         );
         assert_eq!(read_summary(&dispatch, &read), synchronous);
         assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
@@ -4810,8 +4810,19 @@ mod semantic_poll_contract {
         }
     }
 
+    /// A declaration lookup of a name its scope imports and re-exports
+    /// (`import { Props } from './owner'; export { Props }`) is the scope's
+    /// own identity to the resolver: it answers the scope's placeholder from
+    /// the scope's inventory alone. The polled entry answers it on its first
+    /// poll, under a forbidding probe, with the owner's index still cold on
+    /// held shards — it reads the import's target only when a consumer
+    /// instantiates the placeholder, as the synchronous entry does — and
+    /// leaves nothing open. (Before the route became the lookup's own
+    /// transitions, the frame preloaded the scope's import targets ahead of
+    /// the build and waited on the owner's index for an answer that never
+    /// read it.)
     #[test]
-    fn an_imported_declaration_with_present_source_yields_for_indexing() {
+    fn an_imported_declaration_answers_its_scope_without_indexing_its_import() {
         const IMPORTER: &str = "/semantic-task/decl-importer.ts";
         let make_host = || {
             let host = unloaded_files_host(&[
@@ -4831,31 +4842,24 @@ mod semantic_poll_contract {
             let read = dispatch.execute_via_cold_build_helper(declaration_key(IMPORTER));
             read_summary(&dispatch, &read)
         };
-        for abandon in [false, true] {
-            let host = make_host();
-            let mut held = host.decl_lowering.hold_workers_for_tests();
-            let mut dispatch = ProjectSemanticDispatch::new(&*host);
-            let mut entry = dispatch.poll_query(declaration_key(IMPORTER));
-            {
-                let _forbid = verter_execution::blocking::WaitProbe::forbid();
-                assert!(entry.poll(Waker::noop()).is_pending());
-                assert!(entry.poll(Waker::noop()).is_pending());
+        let host = make_host();
+        let mut held = host.decl_lowering.hold_workers_for_tests();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let mut entry = dispatch.poll_query(declaration_key(IMPORTER));
+        let read = {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            match entry.poll(Waker::noop()) {
+                Poll::Ready(read) => read,
+                Poll::Pending => {
+                    panic!("the lookup answers from its scope without the import's index")
+                }
             }
-            if abandon {
-                drop(entry);
-                held.release();
-            } else {
-                held.release();
-                let read = poll_until_ready(|waker| {
-                    let _forbid = verter_execution::blocking::WaitProbe::forbid();
-                    entry.poll(waker)
-                });
-                drop(entry);
-                assert_eq!(read_summary(&dispatch, &read), synchronous);
-            }
-            assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
-            assert_eq!(host.task_registry.wait_count_for_tests(), 0);
-        }
+        };
+        drop(entry);
+        held.release();
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(host.task_registry.wait_count_for_tests(), 0);
     }
 
     #[test]
@@ -4940,9 +4944,15 @@ mod semantic_poll_contract {
                 .blocking_loads_begun
                 .load(std::sync::atomic::Ordering::SeqCst)
         };
-        let cases: [(&str, usize, Key); 5] = [
+        let cases: [(&str, usize, Key); 6] = [
             ("a declaration's source", 1, |_, _| {
                 declaration_key(MISSING_OWNER)
+            }),
+            // The declaring file's load fails once; the declaration reads
+            // the static surface then makes at its port consume that
+            // failure instead of loading the file again.
+            ("a class's static declaring file", 1, |host, dispatch| {
+                class_static_surface_in(host, dispatch, MISSING_OWNER)
             }),
             ("an instantiation's declaring file", 1, |_, dispatch| {
                 missing_props_key(dispatch)
@@ -5341,8 +5351,13 @@ mod semantic_poll_contract {
                 )
             },
             expression_site: false,
-            before_seam: (1, 0),
-            in_all: (2, 1),
+            // The scope is read, its wildcard specifier resolved and the
+            // owner read as a hop before the route waits on the defining
+            // declaration.
+            before_seam: (1, 3),
+            // The defining lookup begins its own build and reads its scope;
+            // the route resumes once with it.
+            in_all: (2, 5),
         },
         HeldSeam {
             seam: "a macro payload's props intersection",
@@ -5416,8 +5431,12 @@ mod semantic_poll_contract {
             expression_site: true,
             before_seam: (1, 0),
             // The anchor list, the call and construct lists, the
-            // `CallableFunction` and `Function` lookups and the interface.
-            in_all: (1, 6),
+            // `CallableFunction` lookup's library and pending-contributor
+            // index reads and its load of the callee file (its `declare
+            // global` block is still pending ingestion on a fresh host) and
+            // population read, the `Function` lookup's three index reads and
+            // its contributor's load, and the interface.
+            in_all: (1, 12),
         },
         HeldSeam {
             seam: "an apparent type's construct list",
@@ -5426,16 +5445,18 @@ mod semantic_poll_contract {
             expression_site: true,
             // The anchor list and the call list are read before the wait.
             before_seam: (1, 2),
-            in_all: (1, 6),
+            in_all: (1, 12),
         },
         HeldSeam {
             seam: "an apparent type's interface instantiation",
             host: apparent_callee_host,
             keys: apparent_interface_keys,
             expression_site: true,
-            // Every list and both lookups are made before the wait.
-            before_seam: (1, 5),
-            in_all: (1, 6),
+            // Every list and both lookups are made before the wait. The
+            // keys' own interface read ingested the pending contributor
+            // already, so the `CallableFunction` lookup loads none.
+            before_seam: (1, 10),
+            in_all: (1, 11),
         },
         HeldSeam {
             seam: "a class instance surface's instantiation",
@@ -5981,6 +6002,272 @@ mod semantic_poll_contract {
                 assert_eq!(read_summary(&dispatch, &read), synchronous, "{label}");
                 assert!(graph.resident_flight_keys_for_tests().is_empty(), "{label}");
             }
+        }
+    }
+
+    /// A barrel one hop past the scope's own imports.
+    const DEEP_IMPORTER: &str = "/semantic-task/deep-importer.ts";
+    const DEEP_BARREL: &str = "/semantic-task/deep-barrel.ts";
+
+    /// A host whose declaration lookup in [`DEEP_IMPORTER`] reaches
+    /// [`UNLOADED_OWNER`] through two barrels: the importer's `export *`
+    /// and the deeper barrel's named re-export. Both barrels are indexed;
+    /// the owner is loaded when `owner_indexed`, else left unloaded.
+    fn deep_barrel_host(owner_indexed: bool) -> Arc<crate::VerterHost> {
+        let host = unloaded_files_host(&[
+            (DEEP_IMPORTER, "export * from './deep-barrel';"),
+            (DEEP_BARREL, "export { Props } from './owner';"),
+            (UNLOADED_OWNER, "export interface Props { a: string }"),
+        ]);
+        host.ensure_indexed_ready(DEEP_IMPORTER).unwrap();
+        host.ensure_indexed_ready(DEEP_BARREL).unwrap();
+        if owner_indexed {
+            host.ensure_indexed_ready(UNLOADED_OWNER).unwrap();
+        }
+        host
+    }
+
+    /// A declaration lookup follows its scope's export route hop by hop,
+    /// each barrel a load of its own: a defining file two barrels away,
+    /// whose index another shard still builds, returns `Pending` at the
+    /// polled entry with the route retained — the scope, the first barrel
+    /// and both specifier resolutions each read once — without entering a
+    /// wait, and its `Send` task stays pending on another thread. Released,
+    /// the lookup resumes at the deeper hop, reads the defining declaration
+    /// once and delivers exactly what the synchronous entry, which drives
+    /// the same route in place, reads on a fresh host, with the same
+    /// stages. No file the route read ahead of its hops: nothing of the
+    /// deeper barrel's target is loaded before the lookup stands at it.
+    #[test]
+    fn a_routed_declaration_whose_deeper_barrel_target_is_indexing_yields_and_resumes_elsewhere() {
+        let (synchronous, synchronous_stages) = {
+            let host = deep_barrel_host(false);
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let (read, stages) = stages_of(&host, || {
+                dispatch.execute_via_cold_build_helper(declaration_key(DEEP_IMPORTER))
+            });
+            (read_summary(&dispatch, &read), stages)
+        };
+        assert_eq!(
+            synchronous_stages,
+            (2, 7),
+            "the lookup begins once and resumes at its scope, both specifiers and both hops; the defining lookup begins once and resumes at its scope, then the route resumes with it"
+        );
+        assert!(
+            !synchronous.3 && synchronous.5.is_some(),
+            "premise: a complete, priced answer: {synchronous:?}"
+        );
+
+        let host = deep_barrel_host(false);
+        assert!(host.ensure_loaded(UNLOADED_OWNER));
+        let mut held = host.decl_lowering.hold_workers_for_tests();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let before = continuation_stages(&host);
+        let mut entry = dispatch.poll_query(declaration_key(DEEP_IMPORTER));
+        let counter = CountingThreadWaker::for_current_thread();
+        let waker = Waker::from(Arc::clone(&counter));
+        let first = {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            entry.poll(&waker).is_pending()
+        };
+        let held_stages = continuation_stages(&host);
+        let elsewhere = entry.task().map(|task| {
+            assert_send(task);
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| task.poll(&waker).is_pending())
+                    .join()
+                    .expect("the pending poll returns")
+            })
+        });
+        held.release();
+        assert!(
+            first,
+            "the lookup yields while the deeper target's index builds"
+        );
+        assert_eq!(
+            (held_stages.0 - before.0, held_stages.1 - before.1),
+            (1, 4),
+            "the scope, the first barrel and both specifiers were read once and the route waits at the deeper target"
+        );
+        assert_eq!(elsewhere, Some(true));
+        counter.wait_for_wake("the completed index wakes the waiting lookup");
+        let read = resume_elsewhere(&mut entry);
+        drop(entry);
+        let after = continuation_stages(&host);
+        assert_eq!(
+            (after.0 - before.0, after.1 - before.1),
+            synchronous_stages,
+            "no stage runs again: the route resumes at the deeper target"
+        );
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+
+        // Warm, the polled entry answers alike on its first poll without
+        // running a stage.
+        let (warm, stages) = {
+            let mut warm = dispatch.poll_query(declaration_key(DEEP_IMPORTER));
+            stages_of(&host, || match warm.poll(Waker::noop()) {
+                Poll::Ready(read) => read,
+                Poll::Pending => panic!("a warm lookup answers at once"),
+            })
+        };
+        assert_eq!(stages, (0, 0), "a warm lookup runs no stage");
+        assert_eq!(read_summary(&dispatch, &warm), synchronous);
+    }
+
+    /// The module whose `declare global` block contributes the `Function`
+    /// interface a callable's apparent type widens to.
+    const FUNCTION_CONTRIBUTOR: &str = "/semantic-task/function-global.ts";
+
+    const FUNCTION_CONTRIBUTION: &str =
+        "declare global { interface Function { readonly marker: \"fn\"; } }\n";
+
+    /// A callable object surface in the contextual file, whose project
+    /// declares `Function` only through `contribution`, the module source
+    /// of [`FUNCTION_CONTRIBUTOR`]; both files indexed.
+    fn contributed_function_host(contribution: &str) -> Arc<crate::VerterHost> {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            FUNCTION_CONTRIBUTOR,
+            &crate::u6_flow_shape_corpus_tests::module_script(contribution),
+            crate::FileLanguage::script_ts(),
+        );
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            CONTEXTUAL_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(
+                "declare const o: { (a: string): 1 };\n",
+            ),
+            crate::FileLanguage::script_ts(),
+        );
+        host.ensure_indexed_ready(FUNCTION_CONTRIBUTOR)
+            .expect("the contributor has indexed input");
+        host.ensure_indexed_ready(CONTEXTUAL_FILE)
+            .expect("the callee has indexed input");
+        host
+    }
+
+    /// The `Function` contribution after an edit: the same interface, a
+    /// comment added, so the module's index must be built again.
+    const EDITED_FUNCTION_CONTRIBUTION: &str =
+        "// edited\ndeclare global { interface Function { readonly marker: \"fn\"; } }\n";
+
+    /// A host whose `Function` contributor was indexed and then edited: its
+    /// source is current, its index cold and the contributor pending
+    /// ingestion again, so the next global lookup reads it as a load.
+    fn edited_function_contributor_host() -> Arc<crate::VerterHost> {
+        let host = contributed_function_host(FUNCTION_CONTRIBUTION);
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            FUNCTION_CONTRIBUTOR,
+            &crate::u6_flow_shape_corpus_tests::module_script(EDITED_FUNCTION_CONTRIBUTION),
+            crate::FileLanguage::script_ts(),
+        );
+        host
+    }
+
+    /// A global declaration lookup reads the program contributors it would
+    /// otherwise index in place as loads of its own: an apparent type whose
+    /// `Function` interface a `declare global` module contributes, that
+    /// module's index cold after an edit and its shard held, returns
+    /// `Pending` at the polled entry at the contributor's load — only the
+    /// stages before it run — without entering a wait, and its `Send` task
+    /// stays pending on another thread. Released, it resumes at the
+    /// contributor and delivers exactly what the synchronous entry reads
+    /// on an equally edited host, with the same stages: no stage runs
+    /// again, and no load is made ahead of the lookup's own.
+    #[test]
+    fn an_apparent_type_whose_global_contributor_is_indexing_yields_and_resumes_elsewhere() {
+        let (synchronous, synchronous_stages) = {
+            let host = edited_function_contributor_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let (apparent, _) = apparent_type_keys(&dispatch);
+            let (read, stages) =
+                stages_of(&host, || dispatch.execute_via_cold_build_helper(apparent));
+            (read_summary(&dispatch, &read), stages)
+        };
+        assert!(
+            synchronous.0.contains("marker") && !synchronous.3,
+            "premise: the contributed interface's complete surface: {synchronous:?}"
+        );
+
+        let host = edited_function_contributor_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let (apparent, _) = apparent_type_keys(&dispatch);
+        // The held shards keep the edited contributor's index cold until
+        // released.
+        let mut held = host.decl_lowering.hold_workers_for_tests();
+        let before = continuation_stages(&host);
+        let mut entry = dispatch.poll_query(apparent.clone());
+        let counter = CountingThreadWaker::for_current_thread();
+        let waker = Waker::from(Arc::clone(&counter));
+        let first = {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            entry.poll(&waker).is_pending()
+        };
+        let held_stages = continuation_stages(&host);
+        let elsewhere = entry.task().map(|task| {
+            assert_send(task);
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| task.poll(&waker).is_pending())
+                    .join()
+                    .expect("the pending poll returns")
+            })
+        });
+        held.release();
+        assert!(
+            first,
+            "the apparent type yields while its contributor's index builds"
+        );
+        let held_stages = (held_stages.0 - before.0, held_stages.1 - before.1);
+        assert_eq!(held_stages.0, 1, "only the apparent type's build began");
+        assert!(
+            held_stages.1 >= 4 && held_stages.1 < synchronous_stages.1,
+            "the lists and the lookup's index reads ran and the lookup waits at its contributor: {held_stages:?} of {synchronous_stages:?}"
+        );
+        assert_eq!(elsewhere, Some(true));
+        counter.wait_for_wake("the completed index wakes the waiting lookup");
+        let read = resume_elsewhere(&mut entry);
+        drop(entry);
+        let after = continuation_stages(&host);
+        assert_eq!(
+            (after.0 - before.0, after.1 - before.1),
+            synchronous_stages,
+            "no stage runs again: the lookup resumes at its contributor"
+        );
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+    }
+
+    /// The static surface of the class `C` declared in `file`.
+    fn class_static_surface_in(
+        host: &crate::VerterHost,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        file: &str,
+    ) -> SemanticQueryKey {
+        let env = host.host_view_env_hashes_for(file);
+        SemanticQueryKey::ResolveClassSurface {
+            decl_slot: dispatch.type_slot_for(
+                file,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                "C",
+            ),
+            type_args: Arc::from(Vec::new().into_boxed_slice()),
+            side: verter_type_engine::semantic_query::ClassSurfaceSide::Static,
+            context: verter_type_engine::semantic_query::ClassSurfaceContext {
+                parse_env_hash: env.parse_env_hash,
+                resolve_env_hash: env.resolve_env_hash,
+                mode: ProjectionMode::Shallow,
+            },
         }
     }
 

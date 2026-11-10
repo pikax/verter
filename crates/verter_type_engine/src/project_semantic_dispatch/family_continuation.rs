@@ -39,6 +39,7 @@ use super::continuation_stages::{
     ApparentTypeBuild, ClassInstanceSurfaceBuild, ClassStaticSurfaceBuild, MacroPayloadBuild,
     OverloadSetBuild, ReduceIntersectionBuild,
 };
+use super::port_continuations::{PortAnswer, PortRead, ResolveDeclBuild};
 use super::ProjectSemanticDispatch;
 
 /// The capability a family continuation's stage runs with: everything a
@@ -166,6 +167,16 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
         self.dispatch.snapshot.current_project_generation()
     }
 
+    /// The dependency signature of `canonical_id` at the content version
+    /// `hash`, under the current project generation.
+    pub(super) fn dep_signature_for(
+        &self,
+        canonical_id: impl Into<verter_type_expr::OwnedStr>,
+        hash: verter_session_query::analysis::types::Hash16,
+    ) -> crate::semantic_query::DepSignature {
+        self.dispatch.dep_signature_for(canonical_id, hash)
+    }
+
     /// The file versions `nodes` were lowered from.
     pub(super) fn observed_self_roots_from_nodes(
         &self,
@@ -245,7 +256,7 @@ pub(super) enum FamilyBuild {
         Box<QueryBuildOutput>,
         Box<crate::semantic_query::SemanticNodeData>,
     ),
-    ResolveDecl(crate::semantic_query_memo::ObservedGraphSelfRoot),
+    ResolveDecl(Box<ResolveDeclBuild>),
     CycleGate(Box<super::cycle_gate::CycleGateBuild>),
     MacroPayload(MacroPayloadBuild),
     ReduceIntersection(ReduceIntersectionBuild),
@@ -286,6 +297,23 @@ impl FamilyBuild {
             | Self::TemplateUnion(..) => false,
         }
     }
+
+    /// The resolver port this build stands at ([`FamilyStep::Port`]): what
+    /// it reads next, which its driver answers in place over the files the
+    /// build loaded.
+    pub(super) fn port_read(&self) -> PortRead<'_> {
+        match self {
+            Self::ClassStaticSurface(build) => PortRead::ClassStatic(build.declaration_read()),
+            Self::ApparentType(build) => build.global_port(),
+            Self::ResolveDecl(build) => build.port_read(),
+            Self::MacroPayload(_)
+            | Self::ReduceIntersection(_)
+            | Self::OverloadSet(_)
+            | Self::ClassInstanceSurface(_)
+            | Self::CycleGate(_)
+            | Self::TemplateUnion(..) => unreachable!("this family reads no resolver port"),
+        }
+    }
 }
 
 /// The answer a build waiting on a read named from retired kernel handles
@@ -296,16 +324,6 @@ pub(super) fn retired_read() -> CacheRead<QueryResult<SemanticQueryValue>> {
         QueryResult::Error(crate::semantic_query::QueryError::Miss),
         super::empty_signature(),
     )
-}
-
-/// A global declaration lookup a stage names: the first declaration of the
-/// global type `name` that `demand`'s project reads — its library's, else
-/// its program's contributors'. The lookup reads the library and the
-/// contributing files where the driver stands: both drivers make it in
-/// place.
-pub(super) struct GlobalRead {
-    pub(super) demand: Arc<str>,
-    pub(super) name: &'static str,
 }
 
 /// Where a family build stands after its latest stage.
@@ -319,13 +337,14 @@ pub(super) enum FamilyStep {
     /// The build reads this file's indexed input next, holding everything
     /// it computed.
     Load(Arc<str>, Box<FamilyBuild>),
-    /// The build looks a global declaration up next, holding everything it
-    /// computed.
-    Global(GlobalRead, Box<FamilyBuild>),
-    /// The build reads prepared declarations and lowers declaration
-    /// positions of the files it loaded next, holding everything it
-    /// computed. Both drivers make the read in place.
-    Declarations(Box<FamilyBuild>),
+    /// The build reads a resolver port next — a declaration, route or
+    /// global lookup over files it loaded ([`FamilyBuild::port_read`]) —
+    /// holding everything it computed. Its driver answers the port in
+    /// place over the deliveries the build retained
+    /// ([`ProjectSemanticDispatch::answer_port_in_place`]); a port whose
+    /// file is still loading on a production poll's drive waits on that
+    /// load first.
+    Port(Box<FamilyBuild>),
 }
 
 // A suspended family build is owned state its frame carries to whichever
@@ -370,7 +389,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticQueryKey::TemplateLiteralReduce { pattern, args, .. } => {
                 Some(self.begin_template_literal_reduce(pattern, args))
             }
-            SemanticQueryKey::ResolveDecl(key) => Some(self.begin_resolve_decl(key)),
+            SemanticQueryKey::ResolveDecl(key) => {
+                Some(self.continuation_stage().begin_resolve_decl(key))
+            }
             SemanticQueryKey::ClassifyMaterializationCycleGate(key) => {
                 Some(self.continuation_stage().begin_cycle_gate(key))
             }
@@ -449,18 +470,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 });
                 FamilyStep::Done(output)
             }
-            FamilyBuild::ResolveDecl(root) => {
-                let read = super::narrow_value_cache_read(read);
-                let completeness = read.fact_status.completeness();
-                let mut roots = vec![root];
-                if let QueryResult::Value(node) = &read.value {
-                    roots.extend(self.observed_self_roots_from_nodes([*node]));
-                }
-                let mut output: QueryBuildOutput = (read.value, read.dep_signature).into();
-                output.cache_suppress = read.cache_suppress;
-                output.merge_completeness(completeness);
-                FamilyStep::Done(Box::new(output.with_observed_self_roots(roots)))
-            }
+            FamilyBuild::ResolveDecl(build) => self
+                .continuation_stage()
+                .finish_resolve_decl(*build, super::narrow_value_cache_read(read)),
             FamilyBuild::CycleGate(build) => self
                 .continuation_stage()
                 .resume_cycle_gate_hop(*build, super::narrow_value_cache_read(read)),
@@ -504,14 +516,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .continuation_stage()
                 .resume_macro_payload_owner(build, serve),
             FamilyBuild::TemplateUnion(..) => unreachable!("a template union is a query read"),
-            FamilyBuild::ResolveDecl(_) => unreachable!("a declaration target is a query read"),
+            FamilyBuild::ResolveDecl(build) => self
+                .continuation_stage()
+                .resume_resolve_decl_source(*build, serve),
             FamilyBuild::ReduceIntersection(_) => {
                 unreachable!("an intersection reduction reads no file")
             }
             FamilyBuild::OverloadSet(_) => unreachable!("an overload set reads no file"),
-            FamilyBuild::ApparentType(_) => {
-                unreachable!("an apparent type reads its files through its global lookup")
-            }
+            FamilyBuild::ApparentType(build) => self
+                .continuation_stage()
+                .resume_apparent_global_source(build, serve),
             FamilyBuild::ClassInstanceSurface(build) => self
                 .continuation_stage()
                 .resume_class_instance_source(build, serve),
@@ -521,50 +535,72 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// The next stage of `build`, given the declaration the global lookup
-    /// it named found.
+    /// The next stage of `build`, given the answer to the resolver port it
+    /// stands at.
     #[inline(never)]
-    pub(super) fn resume_family_global(&self, build: FamilyBuild, read: GlobalRead) -> FamilyStep {
+    pub(super) fn resume_family_port(&self, build: FamilyBuild, answer: PortAnswer) -> FamilyStep {
         self.graph().record_continuation_resumed();
-        let found = self.first_global_declaration(read.demand.as_ref(), read.name);
-        match build {
-            FamilyBuild::ApparentType(build) => self
+        match (build, answer) {
+            (FamilyBuild::ClassStaticSurface(build), PortAnswer::ClassStatic(answer)) => self
                 .continuation_stage()
-                .resume_apparent_global(build, found),
-            FamilyBuild::MacroPayload(_)
-            | FamilyBuild::ReduceIntersection(_)
-            | FamilyBuild::OverloadSet(_)
-            | FamilyBuild::ClassInstanceSurface(_)
-            | FamilyBuild::ClassStaticSurface(_)
-            | FamilyBuild::CycleGate(_)
-            | FamilyBuild::TemplateUnion(..)
-            | FamilyBuild::ResolveDecl(_) => {
-                unreachable!("only an apparent type looks a global declaration up")
+                .resume_class_static_declarations(build, answer),
+            (FamilyBuild::ApparentType(build), answer) => self
+                .continuation_stage()
+                .resume_apparent_global_port(build, answer),
+            (FamilyBuild::ResolveDecl(build), answer) => self
+                .continuation_stage()
+                .resume_resolve_decl_port(*build, answer),
+            (FamilyBuild::ClassStaticSurface(_), _) => {
+                unreachable!("a class's static surface reads only its declarations")
             }
+            (
+                FamilyBuild::MacroPayload(_)
+                | FamilyBuild::ReduceIntersection(_)
+                | FamilyBuild::OverloadSet(_)
+                | FamilyBuild::ClassInstanceSurface(_)
+                | FamilyBuild::CycleGate(_)
+                | FamilyBuild::TemplateUnion(..),
+                _,
+            ) => unreachable!("this family reads no resolver port"),
         }
     }
 
-    /// The next stage of `build`, given the answer to the declaration read
-    /// it stands at.
+    /// Answer the resolver port `read` in place, where the driver stands:
+    /// over the deliveries the build retained for the files it loaded, so
+    /// the answer loads nothing a `Load` transition did not name. A port is
+    /// the one place a family's stage reaches the resolver.
     #[inline(never)]
-    pub(super) fn resume_family_declarations(&self, build: FamilyBuild) -> FamilyStep {
-        self.graph().record_continuation_resumed();
-        match build {
-            FamilyBuild::ClassStaticSurface(build) => {
-                let answer = self.read_class_static_declarations(&build.declaration_read());
-                self.continuation_stage()
-                    .resume_class_static_declarations(build, answer)
+    pub(super) fn answer_port_in_place(&self, read: &PortRead<'_>) -> PortAnswer {
+        match read {
+            PortRead::GlobalLib { demand, name } => {
+                PortAnswer::GlobalLib(self.lib_global_identity(demand, name))
             }
-            FamilyBuild::MacroPayload(_)
-            | FamilyBuild::ReduceIntersection(_)
-            | FamilyBuild::OverloadSet(_)
-            | FamilyBuild::ApparentType(_)
-            | FamilyBuild::ClassInstanceSurface(_)
-            | FamilyBuild::CycleGate(_)
-            | FamilyBuild::TemplateUnion(..)
-            | FamilyBuild::ResolveDecl(_) => {
-                unreachable!("only a class's static surface reads declarations in place")
+            PortRead::GlobalPending => {
+                PortAnswer::GlobalPending(self.ctx.pending_global_contributors())
             }
+            PortRead::GlobalContributors { demand, name } => {
+                PortAnswer::GlobalContributors(self.global_contributors_in(
+                    demand,
+                    name,
+                    verter_session_query::facts::SymbolSpace::Type,
+                ))
+            }
+            PortRead::ClassStatic(read) => {
+                PortAnswer::ClassStatic(self.read_class_static_declarations(read))
+            }
+            PortRead::Dependency {
+                importer,
+                specifier,
+            } => PortAnswer::Dependency(
+                self.ctx
+                    .resolve_type_dependency_canonical_witnessed(importer, specifier)
+                    .map(Arc::from),
+            ),
+            PortRead::BareName {
+                canonical,
+                owner,
+                name,
+            } => PortAnswer::BareName(self.resolve_decl_route_in_place(canonical, *owner, name)),
         }
     }
 
@@ -668,11 +704,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let serve = self.ctx.ensure_indexed_ready_serve(&canonical);
                     step = self.resume_family_source(*build, serve);
                 }
-                FamilyStep::Global(read, build) => {
-                    step = self.resume_family_global(*build, read);
-                }
-                FamilyStep::Declarations(build) => {
-                    step = self.resume_family_declarations(*build);
+                FamilyStep::Port(build) => {
+                    let answer = self.answer_port_in_place(&build.port_read());
+                    step = self.resume_family_port(*build, answer);
                 }
             }
         }

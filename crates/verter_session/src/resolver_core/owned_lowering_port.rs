@@ -363,6 +363,12 @@ impl SourceInputProvider for crate::VerterHost {
         &self,
         canonical: &str,
     ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
+        // A reader that already waited on an owned load of the file which
+        // ended without integrating it answers from that outcome: the file
+        // is not materialized again on the polling thread.
+        if super::request_bound::consumed_load_ended(self, canonical) {
+            return None;
+        }
         crate::VerterHost::ensure_indexed_ready_serve(self, canonical)
     }
     fn source(
@@ -814,6 +820,22 @@ macro_rules! owned_lowering_from_source_inputs {
                     }),
                 );
                 (key, answer, resolutions.into_inner())
+            }
+            fn pending_global_contributors(&self) -> Vec<Arc<str>> {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::pending_global_contributors");
+                let host = SourceInputProvider::source_host(self);
+                // The classification half of `ingest_program_ambient_roots`:
+                // it records the pending contributors and settles program
+                // discovery without claiming an index flight.
+                host.classify_injected_ambient_roots(None);
+                host.ingest_configured_programs();
+                host.project_type_store()
+                    .indexed()
+                    .global_contributor_index()
+                    .pending_overlay_ambient()
+                    .into_iter()
+                    .map(|(canonical, _)| canonical)
+                    .collect()
             }
             fn global_contributor_answer(
                 &self,
