@@ -1,0 +1,14 @@
+{
+  "id": "types-helpers",
+  "files": [
+    "types-helpers/example.ts"
+  ],
+  "imports": [
+    "@verter/types"
+  ],
+  "surfaces": [
+    "vue.language_service.typing"
+  ],
+  "executionClass": "ExternalOwner",
+  "proofClass": "static-proof"
+}

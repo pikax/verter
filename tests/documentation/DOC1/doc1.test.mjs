@@ -2,15 +2,18 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { build } from "esbuild";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   canonicalizeReceipt,
   createBoundedText,
   createTextDigester,
   loadWorkspacePackages,
+  resolveExampleManifest,
   resolvePackageExport,
   resolveShippedCommand,
   sha256Text,
@@ -25,13 +28,105 @@ const generatedRel = "docs/generated/typeinfo-row-registry-counts.md";
 const viteConfig = readFileSync(join(repoRoot, viteConfigRel), "utf8");
 const commands = readFileSync(join(repoRoot, commandsRel), "utf8");
 const generated = readFileSync(join(repoRoot, generatedRel), "utf8");
-const manifest = JSON.parse(
-  readFileSync(join(repoRoot, "examples/reference/manifest.json"), "utf8"),
-);
+// The manifest is a sharded index: the header keeps home/pin and the
+// two index pages, rows register through fragment files, and readers observe
+// only the merged view resolved by the shared loader.
+const manifestRel = "examples/reference/manifest.json";
+const manifestHeader = JSON.parse(readFileSync(join(repoRoot, manifestRel), "utf8"));
+const { manifest } = resolveExampleManifest(join(repoRoot, "examples/reference"));
+const exampleFragment = (id) => `examples/reference/${id}/example.json`;
 
 function opts(extra = {}) {
   return { repoRoot, skipTypeinfoCheck: true, ...extra };
 }
+
+test("row-bearing manifest headers fail with the offending key", async () => {
+  for (const key of ["examples", "journeys", "sdkGuides.topics", "recipes.topics"]) {
+    const header = structuredClone(manifestHeader);
+    const parts = key.split(".");
+    if (parts.length === 1) header[key] = [{ id: "header-row" }];
+    else header[parts[0]].topics = [{ id: "header-row" }];
+    const receipt = await validate(opts({ overlays: { [manifestRel]: JSON.stringify(header) } }));
+    assert.equal(receipt.completenessState, "failed");
+    assert.deepEqual(
+      receipt.errors.map((item) => item.code),
+      ["manifest-header-invalid"],
+    );
+    assert.equal(receipt.errors[0].key, key);
+  }
+});
+
+test("a malformed fragment reports its primary failure before dependent validation", async () => {
+  const fragment = exampleFragment("shipped-cli");
+  const receipt = await validate(opts({ overlays: { [fragment]: "{broken" } }));
+  assert.equal(receipt.completenessState, "failed");
+  assert.deepEqual(
+    receipt.errors.map((item) => item.code),
+    ["manifest-fragment-invalid"],
+  );
+  assert.ok(receipt.errors[0].fragment.endsWith(fragment));
+});
+
+test("resolved rows and canonical receipts use code-unit id order", () => {
+  const ids = ["a", "Z", "a-b", "a_b"];
+  const receipt = canonicalizeReceipt({
+    examples: ids.map((id) => ({ id })),
+    journeys: ids.map((id) => ({ id })),
+    sdkGuides: { topics: ids.map((id) => ({ id })) },
+    recipes: { topics: ids.map((id) => ({ id })) },
+  });
+  for (const rows of [
+    receipt.examples,
+    receipt.journeys,
+    receipt.sdkGuides.topics,
+    receipt.recipes.topics,
+  ]) {
+    assert.deepEqual(
+      rows.map((row) => row.id),
+      [...ids].sort(),
+    );
+  }
+});
+
+test("the actual sidebar config discovers a new section without another edit", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "sidebar-config-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  cpSync(join(repoRoot, "docs/.vitepress/config.ts"), join(root, "config.ts"));
+  cpSync(join(repoRoot, "docs/.vitepress/sidebar"), join(root, "sidebar"), { recursive: true });
+  const expected = Object.fromEntries(
+    readdirSync(join(root, "sidebar"))
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => [
+        `/${name.slice(0, -5)}/`,
+        JSON.parse(readFileSync(join(root, "sidebar", name), "utf8")),
+      ]),
+  );
+  const added = [{ text: "Additional", items: [{ text: "Home", link: "/additional/" }] }];
+  writeFileSync(join(root, "sidebar/additional.json"), JSON.stringify(added));
+  await build({
+    entryPoints: [join(root, "config.ts")],
+    outfile: join(root, "config.mjs"),
+    bundle: true,
+    platform: "node",
+    format: "esm",
+    plugins: [
+      {
+        name: "config-wrappers",
+        setup(build) {
+          build.onResolve({ filter: /^(vitepress|vitepress-plugin-mermaid)$/ }, (args) => ({
+            path: args.path,
+            namespace: "wrappers",
+          }));
+          build.onLoad({ filter: /.*/, namespace: "wrappers" }, () => ({
+            contents: "export const defineConfig = x => x; export const withMermaid = x => x;",
+          }));
+        },
+      },
+    ],
+  });
+  const { default: config } = await import(pathToFileURL(join(root, "config.mjs")).href);
+  assert.deepEqual(config.themeConfig.sidebar, { ...expected, "/additional/": added });
+});
 
 async function clean() {
   return canonicalizeReceipt(await validate(opts()));
@@ -101,13 +196,12 @@ test("a side-effect import of package source internals fails", async () => {
 });
 
 test("a declared node: builtin import is not treated as an unpublished export", async () => {
-  const mutated = structuredClone(manifest);
-  const example = mutated.examples.find((row) => row.id === "unplugin-vite");
-  example.imports = [...example.imports, "node:fs"];
+  const unplugin = structuredClone(manifest.examples.find((row) => row.id === "unplugin-vite"));
+  unplugin.imports = [...unplugin.imports, "node:fs"];
   const receipt = await validate(
     opts({
       overlays: {
-        "examples/reference/manifest.json": JSON.stringify(mutated),
+        [exampleFragment("unplugin-vite")]: JSON.stringify(unplugin),
         [viteConfigRel]: `${viteConfig}\nimport fs from "node:fs";\n`,
       },
     }),
@@ -146,12 +240,12 @@ test("an example that invokes a bin absent from shipped packages fails", async (
 });
 
 test("an example citing a surface absent from the capability catalog fails", async () => {
-  const mutated = structuredClone(manifest);
-  mutated.examples[0].surfaces = ["invented.capability.matrix"];
+  const unplugin = structuredClone(manifest.examples.find((row) => row.id === "unplugin-vite"));
+  unplugin.surfaces = ["invented.capability.matrix"];
   const receipt = await validate(
     opts({
       overlays: {
-        "examples/reference/manifest.json": JSON.stringify(mutated),
+        [exampleFragment("unplugin-vite")]: JSON.stringify(unplugin),
       },
     }),
   );
@@ -226,21 +320,60 @@ test("digest labels follow posixRel of the examples root", async () => {
   assert.equal(receipt.projectConfiguration.examplesRoot, "examples/reference");
 });
 
+test("the manifest header contains metadata while rows register through fragments", () => {
+  assert.deepEqual(Object.keys(manifestHeader).sort(), ["home", "pin", "recipes", "sdkGuides"]);
+  assert.equal(manifestHeader.sdkGuides.index, "sdk/README.md");
+  assert.equal(manifestHeader.recipes.index, "guides/README.md");
+});
+
+test("a fragment-only example registration reaches the actual reader", async () => {
+  const before = await validate(opts());
+  const row = {
+    id: "additional-example",
+    files: ["additional.ts"],
+    imports: ["@verter/types"],
+    surfaces: ["vue.language_service.typing"],
+  };
+  const after = await validate(
+    opts({
+      overlays: {
+        [exampleFragment(row.id)]: JSON.stringify(row),
+        "examples/reference/additional.ts": 'import type { PatchHidden } from "@verter/types";\n',
+      },
+    }),
+  );
+  assert.deepEqual(after.errors, before.errors);
+  assert.equal(after.completenessState, before.completenessState);
+  assert.ok(after.examples.some((example) => example.id === row.id && example.ok));
+  assert.deepEqual(
+    after.examples.filter((example) => example.id !== row.id),
+    before.examples,
+  );
+});
+
+test("a fragment edit changes the source digest", async () => {
+  const fresh = await validate(opts());
+  const row = structuredClone(manifest.examples.find((r) => r.id === "shipped-cli"));
+  row.commands = [...row.commands];
+  const edited = await validate(
+    opts({ overlays: { [exampleFragment("shipped-cli")]: JSON.stringify(row) } }),
+  );
+  assert.equal(edited.completenessState, fresh.completenessState);
+  assert.notEqual(edited.sourceRevisions.digest, fresh.sourceRevisions.digest);
+});
+
 test("custom examplesRoot labels receipts with that path", async () => {
   const root = "examples/alt-reference";
   const receipt = await validate(
     opts({
       examplesRoot: join(repoRoot, root),
       overlays: {
-        [`${root}/manifest.json`]: JSON.stringify({
-          examples: [
-            {
-              id: "alt",
-              files: ["alt.ts"],
-              imports: ["@verter/types"],
-              surfaces: ["vue.language_service.typing"],
-            },
-          ],
+        [`${root}/manifest.json`]: JSON.stringify({ home: root }),
+        [`${root}/alt/example.json`]: JSON.stringify({
+          id: "alt",
+          files: ["alt.ts"],
+          imports: ["@verter/types"],
+          surfaces: ["vue.language_service.typing"],
         }),
         [`${root}/alt.ts`]:
           'import type { PatchHidden } from "@verter/types";\nexport type T = PatchHidden<{}, {}>;\n',
@@ -319,12 +452,10 @@ test("a compound command is rejected before the bin lookup", async () => {
     assert.equal(resolved.ok, false, command);
     assert.equal(resolved.code, "compound-command", command);
   }
-  const mutated = structuredClone(manifest);
-  mutated.examples.find((row) => row.id === "shipped-cli").commands = [
-    "verter-tsc && cargo run -p verter_tsc",
-  ];
+  const shippedCli = structuredClone(manifest.examples.find((row) => row.id === "shipped-cli"));
+  shippedCli.commands = ["verter-tsc && cargo run -p verter_tsc"];
   const receipt = await validate(
-    opts({ overlays: { "examples/reference/manifest.json": JSON.stringify(mutated) } }),
+    opts({ overlays: { [exampleFragment("shipped-cli")]: JSON.stringify(shippedCli) } }),
   );
   assert.notEqual(receipt.completenessState, "complete");
   const rejected = receipt.errors.find((item) => item.code === "unshipped-command");
@@ -333,10 +464,10 @@ test("a compound command is rejected before the bin lookup", async () => {
 });
 
 test("an example file outside the example home is rejected", async () => {
-  const mutated = structuredClone(manifest);
-  mutated.examples.find((row) => row.id === "types-helpers").files = ["../../package.json"];
+  const typesHelpers = structuredClone(manifest.examples.find((row) => row.id === "types-helpers"));
+  typesHelpers.files = ["../../package.json"];
   const receipt = await validate(
-    opts({ overlays: { "examples/reference/manifest.json": JSON.stringify(mutated) } }),
+    opts({ overlays: { [exampleFragment("types-helpers")]: JSON.stringify(typesHelpers) } }),
   );
   assert.notEqual(receipt.completenessState, "complete");
   const outside = receipt.errors.find((item) => item.code === "example-outside-home");
@@ -382,11 +513,11 @@ test("an observed import of an undeclared non-peer package is unknown", async ()
 });
 
 test("manifest pins are validated against the running engine and the workspace", async () => {
-  const mutated = structuredClone(manifest);
-  mutated.pin = { ...mutated.pin, node: ">=999", typescript: "0.0.0-not-installed" };
-  const receipt = await validate(
-    opts({ overlays: { "examples/reference/manifest.json": JSON.stringify(mutated) } }),
-  );
+  const header = {
+    ...manifestHeader,
+    pin: { ...manifestHeader.pin, node: ">=999", typescript: "0.0.0-not-installed" },
+  };
+  const receipt = await validate(opts({ overlays: { [manifestRel]: JSON.stringify(header) } }));
   assert.notEqual(receipt.completenessState, "complete");
   const node = receipt.errors.find(
     (item) => item.code === "pin-mismatch" && item.package === "node",

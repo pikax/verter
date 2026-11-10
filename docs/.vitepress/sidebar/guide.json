@@ -1,0 +1,70 @@
+[
+  {
+    "text": "Introduction",
+    "items": [
+      {
+        "text": "What is Verter?",
+        "link": "/guide/"
+      },
+      {
+        "text": "Getting Started",
+        "link": "/guide/getting-started"
+      }
+    ]
+  },
+  {
+    "text": "Bundler Integration",
+    "items": [
+      {
+        "text": "Vite",
+        "link": "/guide/vite"
+      },
+      {
+        "text": "webpack",
+        "link": "/guide/webpack"
+      },
+      {
+        "text": "Other Bundlers",
+        "link": "/guide/other-bundlers"
+      }
+    ]
+  },
+  {
+    "text": "Features",
+    "items": [
+      {
+        "text": "Overview",
+        "link": "/guide/features"
+      },
+      {
+        "text": "Performance",
+        "link": "/guide/performance"
+      },
+      {
+        "text": "Cross-File Optimization",
+        "link": "/guide/cross-file-optimization"
+      },
+      {
+        "text": "Linting",
+        "link": "/guide/linting"
+      },
+      {
+        "text": "Architecture",
+        "link": "/guide/architecture"
+      }
+    ]
+  },
+  {
+    "text": "Advanced",
+    "items": [
+      {
+        "text": "Reactivity Classification",
+        "link": "/guide/advanced/reactivity-classification"
+      },
+      {
+        "text": "Template Compilation",
+        "link": "/guide/advanced/template-compilation"
+      }
+    ]
+  }
+]

@@ -1,0 +1,10 @@
+{
+  "owner": "DXM0",
+  "tests": [
+    {
+      "runner": "node-test",
+      "file": "scripts/lib/sharded-index.test.mjs",
+      "ci": true
+    }
+  ]
+}

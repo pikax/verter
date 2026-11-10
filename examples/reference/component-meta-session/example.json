@@ -1,0 +1,14 @@
+{
+  "id": "component-meta-session",
+  "files": [
+    "component-meta/session.ts"
+  ],
+  "imports": [
+    "@verter/component-meta"
+  ],
+  "surfaces": [
+    "vue.component_meta.scalar"
+  ],
+  "executionClass": "NativeOnly",
+  "proofClass": "static-proof"
+}
