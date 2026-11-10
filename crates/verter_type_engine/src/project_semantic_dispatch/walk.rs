@@ -1600,7 +1600,7 @@ pub(crate) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabiliti
     surface_failure: Option<QueryError>,
     /// `true` when this walk projects a NON-EMPTY path (the caller
     /// requested `base[seg..]`), as opposed to an EMPTY whole-surface
-    /// projection (`ProjectPath(base, [])`). Set once in [`Self::walk`].
+    /// projection (`ProjectPath(base, [])`). Set in [`Self::begin_walk`].
     ///
     /// The path-precision rule distinguishes the two terminal cases: a
     /// non-empty path's terminal value is a PROJECTED segment result, so
