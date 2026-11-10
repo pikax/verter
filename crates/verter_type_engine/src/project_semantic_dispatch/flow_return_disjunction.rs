@@ -292,8 +292,16 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         for root in roots {
             note_entry();
             match mark.products.narrowing(&root) {
-                Some(product) => self.products.set_narrowing(&root, product.clone()),
-                None => self.products.remove(FlowDomain::Narrowing, &root),
+                Some(product) => self.products.set_narrowing(
+                    &mut self.frame_execution.borrow_mut(),
+                    &root,
+                    product.clone(),
+                ),
+                None => self.products.remove(
+                    &mut self.frame_execution.borrow_mut(),
+                    FlowDomain::Narrowing,
+                    &root,
+                ),
             }
         }
         self.narrowing_writes.truncate(mark.writes);

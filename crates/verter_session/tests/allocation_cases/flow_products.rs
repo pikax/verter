@@ -110,7 +110,7 @@ fn sparse_multiway_join_visits_only_materialized_predecessor_cells() {
         reset_alloc_counter();
         let result = execution.join_products(&incoming, &algebra).unwrap();
         let allocated = (alloc_count(), alloc_bytes());
-        assert_eq!(result.len(), predecessors);
+        assert_eq!(execution.read(&result).unwrap().len(), predecessors);
         assert!(keys.iter().all(|key| result.get(key)
             == Some(&FlowProductValue::ReachingType(ReachingTypeProduct::of(
                 number
@@ -275,7 +275,7 @@ fn continuation_allocation_depends_on_materialized_products_not_selected_capacit
             let started = std::time::Instant::now();
             let count = branches
                 .iter()
-                .map(|state| state.ordered_entries().count())
+                .map(|state| execution.read(state).unwrap().ordered_entries().count())
                 .sum::<usize>();
             let iterate_ns = started.elapsed().as_nanos();
             let iterate_cost = (alloc_count(), alloc_bytes());
@@ -287,7 +287,7 @@ fn continuation_allocation_depends_on_materialized_products_not_selected_capacit
                 .unwrap();
             let join_ns = started.elapsed().as_nanos();
             let join_cost = (alloc_count(), alloc_bytes());
-            assert_eq!(joined.len(), materialized);
+            assert_eq!(execution.read(&joined).unwrap().len(), materialized);
             let cost = (write_cost, iterate_cost, join_cost);
             if let Some(baseline) = baselines.get(&materialized) {
                 assert_eq!(

@@ -266,7 +266,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             alternate,
             contributors: Vec::new(),
             entry_products: self.products.clone(),
-            entry_writes: self.products.observe_writes(),
+            entry_writes: self.products.observe_writes(&self.frame_execution.borrow()),
             narrow_mark: self.narrowing_snapshot(),
             bases: self.scope_bases(),
             consequent: None,
@@ -286,7 +286,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // close on every abrupt edge that crossed the arm.
         let shadows = self.close_scope_since(eval.bases);
         let mut state = self.layer_state();
-        Self::close_lexical_scope(&mut state, &shadows);
+        Self::close_lexical_scope(&mut self.frame_execution.borrow_mut(), &mut state, &shadows);
         let products = state.products;
         let narrowings = self.narrowings_since(&eval.narrow_mark);
         self.restore_narrowings(eval.narrow_mark.clone());
@@ -818,7 +818,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         exit_states.extend(self.drain_break_exits(eval.bases.break_exits, None));
         if eval.last_falls {
             if let Some(mut end) = eval.last_end.take() {
-                Self::close_lexical_scope(&mut end, &shadows);
+                Self::close_lexical_scope(
+                    &mut self.frame_execution.borrow_mut(),
+                    &mut end,
+                    &shadows,
+                );
                 exit_states.push(end);
             }
         }
@@ -885,7 +889,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let shadows = self.close_scope_since(eval.bases);
         let mut exits: Vec<FlowLayerState> =
             self.drain_break_exits(eval.bases.break_exits, Some(eval.label));
-        Self::close_lexical_scope(&mut end, &shadows);
+        Self::close_lexical_scope(&mut self.frame_execution.borrow_mut(), &mut end, &shadows);
         if body_falls {
             exits.push(end);
         }
@@ -969,7 +973,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         )>,
         collect_throws: bool,
     ) -> TryClause {
-        let write_observation = self.products.observe_writes();
+        let write_observation = self.products.observe_writes(&self.frame_execution.borrow());
         self.restore_layer_state(start.clone());
         let clause = TryClause {
             start: start.clone(),
@@ -1058,7 +1062,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // break exits that crossed the clause's scope.
         let shadows =
             self.split_scope_shadows_close_exits(shadow_base, break_base, return_base, throw_base);
-        Self::close_lexical_scope(&mut end, &shadows);
+        Self::close_lexical_scope(&mut self.frame_execution.borrow_mut(), &mut end, &shadows);
         let executed = self.written_between(&write_observation, &end);
         // Preserve the clause-refusal contract without confusing it with
         // execution evidence. Only written subjects need a type comparison.
@@ -1328,8 +1332,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let mut post = pre_finally.clone();
         self.restore_clause_entry_narrowings(&eval.entry, &mut post.products);
         for subject in &finally_writes.executed.0 {
-            post.products
-                .apply_executed_write_from(subject, &finally_end.products);
+            post.products.apply_executed_write_from(
+                &mut self.frame_execution.borrow_mut(),
+                subject,
+                &finally_end.products,
+            );
             self.narrowing_writes.push(NarrowingLedgerEntry::Cleared {
                 root: self.canonical_runtime_subject(subject),
             });
@@ -1391,14 +1398,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .local(&first.binding)
                     .map(FlowProductSubject::Local)
                     .unwrap_or_else(|| FlowProductSubject::Captured(first.binding.clone()));
-                reestablish_narrowings(&mut self.products, &subject, &facts);
+                reestablish_narrowings(
+                    &mut self.products,
+                    &mut self.frame_execution.borrow_mut(),
+                    &subject,
+                    &facts,
+                );
             }
             for subject in &try_writes.type_changes.0 {
                 if eval.entry.products.assignment(subject).single_path() {
                     continue;
                 }
                 let cleared = self.products.assignment(subject).with_single_path(false);
-                self.products.set_assignment(subject, cleared);
+                self.products.set_assignment(
+                    &mut self.frame_execution.borrow_mut(),
+                    subject,
+                    cleared,
+                );
             }
         }
         // A throw of the try / catch clauses continues to an OUTER try
@@ -1668,15 +1684,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         analysis.memo.insert(reference.subject, products.clone());
         let carried = &analysis.carried[reference.subject];
         match analysis.references.last_mut() {
-            Some(parent) => parent
-                .start
-                .products
-                .restore_head_value_from(carried, &products),
+            Some(parent) => parent.start.products.restore_head_value_from(
+                &mut self.frame_execution.borrow_mut(),
+                carried,
+                &products,
+            ),
             None => {
-                analysis
-                    .head
-                    .products
-                    .restore_head_value_from(carried, &products);
+                analysis.head.products.restore_head_value_from(
+                    &mut self.frame_execution.borrow_mut(),
+                    carried,
+                    &products,
+                );
                 analysis.next_subject += 1;
             }
         }
@@ -1746,7 +1764,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 .expect("the reference analysed")
                                 .start
                                 .products
-                                .restore_head_value_from(&carried, &products);
+                                .restore_head_value_from(
+                                    &mut self.frame_execution.borrow_mut(),
+                                    &carried,
+                                    &products,
+                                );
                         }
                         None => {
                             analysis.in_analysis.push(other);
@@ -1790,10 +1812,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 match known {
                     Some(products) => {
                         let carried = analysis.carried[subject].clone();
-                        analysis
-                            .head
-                            .products
-                            .restore_head_value_from(&carried, &products);
+                        analysis.head.products.restore_head_value_from(
+                            &mut self.frame_execution.borrow_mut(),
+                            &carried,
+                            &products,
+                        );
                         analysis.next_subject += 1;
                     }
                     None => {
@@ -1977,7 +2000,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 let mut back_inputs = self.drain_continue_exits(pass.break_base, &lowered.labels);
                 if falls {
                     let mut end = self.layer_state();
-                    Self::close_lexical_scope(&mut end, &shadows);
+                    Self::close_lexical_scope(
+                        &mut self.frame_execution.borrow_mut(),
+                        &mut end,
+                        &shadows,
+                    );
                     back_inputs.push(end);
                 }
                 if back_inputs.is_empty() {
@@ -2080,7 +2107,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // closes over every state that leaves it.
         let shadows = self.close_scope_since(eval.bases);
         for exit in &mut exits {
-            Self::close_lexical_scope(exit, &shadows);
+            Self::close_lexical_scope(&mut self.frame_execution.borrow_mut(), exit, &shadows);
         }
         if exits.is_empty() {
             self.restore_layer_state(entry);
@@ -2089,7 +2116,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // The exits leave from the converged head (or its back edge): a
         // binding the head already holds conditionally stays conditional.
         let joined = self.join_continuations(&exits, &head.products, &entry.write_observation);
-        let written = joined.products.writes_since(&entry.write_observation);
+        let written = joined.products.writes_since(
+            &mut self.frame_execution.borrow_mut(),
+            &entry.write_observation,
+        );
         self.restore_layer_state(joined);
         for subject in written {
             if let Some(root) = self.narrow_root_of(&subject) {

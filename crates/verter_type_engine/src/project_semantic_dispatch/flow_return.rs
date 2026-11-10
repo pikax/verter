@@ -46,7 +46,8 @@ use super::flow_return_callee::{
     UtilityClause,
 };
 use super::flow_return_products::{
-    FlowBindingLayer, FlowFrameProducts as FlowProductStore, FlowWriteObservation,
+    FlowBindingLayer, FlowFrameExecution, FlowFrameProducts as FlowProductStore,
+    FlowWriteObservation, SharedFlowExecution,
 };
 use super::flow_solve::{FlowPartialReason, FlowSolveOutcome, NoValueFlowResult};
 use super::walk::QueryBuildOutput;
@@ -566,6 +567,7 @@ pub mod flow_admission_fault_injection {
     impl ProductObservation {
         pub(crate) fn capture(
             products: &super::super::flow_return_products::FlowFrameProducts,
+            frame: &super::super::flow_return_products::FlowFrameExecution,
             evidence: Option<&super::super::flow_products::FlowProductEvidence>,
             report: super::super::dispatch_txn::flow_obligation_state::FlowDischargeReport,
         ) -> Self {
@@ -573,8 +575,9 @@ pub mod flow_admission_fault_injection {
             use super::super::flow_solve::FlowDomain;
             Self {
                 products: products
-                    .state
-                    .ordered_entries()
+                    .read(frame)
+                    .into_iter()
+                    .flat_map(|read| read.ordered_entries())
                     .map(|(key, value)| {
                         let value = match value {
                             FlowProductValue::ReachingValue(value) => ObservedProduct::Definitions(
@@ -600,9 +603,7 @@ pub mod flow_admission_fault_injection {
                         (key.domain(), key.node().index(), value)
                     })
                     .collect(),
-                executed: products
-                    .execution
-                    .borrow()
+                executed: frame
                     .execution
                     .selected_sites()
                     .flat_map(|site| {
@@ -5303,6 +5304,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 knobs.product_executions.lock().unwrap().push(
                     flow_admission_fault_injection::ProductObservation::capture(
                         witness.products,
+                        &witness.frame_execution.borrow(),
                         witness.product_evidence,
                         report.clone(),
                     ),
@@ -7243,11 +7245,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return degraded(FlowReturnFailure::Unresolved, self_roots);
             }
         };
-        let Ok(mut products) = FlowProductStore::new(execution, &bound) else {
+        let Ok((mut products, frame_execution)) = FlowProductStore::new(execution, &bound) else {
             return degraded(FlowReturnFailure::Unresolved, self_roots);
         };
+        let frame_execution: SharedFlowExecution =
+            std::rc::Rc::new(std::cell::RefCell::new(frame_execution));
         seed_selected_parameters(
             &mut products,
+            &mut frame_execution.borrow_mut(),
             &ir.params,
             &params,
             &ir.bindings,
@@ -7312,6 +7317,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map(|carrier| Arc::clone(&carrier.plan)),
             anchor: frame_anchor,
             products,
+            frame_execution: std::rc::Rc::clone(&frame_execution),
             narrowing_writes: Vec::new(),
             observations: BodyCompletionObservations::none(),
             member_filter,
@@ -7407,7 +7413,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             constructed_values = std::mem::take(&mut evaluator.constructive_values);
             call_evidence = std::mem::take(&mut evaluator.call_evidence);
             executed_walk = std::mem::take(&mut evaluator.executed_walk);
-            let finished = evaluator.products.finish(evaluator.plan.as_deref());
+            let finished = evaluator
+                .frame_execution
+                .borrow_mut()
+                .finish(evaluator.plan.as_deref());
             products_finished = finished.is_ok();
             product_budget_exceeded = match &finished {
                 Err(FlowProductFailure::BudgetExceeded(exceeded)) => Some(*exceeded),
@@ -7554,6 +7563,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             bindings: &frame_bindings,
             product_evidence: frame_product_evidence.as_ref(),
             products: &frame_products,
+            frame_execution: &frame_execution,
             constructed_values: &constructed_values,
         };
         let contributors = match contributors {
@@ -13109,6 +13119,11 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// function-scoped subjects survive a lexical scope close because the
     /// close replays exactly the scope's own declaration shadows.
     products: FlowProductStore,
+    /// The product authority every snapshot of this frame advances under —
+    /// its declaration bank, budget, evidence and write sequence. Snapshots
+    /// never hold it; a nested evaluator reaches its enclosing frame's
+    /// through [`EnclosingFrame::frame_execution`].
+    frame_execution: SharedFlowExecution,
     /// The guard facts this frame has WRITTEN, in write order — the
     /// establishment ledger a scoped guard's mark truncates and a
     /// union-of-facts guard reads its per-disjunct contribution from.
@@ -13480,6 +13495,9 @@ struct FlowExecutionWitness<'w> {
     /// product evidence its own bindings rest on.
     product_evidence: Option<&'w FlowProductEvidence>,
     products: &'w FlowProductStore,
+    /// The product authority `products` was produced under, sealed.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    frame_execution: &'w SharedFlowExecution,
     /// Successful finite class construction certificates, tied to actual nodes.
     constructed_values: &'w rustc_hash::FxHashMap<SemanticNodeId, ConstructiveValue>,
 }
@@ -13964,6 +13982,7 @@ pub fn standing_narrowings(
 /// parameter input as definition provenance; no later initializer is claimed.
 fn seed_selected_parameters(
     products: &mut FlowProductStore,
+    frame: &mut FlowFrameExecution,
     parameters: &[verter_session_query::flow::slice::SliceParam],
     values: &[SemanticNodeId],
     bindings: &FlowBindingMap,
@@ -13997,9 +14016,10 @@ fn seed_selected_parameters(
         };
         let subject = FlowProductSubject::Local(binding);
         if binding == *input {
-            products.set_declared_type(&subject, Some(*value));
+            products.set_declared_type(frame, &subject, Some(*value));
         }
         products.bind_at(
+            frame,
             &subject,
             DefiniteAssignmentProduct::assigned(),
             ReachingTypeProduct::of(*value),
@@ -14064,11 +14084,12 @@ fn narrowing_facts_of(products: &FlowProductStore) -> Vec<FlowNarrowingFact> {
 /// are both in canonical fact order, so that check is one merge walk.
 fn reestablish_narrowings(
     products: &mut FlowProductStore,
+    frame: &mut FlowFrameExecution,
     root: &FlowProductSubject,
     facts: &[FlowNarrowingFact],
 ) {
     let Some(identity) = products.identity(root) else {
-        products.remove(super::flow_solve::FlowDomain::Narrowing, root);
+        products.remove(frame, super::flow_solve::FlowDomain::Narrowing, root);
         return;
     };
     let standing: &[FlowNarrowingFact] = products
@@ -14106,7 +14127,7 @@ fn reestablish_narrowings(
             fresh_literal: fact.fresh_literal,
         }))
         .collect();
-    products.set_narrowing(root, NarrowingProduct::new(merged));
+    products.set_narrowing(frame, root, NarrowingProduct::new(merged));
 }
 
 /// Record `path` under `root` narrowing to `node` in `products` — the ONE
@@ -14127,6 +14148,7 @@ fn numeric_member_name(name: &str) -> Option<f64> {
 
 fn push_narrowing_into(
     products: &mut FlowProductStore,
+    frame: &mut FlowFrameExecution,
     root: &FlowProductSubject,
     path: &Arc<[Arc<str>]>,
     narrowed: FlowNarrowed,
@@ -14147,7 +14169,7 @@ fn push_narrowing_into(
         binding: match products.identity(root) {
             Some(identity) => identity,
             None => {
-                products.remove(super::flow_solve::FlowDomain::Narrowing, root);
+                products.remove(frame, super::flow_solve::FlowDomain::Narrowing, root);
                 return;
             }
         },
@@ -14155,7 +14177,7 @@ fn push_narrowing_into(
         narrowed_to: narrowed,
         fresh_literal,
     });
-    products.set_narrowing(root, NarrowingProduct::new(facts));
+    products.set_narrowing(frame, root, NarrowingProduct::new(facts));
 }
 
 /// The outcome of evaluating ONE POSITION — a sub-expression, or one call
@@ -14291,6 +14313,9 @@ struct EnclosingFrame<'b> {
     function: verter_session_query::function_program::FunctionProgramKey,
     binder_env: &'b FlowBinderEnv,
     products: FlowProductStore,
+    /// The product authority `products` advances under: a capture
+    /// authority the nested evaluator lowers installs into its bank.
+    frame_execution: SharedFlowExecution,
     outside: usize,
     outer: EnclosingFrames<'b>,
 }
@@ -14302,11 +14327,13 @@ impl<'b> EnclosingFrames<'b> {
         function: verter_session_query::function_program::FunctionProgramKey,
         binder_env: &'b FlowBinderEnv,
         products: FlowProductStore,
+        frame_execution: SharedFlowExecution,
     ) -> Self {
         Self(Some(std::rc::Rc::new(EnclosingFrame {
             function,
             binder_env,
             products,
+            frame_execution,
             outside: self.len(),
             outer: self.clone(),
         })))
@@ -17181,7 +17208,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .flow
             .declared_authority_work
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.products.runtime_declared_type(binding)
+        self.products
+            .runtime_declared_type(&self.frame_execution.borrow(), binding)
     }
 
     /// Whether `binding` is the checker's AUTO-TYPED variable in this frame
@@ -17230,12 +17258,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .products
             .subjects_in(super::flow_solve::FlowDomain::Narrowing)
         {
-            self.products
-                .remove(super::flow_solve::FlowDomain::Narrowing, &subject);
+            self.products.remove(
+                &mut self.frame_execution.borrow_mut(),
+                super::flow_solve::FlowDomain::Narrowing,
+                &subject,
+            );
         }
         for (subject, facts) in mark.facts {
             if let Some(facts) = facts {
-                self.products.set_narrowing(&subject, facts);
+                self.products.set_narrowing(
+                    &mut self.frame_execution.borrow_mut(),
+                    &subject,
+                    facts,
+                );
             }
         }
         self.narrowing_writes.truncate(mark.writes);
@@ -17273,12 +17308,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         into: &mut FlowProductStore,
     ) {
         let written: rustc_hash::FxHashSet<FlowProductSubject> = into
-            .writes_since(&entry.write_observation)
+            .writes_since(
+                &mut self.frame_execution.borrow_mut(),
+                &entry.write_observation,
+            )
             .iter()
             .map(|subject| self.canonical_runtime_subject(subject))
             .collect();
         for subject in into.subjects_in(super::flow_solve::FlowDomain::Narrowing) {
-            into.remove(super::flow_solve::FlowDomain::Narrowing, &subject);
+            into.remove(
+                &mut self.frame_execution.borrow_mut(),
+                super::flow_solve::FlowDomain::Narrowing,
+                &subject,
+            );
         }
         for subject in entry
             .products
@@ -17290,7 +17332,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             let written = written.contains(&subject);
             let value = into.reaching(&subject);
             if !written && value == entry.products.reaching(&subject) {
-                into.set_narrowing(&subject, product.clone());
+                into.set_narrowing(
+                    &mut self.frame_execution.borrow_mut(),
+                    &subject,
+                    product.clone(),
+                );
                 continue;
             }
             let mut kept: Vec<FlowNarrowingFact> = Vec::with_capacity(product.facts().len());
@@ -17302,7 +17348,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     });
                 }
             }
-            into.set_narrowing(&subject, NarrowingProduct::new(kept));
+            into.set_narrowing(
+                &mut self.frame_execution.borrow_mut(),
+                &subject,
+                NarrowingProduct::new(kept),
+            );
         }
     }
 
@@ -17352,6 +17402,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         };
         push_narrowing_into(
             &mut self.products,
+            &mut self.frame_execution.borrow_mut(),
             &root,
             &subject.path,
             narrowed.clone(),
@@ -17430,9 +17481,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             nullability: self.nullability,
         };
         if incoming.len() == 1 {
+            let mut frame = self.frame_execution.borrow_mut();
             return FlowLayerState {
-                products: FlowProductStore::join(&[&first.products], observation, &frame_algebra),
-                write_observation: self.products.observe_writes(),
+                products: FlowProductStore::join(
+                    &mut frame,
+                    &[&first.products],
+                    observation,
+                    &frame_algebra,
+                ),
+                write_observation: self.products.observe_writes(&frame),
             };
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -17475,9 +17532,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }
             products
         };
-        let joined = FlowLayerState {
-            products: FlowProductStore::join(&products, observation, algebra),
-            write_observation: self.products.observe_writes(),
+        let joined = {
+            let mut frame = self.frame_execution.borrow_mut();
+            FlowLayerState {
+                products: FlowProductStore::join(&mut frame, &products, observation, algebra),
+                write_observation: self.products.observe_writes(&frame),
+            }
         };
         #[cfg(any(test, feature = "test-support"))]
         if let Some(observed) = observed {
@@ -17585,6 +17645,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         let fresh = (fact.fresh_literal == Some(narrowed))
                             .then_some(WideningMembership::All);
                         products.set_reaching_type(
+                            &mut self.frame_execution.borrow_mut(),
                             subject,
                             ReachingTypeProduct::of(narrowed).with_widening(fresh),
                         );
@@ -17599,7 +17660,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        products.set_narrowing(subject, NarrowingProduct::new(kept));
+                        products.set_narrowing(
+                            &mut self.frame_execution.borrow_mut(),
+                            subject,
+                            NarrowingProduct::new(kept),
+                        );
                     }
                     products
                 })
@@ -17874,7 +17939,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         guard: &verter_session_query::flow::slice::SliceGuard,
     ) -> Positional<SemanticNodeId> {
         let entry_products = self.products.clone();
-        let entry_writes = self.products.observe_writes();
+        let entry_writes = self.products.observe_writes(&self.frame_execution.borrow());
         let mut nodes = Vec::with_capacity(2);
         let mut arm_products = Vec::with_capacity(2);
         for (index, arm) in [consequent, alternate].into_iter().enumerate() {
@@ -17942,7 +18007,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         if changed {
             let product = self.evolving_product(elements);
-            self.products.set_reaching_type(subject, product);
+            self.products.set_reaching_type(
+                &mut self.frame_execution.borrow_mut(),
+                subject,
+                product,
+            );
         }
     }
 
@@ -17956,6 +18025,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) {
         self.record_dead_write(binding);
         self.products.bind_at(
+            &mut self.frame_execution.borrow_mut(),
             binding,
             DefiniteAssignmentProduct::assigned()
                 .with_single_path(single_path)
@@ -18014,7 +18084,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         declared: Option<SemanticNodeId>,
     ) {
         if kind != verter_session_query::flow::slice::SliceBindingKind::Var || declared.is_some() {
-            self.products.set_declared_type(binding, declared);
+            self.products.set_declared_type(
+                &mut self.frame_execution.borrow_mut(),
+                binding,
+                declared,
+            );
         }
     }
 
@@ -18249,7 +18323,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 if forked {
                                     walk.forks.push(ArmFork {
                                         entry: self.products.clone(),
-                                        entry_writes: self.products.observe_writes(),
+                                        entry_writes: self
+                                            .products
+                                            .observe_writes(&self.frame_execution.borrow()),
                                         arms: Vec::with_capacity(2),
                                     });
                                     walk.steps.push(ArmStep::JoinFork);
@@ -18774,8 +18850,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .cloned()
                 .collect();
             if kept.len() != product.facts().len() {
-                self.products
-                    .set_narrowing(&root, NarrowingProduct::new(kept));
+                self.products.set_narrowing(
+                    &mut self.frame_execution.borrow_mut(),
+                    &root,
+                    NarrowingProduct::new(kept),
+                );
             }
         }
         self.narrowing_writes
@@ -18818,6 +18897,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             } => {
                 let subject = FlowProductSubject::Local(*binding);
                 self.products.bind_at(
+                    &mut self.frame_execution.borrow_mut(),
                     &subject,
                     self.products
                         .assignment(&subject)
@@ -19268,13 +19348,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if consequent_falls {
             incoming.push(FlowLayerState {
                 products: consequent.clone(),
-                write_observation: consequent.observe_writes(),
+                write_observation: consequent.observe_writes(&self.frame_execution.borrow()),
             });
         }
         if alternate_falls {
             incoming.push(FlowLayerState {
                 products: alternate.clone(),
-                write_observation: entry.observe_writes(),
+                write_observation: entry.observe_writes(&self.frame_execution.borrow()),
             });
         }
         if incoming.is_empty() {
@@ -19282,7 +19362,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
 
         let joined = self.join_continuations(&incoming, entry, observation);
-        let written = joined.products.writes_since(observation);
+        let written = joined
+            .products
+            .writes_since(&mut self.frame_execution.borrow_mut(), observation);
         self.restore_layer_state(joined);
         for subject in written {
             if let Some(root) = self.narrow_root_of(&subject) {
@@ -19337,7 +19419,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             for state in incoming.iter() {
                 if state.products.reaching(&subject).is_none() {
                     defined_on_every_path = false;
-                    let declared = state.products.declared_type(&subject);
+                    let declared = state
+                        .products
+                        .declared_type(&self.frame_execution.borrow(), &subject);
                     never_assigned_declared = Some(match never_assigned_declared {
                         None => declared,
                         // One authority-less predecessor is enough to keep
@@ -19357,9 +19441,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             Some(reaching) => self.union(&[reaching, declared]),
                             None => declared,
                         };
-                        joined
-                            .products
-                            .set_reaching_type(&subject, ReachingTypeProduct::of(folded));
+                        joined.products.set_reaching_type(
+                            &mut self.frame_execution.borrow_mut(),
+                            &subject,
+                            ReachingTypeProduct::of(folded),
+                        );
                         inherited
                     }
                     _ => true,
@@ -19369,7 +19455,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .products
                 .assignment(&subject)
                 .with_single_path(single_path);
-            joined.products.set_assignment(&subject, assignment);
+            joined.products.set_assignment(
+                &mut self.frame_execution.borrow_mut(),
+                &subject,
+                assignment,
+            );
         }
         joined
     }
@@ -19389,10 +19479,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ///   tell an arm's write from an untouched binding. Source declaration
     ///   authority remains installed independently of the control path.
     fn restore_arm_entry(&mut self, entry: &FlowProductStore) {
-        let mut subjects: Vec<FlowProductSubject> = self.products.subjects();
+        let mut subjects: Vec<FlowProductSubject> =
+            self.products.subjects(&self.frame_execution.borrow());
         let mut seen: rustc_hash::FxHashSet<FlowProductSubject> =
             subjects.iter().cloned().collect();
-        for subject in entry.subjects() {
+        for subject in entry.subjects(&self.frame_execution.borrow()) {
             if seen.insert(subject.clone()) {
                 subjects.push(subject);
             }
@@ -19407,8 +19498,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             } else {
                 held
             };
-            self.products
-                .restore_reaching_from(&subject, entry, Some(assignment), false);
+            self.products.restore_reaching_from(
+                &mut self.frame_execution.borrow_mut(),
+                &subject,
+                entry,
+                Some(assignment),
+                false,
+            );
         }
     }
 
@@ -19459,14 +19555,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let declaration = self.skeleton.binding(*binding);
         declaration.kind == verter_session_query::flow::skeleton::SkeletonBindingKind::Let
             && declaration.initializer.is_none()
-            && self.products.runtime_declared_type(subject).is_none()
+            && self
+                .products
+                .runtime_declared_type(&self.frame_execution.borrow(), subject)
+                .is_none()
     }
 
     /// Snapshot the live binding layers.
     fn layer_state(&self) -> FlowLayerState {
         FlowLayerState {
             products: self.products.clone(),
-            write_observation: self.products.observe_writes(),
+            write_observation: self.products.observe_writes(&self.frame_execution.borrow()),
         }
     }
 
@@ -19486,11 +19585,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// `shadows` is exactly the scope's own declaration records, sliced
     /// off the evaluator's `scope_shadows` at the scope's boundaries, so
     /// a scope can never drop (or keep) another scope's binding.
-    fn close_lexical_scope(state: &mut FlowLayerState, shadows: &[ScopeShadow]) {
+    fn close_lexical_scope(
+        frame: &mut FlowFrameExecution,
+        state: &mut FlowLayerState,
+        shadows: &[ScopeShadow],
+    ) {
         for shadow in shadows.iter().rev() {
             state
                 .products
-                .restore_reaching_from(&shadow.subject, &shadow.prior, None, true);
+                .restore_reaching_from(frame, &shadow.subject, &shadow.prior, None, true);
         }
     }
 
@@ -19547,13 +19650,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> Vec<ScopeShadow> {
         let shadows: Vec<ScopeShadow> = self.scope_shadows.split_off(shadow_base);
         for exit in &mut self.break_exits[break_base..] {
-            Self::close_lexical_scope(&mut exit.state, &shadows);
+            Self::close_lexical_scope(
+                &mut self.frame_execution.borrow_mut(),
+                &mut exit.state,
+                &shadows,
+            );
         }
         for state in &mut self.return_edges[return_base..] {
-            Self::close_lexical_scope(state, &shadows);
+            Self::close_lexical_scope(&mut self.frame_execution.borrow_mut(), state, &shadows);
         }
         for state in &mut self.throw_points[throw_base..] {
-            Self::close_lexical_scope(state, &shadows);
+            Self::close_lexical_scope(&mut self.frame_execution.borrow_mut(), state, &shadows);
         }
         shadows
     }
@@ -19586,7 +19693,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         after: &FlowLayerState,
     ) -> FlowExecutedClauseWrites {
         let _ = observation;
-        FlowExecutedClauseWrites(after.products.writes_since(observation))
+        FlowExecutedClauseWrites(
+            after
+                .products
+                .writes_since(&mut self.frame_execution.borrow_mut(), observation),
+        )
     }
 
     /// A dispatch path with no reaching definition retains the existing
@@ -19603,7 +19714,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .collect();
         for subject in fallthrough_only {
             let flagged = start.products.assignment(&subject).with_single_path(true);
-            start.products.set_assignment(&subject, flagged);
+            start.products.set_assignment(
+                &mut self.frame_execution.borrow_mut(),
+                &subject,
+                flagged,
+            );
         }
     }
 
@@ -19628,7 +19743,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .collect();
         for subject in conditionally_defined {
             let flagged = joined.products.assignment(&subject).with_single_path(true);
-            joined.products.set_assignment(&subject, flagged);
+            joined.products.set_assignment(
+                &mut self.frame_execution.borrow_mut(),
+                &subject,
+                flagged,
+            );
         }
     }
 
@@ -23785,6 +23904,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             let root = self.narrow_subject(&subject.root);
             push_narrowing_into(
                 &mut state.products,
+                &mut self.frame_execution.borrow_mut(),
                 &root,
                 &subject.path,
                 FlowNarrowed::Node(node),
@@ -23801,6 +23921,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .reaching_type(target)
                 .is_some_and(ReachingTypeProduct::widening_nullish);
             products.set_reaching_type(
+                &mut self.frame_execution.borrow_mut(),
                 target,
                 ReachingTypeProduct::of(node)
                     .with_widening(widening)
@@ -23864,7 +23985,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }));
         }
         if changed {
-            products.set_narrowing(root, NarrowingProduct::new(kept));
+            products.set_narrowing(
+                &mut self.frame_execution.borrow_mut(),
+                root,
+                NarrowingProduct::new(kept),
+            );
         }
     }
 
@@ -26503,7 +26628,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 return_base,
                 throw_base,
             );
-            Self::close_lexical_scope(&mut end, &shadows);
+            Self::close_lexical_scope(&mut self.frame_execution.borrow_mut(), &mut end, &shadows);
             self.restore_layer_state(end);
             path_alive = block_falls;
         }
@@ -27366,8 +27491,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             // declaration: a path reaching a read only
                             // through it reads the variable's initial type.
                             if let Some(reaching) = self.products.reaching_type(&subject).cloned() {
-                                self.products
-                                    .set_reaching_type(&subject, reaching.declaration_only());
+                                self.products.set_reaching_type(
+                                    &mut self.frame_execution.borrow_mut(),
+                                    &subject,
+                                    reaching.declaration_only(),
+                                );
                             }
                         }
                         continue;
@@ -27785,24 +27913,33 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .note_frame_read(self.enclosing_frames.len(), frame.outside);
     }
 
+    /// The declaring frame's products for a capture authority's locator,
+    /// with the product authority they advance under and the subject.
     fn capture_source_products(
         &self,
         locator: &verter_session_query::flow::slice::SliceCaptureAuthorityLocator,
-    ) -> Option<(FlowProductStore, FlowProductSubject)> {
-        let products = if &locator.declaration().defining_function == self.bindings.function() {
-            self.products.clone()
-        } else {
-            self.enclosing_frames.iter().find_map(|frame| {
-                (frame.function == locator.declaration().defining_function).then(|| {
-                    self.note_enclosing_frame_read(frame);
-                    frame.products.clone()
-                })
-            })?
-        };
+    ) -> Option<(FlowProductStore, SharedFlowExecution, FlowProductSubject)> {
+        let (products, frame_execution) =
+            if &locator.declaration().defining_function == self.bindings.function() {
+                (
+                    self.products.clone(),
+                    std::rc::Rc::clone(&self.frame_execution),
+                )
+            } else {
+                self.enclosing_frames.iter().find_map(|frame| {
+                    (frame.function == locator.declaration().defining_function).then(|| {
+                        self.note_enclosing_frame_read(frame);
+                        (
+                            frame.products.clone(),
+                            std::rc::Rc::clone(&frame.frame_execution),
+                        )
+                    })
+                })?
+            };
         let subject = FlowProductSubject::Local(locator.local_declaration()?);
         products
             .contains_subject(&subject)
-            .then_some((products, subject))
+            .then_some((products, frame_execution, subject))
     }
 
     fn lower_capture_authority(
@@ -28148,7 +28285,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
             return NestedSignatureStep::Done(self.unmodeled_position());
         };
-        let Ok(mut captured_products) = FlowProductStore::new(execution, &bound) else {
+        let Ok((mut captured_products, mut captured_execution)) =
+            FlowProductStore::new(execution, &bound)
+        else {
             self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
             return NestedSignatureStep::Done(self.unmodeled_position());
         };
@@ -28171,6 +28310,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 declared_capture_types.insert(identity.clone(), node);
             }
             captured_products.import_capture_input(
+                &mut captured_execution,
                 &input.subject,
                 input.assignment,
                 input.reaching,
@@ -28179,6 +28319,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         seed_selected_parameters(
             &mut captured_products,
+            &mut captured_execution,
             nested_params,
             &params,
             bindings,
@@ -28191,6 +28332,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             type_param_decls,
             binder_env,
             captured_products,
+            captured_execution,
             declared_capture_types,
             extended_capture_identities,
             execution_selection,
@@ -28442,7 +28584,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         })
                         .flatten(),
                     declared: value_demanded
-                        .then(|| self.products.declared_type(&parent))
+                        .then(|| {
+                            self.products
+                                .declared_type(&self.frame_execution.borrow(), &parent)
+                        })
                         .flatten(),
                     inferred_declared,
                 }
@@ -28470,9 +28615,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     continue;
                 };
                 let source = self.capture_source_products(&locator);
-                if let Some(node) = source
-                    .as_ref()
-                    .and_then(|(products, subject)| products.declared_type(subject))
+                if let Some(node) =
+                    source
+                        .as_ref()
+                        .and_then(|(products, frame_execution, subject)| {
+                            products.declared_type(&frame_execution.borrow(), subject)
+                        })
                 {
                     capture_inputs[index].apply_authority(node, locator.source());
                 } else {
@@ -28517,8 +28665,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     Some(None) => unresolved.push(index),
                     Some(Some(authority)) => {
                         if let Some(node) = self.lower_capture_authority(&locator, authority) {
-                            if let Some((mut products, subject)) = source {
-                                products.set_declared_type(&subject, Some(node));
+                            if let Some((mut products, frame_execution, subject)) = source {
+                                products.set_declared_type(
+                                    &mut frame_execution.borrow_mut(),
+                                    &subject,
+                                    Some(node),
+                                );
                             }
                             capture_inputs[index].apply_authority(node, locator.source());
                         }

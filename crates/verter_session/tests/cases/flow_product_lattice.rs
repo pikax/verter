@@ -16,6 +16,16 @@ use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 const SOURCE: &str = "function products(x) { const y = x; return y; }";
 
+/// `store` read with its own execution's declaration authority.
+fn view<'a>(
+    execution: &'a FlowProductExecution,
+    store: &'a FlowProductStore,
+) -> FlowProductRead<'a> {
+    execution
+        .read(store)
+        .expect("a snapshot is read with its own execution")
+}
+
 #[test]
 fn captured_product_attachment_requires_the_original_pinned_graph() {
     let source = "function products(x) { function nested() { return x; } return nested; }";
@@ -295,12 +305,12 @@ fn unrelated_declarations_do_not_consume_the_product_budget() {
         );
         sizes.push(execution.selected_subject_count());
         let mut store = execution.empty_state();
-        assert!(store.is_empty());
+        assert!(view(&execution, &store).is_empty());
         let key = execution
             .key(FlowDomain::ReachingType, return_node(&inputs))
             .unwrap();
         put(&mut execution, &mut store, &key, reaching(number)).unwrap();
-        assert_eq!(store.len(), 1);
+        assert_eq!(view(&execution, &store).len(), 1);
         assert_eq!(execution.finish().unwrap().iterations(), 0);
         for node in inputs.graph().nodes() {
             if matches!(inputs.graph().node_kind(node), FlowNodeKind::Binding(_)) {
@@ -407,7 +417,7 @@ fn failed_transfer_bundles_preserve_prior_state_and_never_seal_evidence() {
     ));
     assert_eq!(store.get(&key), Some(&reaching(number)));
     assert_eq!(store.get(&narrow), None);
-    assert_eq!(store.len(), 1);
+    assert_eq!(view(&execution, &store).len(), 1);
     assert!(execution.finish().is_err());
 }
 
@@ -554,7 +564,7 @@ fn product_snapshots_and_evidence_are_predecessor_permutation_invariant() {
         let result = execution
             .join_products(&order.map(|i| &states[i]), &algebra)
             .unwrap();
-        assert_eq!(result.len(), domains.len());
+        assert_eq!(view(&execution, &result).len(), domains.len());
         let assignment = execution
             .key(FlowDomain::DefiniteAssignment, key.node())
             .unwrap();
@@ -569,7 +579,7 @@ fn product_snapshots_and_evidence_are_predecessor_permutation_invariant() {
         );
         // Strip only execution-local capabilities and unordered contributor order.
         // Keep every materialized domain, definition, semantic result and flag.
-        let snapshot: Vec<_> = result
+        let snapshot: Vec<_> = view(&execution, &result)
             .ordered_entries()
             .map(|(key, value)| {
                 let value = match value {
@@ -637,7 +647,7 @@ fn hoisted_declaration_aliases_share_runtime_state_but_keep_exact_evidence() {
     let mut state = execution.empty_state();
     put(&mut execution, &mut state, &keys[1], reaching(number)).unwrap();
     assert_eq!(state.get(&keys[0]), state.get(&keys[1]));
-    assert_eq!(state.len(), 1);
+    assert_eq!(view(&execution, &state).len(), 1);
     let evidence = execution.finish().unwrap();
     assert!(!evidence.executed(&keys[0]));
     assert!(evidence.executed(&keys[1]));
@@ -702,7 +712,7 @@ fn iteration_and_product_caps_are_exact_without_counting_acyclic_work() {
             }
         ))
     ));
-    assert_eq!(state.len(), 1);
+    assert_eq!(view(&crowded, &state).len(), 1);
 }
 
 #[test]
@@ -965,7 +975,7 @@ fn declared_authority_survives_snapshot_restore_and_cannot_be_erased() {
         let authored = FlowProductValue::DeclaredType(DeclaredTypeProduct::of(number));
         put(&mut execution, &mut branch, &key, authored.clone()).unwrap();
         assert_eq!(
-            before.get(&key),
+            view(&execution, &before).get(&key),
             Some(&authored),
             "source authority outlives a branch snapshot"
         );
@@ -979,7 +989,7 @@ fn declared_authority_survives_snapshot_restore_and_cannot_be_erased() {
                 }]
             )
             .is_err());
-        assert_eq!(branch.get(&key), Some(&authored));
+        assert_eq!(view(&execution, &branch).get(&key), Some(&authored));
         assert!(put(
             &mut execution,
             &mut before,
@@ -1011,26 +1021,35 @@ fn declared_types_belong_to_source_declarations_even_when_runtime_bindings_alias
     let before = state.clone();
     let first = FlowProductValue::DeclaredType(DeclaredTypeProduct::of(number));
     let second = FlowProductValue::DeclaredType(DeclaredTypeProduct::of(string));
-    assert_eq!(before.declared_type(&keys[2]), None);
+    assert_eq!(view(&execution, &before).declared_type(&keys[2]), None);
     put(&mut execution, &mut state, &keys[1], second.clone()).unwrap();
-    assert_eq!(before.declared_type(&keys[0]), Some(string));
-    assert_eq!(before.declared_type(&keys[2]), Some(string));
-    put(&mut execution, &mut state, &keys[0], first.clone()).unwrap();
-    assert_eq!(state.get(&keys[0]), Some(&first));
-    assert_eq!(state.get(&keys[1]), Some(&second));
     assert_eq!(
-        state.get(&keys[2]),
+        view(&execution, &before).declared_type(&keys[0]),
+        Some(string)
+    );
+    assert_eq!(
+        view(&execution, &before).declared_type(&keys[2]),
+        Some(string)
+    );
+    put(&mut execution, &mut state, &keys[0], first.clone()).unwrap();
+    assert_eq!(view(&execution, &state).get(&keys[0]), Some(&first));
+    assert_eq!(view(&execution, &state).get(&keys[1]), Some(&second));
+    assert_eq!(
+        view(&execution, &state).get(&keys[2]),
         None,
         "fallback does not fabricate authored facts"
     );
-    assert_eq!(before.declared_type(&keys[0]), Some(number));
     assert_eq!(
-        before.declared_type(&keys[1]),
+        view(&execution, &before).declared_type(&keys[0]),
+        Some(number)
+    );
+    assert_eq!(
+        view(&execution, &before).declared_type(&keys[1]),
         Some(string),
         "exact declaration wins"
     );
     assert_eq!(
-        before.declared_type(&keys[2]),
+        view(&execution, &before).declared_type(&keys[2]),
         Some(number),
         "fallback follows source order, not publication order"
     );
@@ -1161,6 +1180,55 @@ fn execution_evidence_requires_the_exact_attached_plan_and_cold_completion_seals
     );
 }
 
+/// The product authority is owned `Send` state: an execution, its snapshots
+/// and its keys move to another thread, advance there under exclusive
+/// access and come back. A snapshot taken before a declaration installed
+/// reads it once its own execution is supplied, its runtime products
+/// untouched, and the evidence proves only the transfers actually run.
+#[test]
+fn an_execution_and_its_snapshots_advance_on_another_thread() {
+    let (inputs, execution) = execution(SOURCE, 1, FlowProductBudget::default());
+    let (_graph, number, _) = types();
+    let _scope = _graph.enter_node_root_scope();
+    let key = binding(&execution, &inputs, "y", FlowDomain::ReachingType);
+    let declared = key.for_domain(FlowDomain::DeclaredType).unwrap();
+    let TestExecution { execution, plan } = execution;
+    let before = execution.empty_state();
+    let state = before.clone();
+    let (mut execution, state) = std::thread::scope(|scope| {
+        let (key, declared) = (key.clone(), declared.clone());
+        scope
+            .spawn(move || {
+                let (mut execution, mut state) = (execution, state);
+                put(&mut execution, &mut state, &key, reaching(number)).unwrap();
+                put(
+                    &mut execution,
+                    &mut state,
+                    &declared,
+                    FlowProductValue::DeclaredType(DeclaredTypeProduct::of(number)),
+                )
+                .unwrap();
+                (execution, state)
+            })
+            .join()
+            .expect("the advancing thread returns its authority")
+    });
+    assert_eq!(state.get(&key), Some(&reaching(number)));
+    assert_eq!(
+        before.get(&key),
+        None,
+        "an older continuation keeps its runtime products"
+    );
+    assert_eq!(
+        view(&execution, &before).declared_type(&declared),
+        Some(number),
+        "source authority is execution-lifetime, read with the snapshot's own execution"
+    );
+    let evidence = execution.finish_with_plan(&plan).unwrap();
+    assert!(evidence.executed(&key));
+    assert!(evidence.executed(&declared));
+}
+
 #[test]
 fn snapshots_share_runtime_storage_and_writes_preserve_other_continuations() {
     let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
@@ -1174,7 +1242,7 @@ fn snapshots_share_runtime_storage_and_writes_preserve_other_continuations() {
     put(&mut execution, &mut branch, &key, reaching(string)).unwrap();
     assert_eq!(state.get(&key), Some(&reaching(number)));
     assert_eq!(branch.get(&key), Some(&reaching(string)));
-    assert_eq!(state.ordered_entries().count(), 1);
+    assert_eq!(view(&execution, &state).ordered_entries().count(), 1);
 }
 
 #[test]
@@ -1296,10 +1364,10 @@ fn declarations_have_an_execution_lifetime_budget_and_publish_bundles_atomically
             }
         ))
     ));
-    assert_eq!(old.get(&x), None);
-    assert_eq!(old.get(&y), None);
+    assert_eq!(view(&execution, &old).get(&x), None);
+    assert_eq!(view(&execution, &old).get(&y), None);
     assert_eq!(old.get(&reaching_y), Some(&reaching(number)));
-    assert!(branch.is_empty());
+    assert!(view(&execution, &branch).is_empty());
     assert!(execution.finish().is_err());
 }
 
@@ -1324,11 +1392,11 @@ fn source_authority_cannot_be_replaced_through_an_old_healthy_snapshot() {
     let authored = FlowProductValue::DeclaredType(DeclaredTypeProduct::of(number));
     put(&mut execution, &mut branch, &declared, authored.clone()).unwrap();
     assert_eq!(
-        old.len(),
+        view(&execution, &old).len(),
         2,
         "one runtime cell plus one separately bounded source fact"
     );
-    assert_eq!(old.get(&declared), Some(&authored));
+    assert_eq!(view(&execution, &old).get(&declared), Some(&authored));
     assert!(put(
         &mut execution,
         &mut old,
@@ -1336,7 +1404,7 @@ fn source_authority_cannot_be_replaced_through_an_old_healthy_snapshot() {
         FlowProductValue::DeclaredType(DeclaredTypeProduct::of(string))
     )
     .is_err());
-    assert_eq!(old.get(&declared), Some(&authored));
+    assert_eq!(view(&execution, &old).get(&declared), Some(&authored));
     assert!(execution.finish().is_err());
 }
 
