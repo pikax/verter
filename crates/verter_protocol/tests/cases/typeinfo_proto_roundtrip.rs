@@ -240,11 +240,14 @@ fn type_info_request_error_roundtrip_covers_every_variant() {
         Kind::ExpansionBudgetOutOfRange(g::wire_error_expansion_budget_out_of_range(
             5000, 256, 4096, 64,
         )),
+        Kind::UnknownFrameworkProfile(
+            g::wire_error_unknown_framework_profile(sample_profile_ref()),
+        ),
     ];
     assert_eq!(
         variants.len(),
-        11,
-        "TypeInfoRequestError covers exactly 11 closed variants (field 11 reserved)",
+        12,
+        "TypeInfoRequestError covers exactly 12 closed variants (field 11 reserved)",
     );
 
     for (idx, kind) in variants.into_iter().enumerate() {
@@ -270,10 +273,25 @@ fn capability_handshake_roundtrips() {
     let response = g::TypeInfoCapabilityHandshakeResponse {
         server_version: g::TYPEINFO_GRAPH_SCHEMA_VERSION,
         server_supported_versions: vec![1, 2, 3],
+        framework_profiles: vec![g::FrameworkProfileAdvertisement {
+            profile: Some(sample_profile_ref()),
+            family: "vue".to_string(),
+            release: "3".to_string(),
+            framework: g::FrameworkTag::Vue as i32,
+        }],
     };
     let bytes = response.encode_to_vec();
     let decoded = g::TypeInfoCapabilityHandshakeResponse::decode(bytes.as_slice()).unwrap();
     assert_eq!(decoded, response);
+    // The advertised digest survives byte-for-byte: it is the reference a
+    // selector names.
+    assert_eq!(
+        decoded.framework_profiles[0]
+            .profile
+            .as_ref()
+            .map(|profile| profile.digest.as_slice()),
+        Some(sample_profile_ref().digest.as_slice())
+    );
 }
 
 #[test]
@@ -1350,12 +1368,22 @@ fn sample_framework_surface_request() -> g::FrameworkSurfaceRequest {
     }
 }
 
+/// A 32-byte profile reference with distinct bytes, so a reordering or
+/// truncation in transport is visible.
+fn sample_profile_ref() -> g::FrameworkProfileRef {
+    g::FrameworkProfileRef {
+        digest: (0..g::FRAMEWORK_PROFILE_DIGEST_LEN)
+            .map(|byte| u8::try_from(byte).expect("32 fits a byte"))
+            .collect(),
+    }
+}
+
 fn sample_component_selector() -> g::ComponentSelector {
     g::ComponentSelector {
         canonical_id: "/Foo.vue".to_string(),
         export_name: String::new(),
         has_export_name: false,
-        framework_adapter_id: "vue".to_string(),
+        framework_profile: Some(sample_profile_ref()),
     }
 }
 

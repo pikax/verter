@@ -17,8 +17,123 @@
 
 use std::sync::OnceLock;
 
+use verter_identity::successor::{
+    CarrierProfileId, FrameworkProfileId, ProfileSchemaEpoch, ReleaseCoordinates,
+    ReleaseDescriptorError, ReleaseId,
+};
 use verter_language::{FrameworkAdapterId, LanguageId};
 use verter_protocol::typeinfo::graph::{FrameworkSurfaceKind, FrameworkTag};
+
+/// The descriptor-schema family of every built-in semantic-profile manifest
+/// (`identities.md` `I11`): the epoch behind each minted
+/// [`FrameworkProfileId`]. Bumping [`FRAMEWORK_PROFILE_DESCRIPTOR_SCHEMA_EPOCH`]
+/// re-mints every advertised profile and nothing else. It is a descriptor
+/// epoch, not the TypeInfo wire schema version.
+pub const FRAMEWORK_PROFILE_DESCRIPTOR_SCHEMA_FAMILY: &str = "verter.framework-profile.descriptor";
+
+/// The current epoch of [`FRAMEWORK_PROFILE_DESCRIPTOR_SCHEMA_FAMILY`].
+pub const FRAMEWORK_PROFILE_DESCRIPTOR_SCHEMA_EPOCH: u32 = 1;
+
+/// The syntax-schema family of every claimed carrier profile. Its epoch is
+/// the registered parser-grammar version the carrier catalog stamps on each
+/// row, so a grammar bump re-mints the carrier profiles (and through them the
+/// semantic profiles that claim them) — a release change never does
+/// (`identities.md` `R02`, `R04`).
+pub const CARRIER_SYNTAX_SCHEMA_FAMILY: &str = "verter.carrier.syntax";
+
+/// One adapter registration's semantic-profile manifest: the inputs — and
+/// only the inputs — [`FrameworkProfileId`]'s law names (`identities.md`
+/// `I05`, `R02`, `R04`–`R07`).
+///
+/// The manifest declares exactly one EXACT release of one family, the majors
+/// the family's admitted line allows, and the carrier families the profile
+/// claims. Nothing here is derived from the adapter id, the display
+/// [`FrameworkTag`], a file extension or the adapter's implementation
+/// version: those are presentation or implementation metadata, never a
+/// release (`R03`). A declaration the release law rejects — a range, a
+/// floating tag, a versions array, a bare family, an unadmitted major — fails
+/// registry CONSTRUCTION with its typed [`ReleaseDescriptorError`]; it is
+/// never coerced into a profile and never reaches a request.
+///
+/// The declared release means exactly those coordinates: `"3"`, `"3.0"` and
+/// `"3.0.0"` mint three different profiles, and an admitted major does not
+/// make every `3.x.y` package an instance of `"3"`. Reading the installed
+/// package release (`R08`) and per-package activation (`R09`) are FWA1's;
+/// this manifest is the declaration authority FWA1 feeds, not a second one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameworkProfileManifest {
+    /// The semantic family key the release belongs to (`"vue"`, `"svelte"`).
+    pub family: &'static str,
+    /// The one exact release this profile is the meaning of —
+    /// `major[.minor[.patch]]`, never a range or a floating tag.
+    pub release: &'static str,
+    /// The exact majors the family's admitted line allows. A release whose
+    /// major is outside it is `unsupported-version` at construction.
+    pub admitted_majors: &'static [u32],
+    /// The carrier families this profile claims (its component carriers),
+    /// each minted as a [`CarrierProfileId`] under the carrier syntax
+    /// epoch. Order and repetition are not identity.
+    pub claimed_carriers: &'static [&'static str],
+}
+
+impl FrameworkProfileManifest {
+    /// Mint the profile this manifest declares: decode the exact release
+    /// under the admitted line, mint its [`ReleaseId`] and the claimed
+    /// [`CarrierProfileId`]s under `carrier_syntax_schema`, and compose the
+    /// [`FrameworkProfileId`] under the current descriptor epoch. The only
+    /// production minting site — a profile without its release cannot
+    /// exist, and a rejected declaration is a typed error, never a profile.
+    pub fn mint(
+        &self,
+        carrier_syntax_schema: &ProfileSchemaEpoch,
+    ) -> Result<FrameworkProfileId, ReleaseDescriptorError> {
+        let schema = framework_profile_descriptor_schema();
+        let coordinates =
+            ReleaseCoordinates::decode(self.family, &[self.release], self.admitted_majors)?;
+        let release = ReleaseId::from_coordinates(&coordinates, &schema);
+        let carriers: Vec<CarrierProfileId> = self
+            .claimed_carriers
+            .iter()
+            .map(|carrier| CarrierProfileId::from_carrier(carrier, carrier_syntax_schema))
+            .collect();
+        Ok(FrameworkProfileId::from_release_and_carriers(
+            &release, &carriers, &schema,
+        ))
+    }
+}
+
+/// The current semantic descriptor-schema epoch every built-in profile is
+/// minted under.
+#[must_use]
+pub fn framework_profile_descriptor_schema() -> ProfileSchemaEpoch {
+    ProfileSchemaEpoch::for_schema_family(
+        FRAMEWORK_PROFILE_DESCRIPTOR_SCHEMA_FAMILY,
+        FRAMEWORK_PROFILE_DESCRIPTOR_SCHEMA_EPOCH,
+    )
+}
+
+/// The carrier syntax-schema epoch for a registered parser-grammar version.
+#[must_use]
+pub fn carrier_syntax_schema(parser_grammar_version: u32) -> ProfileSchemaEpoch {
+    ProfileSchemaEpoch::for_schema_family(CARRIER_SYNTAX_SCHEMA_FAMILY, parser_grammar_version)
+}
+
+/// The built-in Vue manifest: the Vue 3 line over the `.vue` carrier.
+pub const VUE_PROFILE_MANIFEST: FrameworkProfileManifest = FrameworkProfileManifest {
+    family: "vue",
+    release: "3",
+    admitted_majors: &[3],
+    claimed_carriers: &["vue"],
+};
+
+/// The built-in Svelte manifest: the Svelte 5 line over the `.svelte`
+/// carrier.
+pub const SVELTE_PROFILE_MANIFEST: FrameworkProfileManifest = FrameworkProfileManifest {
+    family: "svelte",
+    release: "5",
+    admitted_majors: &[5],
+    claimed_carriers: &["svelte"],
+};
 
 /// Every framework-surface kind the wire taxonomy defines, in tag order.
 ///
@@ -58,10 +173,10 @@ pub const SVELTE_SUPPORTED_SURFACE_KINDS: &[FrameworkSurfaceKind] = &[
 pub struct FrameworkAdapterDescriptor {
     /// The interned `verter_language` adapter id (e.g. the `.vue` adapter id).
     pub id: FrameworkAdapterId,
-    /// The wire framework tag this adapter answers to. The tag is the closed
-    /// wire taxonomy entry a client selects the adapter by; the host interns
-    /// the wire `framework_adapter_id` string at receive time and the executor
-    /// maps it to this descriptor.
+    /// The wire framework tag this adapter's responses carry: the closed
+    /// display taxonomy entry, never a selector. A TypeInfo `Component`
+    /// selector names the registration's admitted profile (minted from
+    /// [`Self::profile_manifest`]) instead.
     pub tag: FrameworkTag,
     /// The framework-surface kinds this adapter can produce. REUSES the wire
     /// enum (no parallel host enum). A kind absent from this slice is filled
@@ -140,6 +255,11 @@ pub struct FrameworkAdapterDescriptor {
     /// accident), either of which would silently flip same-stem resolution.
     /// Equal ranks keep the catalog's deterministic sorted-identity order.
     pub carrier_probe_rank: u32,
+    /// The semantic-profile manifest this registration is the meaning of.
+    /// The registry mints its [`FrameworkProfileId`] ONCE at construction;
+    /// the TypeInfo `Component` selector names that profile (TR06), never
+    /// the adapter id or the display tag.
+    pub profile_manifest: FrameworkProfileManifest,
 }
 
 /// An adapter's virtual-file naming policy — the single authority for how its
@@ -779,6 +899,7 @@ pub fn vue_descriptor() -> FrameworkAdapterDescriptor {
         // The established same-stem probe winner: a `./Widget` collision
         // with a `.svelte` twin resolves to the `.vue` carrier first.
         carrier_probe_rank: 0,
+        profile_manifest: VUE_PROFILE_MANIFEST,
     }
 }
 
@@ -947,6 +1068,7 @@ pub fn svelte_descriptor() -> FrameworkAdapterDescriptor {
         anchors_exports_at_script_setup: false,
         // Probed after `.vue` on a same-stem collision.
         carrier_probe_rank: 1,
+        profile_manifest: SVELTE_PROFILE_MANIFEST,
     }
 }
 

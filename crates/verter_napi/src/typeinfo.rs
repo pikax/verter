@@ -12,7 +12,10 @@ use napi_derive::napi;
 
 use prost::Message;
 use verter_audit::{AuditCaptureState, RequestAuditRecord};
-use verter_protocol::typeinfo::graph::{TypeInfoGraphRequest, TypeInfoGraphResponse};
+use verter_protocol::typeinfo::graph::{
+    TypeInfoCapabilityHandshakeRequest, TypeInfoCapabilityHandshakeResponse, TypeInfoGraphRequest,
+    TypeInfoGraphResponse,
+};
 use verter_protocol::typeinfo::FfiSymbolEntry;
 use verter_session::host_resolve_type_audit::TypeResolutionRequestError;
 use verter_type_engine::semantic_query::ProjectionMode;
@@ -192,6 +195,26 @@ pub(crate) fn decode_type_info_graph_request(buf: Buffer) -> Result<TypeInfoGrap
             format!("type-info graph request decode error: {e}"),
         )
     })
+}
+
+/// Decode a `Buffer` carrying a protobuf-encoded
+/// [`TypeInfoCapabilityHandshakeRequest`].
+pub(crate) fn decode_capability_handshake_request(
+    buf: Buffer,
+) -> Result<TypeInfoCapabilityHandshakeRequest> {
+    TypeInfoCapabilityHandshakeRequest::decode(buf.as_ref()).map_err(|e| {
+        Error::new(
+            Status::InvalidArg,
+            format!("capability handshake decode error: {e}"),
+        )
+    })
+}
+
+/// Encode a [`TypeInfoCapabilityHandshakeResponse`] to a protobuf Buffer.
+pub(crate) fn encode_capability_handshake_response(
+    resp: &TypeInfoCapabilityHandshakeResponse,
+) -> Buffer {
+    Buffer::from(resp.encode_to_vec())
 }
 
 /// Encode a [`TypeInfoGraphResponse`] to a protobuf Buffer.

@@ -349,15 +349,20 @@ mod tests {
     fn plan_emits_no_options_demand() {
         // Planning never emits an OPTIONS demand (OPTIONS is unsupported).
         let adapter = SvelteFrameworkAdapter::default();
-        let selector = ResolvedComponentSelector {
-            canonical: Arc::from("/App.svelte"),
-            export: crate::typeinfo::framework_surface::ComponentExport::Default,
-        };
         let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
         let registry = crate::framework::FrameworkAdapterRegistry::built_in();
         let registration = registry
             .get(&crate::framework::FrameworkAdapterId::svelte())
             .expect("svelte registered");
+        let selector = ResolvedComponentSelector {
+            canonical: Arc::from("/App.svelte"),
+            export: crate::typeinfo::framework_surface::ComponentExport::Default,
+            framework_profile: registry
+                .profile_for_adapter(&crate::framework::FrameworkAdapterId::svelte())
+                .expect("svelte admits a profile")
+                .profile
+                .clone(),
+        };
         let ctx = FrameworkAdapterCtx::new(registration, &host);
         let plan = adapter.plan_surfaces(&ctx, &selector, ALL_FRAMEWORK_SURFACE_KINDS);
         // No planned demand targets OPTIONS.

@@ -182,9 +182,13 @@ fn svelte_rune_module_not_component_carrier() {
     );
 }
 
-fn framework_envelope(canonical: &str, adapter_id: &str) -> wire::TypeInfoGraphRequest {
+fn framework_envelope(
+    host: &VerterHost,
+    canonical: &str,
+    adapter_id: &str,
+) -> wire::TypeInfoGraphRequest {
     wire::TypeInfoGraphRequest {
-        schema_version: 3,
+        schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
         operation: wire::Operation::FrameworkSurfaces as i32,
         payload: Some(wire_request::Payload::FrameworkSurface(
             wire::FrameworkSurfaceRequest {
@@ -192,7 +196,12 @@ fn framework_envelope(canonical: &str, adapter_id: &str) -> wire::TypeInfoGraphR
                     canonical_id: canonical.to_string(),
                     export_name: String::new(),
                     has_export_name: false,
-                    framework_adapter_id: adapter_id.to_string(),
+                    framework_profile: Some(
+                        host.advertised_framework_profile_for_adapter(
+                            &verter_session::framework::FrameworkAdapterId::new(adapter_id),
+                        )
+                        .expect("a registered adapter admits a profile"),
+                    ),
                 }),
                 context: Some(wire::ProjectionReductionContext {
                     mode: wire::ProjectionMode::Expanded as i32,
@@ -216,8 +225,11 @@ fn framework_envelope(canonical: &str, adapter_id: &str) -> wire::TypeInfoGraphR
                 include_provenance: false,
                 include_diagnostics: false,
                 include_projection: vec![],
-                requested_kinds: vec![],
-                schema_version: 3,
+                requested_kinds: verter_session::framework::ALL_FRAMEWORK_SURFACE_KINDS
+                    .iter()
+                    .map(|kind| *kind as i32)
+                    .collect(),
+                schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
             },
         )),
     }
@@ -242,7 +254,7 @@ fn svelte_feature_rows_supported_no_diagnostic() {
     // rune module has NO component, every component surface kind is structurally
     // UNSUPPORTED / not-supported — NOT supported-empty (the typed distinction
     // the executor preserves). It must NOT be SUPPORTED for any component kind.
-    let envelope = framework_envelope("/store.svelte.ts", "svelte");
+    let envelope = framework_envelope(&host, "/store.svelte.ts", "svelte");
     let result = host.resolve_framework_surface_with_audit(envelope);
     let response = result
         .as_result()
@@ -296,8 +308,11 @@ fn svelte_feature_rows_supported_no_diagnostic() {
         "<script lang=\"ts\">let { label }: { label: string } = $props();</script>\n<div>{label}</div>\n",
         FileLanguage::svelte(),
     );
-    let component_result =
-        host.resolve_framework_surface_with_audit(framework_envelope("/Box.svelte", "svelte"));
+    let component_result = host.resolve_framework_surface_with_audit(framework_envelope(
+        &host,
+        "/Box.svelte",
+        "svelte",
+    ));
     let component_response = component_result
         .as_result()
         .expect("a `.svelte` component framework-surface request resolves structurally");

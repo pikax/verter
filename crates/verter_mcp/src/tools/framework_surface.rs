@@ -20,13 +20,17 @@ use verter_protocol::verter::v1::{
 };
 
 /// Build a well-formed framework-surface request envelope for a default
-/// export component at `canonical`, selected by `adapter_id`.
+/// export component at `canonical`, read under the host-admitted
+/// `framework_profile` (schema 11: a reference the host advertised).
 ///
 /// The framework-surface operation rides the existing graph envelope. The
 /// tool projects the whole component surface, so its facet demand
 /// (`requested_kinds`, schema 10) names every known kind explicitly; the
 /// executor resolves exactly the demanded kinds.
-pub fn build_request(canonical: &str, adapter_id: &str) -> TypeInfoGraphRequest {
+pub fn build_request(
+    canonical: &str,
+    framework_profile: wire::FrameworkProfileRef,
+) -> TypeInfoGraphRequest {
     TypeInfoGraphRequest {
         schema_version: TYPEINFO_GRAPH_SCHEMA_VERSION,
         operation: wire::Operation::FrameworkSurfaces as i32,
@@ -36,7 +40,7 @@ pub fn build_request(canonical: &str, adapter_id: &str) -> TypeInfoGraphRequest 
                     canonical_id: canonical.to_string(),
                     export_name: String::new(),
                     has_export_name: false,
-                    framework_adapter_id: adapter_id.to_string(),
+                    framework_profile: Some(framework_profile),
                 }),
                 context: Some(wire::ProjectionReductionContext {
                     mode: wire::ProjectionMode::Navigate as i32,
@@ -107,10 +111,30 @@ fn project_payload(payload: &FrameworkSurfacePayload) -> serde_json::Value {
         .map(|entry| project_kind_entry(entry, strings))
         .collect();
 
+    // The typed selector echo: the profile the host resolved the surface
+    // under, as the lowercase hex of its digest.
+    let framework_profile = payload
+        .selector
+        .as_ref()
+        .and_then(|selector| selector.framework_profile.as_ref())
+        .map(|profile| profile_digest_hex(&profile.digest));
+
     serde_json::json!({
         "framework": framework,
+        "frameworkProfile": framework_profile,
         "surfaces": surfaces,
     })
+}
+
+/// Lowercase hex of a profile reference digest.
+fn profile_digest_hex(digest: &[u8]) -> String {
+    use std::fmt::Write as _;
+    digest
+        .iter()
+        .fold(String::with_capacity(digest.len() * 2), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 fn project_kind_entry(entry: &FrameworkSurfaceKindEntry, strings: &[String]) -> serde_json::Value {
@@ -282,6 +306,13 @@ fn project_error_kind(error: &TypeInfoRequestError) -> serde_json::Value {
         Kind::ExpansionBudgetOutOfRange(_) => {
             serde_json::json!({ "case": "expansionBudgetOutOfRange" })
         }
+        Kind::UnknownFrameworkProfile(p) => serde_json::json!({
+            "case": "unknownFrameworkProfile",
+            "frameworkProfile": p
+                .profile
+                .as_ref()
+                .map(|profile| profile_digest_hex(&profile.digest)),
+        }),
     }
 }
 
@@ -298,7 +329,10 @@ mod tests {
 
     #[test]
     fn build_request_carries_the_selector_and_full_schema() {
-        let req = build_request("/App.vue", "vue");
+        let profile = wire::FrameworkProfileRef {
+            digest: vec![7; wire::FRAMEWORK_PROFILE_DIGEST_LEN],
+        };
+        let req = build_request("/App.vue", profile.clone());
         assert_eq!(req.schema_version, TYPEINFO_GRAPH_SCHEMA_VERSION);
         assert_eq!(req.operation, wire::Operation::FrameworkSurfaces as i32);
         let Some(type_info_graph_request::Payload::FrameworkSurface(fs)) = &req.payload else {
@@ -306,7 +340,7 @@ mod tests {
         };
         let selector = fs.selector.as_ref().expect("selector present");
         assert_eq!(selector.canonical_id, "/App.vue");
-        assert_eq!(selector.framework_adapter_id, "vue");
+        assert_eq!(selector.framework_profile.as_ref(), Some(&profile));
         assert!(!selector.has_export_name);
         assert_eq!(fs.schema_version, TYPEINFO_GRAPH_SCHEMA_VERSION);
     }

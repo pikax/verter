@@ -1510,6 +1510,25 @@ impl WasmVerterHost {
         }))?
     }
 
+    /// Answer the TypeInfo capability handshake. Mirrors the NAPI
+    /// `typeInfoCapabilities`.
+    ///
+    /// `request` is the protobuf-encoded
+    /// `TypeInfoCapabilityHandshakeRequest`; returns the protobuf-encoded
+    /// `TypeInfoCapabilityHandshakeResponse` bytes: the server's current and
+    /// accepted schema versions and every framework profile this host admits
+    /// (schema 11), which a `ComponentSelector.framework_profile` names.
+    #[wasm_bindgen(js_name = "typeInfoCapabilities")]
+    pub fn typeinfo_capabilities(&self, request: &[u8]) -> Result<Vec<u8>, JsValue> {
+        let request = crate::typeinfo::decode_capability_handshake_request(request)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(AssertUnwindSafe(move || {
+            crate::typeinfo::encode_capability_handshake_response(
+                &host.typeinfo_capabilities(&request),
+            )
+        }))
+    }
+
     // =========================================================================
     // Committed input-snapshot handoff (browser acquisition boundary)
     //

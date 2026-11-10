@@ -1080,9 +1080,20 @@ reaches the waits under
 A family whose build reads other queries or files can be written as an owned
 sequential continuation (`project_semantic_dispatch/family_continuation.rs`).
 Its first stage either answers or names the one dependency it reads next —
-a query (`FamilyStep::Need`) or a file's indexed input (`FamilyStep::Load`)
-— and retains everything it computed in a `FamilyBuild`; each later stage
-resumes from that state with the dependency's answer. Macro payloads
+a query (`FamilyStep::Need`), a file's indexed input (`FamilyStep::Load`)
+or a resolver port (`FamilyStep::Port`, below) — and retains everything it
+computed in a `FamilyBuild`; each later stage resumes from that state with
+the dependency's answer. Declaration lookups (`ResolveDecl`: the scope
+file, then — for a name the scope imports or re-exports — each barrel of
+the route as its own load, each specifier's canonical as a port, until the
+route stands at the defining declaration, read as a query. The walk takes
+only a step the inventories settle unambiguously: the scope's own import
+binding, a named re-export, an export of a local import binding, or a
+file's sole `export *`; a hop never follows a private import. Anything
+else — two or more wildcards, an unresolved specifier, an unservable hop,
+a namespace import, an `export =`, an ambient module — asks the in-place
+bare-name resolver as a port, which applies the full route policy, so the
+declaration the lookup settles on is the one it always settled on), macro payloads
 (`ResolveMacroPayload`: owner file, then the props intersection or the
 emits/slots/model projection), ordered intersection reductions
 (`ReduceIntersection`: each nested subgroup) and overload sets without
@@ -1092,7 +1103,12 @@ candidate's node form applies, one at a time; a list a kernel-epoch
 replacement retired is read once more) and apparent types (`ApparentType`:
 the anchor walk's signature lists of an object surface, the base's call and
 construct lists choosing a `strictBindCallApply` interface, the global
-interface lookup with its `Function` fallback, then the interface's
+interface lookup with its `Function` fallback — itself a continuation,
+`GlobalLookup`: the library's symbol index as a port, the declaring
+library file as a load, the contributors still pending ingestion as a port
+and each indexed, unobserved, as its own transition (what the population read would otherwise make
+IndexedReady in place), the program's contributor population as a port
+and a `declare global` contributor's module as a load — then the interface's
 `Instantiate`) and class instance surfaces (`ResolveClassSurface` on its
 `Instance` side: the declaring file's indexed input, which the surface roots
 on, then the type-space half's `Shallow` `Instantiate`) and class static
@@ -1108,28 +1124,49 @@ The shared signature-list read
 (`SignatureListRead`) is one sub-continuation both overload sets and
 apparent types step, in resolution or declaration order.
 
-Five of these are certified suspendable at every dependency they name, with
-each seam held under test: macro payloads (owner load; props intersection or
+Six of these are certified suspendable at every dependency they name, with
+each seam held under test: declaration lookups (each route hop's load,
+including a barrel beyond the scope's own imports; the defining
+declaration), macro payloads (owner load; props intersection or
 emits/slots/model projection), intersection reductions (each nested
 subgroup, first or later), overload sets without explicit type arguments
 (the list; each composite's result, including a retirement while it is
-held), apparent types (anchor, call and construct lists; the interface's
-instantiation) and class instance surfaces (the declaring file's load; the
-instantiation). A class's static surface is written the same way but is not
-certified: its declaration reads and a value base's constructor surface are
-still made in place (below). Neither is an apparent type's global lookup,
-nor a need whose entry normalizes its subject first; the children a family
-needs are suspendable only as far as their own families are.
-- **Global lookups.** A stage names a global declaration lookup as
-  `FamilyStep::Global`; both drivers make it in place
-  (`first_global_declaration`), so the library and program-contributor
-  files it reads still load synchronously on the polling thread.
-- **Declaration reads.** A stage names a read of prepared declarations and
-  declaration positions as `FamilyStep::Declarations`; both drivers make it
-  in place (`read_class_static_declarations`). The files those reads lower
-  from were loaded by the build's earlier `Load` stages, but a prepared
-  declaration's own import routing, a heritage argument's lowering and a
-  value base's constructor type still read synchronously inside the step.
+held), apparent types (anchor, call and construct lists; the global
+lookup's library or contributor load; the interface's instantiation) and
+class instance surfaces (the declaring file's load; the instantiation). A
+class's static surface is written the same way but is not certified: its
+declaration ports still read a prepared declaration's import routing, a
+heritage argument's lowering and a value base's constructor type in place
+(below). Nor is a need whose entry normalizes its subject first; the
+children a family needs are suspendable only as far as their own families
+are.
+- **Resolver ports.** A stage that reads the resolver — a declaration read,
+  a route's specifier, a global lookup's index — names the read as a typed
+  port (`port_continuations::PortRead`) the build stands at
+  (`FamilyStep::Port`, `FamilyBuild::port_read`), and its driver answers
+  the port in place (`ProjectSemanticDispatch::answer_port_in_place` →
+  `PortAnswer`, `resume_family_port`) over the deliveries the build
+  retained for the files it loaded, so a port loads nothing a `Load` did
+  not name. A port names the file it stands on (`PortRead::reads_file`); on
+  a production poll's drive a frame that finds it still loading waits on
+  the load first (`FrameBuild::FamilyPort`) and answers the port over its
+  terminal outcome. The ports: `GlobalLib` and `GlobalContributors` (index
+  reads of a global lookup), `ClassStatic` (a static surface's declaration
+  read: the effective prepared value declaration, the constructor shape and
+  heritage list, a base's contribution, the composed surface),
+  `Dependency` (a specifier's canonical, by workspace resolution) and
+  `BareName` (the in-place bare-name resolver for a route the hop walk
+  could not settle). The `Dependency` and `BareName` answers and the
+  `ClassStatic` reads' own nested routing still reach the resolver flights
+  and loads inventoried below; they are the remaining synchronous reads of
+  a converted family.
+- **Retained loads.** A load a family waited on joins the frame's consumed
+  loads whichever way it ended (`request_ports::retain_consumed_load`), so
+  every later read of the file by the same build — a later stage's load,
+  a port's prepared-declaration or route read, a scope read — answers from
+  the retained delivery or failure and never begins the load again
+  (`consumed_load_known`). Readers nest: an inner frame's reads see an
+  enclosing frame's retained outcomes beneath its own.
 
 - **One implementation, two drivers.** The synchronous producer (the cold
   build every synchronous entry runs) drives the continuation in place,
@@ -1224,10 +1261,23 @@ what the synchronous entry reads with no replacement, each reading the
 retired list exactly once more;
 `an_overload_set_whose_list_retires_while_its_composite_result_is_held_reads_its_list_once_more`
 retires it while the composite's result is held.
-`family_load_failure_is_terminal` polls a macro payload and a class instance
-surface whose file the workspace does not hold and requires a bounded
-answer equal to the synchronous entry's, with the owner's failed load
-submitted once by either entry.
+`family_load_failure_is_terminal` polls a declaration lookup, a macro
+payload and a class instance and a class static surface whose file the
+workspace does not hold and requires a bounded answer equal to the
+synchronous entry's, with the owner's failed load submitted once by either
+entry: the static surface's declaration port consumes the failed load at
+its prepared-declaration read instead of loading the file again.
+`a_routed_declaration_whose_deeper_barrel_target_is_indexing_yields_and_resumes_elsewhere`
+holds the owner shards while a lookup's route crosses two barrels to a
+defining file whose index is cold: the first poll answers `Pending` under a
+forbidding probe after the scope, the first barrel and both specifiers,
+and the released lookup resumes at the deeper target to the synchronous
+entry's read with the same stages.
+`an_apparent_type_whose_global_contributor_is_indexing_yields_and_resumes_elsewhere`
+edits the module whose `declare global` block contributes `Function` and
+holds the shards: the apparent type's lookup answers `Pending` at the
+contributor's load after both lookups' index reads, and resumes to the
+synchronous entry's read.
 
 ### Frame entry loads
 
@@ -1436,11 +1486,18 @@ compares the exact cold synchronous receipt and checks completed-member work.
 Internal relation/inference stages, winner processing and nested queries
 evaluated inside other synchronous adapters still require continuation conversion.
 
-Family continuations (above) cover macro payloads, intersection
-reductions, overload sets without explicit type arguments, apparent
-types (whose global interface lookup is still made in place) and class
-instance and static surfaces (the static side's declaration reads are still
-made in place). Every other
+Family continuations (above) cover declaration lookups along their
+import/export route, macro payloads, intersection reductions, overload
+sets without explicit type arguments, apparent types with their global
+lookup, and class instance and static surfaces. What a converted family
+still reads in place is confined to its ports: a route specifier's
+workspace resolution (`PortRead::Dependency`), the bare-name resolver for a
+route the shallow inventories cannot settle — a namespace import, an
+`export =`, an ambient module, a default export (`PortRead::BareName`) —
+and the static surface's declaration reads (`PortRead::ClassStatic`: a
+prepared declaration's own import routing, a heritage argument's lowering
+and a value base's constructor type), each over files the family already
+loaded. Every other
 family a frame or cold build reaches still builds in one synchronous step:
 path projection, mapped types, `keyof`, template literals, overload sets with explicit type arguments (each candidate instantiates
 through the substitution engine, whose template-literal fold reads in
@@ -1450,10 +1507,12 @@ call walk below a suspension point. Their nested query reads and resolver
 port calls (`ensure_indexed_ready_serve`, prepared declarations, module
 export tables, route resolution, declaration lowering) remain synchronous
 inside the step. Frame entry loads (above) cover only the loads an
-instantiation or `typeof` build performs before anything else: a file a
-build reaches later — a re-export chain's hop resolved at demand time, a
-heritage or member declaration of another file, a declaration body lowered
-on its owner shard — still loads or is lowered in place. Failed frame entry
+instantiation or `typeof` build performs before anything else, and they
+are the one place a frame still loads ahead of a read, from the bundle's
+route plan rather than from the read itself: a file such a build reaches
+later — a heritage or member declaration of another file, a declaration
+body lowered on its owner shard — still loads or is lowered in place.
+Failed frame entry
 loads supply their terminal outcome to the frame's repeated reads without
 synchronous retries. A flow frame still drops and re-runs
 its evaluation when its body meets an unanswered read.

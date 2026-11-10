@@ -150,6 +150,18 @@ impl OverloadSetBuild {
 }
 
 impl ApparentTypeBuild {
+    /// The port the widening's global lookup stands at.
+    pub(super) fn global_port(&self) -> super::port_continuations::PortRead<'_> {
+        match &self.stage {
+            ApparentStage::Global { lookup, .. } => lookup.port(),
+            ApparentStage::Anchor { .. }
+            | ApparentStage::Buckets { .. }
+            | ApparentStage::Surface { .. } => {
+                unreachable!("an apparent type reads a port only for its global lookup")
+            }
+        }
+    }
+
     /// Whether the read this widening waits on was named from handles a
     /// kernel-epoch replacement retired while it waited.
     pub(super) fn awaits_retired_read<C: crate::resolver_core::ResolverCapabilities>(
@@ -190,12 +202,14 @@ enum ApparentStage {
         calls: Option<Vec<SemanticNodeId>>,
         list: SignatureListRead,
     },
-    /// Looking up the global interface `name`; `fallback` when the
-    /// callable `Function` interface is looked up after it finds none.
+    /// Looking up the global interface `name` — the lookup's own stages
+    /// retained in `lookup`; `fallback` when the callable `Function`
+    /// interface is looked up after it finds none.
     Global {
         scope: ApparentScope,
         name: &'static str,
         fallback: bool,
+        lookup: super::port_continuations::GlobalLookup,
     },
     /// Reading the interface's instantiation.
     Surface { rootless: bool },
@@ -304,6 +318,20 @@ pub(super) enum ClassStaticRead<'b> {
         surfaces: &'b [SemanticNodeId],
         type_args: &'b Arc<[SemanticNodeId]>,
     },
+}
+
+impl ClassStaticRead<'_> {
+    /// The file the read lowers from or looks its declaration up in: the
+    /// declaring file the surface loaded, or the effective declaring file
+    /// the slot rebased onto.
+    pub(super) fn reads_file(&self) -> &str {
+        match self {
+            Self::Owner(decl_slot) => decl_slot.defining_canonical.as_ref(),
+            Self::Constructor { own, .. } | Self::Base { own, .. } | Self::Finish { own, .. } => {
+                own.canonical.as_ref()
+            }
+        }
+    }
 }
 
 /// The answer to a [`ClassStaticRead`].
@@ -1047,7 +1075,7 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
             };
             return FamilyStep::Need(read, Box::new(FamilyBuild::ApparentType(build)));
         }
-        Self::look_up_apparent_global(
+        self.look_up_apparent_global(
             build,
             scope,
             super::apparent_type::CALLABLE_APPARENT_INTERFACE,
@@ -1055,23 +1083,78 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
         )
     }
 
-    /// Look the global interface `name` up next in `scope`'s project.
+    /// Look the global interface `name` up next in `scope`'s project: the
+    /// lookup is a continuation of its own
+    /// ([`GlobalLookup`](super::port_continuations::GlobalLookup)), whose
+    /// index reads are this family's ports and whose library and
+    /// contributor files are its loads.
     fn look_up_apparent_global(
+        &self,
         mut build: ApparentTypeBuild,
         scope: ApparentScope,
         name: &'static str,
         fallback: bool,
     ) -> FamilyStep {
         let demand = Arc::clone(&scope.canonical);
+        let (lookup, step) =
+            super::port_continuations::GlobalLookup::begin(demand, Arc::from(name));
         build.stage = ApparentStage::Global {
             scope,
             name,
             fallback,
+            lookup,
         };
-        FamilyStep::Global(
-            super::family_continuation::GlobalRead { demand, name },
-            Box::new(FamilyBuild::ApparentType(build)),
-        )
+        self.advance_apparent_global(build, step)
+    }
+
+    /// Carry an apparent type's global lookup on from `step`: the port or
+    /// file it reads next, the build retained, or its declaration.
+    fn advance_apparent_global(
+        &self,
+        build: ApparentTypeBuild,
+        step: super::port_continuations::GlobalStep,
+    ) -> FamilyStep {
+        use super::port_continuations::GlobalStep;
+        match step {
+            GlobalStep::Port => FamilyStep::Port(Box::new(FamilyBuild::ApparentType(build))),
+            GlobalStep::Load(file) => {
+                FamilyStep::Load(file, Box::new(FamilyBuild::ApparentType(build)))
+            }
+            GlobalStep::Index(file) => {
+                FamilyStep::Index(file, Box::new(FamilyBuild::ApparentType(build)))
+            }
+            GlobalStep::Found(found) => self.resume_apparent_global(build, found),
+        }
+    }
+
+    /// Resume an apparent type's global lookup with the answer to the port
+    /// it stood at.
+    #[inline(never)]
+    pub(super) fn resume_apparent_global_port(
+        &self,
+        mut build: ApparentTypeBuild,
+        answer: super::port_continuations::PortAnswer,
+    ) -> FamilyStep {
+        let ApparentStage::Global { lookup, .. } = &mut build.stage else {
+            unreachable!("an apparent type reads a port only for its global lookup")
+        };
+        let step = lookup.resume_port(answer);
+        self.advance_apparent_global(build, step)
+    }
+
+    /// Resume an apparent type's global lookup with the indexed input of
+    /// the library or contributor file it read.
+    #[inline(never)]
+    pub(super) fn resume_apparent_global_source(
+        &self,
+        mut build: ApparentTypeBuild,
+        serve: Option<verter_session_query::inputs::indexed::IndexedInputServe>,
+    ) -> FamilyStep {
+        let ApparentStage::Global { lookup, .. } = &mut build.stage else {
+            unreachable!("an apparent type reads a file only for its global lookup")
+        };
+        let step = lookup.resume_source(serve);
+        self.advance_apparent_global(build, step)
     }
 
     /// Resume a callable's apparent type with the read it waited on: a
@@ -1126,7 +1209,7 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
                     FamilyStep::Need(key, Box::new(FamilyBuild::ApparentType(build)))
                 }
                 // An unsettled bucket chooses no strict interface.
-                (ListProgress::Unsettled, _) => Self::look_up_apparent_global(
+                (ListProgress::Unsettled, _) => self.look_up_apparent_global(
                     build,
                     scope,
                     super::apparent_type::CALLABLE_APPARENT_INTERFACE,
@@ -1147,21 +1230,21 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
                 }
                 (ListProgress::Nodes(constructs), Some(calls)) => {
                     if !calls.is_empty() {
-                        Self::look_up_apparent_global(
+                        self.look_up_apparent_global(
                             build,
                             scope,
                             super::apparent_type::CALLABLE_STRICT_INTERFACE,
                             true,
                         )
                     } else if !constructs.is_empty() {
-                        Self::look_up_apparent_global(
+                        self.look_up_apparent_global(
                             build,
                             scope,
                             super::apparent_type::NEWABLE_STRICT_INTERFACE,
                             true,
                         )
                     } else {
-                        Self::look_up_apparent_global(
+                        self.look_up_apparent_global(
                             build,
                             scope,
                             super::apparent_type::CALLABLE_APPARENT_INTERFACE,
@@ -1208,6 +1291,7 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
             scope,
             name,
             fallback,
+            lookup: _,
         } = std::mem::replace(&mut build.stage, ApparentStage::Surface { rootless: false })
         else {
             unreachable!("an apparent type resumes its global lookup at that lookup")
@@ -1222,7 +1306,7 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
                     Box::new(FamilyBuild::ApparentType(build)),
                 )
             }
-            None if fallback => Self::look_up_apparent_global(
+            None if fallback => self.look_up_apparent_global(
                 build,
                 scope,
                 super::apparent_type::CALLABLE_APPARENT_INTERFACE,
@@ -1359,7 +1443,7 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
             }
             _ => unreachable!("a class's static surface reads a file only for its declaration"),
         };
-        FamilyStep::Declarations(Box::new(FamilyBuild::ClassStaticSurface(build)))
+        FamilyStep::Port(Box::new(FamilyBuild::ClassStaticSurface(build)))
     }
 
     /// Resume a class's static surface with the answer to the declaration
@@ -1390,7 +1474,7 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
                     FamilyStep::Load(file, Box::new(FamilyBuild::ClassStaticSurface(build)))
                 } else {
                     build.stage = ClassStaticStage::Constructor { own, prepared };
-                    FamilyStep::Declarations(Box::new(FamilyBuild::ClassStaticSurface(build)))
+                    FamilyStep::Port(Box::new(FamilyBuild::ClassStaticSurface(build)))
                 }
             }
             (ClassStaticStage::Constructor { .. }, ClassStaticAnswer::Constructor(None, _)) => {
@@ -1508,7 +1592,7 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
                 };
             }
         }
-        FamilyStep::Declarations(Box::new(FamilyBuild::ClassStaticSurface(build)))
+        FamilyStep::Port(Box::new(FamilyBuild::ClassStaticSurface(build)))
     }
 
     /// The miss a static surface without an effective declaration or a

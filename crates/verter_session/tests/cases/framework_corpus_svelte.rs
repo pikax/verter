@@ -236,9 +236,9 @@ fn kind_support(payload: &wire::FrameworkSurfacePayload, kind: FrameworkSurfaceK
         .unwrap_or(-1)
 }
 
-fn envelope(canonical: &str) -> wire::TypeInfoGraphRequest {
+fn envelope(host: &VerterHost, canonical: &str) -> wire::TypeInfoGraphRequest {
     wire::TypeInfoGraphRequest {
-        schema_version: 3,
+        schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
         operation: wire::Operation::FrameworkSurfaces as i32,
         payload: Some(wire_request::Payload::FrameworkSurface(
             wire::FrameworkSurfaceRequest {
@@ -246,7 +246,12 @@ fn envelope(canonical: &str) -> wire::TypeInfoGraphRequest {
                     canonical_id: canonical.to_string(),
                     export_name: String::new(),
                     has_export_name: false,
-                    framework_adapter_id: "svelte".to_string(),
+                    framework_profile: Some(
+                        host.advertised_framework_profile_for_adapter(
+                            &verter_session::framework::FrameworkAdapterId::new("svelte"),
+                        )
+                        .expect("a registered adapter admits a profile"),
+                    ),
                 }),
                 context: Some(wire::ProjectionReductionContext {
                     mode: wire::ProjectionMode::Expanded as i32,
@@ -270,8 +275,11 @@ fn envelope(canonical: &str) -> wire::TypeInfoGraphRequest {
                 include_provenance: false,
                 include_diagnostics: false,
                 include_projection: vec![],
-                requested_kinds: vec![],
-                schema_version: 3,
+                requested_kinds: verter_session::framework::ALL_FRAMEWORK_SURFACE_KINDS
+                    .iter()
+                    .map(|kind| *kind as i32)
+                    .collect(),
+                schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
             },
         )),
     }
@@ -301,7 +309,7 @@ fn svelte_callback_prop_events_structural_not_nominal() {
         })
         .unwrap_or_else(|e| panic!("upsert: {e:?}"));
 
-    let result = host.resolve_framework_surface_with_audit(envelope(&canonical));
+    let result = host.resolve_framework_surface_with_audit(envelope(&host, &canonical));
     let response = result.as_result().expect("structural response");
     let payload = match &response.kind {
         Some(type_info_graph_response::Kind::FrameworkSurface(p)) => p,
@@ -358,7 +366,7 @@ fn svelte_surface_corpus_resolves_every_fixture() {
             })
             .unwrap_or_else(|e| panic!("upsert {canonical}: {e:?}"));
 
-        let result = host.resolve_framework_surface_with_audit(envelope(&canonical));
+        let result = host.resolve_framework_surface_with_audit(envelope(&host, &canonical));
         let response = result
             .as_result()
             .unwrap_or_else(|e| panic!("{}: structural response, got {e:?}", case.fixture));
@@ -471,7 +479,7 @@ fn svelte_prop_defaults_make_props_optional_on_the_surface() {
         })
         .unwrap_or_else(|e| panic!("upsert: {e:?}"));
 
-    let result = host.resolve_framework_surface_with_audit(envelope(&canonical));
+    let result = host.resolve_framework_surface_with_audit(envelope(&host, &canonical));
     let response = result.as_result().expect("structural response");
     let payload = match &response.kind {
         Some(type_info_graph_response::Kind::FrameworkSurface(p)) => p,
@@ -529,7 +537,7 @@ fn svelte_prop_default_and_origin_are_on_the_public_framework_surface_wire() {
         })
         .unwrap_or_else(|e| panic!("upsert: {e:?}"));
 
-    let result = host.resolve_framework_surface_with_audit(envelope(&canonical));
+    let result = host.resolve_framework_surface_with_audit(envelope(&host, &canonical));
     let response = result.as_result().expect("structural response");
     let payload = match &response.kind {
         Some(type_info_graph_response::Kind::FrameworkSurface(p)) => p,
@@ -640,7 +648,7 @@ fn svelte_imported_props_origin_import_hop_on_the_public_wire() {
             .unwrap_or_else(|e| panic!("upsert {canonical}: {e:?}"));
     }
 
-    let result = host.resolve_framework_surface_with_audit(envelope(&component));
+    let result = host.resolve_framework_surface_with_audit(envelope(&host, &component));
     let response = result.as_result().expect("structural response");
     let payload = match &response.kind {
         Some(type_info_graph_response::Kind::FrameworkSurface(p)) => p,

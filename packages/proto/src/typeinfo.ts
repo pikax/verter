@@ -25,6 +25,9 @@ export {
   FrameworkSurfaceKindEntrySchema,
   FrameworkSurfaceKindStatusSchema,
   ComponentSelectorSchema,
+  FrameworkProfileRefSchema,
+  FrameworkProfileAdvertisementSchema,
+  TypeInfoRequestErrorUnknownFrameworkProfileSchema,
   GraphProjectionRequestSchema,
   // Graph node messages (kept as the prefixed names — the schema is
   // protobuf-authoritative, and the proto-side prefix avoids collision
@@ -124,6 +127,9 @@ export type {
   FrameworkSurfaceMemberDeclaration,
   FrameworkSurfaceOriginHop,
   ComponentSelector,
+  FrameworkProfileRef,
+  FrameworkProfileAdvertisement,
+  TypeInfoRequestErrorUnknownFrameworkProfile,
   StructuredTypeExpression,
   GraphTypeNode,
   GraphObjectSpreadProgram,
@@ -178,9 +184,16 @@ export type {
  * Schema 10 adds the facet demand `FrameworkSurfaceRequest.requestedKinds`:
  * a v10 framework-surface request names the kinds it asks for (non-empty, no
  * duplicate, no UNSPECIFIED) and its response carries exactly one entry per
- * requested kind in enum-tag order; below v10 the field stays empty and the
- * response carries every known kind.
- * Schema 2 stays accepted for the legacy
- * operations; the framework-surface operation requires 3.
+ * requested kind in enum-tag order.
+ * Schema 11 types the `Component` selector's framework: the open
+ * `ComponentSelector.frameworkAdapterId` string (field 4) is reserved and
+ * `ComponentSelector.frameworkProfile` (a `FrameworkProfileRef`, the 32-byte
+ * digest of one host-admitted framework profile) replaces it. Profiles are
+ * discovered through `TypeInfoCapabilityHandshakeResponse.frameworkProfiles`
+ * (`VerterHost.typeInfoCapabilities`); a well-shaped reference the host does
+ * not admit is the `unknownFrameworkProfile` error arm, and the response's
+ * selector echo names the admitted profile.
+ * Schema 2 stays accepted for the legacy operations; the framework-surface
+ * operation requires 11.
  */
-export const TYPEINFO_GRAPH_SCHEMA_VERSION = 10;
+export const TYPEINFO_GRAPH_SCHEMA_VERSION = 11;

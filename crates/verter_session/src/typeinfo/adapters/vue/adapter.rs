@@ -178,10 +178,6 @@ mod tests {
         // plan the wrong macro. Built without a host: planning is pure data
         // work, so it does not touch the ctx.
         let adapter = VueFrameworkAdapter::default();
-        let selector = ResolvedComponentSelector {
-            canonical: Arc::from("/App.vue"),
-            export: crate::typeinfo::framework_surface::ComponentExport::Default,
-        };
         // Build a minimal ctx purely to satisfy the signature; planning ignores
         // it.
         let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
@@ -189,6 +185,15 @@ mod tests {
         let registration = registry
             .get(&crate::framework::FrameworkAdapterId::vue())
             .expect("vue registered");
+        let selector = ResolvedComponentSelector {
+            canonical: Arc::from("/App.vue"),
+            export: crate::typeinfo::framework_surface::ComponentExport::Default,
+            framework_profile: registry
+                .profile_for_adapter(&crate::framework::FrameworkAdapterId::vue())
+                .expect("vue admits a profile")
+                .profile
+                .clone(),
+        };
         let ctx = FrameworkAdapterCtx::new(registration, &host);
         let plan = adapter.plan_surfaces(
             &ctx,

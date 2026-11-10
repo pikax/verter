@@ -552,9 +552,13 @@ fn partial_props_recovery_keeps_snippet_callable_role() {
 
 // ── Test 7: Deferred-surface intermediate state ─────────────────────────
 
-fn framework_envelope(canonical: &str, adapter_id: &str) -> wire::TypeInfoGraphRequest {
+fn framework_envelope(
+    host: &VerterHost,
+    canonical: &str,
+    adapter_id: &str,
+) -> wire::TypeInfoGraphRequest {
     wire::TypeInfoGraphRequest {
-        schema_version: 3,
+        schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
         operation: wire::Operation::FrameworkSurfaces as i32,
         payload: Some(wire_request::Payload::FrameworkSurface(
             wire::FrameworkSurfaceRequest {
@@ -562,7 +566,12 @@ fn framework_envelope(canonical: &str, adapter_id: &str) -> wire::TypeInfoGraphR
                     canonical_id: canonical.to_string(),
                     export_name: String::new(),
                     has_export_name: false,
-                    framework_adapter_id: adapter_id.to_string(),
+                    framework_profile: Some(
+                        host.advertised_framework_profile_for_adapter(
+                            &crate::framework::FrameworkAdapterId::new(adapter_id),
+                        )
+                        .expect("a registered adapter admits a profile"),
+                    ),
                 }),
                 context: Some(wire::ProjectionReductionContext {
                     mode: wire::ProjectionMode::Expanded as i32,
@@ -586,8 +595,11 @@ fn framework_envelope(canonical: &str, adapter_id: &str) -> wire::TypeInfoGraphR
                 include_provenance: false,
                 include_diagnostics: false,
                 include_projection: vec![],
-                requested_kinds: vec![],
-                schema_version: 3,
+                requested_kinds: crate::framework::ALL_FRAMEWORK_SURFACE_KINDS
+                    .iter()
+                    .map(|kind| *kind as i32)
+                    .collect(),
+                schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
             },
         )),
     }
@@ -639,7 +651,7 @@ fn svelte_framework_surface_resolves_runes_props_and_options_unsupported() {
         "/Widget.svelte",
         "<script lang=\"ts\">interface Props { name: string; count?: number }\nlet { name, count }: Props = $props();</script>\n",
     );
-    let envelope = framework_envelope("/Widget.svelte", "svelte");
+    let envelope = framework_envelope(&host, "/Widget.svelte", "svelte");
     let result = host.resolve_framework_surface_with_audit(envelope);
     let response = result
         .as_result()
@@ -706,7 +718,7 @@ fn svelte_runes_callback_prop_stays_props_absent_from_emits() {
         "/Closeable.svelte",
         "<script lang=\"ts\">interface Props { title: string; onClose?: () => void }\nlet { title, onClose }: Props = $props();</script>\n",
     );
-    let envelope = framework_envelope("/Closeable.svelte", "svelte");
+    let envelope = framework_envelope(&host, "/Closeable.svelte", "svelte");
     let result = host.resolve_framework_surface_with_audit(envelope);
     let response = result.as_result().expect("structural response");
     let payload = match &response.kind {
@@ -739,12 +751,12 @@ fn svelte_framework_surface_warm_hit_is_value_stable() {
         "<script lang=\"ts\">let { a, b }: { a: string; b: number } = $props();</script>\n",
     );
     let first = host
-        .resolve_framework_surface_with_audit(framework_envelope("/Warm.svelte", "svelte"))
+        .resolve_framework_surface_with_audit(framework_envelope(&host, "/Warm.svelte", "svelte"))
         .as_result()
         .expect("first")
         .clone();
     let second = host
-        .resolve_framework_surface_with_audit(framework_envelope("/Warm.svelte", "svelte"))
+        .resolve_framework_surface_with_audit(framework_envelope(&host, "/Warm.svelte", "svelte"))
         .as_result()
         .expect("second")
         .clone();

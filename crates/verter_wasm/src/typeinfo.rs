@@ -9,7 +9,10 @@
 use prost::Message;
 use serde::Serialize;
 use verter_audit::RequestAuditRecord;
-use verter_protocol::typeinfo::graph::{TypeInfoGraphRequest, TypeInfoGraphResponse};
+use verter_protocol::typeinfo::graph::{
+    TypeInfoCapabilityHandshakeRequest, TypeInfoCapabilityHandshakeResponse, TypeInfoGraphRequest,
+    TypeInfoGraphResponse,
+};
 use verter_protocol::typeinfo::{FfiEvaluateTypeExpressionRequest, FfiSymbolEntry};
 use verter_session::host_resolve_type_audit::TypeResolutionRequestError;
 use verter_type_engine::semantic_query::ProjectionMode;
@@ -135,6 +138,22 @@ pub(crate) fn decode_type_info_graph_request(
 ) -> Result<TypeInfoGraphRequest, JsValue> {
     TypeInfoGraphRequest::decode(bytes)
         .map_err(|e| JsValue::from_str(&format!("type-info graph request decode error: {e}")))
+}
+
+/// Decode a protobuf-encoded [`TypeInfoCapabilityHandshakeRequest`] from
+/// raw bytes.
+pub(crate) fn decode_capability_handshake_request(
+    bytes: &[u8],
+) -> Result<TypeInfoCapabilityHandshakeRequest, JsValue> {
+    TypeInfoCapabilityHandshakeRequest::decode(bytes)
+        .map_err(|e| JsValue::from_str(&format!("capability handshake decode error: {e}")))
+}
+
+/// Encode a [`TypeInfoCapabilityHandshakeResponse`] to protobuf bytes.
+pub(crate) fn encode_capability_handshake_response(
+    resp: &TypeInfoCapabilityHandshakeResponse,
+) -> Vec<u8> {
+    resp.encode_to_vec()
 }
 
 /// Encode a [`TypeInfoGraphResponse`] to protobuf bytes.

@@ -4356,6 +4356,24 @@ impl NapiVerterHost {
             })
         }))?
     }
+
+    /// Answer the TypeInfo capability handshake: the server's current and
+    /// accepted schema versions and every framework profile this host
+    /// admits (schema 11).
+    ///
+    /// `request` is a protobuf-encoded
+    /// `verter.v1.TypeInfoCapabilityHandshakeRequest`; the return value is
+    /// the protobuf-encoded `TypeInfoCapabilityHandshakeResponse`. A
+    /// framework-surface `ComponentSelector.framework_profile` names one of
+    /// the advertised profiles.
+    #[napi(js_name = "typeInfoCapabilities")]
+    pub fn typeinfo_capabilities(&self, request: Buffer) -> Result<Buffer> {
+        let request = typeinfo::decode_capability_handshake_request(request)?;
+        let host = std::sync::Arc::clone(&self.inner);
+        catch_panic(std::panic::AssertUnwindSafe(move || {
+            typeinfo::encode_capability_handshake_response(&host.typeinfo_capabilities(&request))
+        }))
+    }
 }
 
 // =============================================================================
@@ -5335,8 +5353,27 @@ defineProps<{ value: Unsafe }>()
             })
             .expect("Vue fixture must upsert");
 
+        // Discover the Vue profile through the real capability binding: the
+        // selector names the advertised reference (schema 11).
+        let handshake = napi_host
+            .typeinfo_capabilities(Buffer::from(
+                wire::TypeInfoCapabilityHandshakeRequest {
+                    client_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+                }
+                .encode_to_vec(),
+            ))
+            .expect("the capability handshake must answer");
+        let handshake = wire::TypeInfoCapabilityHandshakeResponse::decode(handshake.as_ref())
+            .expect("handshake must be a valid TypeInfoCapabilityHandshakeResponse");
+        let vue_profile = handshake
+            .framework_profiles
+            .iter()
+            .find(|advertised| advertised.family == "vue")
+            .and_then(|advertised| advertised.profile.clone())
+            .expect("the default host advertises the Vue profile");
+
         let envelope = wire::TypeInfoGraphRequest {
-            schema_version: 3,
+            schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
             operation: wire::Operation::FrameworkSurfaces as i32,
             payload: Some(wire_request::Payload::FrameworkSurface(
                 wire::FrameworkSurfaceRequest {
@@ -5344,7 +5381,7 @@ defineProps<{ value: Unsafe }>()
                         canonical_id: canonical_id.to_string(),
                         export_name: String::new(),
                         has_export_name: false,
-                        framework_adapter_id: "vue".to_string(),
+                        framework_profile: Some(vue_profile.clone()),
                     }),
                     context: Some(wire::ProjectionReductionContext {
                         mode: wire::ProjectionMode::Expanded as i32,
@@ -5368,8 +5405,8 @@ defineProps<{ value: Unsafe }>()
                     include_provenance: false,
                     include_diagnostics: false,
                     include_projection: vec![],
-                    requested_kinds: vec![],
-                    schema_version: 3,
+                    requested_kinds: vec![kind as i32],
+                    schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
                 },
             )),
         };
@@ -5385,6 +5422,15 @@ defineProps<{ value: Unsafe }>()
             Some(type_info_graph_response::Kind::FrameworkSurface(payload)) => payload,
             other => panic!("expected a framework_surface response arm, got: {other:?}"),
         };
+        // The selector echo names the admitted profile the request named.
+        assert_eq!(
+            payload
+                .selector
+                .as_ref()
+                .and_then(|selector| selector.framework_profile.as_ref()),
+            Some(&vue_profile),
+            "the selector echo must carry the admitted Vue profile reference",
+        );
         let strings: Vec<String> = payload
             .graph
             .as_ref()

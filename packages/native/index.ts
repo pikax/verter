@@ -1174,6 +1174,19 @@ export declare class VerterHost {
     response: Buffer;
     auditRecord: Buffer | null;
   };
+
+  /**
+   * Answer the TypeInfo capability handshake: the server's current and
+   * accepted schema versions and every framework profile this host admits
+   * (schema 11).
+   *
+   * `request` is a protobuf-encoded
+   * `verter.v1.TypeInfoCapabilityHandshakeRequest`; the return value is the
+   * protobuf-encoded `TypeInfoCapabilityHandshakeResponse`. A
+   * framework-surface `ComponentSelector.frameworkProfile` names one of the
+   * advertised profiles.
+   */
+  typeInfoCapabilities(request: Buffer): Buffer;
 }
 
 /**

@@ -986,7 +986,7 @@ fn drive_svelte(row: &Row) -> Result<Vec<String>, String> {
     );
 
     let envelope = wire::TypeInfoGraphRequest {
-        schema_version: 3,
+        schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
         operation: wire::Operation::FrameworkSurfaces as i32,
         payload: Some(wire_request::Payload::FrameworkSurface(
             wire::FrameworkSurfaceRequest {
@@ -994,7 +994,12 @@ fn drive_svelte(row: &Row) -> Result<Vec<String>, String> {
                     canonical_id: canonical.clone(),
                     export_name: String::new(),
                     has_export_name: false,
-                    framework_adapter_id: "svelte".to_string(),
+                    framework_profile: Some(
+                        host.advertised_framework_profile_for_adapter(
+                            &crate::framework::FrameworkAdapterId::new("svelte"),
+                        )
+                        .expect("a registered adapter admits a profile"),
+                    ),
                 }),
                 context: Some(wire::ProjectionReductionContext {
                     mode: wire::ProjectionMode::Expanded as i32,
@@ -1018,8 +1023,11 @@ fn drive_svelte(row: &Row) -> Result<Vec<String>, String> {
                 include_provenance: false,
                 include_diagnostics: false,
                 include_projection: vec![],
-                requested_kinds: vec![],
-                schema_version: 3,
+                requested_kinds: crate::framework::ALL_FRAMEWORK_SURFACE_KINDS
+                    .iter()
+                    .map(|kind| *kind as i32)
+                    .collect(),
+                schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
             },
         )),
     };

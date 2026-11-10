@@ -35,10 +35,12 @@
 //! - [`resolve_named_symbol`] — `resolve_named_symbol_with_audit` impl.
 //! - [`evaluate_type_expression`] — `evaluate_type_expression_with_audit` impl.
 //! - [`shallow_surface`] — `resolve_shallow_surface` impl.
+//! - [`capabilities`] — the TypeInfo capability handshake (`typeinfo_capabilities`).
 //! - [`surface`] — the span-rich [`surface::TypeInfoSurface`] projection.
 //! - [`scratch_cache`] — host-owned LRU for typeinfo scratch URIs.
 
 pub mod adapters;
+pub mod capabilities;
 pub mod evaluate_type_expression;
 #[cfg(feature = "semantic-observe")]
 pub(crate) mod footprint_attach;

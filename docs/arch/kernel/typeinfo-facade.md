@@ -425,7 +425,7 @@ names.
 | UAK0 `D15` | TIF1 | The FFI serde request vocabulary, the FFI half of `TIF-D04` | `tests/kernel/UAK0/products/deletion-retag-ledger.v1.json` |
 | UAK0 `D10`, `D11` | COX0 | Per-framework LSP branches and MCP `is_vue()` gates | `tests/kernel/UAK0/products/deletion-retag-ledger.v1.json` |
 | DEM0 `DEM-D03` | TIF1 | The executor resolves every surface kind; `OP10` demands requested facets only | `tests/kernel/DEM0/products/demand-inventory.v1.json` |
-| VID0 `V-D02` | TIF1 | Open `framework_adapter_id` string; `TR06` makes it a typed profile | `tests/kernel/VID0/products/identity-inventory.v1.json` |
+| VID0 `V-D02` | TIF1 | Open `framework_adapter_id` string; `TR06` makes it a typed profile. Replaced at schema 11 (`ComponentSelector.framework_profile`); the selector's path-string `canonical_id` stays `TIF-D01` | `tests/kernel/VID0/products/identity-inventory.v1.json` |
 | ENC0 `P19` | ENCF0 | `GraphSpanRef` and `GraphDiagnostic` spans with no stated unit | `tests/kernel/ENC0/products/boundary-route-ledger.v1.json` |
 
 Deletion-category coverage:

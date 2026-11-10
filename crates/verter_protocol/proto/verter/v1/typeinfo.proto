@@ -976,24 +976,59 @@ message FrameworkSurfaceRequest {
   bool include_provenance = 5;
   bool include_diagnostics = 6;
   repeated GraphProjectionRequest include_projection = 7;
+  // The framework-surface operation's schema floor is 11 (the typed
+  // `ComponentSelector.framework_profile`); a lower version is a typed
+  // MalformedPayload before execution.
   uint32 schema_version = 8;
   // The facet demand (schema 10): the surface kinds this request asks for.
-  // From schema 10 the list is REQUIRED — non-empty, no duplicate, no
-  // UNSPECIFIED value — and the response carries exactly one
-  // `FrameworkSurfaceKindEntry` per requested kind, in enum-tag order; an
-  // undemanded kind is omitted, neither resolved nor filled. Below schema 10
-  // the field must be empty and the response keeps carrying every known kind.
+  // The list is REQUIRED — non-empty, no duplicate, no UNSPECIFIED value —
+  // and the response carries exactly one `FrameworkSurfaceKindEntry` per
+  // requested kind, in enum-tag order; an undemanded kind is omitted,
+  // neither resolved nor filled.
   repeated FrameworkSurfaceKind requested_kinds = 9;
 }
 
+// ComponentSelector — the typed `Component` selector (TR06): a file, an
+// export name and the typed framework profile the component is read under.
+//
+// Schema 11 retired the open adapter-id string (field 4, reserved) in
+// favour of `framework_profile`: a host-admitted `FrameworkProfileId`
+// reference. A display family (`FrameworkTag`, an adapter spelling, a file
+// extension) is never a selector.
 message ComponentSelector {
+  reserved 4;
+  reserved "framework_adapter_id";
   string canonical_id = 1;
   // Empty when the canonical is its own default export.
   string export_name = 2;
   bool has_export_name = 3;
-  // Open canonical adapter id (e.g., "vue", "svelte", "react",
-  // "solid", "my-corp-fw"). The host interns at receive time.
-  string framework_adapter_id = 4;
+  // REQUIRED from schema 11. The profile is discovered through
+  // `TypeInfoCapabilityHandshakeResponse.framework_profiles`; a reference the
+  // host does not admit is the typed `UnknownFrameworkProfile` error.
+  FrameworkProfileRef framework_profile = 5;
+}
+
+// FrameworkProfileRef — a reference to one host-admitted semantic framework
+// profile (`verter_identity::successor::FrameworkProfileId`): exactly one
+// release over the carriers it claims, under the host's descriptor-schema
+// epoch. `digest` is the identity's 32-byte canonical digest, exactly as the
+// host advertised it. The host never reconstructs an identity from these
+// bytes: it resolves them against its admitted profile index, so a
+// reference the host did not mint fails before any semantic work. A
+// digest whose length is not 32 is a MalformedPayload.
+message FrameworkProfileRef {
+  bytes digest = 1;
+}
+
+// FrameworkProfileAdvertisement — one admitted profile a host answers
+// `framework_profile` references for. `family` and `release` are the
+// manifest coordinates the profile was minted from (an exact release,
+// never a range); `framework` is the display family and nothing else.
+message FrameworkProfileAdvertisement {
+  FrameworkProfileRef profile = 1;
+  string family = 2;
+  string release = 3;
+  FrameworkTag framework = 4;
 }
 
 message GraphProjectionRequest {
@@ -1034,6 +1069,9 @@ message TypeInfoCapabilityHandshakeResponse {
   // Every version the server is prepared to accept. The client
   // intersects with its own supported set.
   repeated uint32 server_supported_versions = 2;
+  // Every framework profile this host admits (schema 11), in digest order.
+  // A `ComponentSelector.framework_profile` names one of these.
+  repeated FrameworkProfileAdvertisement framework_profiles = 3;
 }
 
 // ----------- Framework surface payload -----------
@@ -1041,9 +1079,11 @@ message TypeInfoCapabilityHandshakeResponse {
 // FrameworkSurfacePayload — the framework component-surface response
 // (schema 3+). A framework-surface response carries EXACTLY ONE
 // `FrameworkSurfaceKindEntry` per REQUESTED `FrameworkSurfaceKind`
-// (`FrameworkSurfaceRequest.requested_kinds`, schema 10) — per known kind
-// on a request below schema 10. Schema 4 added the add-only
-// `FrameworkSurfaceMember.default_value_id` + `origin` fields.
+// (`FrameworkSurfaceRequest.requested_kinds`, schema 10). Schema 4 added
+// the add-only `FrameworkSurfaceMember.default_value_id` + `origin` fields.
+// `selector` is the typed selector echo (schema 11): the file, export and
+// the `framework_profile` the host resolved the surface under, built from
+// the admitted identity. `framework` is the display family only.
 message FrameworkSurfacePayload {
   uint32 schema_version = 1;
   ComponentSelector selector = 2;
@@ -1722,7 +1762,18 @@ message TypeInfoRequestError {
     TypeInfoRequestErrorMalformedStructuredExpression malformed_structured_expression = 9;
     TypeInfoRequestErrorMissingProjectPath missing_project_path = 10;
     TypeInfoRequestErrorExpansionBudgetOutOfRange expansion_budget_out_of_range = 12;
+    TypeInfoRequestErrorUnknownFrameworkProfile unknown_framework_profile = 13;
   }
+}
+
+// Typed error for a well-formed `FrameworkProfileRef` (32 bytes) that
+// names no profile this host admits (schema 11): unknown, unadmitted or
+// minted under another descriptor-schema epoch. Carries the rejected
+// reference only — the recovery action is discovery through
+// `TypeInfoCapabilityHandshakeResponse.framework_profiles`, never a
+// guessed family or release.
+message TypeInfoRequestErrorUnknownFrameworkProfile {
+  FrameworkProfileRef profile = 1;
 }
 
 message TypeInfoRequestErrorMissingProjectionContext {}

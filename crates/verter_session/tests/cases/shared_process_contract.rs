@@ -520,13 +520,17 @@ fn compile_many_across_hosts_with_overlapping_canonical_ids_stays_isolated() {
 }
 
 /// Build a well-formed framework-surface `TypeInfoGraphRequest` envelope for
-/// `canonical` + `adapter_id`, at the closed-contract schema version 3 (see
-/// CLAUDE.md's Typeinfo Wire Contract). Mirrors the same helper in
+/// `canonical` + `adapter_id`'s advertised profile, at the current schema
+/// version (see CLAUDE.md's Typeinfo Wire Contract). Mirrors the same helper in
 /// `g_block/framework_surface_executor.rs` — kept local rather than shared
 /// because `tests/cases/*.rs` modules are private siblings, not a library.
-fn framework_envelope(canonical: &str, adapter_id: &str) -> wire::TypeInfoGraphRequest {
+fn framework_envelope(
+    host: &VerterHost,
+    canonical: &str,
+    adapter_id: &str,
+) -> wire::TypeInfoGraphRequest {
     wire::TypeInfoGraphRequest {
-        schema_version: 3,
+        schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
         operation: wire::Operation::FrameworkSurfaces as i32,
         payload: Some(wire_request::Payload::FrameworkSurface(
             wire::FrameworkSurfaceRequest {
@@ -534,7 +538,12 @@ fn framework_envelope(canonical: &str, adapter_id: &str) -> wire::TypeInfoGraphR
                     canonical_id: canonical.to_string(),
                     export_name: String::new(),
                     has_export_name: false,
-                    framework_adapter_id: adapter_id.to_string(),
+                    framework_profile: Some(
+                        host.advertised_framework_profile_for_adapter(
+                            &verter_session::framework::FrameworkAdapterId::new(adapter_id),
+                        )
+                        .expect("a registered adapter admits a profile"),
+                    ),
                 }),
                 context: Some(wire::ProjectionReductionContext {
                     mode: wire::ProjectionMode::Expanded as i32,
@@ -558,8 +567,11 @@ fn framework_envelope(canonical: &str, adapter_id: &str) -> wire::TypeInfoGraphR
                 include_provenance: false,
                 include_diagnostics: false,
                 include_projection: vec![],
-                requested_kinds: vec![],
-                schema_version: 3,
+                requested_kinds: verter_session::framework::ALL_FRAMEWORK_SURFACE_KINDS
+                    .iter()
+                    .map(|kind| *kind as i32)
+                    .collect(),
+                schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
             },
         )),
     }
@@ -618,15 +630,21 @@ fn typeinfo_graph_request_across_hosts_stays_isolated() {
         FileLanguage::vue(),
     );
 
-    let result_a =
-        host_a.resolve_framework_surface_with_audit(framework_envelope("/src/Comp.vue", "vue"));
+    let result_a = host_a.resolve_framework_surface_with_audit(framework_envelope(
+        &host_a,
+        "/src/Comp.vue",
+        "vue",
+    ));
     let response_a = result_a
         .as_result()
         .expect("host A's framework-surface request must resolve structurally");
     assert_eq!(resolved_props(response_a), vec!["onA"]);
 
-    let result_b =
-        host_b.resolve_framework_surface_with_audit(framework_envelope("/src/Comp.vue", "vue"));
+    let result_b = host_b.resolve_framework_surface_with_audit(framework_envelope(
+        &host_b,
+        "/src/Comp.vue",
+        "vue",
+    ));
     let response_b = result_b
         .as_result()
         .expect("host B's framework-surface request must resolve structurally");
@@ -638,8 +656,11 @@ fn typeinfo_graph_request_across_hosts_stays_isolated() {
     // Re-read A again AFTER touching B (same canonical id, same process), to
     // catch a shared slot that only manifests once a second host has
     // resolved a typeinfo-graph request for the same canonical id.
-    let result_a_again =
-        host_a.resolve_framework_surface_with_audit(framework_envelope("/src/Comp.vue", "vue"));
+    let result_a_again = host_a.resolve_framework_surface_with_audit(framework_envelope(
+        &host_a,
+        "/src/Comp.vue",
+        "vue",
+    ));
     let response_a_again = result_a_again
         .as_result()
         .expect("host A's re-resolve must resolve structurally");

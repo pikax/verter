@@ -530,10 +530,11 @@ fn structured_type_expression_taxonomy_proto_ts_parity() {
 
 #[test]
 fn type_info_request_error_taxonomy_proto_ts_parity() {
-    // 11 active arms; field 11 is reserved for wire compatibility —
+    // 12 active arms (13 = schema 11's unknown_framework_profile); field 11
+    // is reserved for wire compatibility —
     // see the proto `reserved 11;` directive on the
     // `TypeInfoRequestError` oneof.
-    assert_proto_ts_parity("TypeInfoRequestError", "TypeInfoRequestError", "kind", 11);
+    assert_proto_ts_parity("TypeInfoRequestError", "TypeInfoRequestError", "kind", 12);
 }
 
 #[test]

@@ -7,7 +7,9 @@
  * rejection). This module decodes those bytes into an ergonomic
  * TypeScript surface:
  *
- * - {@link FrameworkSurface} — `framework` tag + a per-kind map carrying
+ * - {@link FrameworkSurface} — the typed selector echo (file, export and the
+ *   admitted framework profile, schema 11), the display `framework` tag and
+ *   a per-kind map carrying
  *   each kind's support status and resolved members (member names are
  *   resolved through the graph string table here, so consumers never
  *   touch the interned id space). Member types decode from the payload
@@ -29,6 +31,7 @@
 
 import { fromBinary } from "@bufbuild/protobuf";
 import {
+  type ComponentSelector,
   FrameworkSurfaceDeclarationKind,
   type FrameworkSurfaceKind,
   FrameworkSurfaceKindSupport,
@@ -178,7 +181,13 @@ export interface FrameworkSurfaceKindResult {
 
 /** The decoded `framework_surface` response arm. */
 export interface FrameworkSurface {
-  /** The wire framework tag (e.g. `FrameworkTag.VUE`). */
+  /**
+   * The typed selector echo (schema 11): the file and export the surface was
+   * resolved for, qualified by the `frameworkProfile` the host admitted.
+   * `undefined` only for a payload that carries no selector.
+   */
+  readonly selector: ComponentSelector | undefined;
+  /** The wire framework tag (e.g. `FrameworkTag.VUE`): display only. */
   readonly framework: FrameworkTag;
   /**
    * Per-kind resolved surfaces. A v3 payload carries exactly one entry
@@ -258,7 +267,7 @@ export function decodeFrameworkSurfacePayload(payload: FrameworkSurfacePayload):
     });
   }
 
-  return { framework: payload.framework, kinds };
+  return { selector: payload.selector, framework: payload.framework, kinds };
 }
 
 /**
