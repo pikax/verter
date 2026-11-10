@@ -52,7 +52,7 @@ impl OperandKind {
     }
 }
 
-impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// [`SliceExpr::Arithmetic`]: every operand evaluates in order, then the
     /// operator's result follows the checker's rule over their types. A
     /// relation the shared authority cannot decide leaves the typed
@@ -190,9 +190,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             if let verter_session_query::flow::slice::SliceMemberWrite::Assign { value, .. } = write
             {
                 self.prescan_statement_value_writes(Some(value));
-                let holds_before = self.holds.len();
+                let holds_before = self.st.holds.len();
                 let _ = self.eval_expr(value);
-                self.holds.truncate(holds_before);
+                self.st.holds.truncate(holds_before);
             }
             if index.is_none() {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
@@ -270,16 +270,16 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// cannot answer, is itself; a declaration reference is not unfolded,
     /// as its members enter the flow where a read projects them.
     pub(super) fn declared_positional_read(&mut self, node: SemanticNodeId) -> SemanticNodeId {
-        if let Some(done) = self.declared_type_reads.borrow().get(&node) {
+        if let Some(done) = self.st.declared_type_reads.borrow().get(&node) {
             return *done;
         }
         // The walk starts from every part this evaluation already read, so
         // a nest whose every level enters the flow is walked once overall.
-        let mut read = std::mem::take(&mut *self.declared_type_reads.borrow_mut());
+        let mut read = std::mem::take(&mut *self.st.declared_type_reads.borrow_mut());
         let result = self
             .dispatch
             .outside_inline_costs(|| self.declared_read_within(node, &mut read));
-        let mut shared = self.declared_type_reads.borrow_mut();
+        let mut shared = self.st.declared_type_reads.borrow_mut();
         if shared.is_empty() {
             *shared = read;
         } else {
@@ -565,7 +565,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             | SliceNarrowRoot::Local {
                 binding: FlowProductSubject::Local(binding),
                 ..
-            } => Some(self.flow_graph.binding_node(*binding)),
+            } => Some(self.st.flow_graph.binding_node(*binding)),
             SliceNarrowRoot::Local { .. } => None,
         };
         self.bind_written(target, written, false, definition, false);
@@ -901,7 +901,7 @@ fn declared_read_parts(data: &SemanticNodeData) -> Vec<SemanticNodeId> {
     }
 }
 
-impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// [`SliceExpr::NonNull`]: `getNonNullableType` of the operand's value
     /// — its `null` / `undefined` / `void` members removed under
     /// `strictNullChecks`, the value itself with it off. A member whose
@@ -921,7 +921,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             Positional::Value(node) => node,
             other => return other,
         };
-        if !self.nullability.is_strict() {
+        if !self.st.nullability.is_strict() {
             return Positional::Value(node);
         }
         for arm in self.operand_arms(node) {
@@ -1049,7 +1049,7 @@ struct LogicalFacts {
     nullish: bool,
 }
 
-impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// [`SliceExpr::Logical`]: the left operand evaluates; the right one
     /// evaluates on the edge the operator selects, under the left's
     /// narrowing on that edge; the other edge carries the opposite reading;
@@ -1116,13 +1116,13 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 };
             let value = if widen {
                 let fresh = self.operator_fresh_values(node, value);
-                super::widen_values_within(self.dispatch, value, &fresh, self.nullability)
+                super::widen_values_within(self.dispatch, value, &fresh, self.st.nullability)
             } else {
                 value
             };
             left_type = self
                 .dispatch
-                .erase_nullable_members(value, self.nullability);
+                .erase_nullable_members(value, self.st.nullability);
         }
         self.eval_logical_step(operator, left_type, right, guard, right_reachable)
     }
@@ -1138,7 +1138,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         right_reachable: Option<bool>,
     ) -> Positional<SemanticNodeId> {
         let right_key = right as *const SliceExpr as usize;
-        self.regular_right_operands.remove(&right_key);
+        self.st.regular_right_operands.remove(&right_key);
         let right_type = match right_reachable {
             // No edge reaches the right operand: the value is the left's.
             Some(false) => return Positional::Value(left_type),
@@ -1152,16 +1152,19 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 // for `&&` and `??` (for `??` the guard is the nullish
                 // test), on its FALSE reading for `||`.
                 let right_positive = operator != SliceLogical::Or;
-                let entry_products = self.products.clone();
-                let entry_writes = self.products.observe_writes(&self.frame_execution.borrow());
+                let entry_products = self.st.products.clone();
+                let entry_writes = self
+                    .st
+                    .products
+                    .observe_writes(&self.st.frame_execution.borrow());
                 let narrow_mark = self.narrowing_snapshot();
                 self.apply_guard_scoped(guard, right_positive);
                 let outcome = self.eval_operand_value(right);
-                let right_products = self.products.clone();
+                let right_products = self.st.products.clone();
                 self.restore_narrowings(narrow_mark.clone());
                 self.restore_arm_entry(&entry_products);
                 self.apply_guard_scoped(guard, !right_positive);
-                let short_products = self.products.clone();
+                let short_products = self.st.products.clone();
                 self.restore_narrowings(narrow_mark);
                 self.restore_arm_entry(&entry_products);
                 self.join_arm_writes(
@@ -1180,7 +1183,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         };
         let result = self.logical_result(operator, left_type, right_type);
         if let Some((_, true)) = result {
-            self.regular_right_operands.insert(right_key);
+            self.st.regular_right_operands.insert(right_key);
         }
         self.decided(result.map(|(value, _)| value))
     }
@@ -1202,8 +1205,11 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         right: &SliceExpr,
         guard: &SliceGuard,
     ) -> Positional<SemanticNodeId> {
-        let entry_products = self.products.clone();
-        let entry_writes = self.products.observe_writes(&self.frame_execution.borrow());
+        let entry_products = self.st.products.clone();
+        let entry_writes = self
+            .st
+            .products
+            .observe_writes(&self.st.frame_execution.borrow());
         let narrow_mark = self.narrowing_snapshot();
         let mut applied = 0;
         let steps = spine
@@ -1226,7 +1232,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             }
             applied = parts.len();
             let right_key = right as *const SliceExpr as usize;
-            self.regular_right_operands.remove(&right_key);
+            self.st.regular_right_operands.remove(&right_key);
             let right_type = match self.eval_operand_value(right) {
                 Positional::Value(node) => node,
                 other => {
@@ -1236,11 +1242,11 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             };
             if node.is_none() {
                 // The last right edge joins every short-circuit edge.
-                let right_products = self.products.clone();
+                let right_products = self.st.products.clone();
                 self.restore_narrowings(narrow_mark.clone());
                 self.restore_arm_entry(&entry_products);
                 self.apply_guard_scoped(guard, !chain.right_reading);
-                let short_products = self.products.clone();
+                let short_products = self.st.products.clone();
                 self.restore_narrowings(narrow_mark);
                 self.restore_arm_entry(&entry_products);
                 self.join_arm_writes(
@@ -1253,13 +1259,13 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 );
                 let result = self.logical_result(chain.operator, left_type, right_type);
                 if let Some((_, true)) = result {
-                    self.regular_right_operands.insert(right_key);
+                    self.st.regular_right_operands.insert(right_key);
                 }
                 return self.decided(result.map(|(value, _)| value));
             }
             let result = self.logical_result(chain.operator, left_type, right_type);
             if let Some((_, true)) = result {
-                self.regular_right_operands.insert(right_key);
+                self.st.regular_right_operands.insert(right_key);
             }
             let value = match self.decided(result.map(|(value, _)| value)) {
                 Positional::Value(value) => value,
@@ -1271,13 +1277,13 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             let value = match (node, widen) {
                 (Some(node), true) => {
                     let fresh = self.operator_fresh_values(node, value);
-                    super::widen_values_within(self.dispatch, value, &fresh, self.nullability)
+                    super::widen_values_within(self.dispatch, value, &fresh, self.st.nullability)
                 }
                 _ => value,
             };
             left_type = self
                 .dispatch
-                .erase_nullable_members(value, self.nullability);
+                .erase_nullable_members(value, self.st.nullability);
         }
         self.restore_narrowings(narrow_mark);
         self.restore_arm_entry(&entry_products);
@@ -1318,7 +1324,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         match self.eval_value_assignment(target, value, freshness, definition, span) {
             (Positional::Value(_), Some(assigned)) => Positional::Value(
                 self.dispatch
-                    .erase_nullable_members(assigned, self.nullability),
+                    .erase_nullable_members(assigned, self.st.nullability),
             ),
             (Positional::Value(_), None) => {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
@@ -1351,7 +1357,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         let facts = self.logical_facts(left)?;
         let kept = match operator {
             SliceLogical::And if facts.truthy => {
-                let source = if self.nullability.is_strict() {
+                let source = if self.st.nullability.is_strict() {
                     left
                 } else {
                     self.base_type_of_literal(right)
@@ -1360,7 +1366,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             }
             SliceLogical::Or if facts.falsy => self.remove_definitely_falsy(left)?,
             SliceLogical::Coalesce if facts.nullish => {
-                if self.nullability.is_strict() {
+                if self.st.nullability.is_strict() {
                     self.non_nullable_operand(left)
                 } else {
                     left
@@ -1415,7 +1421,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// One non-union member's facts (`getTypeFactsWorker`), `None` for a
     /// member whose facts this frame cannot read off its node.
     fn arm_facts(&self, arm: SemanticNodeId) -> Option<LogicalFacts> {
-        let strict = self.nullability.is_strict();
+        let strict = self.st.nullability.is_strict();
         let falsy_literal = |falsy: bool| LogicalFacts {
             truthy: !falsy,
             falsy: falsy || !strict,
@@ -1533,7 +1539,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     fn remove_definitely_falsy(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
         let mut kept = Vec::new();
         for arm in self.logical_arms(node) {
-            if self.nullability.is_strict()
+            if self.st.nullability.is_strict()
                 && matches!(
                     self.dispatch.graph().node_data(arm).as_deref(),
                     Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
@@ -1554,7 +1560,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     }
 }
 
-impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// [`SliceExpr::Not`]: `true` when every member of the operand is
     /// definitely falsy, `false` when every member is definitely truthy,
     /// `boolean` otherwise (`checkPrefixUnaryExpression` over the
@@ -1657,6 +1663,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         } = node
         {
             let regular = self
+                .st
                 .regular_right_operands
                 .contains(&(&**right as *const SliceExpr as usize));
             if !regular {
@@ -1715,7 +1722,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     }
 }
 
-impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// [`SliceExpr::ConstTemplate`]: the template literal type of the holes'
     /// types (`getTemplateLiteralType`), each hole evaluated in order —
     /// `` `a${n}` as const `` over `n: number` is `` `a${number}` `` and over

@@ -41,7 +41,7 @@ pub(super) enum GuardAlias {
 /// The pseudo-reference segment.
 const PSEUDO_SEGMENT: &str = "\u{0}pattern";
 
-impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// Register the narrowings a destructured declaration's elements carry
     /// (see the module doc): each object or array pattern of two or more
     /// elements whose parent is a union correlates its elements that have
@@ -203,12 +203,12 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         let first = plain.first().map(|(binding, _)| binding.clone());
         let index = match first.and_then(|first| self.correlated_group_of(&first)) {
             Some(index) => {
-                self.correlated_groups[index] = group;
+                self.st.correlated_groups[index] = group;
                 index
             }
             None => {
-                self.correlated_groups.push(group);
-                self.correlated_groups.len() - 1
+                self.st.correlated_groups.push(group);
+                self.st.correlated_groups.len() - 1
             }
         };
         for (binding, property) in plain {
@@ -263,6 +263,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
 
     fn element_subject(&self, binding: &FlowProductSubject) -> SliceNarrowSubject {
         let name = self
+            .st
             .products
             .identity(binding)
             .map(|identity| Arc::<str>::from(identity.name))
@@ -283,7 +284,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
 
     fn correlated_group_of(&self, binding: &FlowProductSubject) -> Option<usize> {
         let key = self.canonical_runtime_subject(binding);
-        self.guard_aliases
+        self.st
+            .guard_aliases
             .get(&key)?
             .iter()
             .find_map(|alias| match alias {
@@ -294,7 +296,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
 
     fn add_guard_alias(&mut self, binding: FlowProductSubject, alias: GuardAlias) {
         let key = self.canonical_runtime_subject(&binding);
-        let aliases = self.guard_aliases.entry(key).or_default();
+        let aliases = self.st.guard_aliases.entry(key).or_default();
         let same = |existing: &GuardAlias| match (existing, &alias) {
             (GuardAlias::Correlated { group: a, .. }, GuardAlias::Correlated { group: b, .. }) => {
                 a == b
@@ -313,7 +315,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             return None;
         }
         let key = self.canonical_runtime_subject(&self.narrow_subject(&subject.root));
-        self.guard_aliases.get(&key).cloned()
+        self.st.guard_aliases.get(&key).cloned()
     }
 
     /// Whether a switch discriminant or a guard this module does not carry
@@ -339,6 +341,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             let (parent, property) = match alias {
                 GuardAlias::Correlated { group, property } => {
                     match self
+                        .st
                         .correlated_groups
                         .get(group)
                         .and_then(|group| group.parent)
@@ -438,7 +441,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         for alias in aliases {
             match alias {
                 GuardAlias::Correlated { group, property } => {
-                    let Some(group) = self.correlated_groups.get(group).cloned() else {
+                    let Some(group) = self.st.correlated_groups.get(group).cloned() else {
                         continue;
                     };
                     let (Some(pseudo), Some(parent)) = (group.pseudo.clone(), group.parent) else {
