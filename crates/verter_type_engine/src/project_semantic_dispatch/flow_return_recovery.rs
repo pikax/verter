@@ -29,7 +29,7 @@ struct NestedFunctionFacts {
     untyped_parameters: Vec<(Arc<str>, verter_span::Span)>,
 }
 
-impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// Whether a member walk's `read` found nothing: no answer, or the typed
     /// miss.
     pub(super) fn member_read_missed(&self, read: Option<SemanticNodeId>) -> bool {
@@ -78,7 +78,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 &args,
                 name,
             ) {
-                return !self.dispatch.global_object_declares(name, self.canonical);
+                return !self
+                    .dispatch
+                    .global_object_declares(name, self.st.canonical);
             }
         }
         let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(base) {
@@ -104,7 +106,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             | Some(SemanticNodeData::Literal(_)) => {
                 drop(data);
                 self.dispatch
-                    .apparent_wrapper_settles(concrete, self.canonical)
+                    .apparent_wrapper_settles(concrete, self.st.canonical)
             }
             // A callable reads the apparent `Function`, which the walk could
             // only miss when the program declares none.
@@ -136,10 +138,10 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         own_method: bool,
     ) -> SemanticNodeId {
         if let Some(span) = span {
-            self.report_absent_member(receiver, name, span.to_absolute(self.anchor));
+            self.report_absent_member(receiver, name, span.to_absolute(self.st.anchor));
         }
         if own_method {
-            self.circular_return.set(true);
+            self.st.circular_return.set(true);
         }
         self.dispatch
             .graph()
@@ -158,6 +160,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         span: verter_span::Span,
     ) {
         if let Some(bound) = self
+            .st
             .receiver
             .as_ref()
             .filter(|bound| bound.binder == receiver)
@@ -197,33 +200,38 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         let Some(reads) = reads else {
             return;
         };
-        if matches!(reads.this, SliceThis::Receiver) && self.receiver.is_none() {
+        if matches!(reads.this, SliceThis::Receiver) && self.st.receiver.is_none() {
             return;
         }
-        let degradation = self.degradation;
+        let degradation = self.st.degradation;
         let receiver = self.eval_this(&reads.this);
-        self.degradation = degradation;
+        self.st.degradation = degradation;
         let Positional::Value(receiver) = receiver else {
             return;
         };
         let literal_value = matches!(reads.this, SliceThis::Value { .. });
         for (name, span) in reads.reads.iter() {
             let absent = if literal_value {
-                !self.dispatch.global_object_declares(name, self.canonical)
+                !self
+                    .dispatch
+                    .global_object_declares(name, self.st.canonical)
             } else {
                 // A receiver a contextual type supplies is read only where
                 // the return reads it: its members can be bodies of their own.
-                self.receiver
+                self.st
+                    .receiver
                     .as_ref()
                     .is_some_and(|bound| bound.binder == receiver && bound.base.is_none())
                     && self.receiver_lacks_member(receiver, name)
-                    && !self.dispatch.global_object_declares(name, self.canonical)
+                    && !self
+                        .dispatch
+                        .global_object_declares(name, self.st.canonical)
             };
             if absent {
-                self.report_absent_member(receiver, name, span.to_absolute(self.anchor));
+                self.report_absent_member(receiver, name, span.to_absolute(self.st.anchor));
             }
         }
-        self.degradation = degradation;
+        self.st.degradation = degradation;
     }
 
     /// Record TS2339 for `name` off the type the checker prints as `printed`.
@@ -234,7 +242,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         span: verter_span::Span,
     ) {
         // A literal evaluated again reports the one read once.
-        if self.checker_diagnostics.iter().any(|diagnostic| {
+        if self.st.checker_diagnostics.iter().any(|diagnostic| {
             diagnostic.start() == span.start
                 && diagnostic.code() == CheckerDiagnosticCode::PropertyDoesNotExist
         }) {
@@ -257,7 +265,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         &self,
         argument: &SliceExpr,
     ) -> Option<verter_span::Span> {
-        let declaration = self.self_slot.is_some_and(|slot| {
+        let declaration = self.st.self_slot.is_some_and(|slot| {
             matches!(
                 slot.function.function_part,
                 verter_type_expr::facts::FunctionPartIdentity::DeclarationBody
@@ -281,6 +289,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         match root {
             SliceExpr::This(verter_session_query::flow::slice::SliceThis::Value { .. }) => true,
             SliceExpr::This(_) => self
+                .st
                 .receiver
                 .as_ref()
                 .is_some_and(|bound| bound.infer_literal_members && bound.binder == node),
@@ -298,10 +307,13 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         name_spans: &[FrameSpan],
     ) -> Option<SemanticNodeId> {
         let (name, _) = links.first()?;
-        if self.dispatch.global_object_declares(name, self.canonical) {
+        if self
+            .dispatch
+            .global_object_declares(name, self.st.canonical)
+        {
             return None;
         }
-        let own_method = !self.frame_declares_return;
+        let own_method = !self.st.frame_declares_return;
         Some(self.absent_member_recovery(receiver, name, name_spans.first().copied(), own_method))
     }
 
@@ -345,11 +357,11 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         use verter_session_query::flow::slice::SliceObjectEntry;
         for occurrence in self
             .dispatch
-            .contextual_undeclared_names(contextual, self.canonical)
+            .contextual_undeclared_names(contextual, self.st.canonical)
         {
             self.record_checker_diagnostic(occurrence);
         }
-        if !self.no_implicit_any {
+        if !self.st.no_implicit_any {
             return;
         }
         for entry in entries {
@@ -393,7 +405,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             };
             let body = facts.span;
             let name = member.spans.name;
-            self.checker_diagnostics.retain(|diagnostic| {
+            self.st.checker_diagnostics.retain(|diagnostic| {
                 !(diagnostic.code() == CheckerDiagnosticCode::PropertyDoesNotExist
                     && body.start <= diagnostic.start()
                     && diagnostic.end() <= body.end
@@ -411,7 +423,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         use verter_session_query::function_program::FunctionBindingKind;
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(self.st.canonical),
                 owner: function.declaration.owner,
                 symbol: function.declaration.name.clone(),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
@@ -470,7 +482,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         &self,
         name: &(verter_span::Span, Arc<str>),
     ) -> Option<CheckerDiagnosticOccurrence> {
-        self.no_implicit_any.then(|| {
+        self.st.no_implicit_any.then(|| {
             let diagnostic = checker_policy::circular_return();
             verter_debug_assert::verter_debug_assert!(
                 diagnostic.code == CheckerDiagnosticCode::CircularReturn,

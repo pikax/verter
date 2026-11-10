@@ -306,7 +306,7 @@ pub(super) struct MemberSide {
     pub(super) computed: ComputedIndexKinds,
 }
 
-impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
+impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// Evaluate a class EXPRESSION to its value: the class's constructor
     /// type, composed by TypeScript's class rules (measured on 7.0.2).
     ///
@@ -362,14 +362,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     pub(super) fn class_eval_frame<'e>(&mut self, class: &'e SliceClass) -> ClassEvalFrame<'e> {
         let class_env = (!class.type_parameters.is_empty()).then(|| {
             Arc::new(self.dispatch.flow_binder_env(
-                self.canonical,
-                self.owner,
+                self.st.canonical,
+                self.st.owner,
                 &class.type_parameters,
-                Some(self.binder_env),
+                Some(self.st.binder_env),
                 Some(class.offset),
             ))
         });
-        let env = class_env.as_deref().unwrap_or(self.binder_env);
+        let env = class_env.as_deref().unwrap_or(self.st.binder_env);
         let source_plan = class.type_parameters.iter().all(|parameter| env.exact_binders.contains(parameter.name.as_ref()))
             && class.members.iter().all(|member| matches!(member.key, SliceObjectKey::Static(_)) && match &member.value {
                 SliceClassMemberValue::Initializer { value, .. } => super::independent_member_expression(value)
@@ -420,7 +420,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // value: the class cannot be composed over a provisional base.
                 Some(heritage) => {
                     frame.awaiting = ClassAwait::Heritage {
-                        holds_before: self.holds.len(),
+                        holds_before: self.st.holds.len(),
                     };
                     return ClassStep::Descend(&heritage.base);
                 }
@@ -428,11 +428,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             },
             ClassAwait::Heritage { holds_before } => {
                 let heritage = class.heritage.as_ref().expect("the class's heritage");
-                self.holds.truncate(holds_before);
+                self.st.holds.truncate(holds_before);
                 let Some(Positional::Value(constructor)) = delivered else {
                     return ClassStep::Done(Positional::Unmodeled);
                 };
-                let frame_env = self.binder_env;
+                let frame_env = self.st.binder_env;
                 let env: &FlowBinderEnv = frame.class_env.as_deref().unwrap_or(frame_env);
                 let mut type_arguments = Vec::with_capacity(heritage.type_arguments.len());
                 for argument in heritage.type_arguments.iter() {
@@ -466,7 +466,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         expr,
                     } => {
                         let node = self.settle_composite_part(outcome, holds_before);
-                        self.declared_reads = declared_reads;
+                        self.st.declared_reads = declared_reads;
                         if widen {
                             self.widen_value_position_read(expr, node)
                         } else {
@@ -508,7 +508,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let receiver = std::rc::Rc::new(
             ClassReceiver::new(
                 self.dispatch
-                    .this_binder(self.canonical, self.owner, &class.name, None),
+                    .this_binder(self.st.canonical, self.st.owner, &class.name, None),
                 frame.base.as_ref().and_then(|base| base.instance),
                 class
                     .members
@@ -523,7 +523,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             )
             .explicit(),
         );
-        frame.enclosing_receiver = Some(self.receiver.replace(receiver.clone()));
+        frame.enclosing_receiver = Some(self.st.receiver.replace(receiver.clone()));
         frame.receiver = Some(receiver);
         frame.order = (0..class.members.len())
             .filter(|index| !is_class_function(&class.members[*index].value))
@@ -551,7 +551,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             if let Some(observations) = observations {
                 let _ = observations.finish(()).discard();
             }
-            self.degradation = degradation;
+            self.st.degradation = degradation;
             frame.again.push(index);
             return;
         }
@@ -579,14 +579,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 frame.again_next += 1;
                 (index, true)
             } else {
-                self.receiver = frame
+                self.st.receiver = frame
                     .enclosing_receiver
                     .take()
                     .expect("the class's enclosing receiver");
                 return ClassStep::Done(self.finish_class_value(frame));
             };
-            let degradation = self.degradation;
-            let frame_env = self.binder_env;
+            let degradation = self.st.degradation;
+            let frame_env = self.st.binder_env;
             let value = match &class.members[index].value {
                 SliceClassMemberValue::Declared(ty) => {
                     let env: &FlowBinderEnv = frame.class_env.as_deref().unwrap_or(frame_env);
@@ -599,8 +599,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         again,
                         observations: None,
                         value: MemberAwait::Initializer {
-                            holds_before: self.holds.len(),
-                            declared_reads: std::mem::replace(&mut self.declared_reads, true),
+                            holds_before: self.st.holds.len(),
+                            declared_reads: std::mem::replace(&mut self.st.declared_reads, true),
                             widen: *widen,
                             expr: value,
                         },
@@ -654,7 +654,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .map(|value| value.expect("every member evaluated"))
             .collect();
         let graph = self.dispatch.graph();
-        let frame_env = self.binder_env;
+        let frame_env = self.st.binder_env;
         let env: &FlowBinderEnv = class_env.as_deref().unwrap_or(frame_env);
         let methods_complete = class.members.iter().zip(&values).all(|(member, value)| {
             let SliceClassMemberValue::Method(expr) = &member.value else {
@@ -663,7 +663,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             let SliceExpr::NestedFunctionValue { function, .. } = expr.as_ref() else {
                 return false;
             };
-            self.constructive_signatures.get(function) == Some(value)
+            self.st.constructive_signatures.get(function) == Some(value)
         });
         let mut instance_side = MemberSide::default();
         let mut static_side = MemberSide::default();
@@ -702,7 +702,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 visibility: member.visibility,
                 excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
                 spans: member.spans,
-                declaration_origin: Some(verter_type_expr::OwnedStr::from(self.canonical)),
+                declaration_origin: Some(verter_type_expr::OwnedStr::from(self.st.canonical)),
                 declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
                 merge_role: crate::semantic_query::MergeRoleStamp::default(),
             });
@@ -722,7 +722,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     readonly: signature.readonly,
                     key_name: Some(verter_type_expr::OwnedStr::from(&signature.key_name)),
                     spans: verter_type_expr::IndexSignatureSpans::default(),
-                    declaration_origin: Some(verter_type_expr::OwnedStr::from(self.canonical)),
+                    declaration_origin: Some(verter_type_expr::OwnedStr::from(self.st.canonical)),
                 });
         }
         self.add_computed_index_signatures(&mut instance_side);
@@ -772,8 +772,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         type_arguments.extend(own_type_parameters.iter().map(|decl| decl.param));
         let type_arguments: Arc<[SemanticNodeId]> = Arc::from(type_arguments.into_boxed_slice());
         let identity = crate::semantic_query::ClassExpressionIdentity {
-            canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
-            owner: self.owner,
+            canonical_id: verter_type_expr::OwnedStr::from(self.st.canonical),
+            owner: self.st.owner,
             offset: class.offset,
             name: verter_type_expr::OwnedStr::from(class.name.clone()),
             outer_clauses: verter_type_expr::OwnedSlice::from(outer_clauses.into_boxed_slice()),
@@ -794,7 +794,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 )),
                 surface,
             },
-            self.binder_env.scope.clone(),
+            self.st.binder_env.scope.clone(),
         );
         let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
         let prototype = type_arguments
@@ -814,7 +814,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 )),
                 surface,
             },
-            self.binder_env.scope.clone(),
+            self.st.binder_env.scope.clone(),
         );
         let construct = |params: crate::semantic_query::PayloadArray<
             crate::semantic_query::FunctionParam,
@@ -873,7 +873,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             0,
             crate::project_semantic_dispatch::build::class_prototype_member(
                 prototype,
-                Some(verter_type_expr::OwnedStr::from(self.canonical)),
+                Some(verter_type_expr::OwnedStr::from(self.st.canonical)),
             ),
         );
         if let Some(base) = &base {
@@ -915,7 +915,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         {
             // The plan supplies the finite authored positions. Reaching this
             // constructor means each was evaluated and actually composed.
-            self.constructive_values.insert(
+            self.st.constructive_values.insert(
                 result,
                 super::ConstructiveValue::Class {
                     instance,
@@ -950,7 +950,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             visibility: member.visibility,
             excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
             spans: member.spans,
-            declaration_origin: Some(verter_type_expr::OwnedStr::from(self.canonical)),
+            declaration_origin: Some(verter_type_expr::OwnedStr::from(self.st.canonical)),
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
             merge_role: crate::semantic_query::MergeRoleStamp::default(),
         });
@@ -989,10 +989,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         .map(|name| verter_type_expr::TypeExpr::named(name.as_ref()))
                         .collect(),
                 };
-                let instance = self.lower_type_in(self.binder_env, &reference);
+                let instance = self.lower_type_in(self.st.binder_env, &reference);
                 Positional::Value(self.dispatch.this_binder(
-                    self.canonical,
-                    self.owner,
+                    self.st.canonical,
+                    self.st.owner,
                     class,
                     Some(instance),
                 ))
@@ -1003,7 +1003,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
             ),
             verter_session_query::flow::slice::SliceThis::Receiver
-            | verter_session_query::flow::slice::SliceThis::Explicit => match &self.receiver {
+            | verter_session_query::flow::slice::SliceThis::Explicit => match &self.st.receiver {
                 Some(receiver) => Positional::Value(receiver.binder),
                 None => {
                     self.record_degradation(
@@ -1023,11 +1023,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 };
                 let value_root = crate::semantic_query::ValueRootKey {
                     scope: crate::semantic_query::ScopeId {
-                        canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
-                        owner: self.owner,
+                        canonical_id: verter_type_expr::OwnedStr::from(self.st.canonical),
+                        owner: self.st.owner,
                         local_scope: None,
                         binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
-                            self.owner,
+                            self.st.owner,
                         ),
                     },
                     name: verter_type_expr::OwnedStr::from(root),
@@ -1039,7 +1039,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path),
                         Arc::from([]),
                     ),
-                    self.binder_env.scope.clone(),
+                    self.st.binder_env.scope.clone(),
                 ))
             }
         }
@@ -1080,7 +1080,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// Whether `receiver` is this frame's bound receiver and neither holds
     /// nor declares member `name`: a read of it is the checker's TS2339.
     pub(super) fn receiver_lacks_member(&self, receiver: SemanticNodeId, name: &str) -> bool {
-        self.receiver
+        self.st
+            .receiver
             .as_ref()
             .filter(|bound| bound.binder == receiver)
             .is_some_and(|bound| {
@@ -1102,6 +1103,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> Option<SemanticNodeId> {
         let graph = self.dispatch.graph();
         if let Some(bound) = self
+            .st
             .receiver
             .as_ref()
             .filter(|bound| bound.binder == receiver)
@@ -1119,7 +1121,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             if matches!(read, ReceiverMemberRead::Own(_))
                 && bound.circular_members.borrow().contains(name)
             {
-                self.circular_return.set(!self.frame_declares_return);
+                self.st.circular_return.set(!self.st.frame_declares_return);
             }
             return match read {
                 ReceiverMemberRead::Own(node) => Some(node),
@@ -1212,6 +1214,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             return Some(declared);
         }
         if self
+            .st
             .auto_typed_locals
             .contains(&self.canonical_runtime_subject(binding))
         {
@@ -1228,9 +1231,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn eval_class_member_key(&mut self, key: &SliceExpr) -> MemberKey {
         // A hold inside a KEY is not this class's value: drop it and read
         // the outcome.
-        let holds_before = self.holds.len();
+        let holds_before = self.st.holds.len();
         let outcome = self.eval_expr(key);
-        self.holds.truncate(holds_before);
+        self.st.holds.truncate(holds_before);
         let Positional::Value(node) = outcome else {
             return MemberKey::Unmodeled;
         };
@@ -1347,7 +1350,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     readonly,
                     key_name: None,
                     spans: verter_type_expr::IndexSignatureSpans::default(),
-                    declaration_origin: Some(verter_type_expr::OwnedStr::from(self.canonical)),
+                    declaration_origin: Some(verter_type_expr::OwnedStr::from(self.st.canonical)),
                 });
         }
     }
@@ -1361,7 +1364,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> Option<ClassBase> {
         let graph = self.dispatch.graph();
         let exact_source = if matches!(
-            self.constructive_values.get(&constructor),
+            self.st.constructive_values.get(&constructor),
             Some(super::ConstructiveValue::Class { .. })
         ) {
             Some(constructor)

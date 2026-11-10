@@ -28,7 +28,7 @@ impl ElementValue {
     }
 }
 
-impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// [`verter_session_query::flow::slice::SliceStatement::Destructure`]: the
     /// parent value is the declarator's annotation when it has one (the
     /// initializer still runs), else its initializer's value — an array
@@ -48,9 +48,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         self.prescan_statement_value_writes(init);
         if let Some(declared) = declared {
             if let Some(init) = init {
-                let holds_before = self.holds.len();
+                let holds_before = self.st.holds.len();
                 let _ = self.eval_expr(init);
-                self.holds.truncate(holds_before);
+                self.st.holds.truncate(holds_before);
             }
             let parent = if declared
                 .shadowed()
@@ -71,9 +71,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             return;
         };
         if annotated {
-            let holds_before = self.holds.len();
+            let holds_before = self.st.holds.len();
             let outcome = self.eval_expr(init);
-            self.holds.truncate(holds_before);
+            self.st.holds.truncate(holds_before);
             let parent = match outcome {
                 Positional::Value(node) => Some(node),
                 Positional::Hold | Positional::Unmodeled => None,
@@ -100,9 +100,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                     let SliceArrayElement::Value { value, .. } = value else {
                         unreachable!("every element was checked to be a value");
                     };
-                    let holds_before = self.holds.len();
+                    let holds_before = self.st.holds.len();
                     let outcome = self.eval_expr(value);
-                    self.holds.truncate(holds_before);
+                    self.st.holds.truncate(holds_before);
                     positional.push(match outcome {
                         Positional::Value(node) => Some(node),
                         Positional::Hold | Positional::Unmodeled => None,
@@ -124,9 +124,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 return;
             }
         }
-        let holds_before = self.holds.len();
+        let holds_before = self.st.holds.len();
         let outcome = self.eval_expr(init);
-        self.holds.truncate(holds_before);
+        self.st.holds.truncate(holds_before);
         let parent = match outcome {
             Positional::Value(node) => Some(node),
             Positional::Hold | Positional::Unmodeled => None,
@@ -145,21 +145,21 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         definition: verter_session_query::flow::skeleton::SkeletonExprSiteId,
     ) {
         self.prescan_statement_value_writes(Some(value));
-        let holds_before = self.holds.len();
+        let holds_before = self.st.holds.len();
         let outcome = self.eval_expr(value);
-        self.holds.truncate(holds_before);
+        self.st.holds.truncate(holds_before);
         let parent = match outcome {
             Positional::Value(node) => Some(node),
             Positional::Hold | Positional::Unmodeled => None,
         };
-        let enclosing = self.pattern_write_definition.replace(definition);
+        let enclosing = self.st.pattern_write_definition.replace(definition);
         self.bind_pattern(
             pattern,
             ElementValue::of(parent),
             SliceBindingKind::Let,
             false,
         );
-        self.pattern_write_definition = enclosing;
+        self.st.pattern_write_definition = enclosing;
     }
 
     /// Bind a loop element's pattern from the iterated element type.
@@ -220,7 +220,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                         self.bind_pattern_binding(*binding, parent, kind)
                     }
                     SlicePattern::Target { target, .. } => {
-                        if let Some(definition) = self.pattern_write_definition {
+                        if let Some(definition) = self.st.pattern_write_definition {
                             match parent.node {
                                 Some(node) => {
                                     self.apply_write(target, node, false, definition, false, false);
@@ -348,9 +348,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     ) -> ElementValue {
         match (&element.default, member.node) {
             (Some(default), member_node) => {
-                let holds_before = self.holds.len();
+                let holds_before = self.st.holds.len();
                 let outcome = self.eval_expr(default);
-                self.holds.truncate(holds_before);
+                self.st.holds.truncate(holds_before);
                 match (member_node, outcome) {
                     (Some(member_node), Positional::Value(default_node)) => {
                         let defined = self.remove_undefined_arms(member_node);
@@ -393,7 +393,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         let subject = FlowProductSubject::Local(binding);
         // A binding outside the demand's selected slots has no product: no
         // read of it is evaluated.
-        if !self.products.contains_subject(&subject) {
+        if !self.st.products.contains_subject(&subject) {
             return;
         }
         if kind != SliceBindingKind::Var {
@@ -418,7 +418,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 self.bind_local(&subject, kind, node, membership, false);
             }
             SliceBindingKind::Let | SliceBindingKind::Var => {
-                let node = widen_values_within(self.dispatch, node, &fresh, self.nullability);
+                let node = widen_values_within(self.dispatch, node, &fresh, self.st.nullability);
                 self.bind_local(&subject, kind, node, None, false);
             }
         }
@@ -434,9 +434,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             };
             return Some(Arc::clone(name));
         };
-        let holds_before = self.holds.len();
+        let holds_before = self.st.holds.len();
         let outcome = self.eval_expr(key);
-        self.holds.truncate(holds_before);
+        self.st.holds.truncate(holds_before);
         let Positional::Value(node) = outcome else {
             return None;
         };
@@ -654,7 +654,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                 let remaining: Vec<crate::semantic_query::TupleElement> = remaining
                     .into_iter()
                     .map(|element| {
-                        if element.optional && self.nullability.is_strict() {
+                        if element.optional && self.st.nullability.is_strict() {
                             crate::semantic_query::TupleElement {
                                 value: self.union(&[element.value, undefined]),
                                 ..element
@@ -676,7 +676,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     }
 }
 
-impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// The type a `for…of` over `source` iterates when `source` is not an
     /// array, a tuple or a string — the checker's
     /// `getIterationTypesOfIterable` slow path through the ITERATOR
@@ -695,14 +695,19 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         // The key is `Symbol.iterator`'s own declared type, read where the
         // global `SymbolConstructor` is declared — the unique symbol the
         // lib's `[Symbol.iterator]` members are keyed by.
-        let constructor =
-            self.dispatch
-                .global_named_type(self.canonical, self.owner, "SymbolConstructor")?;
+        let constructor = self.dispatch.global_named_type(
+            self.st.canonical,
+            self.st.owner,
+            "SymbolConstructor",
+        )?;
         let (scope, owner) = match self.dispatch.graph().node_data(constructor).as_deref() {
             Some(SemanticNodeData::DeclRef { identity }) => {
                 (identity.canonical_id.clone(), identity.owner)
             }
-            _ => (verter_type_expr::OwnedStr::from(self.canonical), self.owner),
+            _ => (
+                verter_type_expr::OwnedStr::from(self.st.canonical),
+                self.st.owner,
+            ),
         };
         let key = self.dispatch.lower_type_expr_in_owner_scope_with_context(
             scope.as_ref(),

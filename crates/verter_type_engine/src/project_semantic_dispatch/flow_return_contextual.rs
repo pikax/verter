@@ -245,7 +245,7 @@ impl CalleeParameters {
     }
 }
 
-impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// Whether a method of an object literal typed by `contextual` may take
     /// an explicit `this` from its contextual signature: the checker copies a
     /// contextual signature's `this` parameter onto the method
@@ -451,8 +451,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         Some(FunctionArgumentRequest {
             demand,
             mark: FunctionArgumentMark {
-                holds_before: self.holds.len(),
-                degradation_before: self.degradation,
+                holds_before: self.st.holds.len(),
+                degradation_before: self.st.degradation,
             },
         })
     }
@@ -469,10 +469,11 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             holds_before,
             degradation_before,
         } = mark;
-        let finished = self.holds.len() == holds_before && self.degradation == degradation_before;
-        self.holds.truncate(holds_before);
+        let finished =
+            self.st.holds.len() == holds_before && self.st.degradation == degradation_before;
+        self.st.holds.truncate(holds_before);
         if !finished {
-            self.degradation = degradation_before;
+            self.st.degradation = degradation_before;
             return None;
         }
         let Positional::Value(node) = value else {

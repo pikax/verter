@@ -267,7 +267,7 @@ fn call_operand(call: &SliceCall) -> Option<&SliceExpr> {
     }
 }
 
-impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
+impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// Begin evaluating a call from [`Self::eval_expr`]'s stack. A call is a
     /// throw point: an enclosing `try`'s catch / finally can be entered
     /// from HERE, with the state as it stands BEFORE the call.
@@ -396,7 +396,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// stopped at an executor route over a lowered argument, start that
     /// route.
     fn drive_call<'e>(&mut self, mut flight: CallInFlight<'e>) -> CallStep<'e> {
-        let enclosing = self.call_drive.replace(flight.drive);
+        let enclosing = self.st.call_drive.replace(flight.drive);
         let driver = self.dispatch;
         let read = driver
             .observe_read(|| self.eval_call_value(flight.call, flight.site, flight.arguments));
@@ -404,7 +404,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // result represented by this position's gap. Selected siblings own
         // separate value observations and need not adopt this dependency.
         let value = driver.adopt_read(read).unwrap_or(Positional::Unmodeled);
-        flight.drive = std::mem::replace(&mut self.call_drive, enclosing)
+        flight.drive = std::mem::replace(&mut self.st.call_drive, enclosing)
             .expect("the call's drive stays installed while its value computes");
         if let Some(callee) = flight.drive.demand.take() {
             let progress = self.start_resolve_call(callee, flight.site, flight.arguments);
@@ -478,6 +478,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         site: SliceCallSite,
     ) -> Positional<SemanticNodeId> {
         let delivered = self
+            .st
             .call_drive
             .as_ref()
             .filter(|drive| drive.span == site.span())
@@ -499,6 +500,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         arguments: &SliceCallArguments,
     ) -> Option<Option<Positional<CallValue>>> {
         let drive = self
+            .st
             .call_drive
             .as_mut()
             .filter(|drive| drive.span == site.span())?;
@@ -512,15 +514,20 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // The route suspends at a lowered argument or at a function-value
         // argument; with neither it runs in place.
         let suspends = arguments.iter().next().is_some()
-            || self.call_arguments.get(&site.span()).is_some_and(|frame| {
-                frame
-                    .iter()
-                    .any(|argument| matches!(argument.value, SliceExpr::NestedFunctionValue { .. }))
-            });
+            || self
+                .st
+                .call_arguments
+                .get(&site.span())
+                .is_some_and(|frame| {
+                    frame.iter().any(|argument| {
+                        matches!(argument.value, SliceExpr::NestedFunctionValue { .. })
+                    })
+                });
         if !suspends {
             return None;
         }
         let drive = self
+            .st
             .call_drive
             .as_mut()
             .filter(|drive| drive.span == site.span())?;
@@ -534,7 +541,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     pub(super) fn call_evidence_mark(&self) -> CallEvidenceMark {
         CallEvidenceMark {
             undecided_relations: self.dispatch.call_undecided_relations(),
-            degradation: self.degradation,
+            degradation: self.st.degradation,
         }
     }
 
@@ -551,10 +558,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         mark: CallEvidenceMark,
         value: Positional<CallValue>,
     ) -> Positional<CallValue> {
-        let newly_degraded = mark.degradation.is_none() && self.degradation.is_some();
+        let newly_degraded = mark.degradation.is_none() && self.st.degradation.is_some();
         if !matches!(value, Positional::Unmodeled) && !newly_degraded {
             #[cfg(any(test, feature = "test-support"))]
-            if self.self_slot.is_none()
+            if self.st.self_slot.is_none()
                 && self
                     .dispatch
                     .observers
@@ -578,7 +585,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     observed.push(relations_decided);
                 }
             }
-            self.call_evidence.push(FlowCallEvidence {
+            self.st.call_evidence.push(FlowCallEvidence {
                 span: site.span(),
                 relations_decided,
             });
@@ -597,7 +604,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let Some((serve, source_demand)) = self
             .dispatch
             .source
-            .indexed_expression_source(self.canonical)
+            .indexed_expression_source(self.st.canonical)
         else {
             return ResolveCallProgress::Done(None);
         };
@@ -611,7 +618,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         else {
             return ResolveCallProgress::Done(None);
         };
-        let frame_arguments = self.call_arguments.get(&site.span()).cloned();
+        let frame_arguments = self.st.call_arguments.get(&site.span()).cloned();
         let count = indexed.call.args.len();
         let route = ResolveCallFrame {
             _serve: serve,
@@ -895,8 +902,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         value.type_args.is_empty()
                             && !self.top_level_literal_nodes(ty).is_empty()
                             && self.dispatch.value_read_widens(
-                                self.canonical,
-                                self.owner,
+                                self.st.canonical,
+                                self.st.owner,
                                 &value.path,
                             )
                     }
@@ -969,7 +976,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             ..
         } = route;
         let call = &indexed.call;
-        self.call_diagnostic_sites.insert(
+        self.st.call_diagnostic_sites.insert(
             span,
             crate::semantic_query::CheckerDiagnosticSite {
                 operation_start: Some(call.report_point),
@@ -994,7 +1001,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // A receiver this frame evaluated for the call (a call's result,
         // which the indexed record reads as its callee's object) is its
         // value.
-        let evaluated_receiver = self.call_receivers.get(&span).copied();
+        let evaluated_receiver = self.st.call_receivers.get(&span).copied();
         let receiver = match call.receiver.as_deref() {
             _ if evaluated_receiver.is_some() => evaluated_receiver,
             Some(receiver) => {
@@ -1019,7 +1026,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         });
         let key = crate::semantic_query::ResolveCallKey {
             point: crate::semantic_query::ProgramPointId {
-                canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(self.st.canonical),
                 offset: call.point,
             },
             callee,
@@ -1035,7 +1042,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             args: Arc::from(args.clone().into_boxed_slice()),
             explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
             flow: crate::semantic_query::FlowNarrowingKey::empty(),
-            context: self.dispatch.resolve_call_context_for(self.canonical),
+            context: self.dispatch.resolve_call_context_for(self.st.canonical),
         };
         // A route the frame's last run held for this call resumes here, its
         // collector as it stood: the executor is not asked again.
@@ -1300,6 +1307,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 ) = (proof.result(&key), &step)
                 {
                     let sources: Vec<_> = self
+                        .st
                         .constructive_values
                         .iter()
                         .filter_map(|(node, value)| match value {
@@ -1315,8 +1323,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         if substituted == result {
                             let instance =
                                 self.dispatch.substitute_canonical(instance, substitution);
-                            self.heritage_self_roots.extend_from_slice(proof.roots());
-                            self.constructive_values.insert(
+                            self.st.heritage_self_roots.extend_from_slice(proof.roots());
+                            self.st.constructive_values.insert(
                                 result,
                                 super::ConstructiveValue::Class {
                                     instance,
@@ -1334,11 +1342,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             {
                 if let (Some((_, result)), Some(super::ConstructiveValue::Class { instance, .. })) = (
                     proof.result(&key),
-                    self.constructive_values.get(&key.callee),
+                    self.st.constructive_values.get(&key.callee),
                 ) {
                     if result == *instance {
-                        self.heritage_self_roots.extend_from_slice(proof.roots());
-                        self.constructive_values
+                        self.st.heritage_self_roots.extend_from_slice(proof.roots());
+                        self.st
+                            .constructive_values
                             .insert(result, super::ConstructiveValue::Instance);
                     }
                 }

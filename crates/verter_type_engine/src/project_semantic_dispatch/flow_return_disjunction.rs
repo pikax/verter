@@ -251,11 +251,11 @@ impl<K> AlternativeUnion<K> {
     }
 }
 
-impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     fn narrowing_window_mark(&self) -> NarrowingWindowMark {
         NarrowingWindowMark {
-            products: self.products.clone(),
-            writes: self.narrowing_writes.len(),
+            products: self.st.products.clone(),
+            writes: self.st.narrowing_writes.len(),
         }
     }
 
@@ -264,13 +264,16 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// broken invariant: re-installing an empty window would leak the
     /// overlay into later alternatives, so it fails loudly instead.
     fn narrowing_writes_since(&self, mark: &NarrowingWindowMark) -> &[NarrowingLedgerEntry] {
-        self.narrowing_writes.get(mark.writes..).unwrap_or_else(|| {
-            panic!(
-                "the guard ledger ({} writes) was truncated below an outstanding mark ({})",
-                self.narrowing_writes.len(),
-                mark.writes
-            )
-        })
+        self.st
+            .narrowing_writes
+            .get(mark.writes..)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the guard ledger ({} writes) was truncated below an outstanding mark ({})",
+                    self.st.narrowing_writes.len(),
+                    mark.writes
+                )
+            })
     }
 
     /// Restore the overlay to `mark`: every root a guard write named since
@@ -292,19 +295,19 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         for root in roots {
             note_entry();
             match mark.products.narrowing(&root) {
-                Some(product) => self.products.set_narrowing(
-                    &mut self.frame_execution.borrow_mut(),
+                Some(product) => self.st.products.set_narrowing(
+                    &mut self.st.frame_execution.borrow_mut(),
                     &root,
                     product.clone(),
                 ),
-                None => self.products.remove(
-                    &mut self.frame_execution.borrow_mut(),
+                None => self.st.products.remove(
+                    &mut self.st.frame_execution.borrow_mut(),
                     FlowDomain::Narrowing,
                     &root,
                 ),
             }
         }
-        self.narrowing_writes.truncate(mark.writes);
+        self.st.narrowing_writes.truncate(mark.writes);
     }
 
     /// The union-of-facts reading of a disjunction: each disjunct's
@@ -350,9 +353,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             }
             self.restore_narrowing_window(&mark);
             if index + 1 < parts.len() {
-                let extension = self.narrowing_writes.len();
+                let extension = self.st.narrowing_writes.len();
                 self.apply_guard_scoped(part, !positive);
-                prefix.fold(&self.narrowing_writes[extension..]);
+                prefix.fold(&self.st.narrowing_writes[extension..]);
             }
         }
         self.restore_narrowing_window(&base);
