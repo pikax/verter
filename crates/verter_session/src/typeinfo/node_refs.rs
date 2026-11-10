@@ -2,7 +2,10 @@
 //!
 //! A typeinfo request that answers a fact registers, after the answer is
 //! exported, an [`IssuedRefKey`] for every exported position it can replay
-//! exactly. The key is the whole tuple a later request must present:
+//! exactly: the declaration root of a resolve-symbol graph, and every
+//! framework-surface member (a prop or exposed member value) whose producing
+//! macro published a replayable source. The key is the whole tuple a later
+//! request must present:
 //!
 //! - the fact's descriptor-specific [`QueryIdentity`], minted from the
 //!   request's semantic material (selector subject, effective mode and
@@ -84,6 +87,137 @@ pub(crate) struct IssuedRefKey {
 pub(crate) enum NativeReplayLocator {
     /// A resolved declaration root.
     Declaration(DeclReplayLocator),
+    /// One member value of a component's framework surface.
+    FrameworkMember(Box<FrameworkMemberLocator>),
+}
+
+/// Which producer of a component's surface contributed a member: Vue's
+/// actual macro (its kind and its index in the owner's macro inventory, not
+/// the surface kind it aggregates into), the owner the macro is written in,
+/// and the request's admitted profile and component selector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FrameworkMemberLocator {
+    /// The component's canonical.
+    pub(crate) component_canonical: Arc<str>,
+    /// How the component is exported from its canonical.
+    pub(crate) component_export: crate::typeinfo::framework_surface::plan::ComponentExport,
+    /// The admitted semantic profile the component was read under.
+    pub(crate) framework_profile: verter_identity::successor::FrameworkProfileId,
+    /// The authored owner the producing macro is written in: the scope the
+    /// member's source replays under.
+    pub(crate) scope_owner: TopLevelOwnerId,
+    /// The wire surface kind the member is exported under.
+    pub(crate) surface: verter_protocol::typeinfo::graph::FrameworkSurfaceKind,
+    /// The producing macro's actual kind.
+    pub(crate) macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
+    /// The producing macro's index in the owner's macro inventory.
+    pub(crate) macro_index: u32,
+    /// The member's role in its surface.
+    pub(crate) role: MemberRole,
+    /// The member's published name.
+    pub(crate) member_name: Arc<str>,
+    /// The member value's replayable source.
+    pub(crate) source: verter_type_expr::facts::SemanticTypeSource,
+}
+
+/// A framework member's role in its surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemberRole {
+    /// A prop's value type.
+    PropValue,
+    /// An exposed member's value type.
+    ExposeValue,
+}
+
+impl FrameworkMemberLocator {
+    fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.component_canonical.len()
+            + self.member_name.len()
+            + serde_json::to_vec(&self.source).map_or(0, |bytes| bytes.len())
+    }
+
+    /// The canonical encoding of the member's typed role: the component
+    /// selector and admitted profile it is read under, then surface, role,
+    /// name, producing macro and source, under explicit tags. Two members
+    /// share a role digest only when every one of them agrees.
+    fn role_digest(&self) -> Option<[u8; 32]> {
+        use crate::typeinfo::framework_surface::plan::ComponentExport;
+        let source = serde_json::to_vec(&self.source).ok()?;
+        let mut encoder = CanonicalEncoder::new("verter.typeinfo.fact.framework_member_role.v1");
+        encoder.field_str(1, &self.component_canonical);
+        match &self.component_export {
+            ComponentExport::Default => encoder.field_enum_discriminant(2, 1),
+            ComponentExport::Named(name) => {
+                encoder.field_enum_discriminant(2, 2).field_str(3, name)
+            }
+        };
+        encoder
+            .field_bytes(4, self.framework_profile.digest().as_bytes())
+            .field_enum_discriminant(5, surface_kind_tag(self.surface))
+            .field_enum_discriminant(6, member_role_tag(self.role))
+            .field_str(7, &self.member_name)
+            .field_enum_discriminant(8, macro_kind_tag(self.macro_kind))
+            .field_u32(9, self.macro_index)
+            .field_bytes(10, &source);
+        Some(*encoder.digest().as_bytes())
+    }
+}
+
+/// Whether `source` is a replayable locator form: an authored body, or a
+/// projected member path, callable occurrence or index position off one.
+/// Closed and synthesized result shapes and synthetic carriers are not:
+/// they are answers, not addresses.
+pub(crate) fn is_replayable_source(source: &verter_type_expr::facts::SemanticTypeSource) -> bool {
+    use verter_type_expr::facts::{ProjectedTypeFact, SemanticTypeSource};
+    match source {
+        SemanticTypeSource::Authored(_) => true,
+        SemanticTypeSource::Projected(projected) => match projected {
+            ProjectedTypeFact::MemberPath { .. }
+            | ProjectedTypeFact::CallableOccurrence { .. }
+            | ProjectedTypeFact::IndexPosition { .. } => true,
+            ProjectedTypeFact::Member(_)
+            | ProjectedTypeFact::IndexSignature(_)
+            | ProjectedTypeFact::CallSignature(_)
+            | ProjectedTypeFact::ConstructSignature(_)
+            | ProjectedTypeFact::Surface(_) => false,
+        },
+        SemanticTypeSource::Synthesized(_)
+        | SemanticTypeSource::Closed(_)
+        | SemanticTypeSource::SyntheticSlotBinding(_) => false,
+    }
+}
+
+const fn surface_kind_tag(kind: verter_protocol::typeinfo::graph::FrameworkSurfaceKind) -> u32 {
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind as Kind;
+    match kind {
+        Kind::Props => 1,
+        Kind::Emits => 2,
+        Kind::Slots => 3,
+        Kind::Model => 4,
+        Kind::Options => 5,
+        Kind::Expose => 6,
+    }
+}
+
+const fn member_role_tag(role: MemberRole) -> u32 {
+    match role {
+        MemberRole::PropValue => 1,
+        MemberRole::ExposeValue => 2,
+    }
+}
+
+const fn macro_kind_tag(kind: verter_session_query::analysis::types::AnalyzedMacroKind) -> u32 {
+    use verter_session_query::analysis::types::AnalyzedMacroKind as Kind;
+    match kind {
+        Kind::DefineProps => 1,
+        Kind::DefineEmits => 2,
+        Kind::DefineModel => 3,
+        Kind::DefineExpose => 4,
+        Kind::DefineOptions => 5,
+        Kind::DefineSlots => 6,
+        Kind::WithDefaults => 7,
+    }
 }
 
 /// The exact declaration a named-symbol resolution reached: its entry
@@ -119,6 +253,7 @@ impl NativeReplayLocator {
         std::mem::size_of::<Self>()
             + match self {
                 Self::Declaration(locator) => locator.retained_bytes(),
+                Self::FrameworkMember(locator) => locator.retained_bytes(),
             }
     }
 }
@@ -128,18 +263,22 @@ impl NativeReplayLocator {
 pub(crate) enum FactQuery {
     /// A resolve-symbol fact.
     ResolveSymbol(QueryIdentity<ResolveSymbolFact>),
+    /// A component-facets fact.
+    ComponentFacets(QueryIdentity<ComponentFacetsFact>),
 }
 
 impl FactQuery {
     fn digest(&self) -> [u8; 32] {
         match self {
             Self::ResolveSymbol(identity) => *identity.digest().as_bytes(),
+            Self::ComponentFacets(identity) => *identity.digest().as_bytes(),
         }
     }
 
     fn retained_bytes(&self) -> usize {
         match self {
             Self::ResolveSymbol(identity) => identity.canonical_bytes().len(),
+            Self::ComponentFacets(identity) => identity.canonical_bytes().len(),
         }
     }
 }
@@ -203,6 +342,133 @@ fn resolve_symbol_query_identity(locator: &DeclReplayLocator) -> QueryIdentity<R
         &[],
         &ResultContractId::from_canonical(&ResolveSymbolResultContract),
     )
+}
+
+/// [`QueryIdentity`] marker of the component-facets fact descriptor.
+pub(crate) enum ComponentFacetsFact {}
+
+/// The component-facets descriptor's query-kind domain.
+const COMPONENT_FACETS_QUERY_DOMAIN: &str = "verter.typeinfo.fact.component_facets.v1";
+
+/// The projection a framework member's source replays under: the
+/// navigable view the surface's shallow member values are read from.
+const FRAMEWORK_MEMBER_REPLAY_MODE: ProjectionMode = ProjectionMode::Navigate;
+
+/// The semantic material a component-facets fact is asked by: the
+/// component selector and the demanded facets, in tag order. The admitted
+/// profile enters as the identity's observed profile; display policy,
+/// closure, flags and wire version shape only the exported answer.
+struct ComponentFacetsQuery<'a> {
+    canonical: &'a str,
+    export: &'a crate::typeinfo::framework_surface::plan::ComponentExport,
+    requested: &'a [verter_protocol::typeinfo::graph::FrameworkSurfaceKind],
+}
+
+impl CanonicalEncode for ComponentFacetsQuery<'_> {
+    const DOMAIN_TAG: &'static str = "verter.typeinfo.fact.component_facets.arguments.v1";
+
+    fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
+        use crate::typeinfo::framework_surface::plan::ComponentExport;
+        encoder.field_str(1, self.canonical);
+        match self.export {
+            ComponentExport::Default => encoder.field_enum_discriminant(2, 1),
+            ComponentExport::Named(name) => {
+                encoder.field_enum_discriminant(2, 2).field_str(3, name)
+            }
+        };
+        let mut kinds: Vec<u32> = self
+            .requested
+            .iter()
+            .map(|kind| surface_kind_tag(*kind))
+            .collect();
+        kinds.sort_unstable();
+        kinds.dedup();
+        encoder.field_sorted_set(4, kinds.iter().map(|tag| tag.to_le_bytes()));
+    }
+}
+
+/// The component-facets descriptor's result contract: the bounded
+/// framework-surface members of one admitted component.
+struct ComponentFacetsResultContract;
+
+impl CanonicalEncode for ComponentFacetsResultContract {
+    const DOMAIN_TAG: &'static str = "verter.typeinfo.fact.component_facets.result.v1";
+
+    fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
+        encoder.field_str(1, "framework-surface.member-values.bounded");
+    }
+}
+
+/// The component-facets query identity of one request.
+fn component_facets_query_identity(
+    selector: &crate::typeinfo::framework_surface::plan::ResolvedComponentSelector,
+    requested: &[verter_protocol::typeinfo::graph::FrameworkSurfaceKind],
+) -> QueryIdentity<ComponentFacetsFact> {
+    QueryIdentity::compose(
+        COMPONENT_FACETS_QUERY_DOMAIN,
+        ComponentFacetsQuery {
+            canonical: &selector.canonical,
+            export: &selector.export,
+            requested,
+        }
+        .canonical_digest(),
+        &[selector.framework_profile.digest()],
+        &ResultContractId::from_canonical(&ComponentFacetsResultContract),
+    )
+}
+
+/// One framework member a request exported and can replay: its locator and
+/// the declaration slot of the component anchor it is read under (the
+/// component's export in its producing macro's owner, with the captured slot
+/// environment).
+pub(crate) struct ExportedFrameworkMember {
+    /// The member's replay locator.
+    pub(crate) locator: FrameworkMemberLocator,
+    /// The component anchor slot.
+    pub(crate) anchor: ResolvedDeclSlotIdentity,
+}
+
+/// Commit the basis of a traced component-facets fact and register one
+/// reference per exported, replayable member. A member whose role has no
+/// canonical encoding is not addressed; a fact with no addressable member
+/// registers nothing. Every refusal is counted and leaves the exported
+/// answer unchanged.
+pub(crate) fn issue_component_facets(
+    host: &VerterHost,
+    view: &HostStoreView,
+    port: &dyn StoreView,
+    trace: NativeTrace,
+    selector: &crate::typeinfo::framework_surface::plan::ResolvedComponentSelector,
+    requested: &[verter_protocol::typeinfo::graph::FrameworkSurfaceKind],
+    members: Vec<ExportedFrameworkMember>,
+) -> Result<Vec<IssuedRefKey>, IssueRefusal> {
+    let entries: Vec<_> = members
+        .into_iter()
+        .filter_map(|member| {
+            let role = member.locator.role_digest()?;
+            Some((
+                *member.anchor.canonical_digest().as_bytes(),
+                Some(role),
+                NativeReplayLocator::FrameworkMember(Box::new(member.locator)),
+            ))
+        })
+        .collect();
+    if entries.is_empty() {
+        return Ok(Vec::new());
+    }
+    let issued = commit_and_register_fact(
+        host,
+        view,
+        port,
+        trace,
+        &[selector.canonical.as_ref()],
+        FactQuery::ComponentFacets(component_facets_query_identity(selector, requested)),
+        entries,
+    );
+    if let Err(refusal) = issued {
+        host.typeinfo_issued_refs.lock().note_refusal(refusal);
+    }
+    issued
 }
 
 /// One issued address and the locator that replays it.
@@ -407,26 +673,61 @@ fn commit_and_register(
     trace: NativeTrace,
     locator: DeclReplayLocator,
 ) -> Result<IssuedRefKey, IssueRefusal> {
-    let basis =
-        commit_native_fact_basis(host, view, port, trace, &[locator.entry_canonical.as_ref()])
-            .map_err(IssueRefusal::Basis)?;
-    let query = resolve_symbol_query_identity(&locator);
-    let key = IssuedRefKey {
-        query: *query.digest().as_bytes(),
-        basis: *basis.basis().id().digest().as_bytes(),
-        slot: *locator.resolved_slot.canonical_digest().as_bytes(),
-        role: None,
-    };
+    let query = FactQuery::ResolveSymbol(resolve_symbol_query_identity(&locator));
+    let slot = *locator.resolved_slot.canonical_digest().as_bytes();
+    let entry_canonical = Arc::clone(&locator.entry_canonical);
+    let keys = commit_and_register_fact(
+        host,
+        view,
+        port,
+        trace,
+        &[entry_canonical.as_ref()],
+        query,
+        vec![(slot, None, NativeReplayLocator::Declaration(locator))],
+    )?;
+    Ok(keys[0])
+}
+
+/// Commit the basis of one traced fact and register its addresses: each
+/// entry's slot and role digests, completed by the fact's query identity and
+/// the committed basis. After commit, the basis is checked against a fresh
+/// capture of the host: a fact whose inputs moved after its capture
+/// registers nothing.
+fn commit_and_register_fact(
+    host: &VerterHost,
+    view: &HostStoreView,
+    port: &dyn StoreView,
+    trace: NativeTrace,
+    entry_scopes: &[&str],
+    query: FactQuery,
+    entries: Vec<([u8; 32], Option<[u8; 32]>, NativeReplayLocator)>,
+) -> Result<Vec<IssuedRefKey>, IssueRefusal> {
+    let basis = commit_native_fact_basis(host, view, port, trace, entry_scopes)
+        .map_err(IssueRefusal::Basis)?;
+    let query_digest = query.digest();
+    let basis_digest = *basis.basis().id().digest().as_bytes();
+    let entries: Vec<(IssuedRefKey, NativeReplayLocator)> = entries
+        .into_iter()
+        .map(|(slot, role, locator)| {
+            (
+                IssuedRefKey {
+                    query: query_digest,
+                    basis: basis_digest,
+                    slot,
+                    role,
+                },
+                locator,
+            )
+        })
+        .collect();
+    let keys = entries.iter().map(|(key, _)| *key).collect();
     if admit_in_fresh_view(host, &basis).is_err() {
         return Err(IssueRefusal::StaleAtRegistration);
     }
-    let record = NativeFactRecord::new(
-        FactQuery::ResolveSymbol(query),
-        basis,
-        vec![(key, NativeReplayLocator::Declaration(locator))],
-    );
-    host.typeinfo_issued_refs.lock().register(record)?;
-    Ok(key)
+    host.typeinfo_issued_refs
+        .lock()
+        .register(NativeFactRecord::new(query, basis, entries))?;
+    Ok(keys)
 }
 
 /// Validate `basis` against a fresh current capture of `host`, through a
@@ -505,6 +806,26 @@ pub(crate) fn replay_issued_in_view<M: verter_audit::observe::ObserveExec>(
                 return Err(ReplayRefusal::Diverged);
             }
             replayed.outcome.map_err(ReplayRefusal::Fault)
+        }
+        NativeReplayLocator::FrameworkMember(locator) => {
+            // The member's own source, raised under its producing macro's
+            // owner: one source, never the component's whole facet.
+            let raised = dispatch
+                .owning()
+                .raise_semantic_type_source_to_hot(
+                    &locator.source,
+                    verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                        scope_canonical_id: &locator.component_canonical,
+                        scope_owner: locator.scope_owner,
+                        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                            FRAMEWORK_MEMBER_REPLAY_MODE,
+                        ),
+                        interior_failures: None,
+                    },
+                )
+                .map(|outcome| outcome.at_optional_boundary());
+            let node = (*raised.value()).map(|hot| hot.node());
+            Ok(node)
         }
     }
 }
