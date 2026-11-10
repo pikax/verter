@@ -746,8 +746,8 @@ fn star_exports_exclude_ambiguous_names_and_default() {
         files: &files,
         ..ProbeProject::default()
     };
-    for probe in ["typeof ns.x", "(typeof ns)['x']", "typeof ns.default"] {
-        let measured = super::checker_probe_lane_tests::with_probe_in(
+    let measure = |probe: &str| {
+        super::checker_probe_lane_tests::with_probe_in(
             project,
             "import * as ns from './index';",
             probe,
@@ -756,12 +756,22 @@ fn star_exports_exclude_ambiguous_names_and_default() {
                     dispatch, node, 0,
                 )
             },
-        );
+        )
+    };
+    for probe in ["typeof ns.x", "(typeof ns)['x']", "typeof ns.default"] {
         assert_eq!(
-            measured, "Opaque(Miss)",
+            measure(probe),
+            "Opaque(Miss)",
             "excluded namespace member: {probe}"
         );
     }
+    // The table only leaves the excluded name out. A name it does not know of
+    // is absent, and reading that as written is the checker's TS2339.
+    let absent = measure("(typeof ns)['zz']");
+    assert!(
+        absent.contains("CheckerRecovery"),
+        "absent member: {absent}"
+    );
 }
 
 #[test]
