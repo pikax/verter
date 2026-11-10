@@ -4,8 +4,9 @@
 //! providers, and surface-resolution disposition.
 //!
 //! The registry is built ONCE at `VerterHost` construction and is the executor's
-//! lookup authority: the wire `framework_adapter_id` a client selects interns to
-//! a [`FrameworkAdapterId`], the registry resolves it to a
+//! lookup authority: it mints each registration's semantic profile once, the
+//! wire `FrameworkProfileRef` a client selects resolves through the admitted
+//! profile index to a [`RegisteredFrameworkProfile`] and its
 //! [`FrameworkRegistration`], and the executor drives that registration's legs.
 //!
 //! Completeness is a closed-set invariant ([`framework_registry_complete`]):
@@ -18,12 +19,15 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_compiler::framework_common::FrameworkParseArtifact;
+use verter_identity::successor::{FrameworkProfileId, ReleaseDescriptorError};
 use verter_language::carrier_grammar::{
     CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
     FrameworkAdapterSemanticVersion, GrammarRegistrationError,
 };
 use verter_language::{CarrierParse, FileLanguage, FrameworkAdapterId, LanguageId};
-use verter_protocol::typeinfo::graph::FrameworkTag;
+use verter_protocol::typeinfo::graph::{
+    FrameworkProfileAdvertisement, FrameworkProfileRef, FrameworkTag, FRAMEWORK_PROFILE_DIGEST_LEN,
+};
 
 use crate::framework::api_projector::ComponentApiProjector;
 use crate::framework::language_classifier::HostLanguageClassifier;
@@ -757,12 +761,136 @@ impl HostServices {
 
 /// The framework adapter registry.
 ///
-/// Owns one [`FrameworkRegistration`] per registered adapter id. Built once at
+/// The validated transport lookup key of one admitted profile: the 32 digest
+/// bytes a wire `FrameworkProfileRef` carries. A lookup key only — never a
+/// semantic or cache identity, which stays the sealed
+/// [`FrameworkProfileId`] it resolves to.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct FrameworkProfileWireKey([u8; FRAMEWORK_PROFILE_DIGEST_LEN]);
+
+impl FrameworkProfileWireKey {
+    fn of(profile: &FrameworkProfileId) -> Self {
+        Self(*profile.digest().as_bytes())
+    }
+
+    /// Validate wire bytes into a key; any length but 32 is no key at all.
+    fn from_wire(digest: &[u8]) -> Option<Self> {
+        <[u8; FRAMEWORK_PROFILE_DIGEST_LEN]>::try_from(digest)
+            .ok()
+            .map(Self)
+    }
+}
+
+/// One admitted semantic profile: the sealed identity the registry minted
+/// from its registration's manifest, and that registration. The TypeInfo
+/// executor dispatches on this entry — one lookup from the wire reference to
+/// the registration, never through the adapter spelling.
+#[derive(Debug)]
+pub struct RegisteredFrameworkProfile {
+    /// The admitted identity, minted once at registry construction.
+    pub profile: FrameworkProfileId,
+    /// The registration whose manifest the profile was minted from.
+    pub registration: Arc<FrameworkRegistration>,
+}
+
+impl RegisteredFrameworkProfile {
+    /// The wire reference clients name this profile by: its canonical digest.
+    #[must_use]
+    pub fn wire_ref(&self) -> FrameworkProfileRef {
+        FrameworkProfileRef {
+            digest: self.profile.digest().as_bytes().to_vec(),
+        }
+    }
+
+    /// The advertisement row the capability handshake publishes for this
+    /// profile: the reference, the manifest coordinates it was minted from,
+    /// and the display family.
+    #[must_use]
+    pub fn advertisement(&self) -> FrameworkProfileAdvertisement {
+        let manifest = &self.registration.descriptor.profile_manifest;
+        FrameworkProfileAdvertisement {
+            profile: Some(self.wire_ref()),
+            family: manifest.family.to_owned(),
+            release: manifest.release.to_owned(),
+            framework: self.registration.descriptor.tag as i32,
+        }
+    }
+}
+
+/// Why a set of registrations cannot be sealed into a registry: a manifest the
+/// release law rejects, or two registrations that mint one profile. A registry
+/// is never built around either — construction fails closed instead of
+/// serving an unadmitted or aliased profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FrameworkRegistryBuildError {
+    /// `adapter_id`'s manifest is not an exact admitted release.
+    RejectedManifest {
+        /// The adapter whose manifest was rejected.
+        adapter_id: FrameworkAdapterId,
+        /// The release law's typed rejection.
+        error: ReleaseDescriptorError,
+    },
+    /// Two registrations mint the same profile (equal canonical identity) or
+    /// two unequal identities share one digest; neither is overwritten by
+    /// insertion order.
+    DuplicateProfile {
+        /// The adapter whose profile was already registered.
+        adapter_id: FrameworkAdapterId,
+        /// The adapter that registered the same profile first.
+        first_adapter_id: FrameworkAdapterId,
+    },
+    /// Two rows register one adapter id; neither is overwritten by insertion
+    /// order (an overwritten row would leave its profile advertised against
+    /// another registration).
+    DuplicateAdapter {
+        /// The adapter id registered twice.
+        adapter_id: FrameworkAdapterId,
+    },
+}
+
+impl std::fmt::Display for FrameworkRegistryBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RejectedManifest { adapter_id, error } => write!(
+                f,
+                "framework adapter '{adapter_id}' declares a profile manifest the release law \
+                 rejects ({error:?}); a profile is never minted from it"
+            ),
+            Self::DuplicateProfile {
+                adapter_id,
+                first_adapter_id,
+            } => write!(
+                f,
+                "framework adapters '{first_adapter_id}' and '{adapter_id}' mint the same \
+                 semantic profile; one profile has one registration"
+            ),
+            Self::DuplicateAdapter { adapter_id } => write!(
+                f,
+                "framework adapter '{adapter_id}' is registered twice; one adapter id has one \
+                 registration"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FrameworkRegistryBuildError {}
+
+/// Owns one [`FrameworkRegistration`] per registered adapter id, and one
+/// admitted [`RegisteredFrameworkProfile`] per registration. Built once at
 /// host construction; immutable thereafter (a normalizer change is a registry
 /// rebuild, not an in-place mutation).
+///
+/// Two indexes over the same registrations: `registrations` serves the
+/// carrier / synth / projector / script-fact consumers that select by adapter
+/// id, and `profiles` serves the TypeInfo `Component` selector, which names
+/// a semantic profile (TR06) — the adapter spelling is never its key.
 #[derive(Debug)]
 pub struct FrameworkAdapterRegistry {
-    registrations: FxHashMap<FrameworkAdapterId, FrameworkRegistration>,
+    registrations: FxHashMap<FrameworkAdapterId, Arc<FrameworkRegistration>>,
+    profiles: FxHashMap<FrameworkProfileWireKey, Arc<RegisteredFrameworkProfile>>,
+    /// Every admitted profile in digest order — the deterministic
+    /// advertisement order.
+    advertised: Vec<Arc<RegisteredFrameworkProfile>>,
     active_provider_index: ActiveProviderIndex,
 }
 
@@ -788,36 +916,138 @@ impl FrameworkAdapterRegistry {
     /// unadmitted one.
     #[must_use]
     pub fn built_in_admitting(options: &FrameworkOptions) -> Self {
-        let mut registrations = FxHashMap::default();
+        let mut registrations = Vec::new();
         if options.admits(&FrameworkAdapterId::vue()) {
-            registrations.insert(FrameworkAdapterId::vue(), vue_registration());
+            registrations.push((FrameworkAdapterId::vue(), vue_registration()));
         }
         if options.admits(&FrameworkAdapterId::svelte()) {
-            registrations.insert(FrameworkAdapterId::svelte(), svelte_registration());
+            registrations.push((FrameworkAdapterId::svelte(), svelte_registration()));
         }
-        Self::finish(registrations)
+        Self::try_from_registrations(registrations)
+            .expect("every built-in framework manifest is an exact admitted release")
     }
 
     /// Build a registry from explicit registration rows. Used by the in-tree
     /// fixture registration the completeness/deferred/script-fact tests
     /// exercise.
+    ///
+    /// # Panics
+    ///
+    /// When a row's profile manifest is rejected or two rows mint one
+    /// profile — see [`Self::try_from_registrations`] for the fallible form.
     #[must_use]
     pub fn from_registrations(
         registrations: impl IntoIterator<Item = (FrameworkAdapterId, FrameworkRegistration)>,
     ) -> Self {
+        Self::try_from_registrations(registrations)
+            .expect("every registration row declares an exact admitted profile manifest")
+    }
+
+    /// Build a registry from explicit registration rows, minting each row's
+    /// admitted profile. A manifest the release law rejects, or two rows that
+    /// mint one profile, fails construction — nothing is coerced, dropped or
+    /// overwritten.
+    ///
+    /// # Errors
+    ///
+    /// [`FrameworkRegistryBuildError`] naming the offending adapter row.
+    pub fn try_from_registrations(
+        registrations: impl IntoIterator<Item = (FrameworkAdapterId, FrameworkRegistration)>,
+    ) -> Result<Self, FrameworkRegistryBuildError> {
         Self::finish(registrations.into_iter().collect())
     }
 
-    /// Seal a registration map into a registry, deriving the active-provider
-    /// index once. The index is the ONLY derived state — registrations are
-    /// immutable thereafter.
-    fn finish(registrations: FxHashMap<FrameworkAdapterId, FrameworkRegistration>) -> Self {
+    /// Seal registration rows into a registry: mint every row's profile once,
+    /// build the profile index and the advertisement order, and derive the
+    /// active-provider index. These are the ONLY derived state —
+    /// registrations are immutable thereafter.
+    fn finish(
+        rows: Vec<(FrameworkAdapterId, FrameworkRegistration)>,
+    ) -> Result<Self, FrameworkRegistryBuildError> {
+        let carrier_syntax =
+            crate::framework::descriptor::carrier_syntax_schema(BUILT_IN_PARSER_GRAMMAR_VERSION);
+        let mut registrations: FxHashMap<FrameworkAdapterId, Arc<FrameworkRegistration>> =
+            FxHashMap::default();
+        let mut profiles: FxHashMap<FrameworkProfileWireKey, Arc<RegisteredFrameworkProfile>> =
+            FxHashMap::default();
+        for (adapter_id, registration) in rows {
+            if registrations.contains_key(&adapter_id) {
+                return Err(FrameworkRegistryBuildError::DuplicateAdapter { adapter_id });
+            }
+            let profile = registration
+                .descriptor
+                .profile_manifest
+                .mint(&carrier_syntax)
+                .map_err(|error| FrameworkRegistryBuildError::RejectedManifest {
+                    adapter_id: adapter_id.clone(),
+                    error,
+                })?;
+            let registration = Arc::new(registration);
+            let key = FrameworkProfileWireKey::of(&profile);
+            // Equal canonical identity, or a digest shared by unequal
+            // identities: both are one slot claimed twice.
+            if let Some(first) = profiles.get(&key) {
+                return Err(FrameworkRegistryBuildError::DuplicateProfile {
+                    adapter_id,
+                    first_adapter_id: first.registration.descriptor.id.clone(),
+                });
+            }
+            profiles.insert(
+                key,
+                Arc::new(RegisteredFrameworkProfile {
+                    profile,
+                    registration: Arc::clone(&registration),
+                }),
+            );
+            registrations.insert(adapter_id, registration);
+        }
+        let mut advertised: Vec<Arc<RegisteredFrameworkProfile>> =
+            profiles.values().cloned().collect();
+        advertised.sort_by(|a, b| {
+            a.profile
+                .digest()
+                .as_bytes()
+                .cmp(b.profile.digest().as_bytes())
+        });
         let mut registry = Self {
             registrations,
+            profiles,
+            advertised,
             active_provider_index: ActiveProviderIndex::default(),
         };
         registry.active_provider_index = ActiveProviderIndex::from_registry(&registry);
-        registry
+        Ok(registry)
+    }
+
+    /// Resolve a wire `FrameworkProfileRef` digest to its admitted profile:
+    /// one hash lookup, no identity reconstruction. `None` for a digest of
+    /// the wrong length or one this registry did not mint (unknown, not
+    /// admitted by the host's options, or minted under another epoch).
+    #[must_use]
+    pub fn resolve_profile(&self, digest: &[u8]) -> Option<&RegisteredFrameworkProfile> {
+        let key = FrameworkProfileWireKey::from_wire(digest)?;
+        self.profiles.get(&key).map(Arc::as_ref)
+    }
+
+    /// Every admitted profile, in digest order — the capability handshake's
+    /// advertisement list.
+    pub fn advertised_profiles(&self) -> impl Iterator<Item = &RegisteredFrameworkProfile> {
+        self.advertised.iter().map(Arc::as_ref)
+    }
+
+    /// The profile minted for `adapter_id`'s registration, if registered. A
+    /// client-side convenience for callers that start from a classified file
+    /// (the carrier's adapter) and need the profile to name on the wire;
+    /// TypeInfo dispatch itself goes through [`Self::resolve_profile`].
+    #[must_use]
+    pub fn profile_for_adapter(
+        &self,
+        adapter_id: &FrameworkAdapterId,
+    ) -> Option<&RegisteredFrameworkProfile> {
+        self.advertised
+            .iter()
+            .find(|entry| &entry.registration.descriptor.id == adapter_id)
+            .map(Arc::as_ref)
     }
 
     /// The active-provider index derived from this registry's script-fact
@@ -832,7 +1062,7 @@ impl FrameworkAdapterRegistry {
     /// The registration for `adapter_id`, if one is registered.
     #[must_use]
     pub fn get(&self, adapter_id: &FrameworkAdapterId) -> Option<&FrameworkRegistration> {
-        self.registrations.get(adapter_id)
+        self.registrations.get(adapter_id).map(Arc::as_ref)
     }
 
     /// Whether `adapter_id` is registered.
@@ -1714,6 +1944,121 @@ mod tests {
             LanguageRow::fixed("vue", FileLanguage::vue()),
             LanguageRow::fixed("svelte", FileLanguage::svelte()),
         ]
+    }
+
+    /// Profile admission is decided at CONSTRUCTION: a manifest the release
+    /// law rejects never mints a profile, two registrations minting one
+    /// profile fail instead of one overwriting the other, every exact
+    /// release / carrier claim / syntax epoch mints its own identity, and the
+    /// built registry resolves exactly the profiles it advertises.
+    #[test]
+    fn profile_manifests_are_admitted_at_construction() {
+        use crate::framework::descriptor::{
+            carrier_syntax_schema, FrameworkProfileManifest, VUE_PROFILE_MANIFEST,
+        };
+
+        let with_release = |release: &'static str| {
+            let mut registration = vue_registration();
+            registration.descriptor.profile_manifest.release = release;
+            registration
+        };
+        for (release, expected) in [
+            ("^3", ReleaseDescriptorError::Range),
+            ("latest", ReleaseDescriptorError::FloatingTag),
+            ("vue", ReleaseDescriptorError::UntaggedFamily),
+            ("", ReleaseDescriptorError::MissingMajor),
+            ("4", ReleaseDescriptorError::UnsupportedVersion),
+        ] {
+            let error = FrameworkAdapterRegistry::try_from_registrations([(
+                FrameworkAdapterId::vue(),
+                with_release(release),
+            )])
+            .expect_err("a rejected manifest never builds a registry");
+            assert_eq!(
+                error,
+                FrameworkRegistryBuildError::RejectedManifest {
+                    adapter_id: FrameworkAdapterId::vue(),
+                    error: expected,
+                },
+                "release {release:?}"
+            );
+        }
+
+        let duplicate = FrameworkAdapterRegistry::try_from_registrations([
+            (FrameworkAdapterId::vue(), vue_registration()),
+            (FrameworkAdapterId::new("vue-twin"), vue_registration()),
+        ])
+        .expect_err("one profile has one registration");
+        assert!(
+            matches!(
+                duplicate,
+                FrameworkRegistryBuildError::DuplicateProfile { .. }
+            ),
+            "got {duplicate:?}"
+        );
+        // One adapter id registered twice — even with distinct manifests —
+        // fails instead of the second row overwriting the first.
+        let twice = FrameworkAdapterRegistry::try_from_registrations([
+            (FrameworkAdapterId::vue(), vue_registration()),
+            (FrameworkAdapterId::vue(), with_release("3.0")),
+        ])
+        .expect_err("one adapter id has one registration");
+        assert_eq!(
+            twice,
+            FrameworkRegistryBuildError::DuplicateAdapter {
+                adapter_id: FrameworkAdapterId::vue(),
+            }
+        );
+
+        let syntax = carrier_syntax_schema(BUILT_IN_PARSER_GRAMMAR_VERSION);
+        let mint = |manifest: &FrameworkProfileManifest| {
+            manifest
+                .mint(&syntax)
+                .expect("an exact admitted release mints")
+        };
+        let three = mint(&VUE_PROFILE_MANIFEST);
+        let distinct = [
+            mint(&FrameworkProfileManifest {
+                release: "3.0",
+                ..VUE_PROFILE_MANIFEST
+            }),
+            mint(&FrameworkProfileManifest {
+                claimed_carriers: &["vue", "md"],
+                ..VUE_PROFILE_MANIFEST
+            }),
+            VUE_PROFILE_MANIFEST
+                .mint(&carrier_syntax_schema(BUILT_IN_PARSER_GRAMMAR_VERSION + 1))
+                .expect("an exact admitted release mints"),
+        ];
+        for other in &distinct {
+            assert_ne!(
+                &three, other,
+                "a changed manifest input re-mints the profile"
+            );
+        }
+        assert_eq!(
+            three,
+            mint(&VUE_PROFILE_MANIFEST),
+            "minting is deterministic"
+        );
+
+        let registry = built_in();
+        let advertised: Vec<_> = registry.advertised_profiles().collect();
+        assert_eq!(advertised.len(), 2, "one profile per built-in registration");
+        for entry in advertised {
+            let resolved = registry
+                .resolve_profile(entry.profile.digest().as_bytes())
+                .expect("an advertised profile resolves");
+            assert_eq!(resolved.profile, entry.profile);
+        }
+        assert_eq!(
+            registry
+                .profile_for_adapter(&FrameworkAdapterId::vue())
+                .map(|entry| entry.profile.clone()),
+            Some(three)
+        );
+        assert!(registry.resolve_profile(&[0; 31]).is_none());
+        assert!(registry.resolve_profile(&[0; 32]).is_none());
     }
 
     fn classifier_over(rows: Vec<LanguageRow>) -> HostLanguageClassifier {

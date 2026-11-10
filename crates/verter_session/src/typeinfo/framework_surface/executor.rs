@@ -10,17 +10,20 @@
 //! validated inner request reaches the module-private executor body.
 //!
 //! Executor flow (post-validation):
-//! 1. Intern `selector.framework_adapter_id`; registry lookup. An unknown id is
-//!    a typed `MalformedPayload` (NO new error variant).
-//! 2. Resolve the selector to a [`ResolvedComponentSelector`] (default export
-//!    via the synthesized `default`; named export via the shallow inventory).
+//! 1. Resolve `selector.framework_profile` (schema 11, a 32-byte digest the
+//!    validator proved well-shaped) against the registry's admitted profile
+//!    index — one hash lookup to the sealed `FrameworkProfileId` and its
+//!    registration, never through an adapter spelling. A reference the host
+//!    did not mint is the typed `UnknownFrameworkProfile` error, before any
+//!    indexing, export resolution, planning or surface-store access.
+//! 2. Resolve the selector to a [`ResolvedComponentSelector`] carrying that
+//!    identity (default export via the synthesized `default`; named export
+//!    via the shallow inventory).
 //! 3. The requested set is the request's facet demand
-//!    (`FrameworkSurfaceRequest.requested_kinds`, schema 10, validated
-//!    non-empty and duplicate-free), taken in enum-tag order; a request below
-//!    schema 10 carries no demand and keeps [`ALL_FRAMEWORK_SURFACE_KINDS`].
-//!    Only requested kinds are planned, resolved and encoded: the response
-//!    carries EXACTLY ONE entry per requested kind and none for an undemanded
-//!    kind.
+//!    (`FrameworkSurfaceRequest.requested_kinds`, validated non-empty and
+//!    duplicate-free), taken in enum-tag order. Only requested kinds are
+//!    planned, resolved and encoded: the response carries EXACTLY ONE entry
+//!    per requested kind and none for an undemanded kind.
 //! 4. A [`SurfaceRegistration::Deferred`] adapter answers every kind
 //!    structurally UNSUPPORTED (a structural response, NOT an error).
 //! 5. A [`SurfaceRegistration::Adapter`] adapter PLANS its demands against the
@@ -28,7 +31,8 @@
 //!    [`PlannedDemand`] through the module-private [`ExecutorResolveCtx`] (an
 //!    EXHAUSTIVE match — no wildcard arm — over the closed 4-variant taxonomy),
 //!    the adapter NORMALIZES the resolved data, and [`graph_export`] encodes the
-//!    `FrameworkSurfacePayload`.
+//!    `FrameworkSurfacePayload`, whose selector echo names the admitted
+//!    profile.
 //!
 //! The executor resolves EVERY [`PlannedDemand`] THROUGH the one shared
 //! type-resolution engine (the relocated Vue delegates / `resolve_shallow_surface_for`
@@ -48,7 +52,6 @@ use verter_audit::{
     AuditedResult, ProjectionModeTag, RequestAuditRecord, RequestKind, RequestKindPayload,
     RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit,
 };
-use verter_language::FrameworkAdapterId;
 use verter_protocol::typeinfo::graph::{
     self as wire, ComponentSelector, FrameworkSurfaceKind, FrameworkSurfaceKindSupport,
     FrameworkSurfacePayload, FrameworkTag, TypeInfoGraphRequest, TypeInfoGraphResponse,
@@ -58,7 +61,7 @@ use verter_protocol::verter::v1::{type_info_graph_response, type_info_request_er
 
 use crate::framework::ctx::FrameworkAdapterCtx;
 use crate::framework::descriptor::ALL_FRAMEWORK_SURFACE_KINDS;
-use crate::framework::registry::SurfaceRegistration;
+use crate::framework::registry::{RegisteredFrameworkProfile, SurfaceRegistration};
 #[cfg(feature = "semantic-observe")]
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::typeinfo::framework_surface::graph_export::{
@@ -250,29 +253,44 @@ impl VerterHost {
             }
         };
 
-        // The validator proved the selector is present and both ids non-empty.
-        let selector = framework_request
+        // The validator proved the selector present, its canonical non-empty
+        // and its profile reference a 32-byte digest.
+        let request_selector = framework_request
             .selector
-            .clone()
+            .as_ref()
             .expect("validator proves selector present");
-        let adapter_id = FrameworkAdapterId::new(&selector.framework_adapter_id);
+        let profile_ref = request_selector
+            .framework_profile
+            .as_ref()
+            .expect("validator proves framework_profile present");
         // The facet demand the validator proved well-formed: every planned,
         // resolved and encoded kind below comes from this slice.
         let requested = requested_surface_kinds(&framework_request);
         let requested: &[FrameworkSurfaceKind] = &requested;
 
-        let Some(registration) = self.framework_registry().get(&adapter_id) else {
-            // An unknown adapter id is a malformed payload (NO new error
-            // variant), surfaced AFTER validation but before any semantic work.
-            let error = malformed(&format!(
-                "no framework adapter registered for id `{adapter_id}`"
-            ));
+        // ADMISSION — one lookup from the wire digest to the admitted profile
+        // and its registration. An unknown, disabled or stale (other-epoch)
+        // reference fails here, AFTER shape validation and BEFORE any
+        // indexing, export resolution, planning or surface-store access.
+        let Some(admitted) = self
+            .framework_registry()
+            .resolve_profile(&profile_ref.digest)
+        else {
+            let error = TypeInfoRequestError {
+                kind: Some(type_info_request_error::Kind::UnknownFrameworkProfile(
+                    wire::wire_error_unknown_framework_profile(profile_ref.clone()),
+                )),
+            };
             let payload =
                 TypeInfoGraphPayload::from_validation_error(GraphOperationTag::FrameworkSurfaces);
             return (error_response(error), payload);
         };
+        let registration = admitted.registration.as_ref();
+        // The selector echo is built from the ADMITTED identity, not copied
+        // from the request bytes.
+        let selector = admitted_selector_echo(request_selector, admitted);
 
-        let resolved_selector = self.resolve_component_selector(&selector);
+        let resolved_selector = self.resolve_component_selector(&selector, admitted);
 
         // A NAMED-export selector must name a real EXPORT of the owner. The
         // export table is authoritative (a private local that is not exported is
@@ -450,6 +468,7 @@ impl VerterHost {
     fn resolve_component_selector(
         &self,
         selector: &ComponentSelector,
+        admitted: &RegisteredFrameworkProfile,
     ) -> ResolvedComponentSelector {
         let canonical: Arc<str> = Arc::from(selector.canonical_id.as_str());
         let export = if selector.has_export_name && !selector.export_name.is_empty() {
@@ -457,7 +476,11 @@ impl VerterHost {
         } else {
             ComponentExport::Default
         };
-        ResolvedComponentSelector { canonical, export }
+        ResolvedComponentSelector {
+            canonical,
+            export,
+            framework_profile: admitted.profile.clone(),
+        }
     }
 }
 
@@ -869,22 +892,28 @@ fn framework_selector_target(
     }
 }
 
-/// Build the audit payload from the encoded per-kind entries.
+/// The typed selector echo: the request's file and export, qualified by the
+/// reference of the profile the host ADMITTED (built from its sealed
+/// identity, never copied from the request bytes).
+fn admitted_selector_echo(
+    selector: &ComponentSelector,
+    admitted: &RegisteredFrameworkProfile,
+) -> ComponentSelector {
+    ComponentSelector {
+        canonical_id: selector.canonical_id.clone(),
+        export_name: selector.export_name.clone(),
+        has_export_name: selector.has_export_name,
+        framework_profile: Some(admitted.wire_ref()),
+    }
+}
+
 /// The request's facet demand in enum-tag (canonical) order.
 ///
-/// From [`FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION`] the validator
-/// has proved `requested_kinds` non-empty, known and duplicate-free, so this
-/// is a pure filter of [`ALL_FRAMEWORK_SURFACE_KINDS`] that keeps the canonical
-/// order whatever order the client wrote. An older request carries no demand
-/// and keeps every known kind — its response contract.
-///
-/// [`FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION`]: crate::typeinfo::request_validation::FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION
+/// The validator has proved `requested_kinds` non-empty, known and
+/// duplicate-free (every accepted framework-surface schema carries the
+/// demand), so this is a pure filter of [`ALL_FRAMEWORK_SURFACE_KINDS`] that
+/// keeps the canonical order whatever order the client wrote.
 fn requested_surface_kinds(request: &wire::FrameworkSurfaceRequest) -> Vec<FrameworkSurfaceKind> {
-    use crate::typeinfo::request_validation::FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION;
-
-    if request.schema_version < FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION {
-        return ALL_FRAMEWORK_SURFACE_KINDS.to_vec();
-    }
     ALL_FRAMEWORK_SURFACE_KINDS
         .iter()
         .copied()
@@ -954,7 +983,7 @@ fn framework_surface_response(
 
 /// Classify the executor's response into the audited `Ok`/`Err` outcome.
 ///
-/// The `error` arm is the typed wire error (validation / unknown adapter); the
+/// The `error` arm is the typed wire error (validation / unknown profile); the
 /// `framework_surface` arm is success.
 fn framework_response_outcome(
     response: &TypeInfoGraphResponse,

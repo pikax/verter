@@ -5,8 +5,11 @@
 //!   schema-version mismatch) returns the typed wire `error` arm BEFORE any
 //!   registry lookup or semantic dispatch — no `framework_surface` arm, no
 //!   registered adapter selection observable.
-//! - UNKNOWN ADAPTER: an unregistered adapter id returns a `MalformedPayload`
-//!   wire error (no new error variant).
+//! - TYPED PROFILE (schema 11): the selector names a profile the host
+//!   advertised through the capability handshake; a reference the host does
+//!   not admit (unknown, disabled) is the typed `UnknownFrameworkProfile`
+//!   error before any semantic work, and the response echoes the admitted
+//!   profile.
 //! - VUE PARITY: a Vue SFC request resolves its props / emits / slots through
 //!   the registry → `VueFrameworkAdapter` plan/normalize → relocated `vue_exec`
 //!   resolution and yields the SAME members the live `vue_macro_dtos` path
@@ -67,17 +70,42 @@ fn default_display_policy() -> wire::DisplayPolicy {
     }
 }
 
-/// Build a well-formed framework-surface envelope at schema 3 for `canonical`
-/// + `adapter_id`.
-fn framework_envelope(canonical: &str, adapter_id: &str) -> wire::TypeInfoGraphRequest {
-    framework_envelope_versioned(canonical, adapter_id, 3, 3)
+/// The profile `host` advertises for `family`, discovered through the
+/// capability handshake — the only way a client learns a profile reference.
+fn advertised_profile(host: &VerterHost, family: &str) -> wire::FrameworkProfileRef {
+    host.typeinfo_capabilities(&wire::TypeInfoCapabilityHandshakeRequest {
+        client_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+    })
+    .framework_profiles
+    .into_iter()
+    .find(|advertised| advertised.family == family)
+    .and_then(|advertised| advertised.profile)
+    .unwrap_or_else(|| panic!("the host advertises a `{family}` profile"))
 }
 
-/// Build a framework-surface envelope with explicit envelope / payload schema
-/// versions (so a mismatch can be exercised).
+/// Build a well-formed current-schema framework-surface envelope for
+/// `canonical`, naming `family`'s advertised profile and demanding every
+/// known kind.
+fn framework_envelope(
+    host: &VerterHost,
+    canonical: &str,
+    family: &str,
+) -> wire::TypeInfoGraphRequest {
+    let version = wire::TYPEINFO_GRAPH_SCHEMA_VERSION;
+    framework_envelope_versioned(
+        canonical,
+        Some(advertised_profile(host, family)),
+        version,
+        version,
+    )
+}
+
+/// Build a framework-surface envelope with an explicit profile reference and
+/// envelope / payload schema versions (so a mismatch can be exercised),
+/// demanding every known kind.
 fn framework_envelope_versioned(
     canonical: &str,
-    adapter_id: &str,
+    framework_profile: Option<wire::FrameworkProfileRef>,
     envelope_version: u32,
     payload_version: u32,
 ) -> wire::TypeInfoGraphRequest {
@@ -90,7 +118,7 @@ fn framework_envelope_versioned(
                     canonical_id: canonical.to_string(),
                     export_name: String::new(),
                     has_export_name: false,
-                    framework_adapter_id: adapter_id.to_string(),
+                    framework_profile,
                 }),
                 context: Some(default_context()),
                 closure: Some(one_level_closure()),
@@ -99,7 +127,10 @@ fn framework_envelope_versioned(
                 include_diagnostics: false,
                 include_projection: vec![],
                 schema_version: payload_version,
-                requested_kinds: vec![],
+                requested_kinds: verter_session::framework::ALL_FRAMEWORK_SURFACE_KINDS
+                    .iter()
+                    .map(|kind| *kind as i32)
+                    .collect(),
             },
         )),
     }
@@ -107,12 +138,12 @@ fn framework_envelope_versioned(
 
 /// A current-schema envelope carrying an explicit facet demand.
 fn framework_envelope_demanding(
+    host: &VerterHost,
     canonical: &str,
-    adapter_id: &str,
+    family: &str,
     requested_kinds: &[FrameworkSurfaceKind],
 ) -> wire::TypeInfoGraphRequest {
-    let version = verter_protocol::typeinfo::graph::TYPEINFO_GRAPH_SCHEMA_VERSION;
-    let mut envelope = framework_envelope_versioned(canonical, adapter_id, version, version);
+    let mut envelope = framework_envelope(host, canonical, family);
     if let Some(wire_request::Payload::FrameworkSurface(request)) = envelope.payload.as_mut() {
         request.requested_kinds = requested_kinds.iter().map(|kind| *kind as i32).collect();
     }
@@ -241,8 +272,8 @@ fn a_degraded_framework_surface_never_encodes_exact_resolved() {
             })
             .unwrap_or_else(|e| panic!("{canonical}: upsert {e:?}"));
 
-        let result =
-            host.resolve_framework_surface_with_audit(framework_envelope(canonical, adapter));
+        let result = host
+            .resolve_framework_surface_with_audit(framework_envelope(&host, canonical, adapter));
         let response = result.as_result().expect("structural response");
         let payload = expect_payload(response);
         let entries = entries_by_kind(payload);
@@ -293,7 +324,7 @@ fn malformed_envelope_op_payload_mismatch_returns_error_before_dispatch() {
     // ResolveSymbol operation carrying a FrameworkSurface payload) is malformed.
     // The executor must return the typed wire error BEFORE any registry lookup.
     let host = build_host();
-    let mut envelope = framework_envelope("/Parity.vue", "vue");
+    let mut envelope = framework_envelope(&host, "/Parity.vue", "vue");
     // Corrupt the operation discriminator to a non-framework operation.
     envelope.operation = wire::Operation::ResolveSymbol as i32;
 
@@ -307,28 +338,34 @@ fn malformed_envelope_op_payload_mismatch_returns_error_before_dispatch() {
 
 #[test]
 fn framework_schema_version_mismatch_rejected_before_dispatch() {
-    // The framework-surface operation requires schema 3; a v2 payload is
-    // rejected with MalformedPayload BEFORE any adapter lookup.
+    // The framework-surface operation requires schema 11 (the typed profile
+    // selector); every globally supported version below it is rejected with
+    // MalformedPayload BEFORE any profile lookup — even one carrying a valid
+    // profile reference.
     let host = build_host();
-    let envelope = framework_envelope_versioned("/Parity.vue", "vue", 2, 2);
-    let result = host.resolve_framework_surface_with_audit(envelope);
-    let error = result
-        .as_result()
-        .expect_err("a sub-minimum schema version must be the Err outcome");
-    assert!(
-        matches!(
-            error.kind,
-            Some(type_info_request_error::Kind::MalformedPayload(_))
-        ),
-        "a sub-minimum framework schema version is a MalformedPayload, got {:?}",
-        error.kind
-    );
+    let profile = advertised_profile(&host, "vue");
+    for version in [2, 3, 9, 10] {
+        let envelope =
+            framework_envelope_versioned("/Parity.vue", Some(profile.clone()), version, version);
+        let result = host.resolve_framework_surface_with_audit(envelope);
+        let error = result
+            .as_result()
+            .expect_err("a sub-minimum schema version must be the Err outcome");
+        assert!(
+            matches!(
+                error.kind,
+                Some(type_info_request_error::Kind::MalformedPayload(_))
+            ),
+            "a framework schema {version} request is a MalformedPayload, got {:?}",
+            error.kind
+        );
+    }
 }
 
 #[test]
 fn empty_framework_selector_canonical_is_not_applicable_in_rejected_audit() {
     let host = build_host();
-    let envelope = framework_envelope("", "vue");
+    let envelope = framework_envelope(&host, "", "vue");
     let result = host.resolve_framework_surface_with_audit(envelope);
 
     result
@@ -346,22 +383,139 @@ fn empty_framework_selector_canonical_is_not_applicable_in_rejected_audit() {
     );
 }
 
+/// The typed `UnknownFrameworkProfile` error carrying exactly the rejected
+/// reference, or a panic.
+fn expect_unknown_profile(
+    result: &verter_audit::AuditedResult<wire::TypeInfoGraphResponse, wire::TypeInfoRequestError>,
+) -> wire::FrameworkProfileRef {
+    let error = result
+        .as_result()
+        .expect_err("an unadmitted profile must be the Err outcome");
+    match &error.kind {
+        Some(type_info_request_error::Kind::UnknownFrameworkProfile(unknown)) => unknown
+            .profile
+            .clone()
+            .expect("the error echoes the rejected reference"),
+        other => panic!("an unadmitted profile is UnknownFrameworkProfile, got {other:?}"),
+    }
+}
+
 #[test]
-fn unknown_adapter_id_returns_malformed_payload() {
-    // An adapter id with no registration is a MalformedPayload (NO new error
-    // variant), surfaced after validation but before any semantic work.
+fn an_unminted_profile_reference_is_unknown_framework_profile() {
+    // A well-shaped 32-byte reference the host never minted is the typed
+    // UnknownFrameworkProfile error (echoing the reference, never a guessed
+    // family or release), surfaced after validation and before any semantic
+    // work.
     let host = build_host();
-    let envelope = framework_envelope("/Parity.vue", "not-a-real-framework");
+    let forged = wire::FrameworkProfileRef {
+        digest: vec![0xAB; wire::FRAMEWORK_PROFILE_DIGEST_LEN],
+    };
+    let envelope = framework_envelope_versioned(
+        "/Parity.vue",
+        Some(forged.clone()),
+        wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+        wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+    );
+    let result = host.resolve_framework_surface_with_audit(envelope);
+    assert_eq!(expect_unknown_profile(&result), forged);
+}
+
+#[test]
+fn a_disabled_framework_profile_is_neither_advertised_nor_admitted() {
+    // Admission follows the host's FrameworkOptions: a Vue-only host neither
+    // advertises nor admits the Svelte profile a default host advertises, so
+    // that reference is UnknownFrameworkProfile — the same answer as a
+    // forged digest. Discovery and admission read one registry.
+    use verter_session::framework::FrameworkOptions;
+    use verter_session::HostConfig;
+
+    let default_host = VerterHost::new_standalone(HostConfig::default());
+    let svelte_profile = advertised_profile(&default_host, "svelte");
+    let vue_only = VerterHost::new_standalone(HostConfig {
+        framework: FrameworkOptions::admitting_names(["vue"]).expect("the Vue vertical"),
+        ..HostConfig::default()
+    });
+    let advertised: Vec<String> = vue_only
+        .typeinfo_capabilities(&wire::TypeInfoCapabilityHandshakeRequest { client_version: 0 })
+        .framework_profiles
+        .into_iter()
+        .map(|advertised| advertised.family)
+        .collect();
+    assert_eq!(advertised, vec!["vue".to_string()]);
+
+    let envelope = framework_envelope_versioned(
+        "/Box.svelte",
+        Some(svelte_profile.clone()),
+        wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+        wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+    );
+    let result = vue_only.resolve_framework_surface_with_audit(envelope);
+    assert_eq!(expect_unknown_profile(&result), svelte_profile);
+}
+
+#[test]
+fn the_response_echoes_the_admitted_profile_and_the_discovered_profiles_are_distinct() {
+    // The selector echo names the admitted profile; Vue and Svelte are two
+    // distinct profiles, advertised in digest order.
+    let host = build_host();
+    let vue = advertised_profile(&host, "vue");
+    let svelte = advertised_profile(&host, "svelte");
+    assert_ne!(vue, svelte, "two registrations mint two profiles");
+    let digests: Vec<Vec<u8>> = host
+        .typeinfo_capabilities(&wire::TypeInfoCapabilityHandshakeRequest { client_version: 0 })
+        .framework_profiles
+        .into_iter()
+        .filter_map(|advertised| advertised.profile.map(|profile| profile.digest))
+        .collect();
+    let mut sorted = digests.clone();
+    sorted.sort();
+    assert_eq!(digests, sorted, "advertisements are in digest order");
+
+    let result =
+        host.resolve_framework_surface_with_audit(framework_envelope(&host, "/Parity.vue", "vue"));
+    let response = result.into_result().expect("a Vue request resolves");
+    let payload = expect_payload(&response);
+    let selector = payload.selector.as_ref().expect("the selector is echoed");
+    assert_eq!(selector.canonical_id, "/Parity.vue");
+    assert_eq!(selector.framework_profile.as_ref(), Some(&vue));
+}
+
+#[test]
+fn a_retired_field_4_adapter_string_does_not_select_a_profile() {
+    // A pre-11 client's selector carried only the open adapter string in the
+    // now-reserved field 4. Decoded today the field is an unknown field, so
+    // the selector has no profile reference: schema 11 rejects it as
+    // MalformedPayload instead of reviving the adapter-string route.
+    use prost::Message;
+
+    let host = build_host();
+    let mut envelope = framework_envelope_versioned(
+        "/Parity.vue",
+        None,
+        wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+        wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+    );
+    // Append field 4 (`framework_adapter_id`, wire type 2) = "vue" to the
+    // encoded selector, then decode the whole envelope as a server would.
+    if let Some(wire_request::Payload::FrameworkSurface(request)) = envelope.payload.as_mut() {
+        let selector = request.selector.take().expect("selector");
+        let mut bytes = selector.encode_to_vec();
+        bytes.extend_from_slice(&[(4 << 3) | 2, 3, b'v', b'u', b'e']);
+        request.selector =
+            Some(wire::ComponentSelector::decode(bytes.as_slice()).expect("decodes"));
+    }
+    let bytes = envelope.encode_to_vec();
+    let envelope = wire::TypeInfoGraphRequest::decode(bytes.as_slice()).expect("decodes");
     let result = host.resolve_framework_surface_with_audit(envelope);
     let error = result
         .as_result()
-        .expect_err("an unknown adapter id must be the Err outcome");
+        .expect_err("a field-4-only selector must be the Err outcome");
     assert!(
         matches!(
             error.kind,
             Some(type_info_request_error::Kind::MalformedPayload(_))
         ),
-        "an unknown adapter id is a MalformedPayload, got {:?}",
+        "a selector without framework_profile is a MalformedPayload, got {:?}",
         error.kind
     );
 }
@@ -369,7 +523,7 @@ fn unknown_adapter_id_returns_malformed_payload() {
 #[test]
 fn response_carries_exactly_one_entry_per_known_kind() {
     let host = build_host();
-    let envelope = framework_envelope("/Parity.vue", "vue");
+    let envelope = framework_envelope(&host, "/Parity.vue", "vue");
     let result = host.resolve_framework_surface_with_audit(envelope);
     let response = result
         .into_result()
@@ -403,6 +557,7 @@ fn response_carries_exactly_one_entry_per_known_kind() {
 fn a_facet_demand_answers_exactly_the_requested_kinds_in_canonical_order() {
     let host = build_host();
     let envelope = framework_envelope_demanding(
+        &host,
         "/Parity.vue",
         "vue",
         &[FrameworkSurfaceKind::Slots, FrameworkSurfaceKind::Props],
@@ -444,7 +599,7 @@ fn vue_props_emits_slots_match_live_macro_dtos() {
     // BEHAVIOR PARITY: the executor's props / emits / slots members equal the
     // members the live `vue_macro_dtos` path produces for the same SFC.
     let host = build_host();
-    let envelope = framework_envelope("/Parity.vue", "vue");
+    let envelope = framework_envelope(&host, "/Parity.vue", "vue");
     let result = host.resolve_framework_surface_with_audit(envelope);
     let response = result.into_result().expect("Vue request resolves");
     let payload = expect_payload(&response);
@@ -567,7 +722,7 @@ fn supported_empty_kind_is_distinct_from_unsupported() {
     // adapter, so its entry is SUPPORTED-empty (not UNSUPPORTED) — the
     // supported-empty vs unsupported distinction on the wire.
     let host = build_host();
-    let envelope = framework_envelope("/Parity.vue", "vue");
+    let envelope = framework_envelope(&host, "/Parity.vue", "vue");
     let result = host.resolve_framework_surface_with_audit(envelope);
     let response = result.into_result().expect("Vue request resolves");
     let payload = expect_payload(&response);
@@ -614,7 +769,7 @@ fn define_model_surface_carries_the_model_binding() {
         &[("/Model.vue", MODEL_VUE)],
         &[("lib.es5.d.ts", harness::STUB_LIB_ES5)],
     );
-    let envelope = framework_envelope("/Model.vue", "vue");
+    let envelope = framework_envelope(&host, "/Model.vue", "vue");
     let response = host
         .resolve_framework_surface_with_audit(envelope)
         .into_result()
@@ -650,7 +805,7 @@ fn define_model_only_component_surfaces_modelvalue_in_props() {
         &[("/Model.vue", MODEL_VUE)],
         &[("lib.es5.d.ts", harness::STUB_LIB_ES5)],
     );
-    let envelope = framework_envelope("/Model.vue", "vue");
+    let envelope = framework_envelope(&host, "/Model.vue", "vue");
     let response = host
         .resolve_framework_surface_with_audit(envelope)
         .into_result()
@@ -682,7 +837,7 @@ fn multiple_define_model_calls_surface_every_binding() {
         &[("/MultiModel.vue", MULTI_MODEL_VUE)],
         &[("lib.es5.d.ts", harness::STUB_LIB_ES5)],
     );
-    let envelope = framework_envelope("/MultiModel.vue", "vue");
+    let envelope = framework_envelope(&host, "/MultiModel.vue", "vue");
     let response = host
         .resolve_framework_surface_with_audit(envelope)
         .into_result()
@@ -732,7 +887,7 @@ fn define_options_present_resolves_supported_with_members() {
         &[("/Options.vue", OPTIONS_VUE)],
         &[("lib.es5.d.ts", harness::STUB_LIB_ES5)],
     );
-    let envelope = framework_envelope("/Options.vue", "vue");
+    let envelope = framework_envelope(&host, "/Options.vue", "vue");
     let response = host
         .resolve_framework_surface_with_audit(envelope)
         .into_result()
@@ -793,7 +948,7 @@ fn define_expose_present_resolves_supported_with_members() {
         &[("/Expose.vue", EXPOSE_VUE)],
         &[("lib.es5.d.ts", harness::STUB_LIB_ES5)],
     );
-    let envelope = framework_envelope("/Expose.vue", "vue");
+    let envelope = framework_envelope(&host, "/Expose.vue", "vue");
     let response = host
         .resolve_framework_surface_with_audit(envelope)
         .into_result()
@@ -839,7 +994,7 @@ defineModel<string>('title');
     );
     // Vue's descriptor advertises all six kinds as supported.
     let descriptor = verter_session::framework::descriptor::vue_descriptor();
-    let envelope = framework_envelope("/AllMacros.vue", "vue");
+    let envelope = framework_envelope(&host, "/AllMacros.vue", "vue");
     let response = host
         .resolve_framework_surface_with_audit(envelope)
         .into_result()
@@ -866,7 +1021,7 @@ fn nonexistent_named_export_is_a_malformed_payload() {
     // typed MalformedPayload — NOT a silent fall-through to the default
     // component surface (which would resolve the WRONG component).
     let host = build_host();
-    let mut envelope = framework_envelope("/Parity.vue", "vue");
+    let mut envelope = framework_envelope(&host, "/Parity.vue", "vue");
     if let Some(wire_request::Payload::FrameworkSurface(r)) = envelope.payload.as_mut() {
         if let Some(selector) = r.selector.as_mut() {
             selector.has_export_name = true;
@@ -969,8 +1124,8 @@ fn an_entry_form_over_a_call_spread_reaches_the_framework_surface_intact() {
             })
             .unwrap_or_else(|e| panic!("{canonical}: upsert {e:?}"));
 
-        let result =
-            host.resolve_framework_surface_with_audit(framework_envelope(&canonical, "svelte"));
+        let result = host
+            .resolve_framework_surface_with_audit(framework_envelope(&host, &canonical, "svelte"));
         let response = result.as_result().expect("structural response");
         let payload = expect_payload(response);
         let entries = entries_by_kind(payload);

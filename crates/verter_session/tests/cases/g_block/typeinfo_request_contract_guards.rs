@@ -133,6 +133,7 @@ fn err_label(err: &wire::TypeInfoRequestError) -> &'static str {
         }
         type_info_request_error::Kind::MissingProjectPath(_) => "MissingProjectPath",
         type_info_request_error::Kind::ExpansionBudgetOutOfRange(_) => "ExpansionBudgetOutOfRange",
+        type_info_request_error::Kind::UnknownFrameworkProfile(_) => "UnknownFrameworkProfile",
     }
 }
 
@@ -328,9 +329,10 @@ fn every_closure_variant_has_concrete_resource_bound() {
 
 // ───────────────── static: error union consistency across sections ────────
 
-/// The closed `TypeInfoRequestError` union — exactly these 11 active
+/// The closed `TypeInfoRequestError` union — exactly these 12 active
 /// variant selectors (proto field 11 / `missing_relate_endpoint` is
-/// retired via `reserved`).
+/// retired via `reserved`; field 13 / `unknown_framework_profile` is the
+/// schema-11 typed rejection of an unadmitted framework profile).
 const REQUEST_ERROR_VARIANTS: &[&str] = &[
     "missing_projection_context",
     "missing_display_policy",
@@ -343,6 +345,7 @@ const REQUEST_ERROR_VARIANTS: &[&str] = &[
     "malformed_structured_expression",
     "missing_project_path",
     "expansion_budget_out_of_range",
+    "unknown_framework_profile",
 ];
 
 #[test]
@@ -351,7 +354,7 @@ fn typeinfo_request_error_union_is_consistent_across_sections() {
     // that enumerate it: the proto `TypeInfoRequestError` oneof and the
     // validator's exhaustive `err_label` match (which mirrors the
     // generated `type_info_request_error::Kind`). Discriminating: drop a
-    // proto arm and the proto set no longer matches the expected 11.
+    // proto arm and the proto set no longer matches the expected 12.
     let proto = read_proto();
 
     // Parse the proto oneof selectors.
@@ -388,7 +391,7 @@ fn typeinfo_request_error_union_is_consistent_across_sections() {
     expected.sort();
     assert_eq!(
         proto_arms, expected,
-        "the proto TypeInfoRequestError oneof must carry exactly the 11 closed \
+        "the proto TypeInfoRequestError oneof must carry exactly the 12 closed \
          error selectors",
     );
 
@@ -406,8 +409,8 @@ fn typeinfo_request_error_union_is_consistent_across_sections() {
     // here ties the validator surface to the proto count.
     assert_eq!(
         REQUEST_ERROR_VARIANTS.len(),
-        11,
-        "the validator-side error union mirror must list exactly 11 variants",
+        12,
+        "the validator-side error union mirror must list exactly 12 variants",
     );
 }
 

@@ -683,10 +683,18 @@ impl VerterMcpServer {
                             "{canonical} is not a framework component file (no adapter)"
                         ))
                     })?;
-                    let request = crate::tools::framework_surface::build_request(
-                        &canonical,
-                        adapter_id.as_str(),
-                    );
+                    // The tool's input is a file path, so the client names the
+                    // host-advertised profile of the carrier the file belongs
+                    // to; the executor admits that reference (schema 11).
+                    let profile = host
+                        .advertised_framework_profile_for_adapter(adapter_id)
+                        .ok_or_else(|| {
+                            mcp_err(format!(
+                                "{canonical}: framework adapter `{adapter_id}` admits no profile"
+                            ))
+                        })?;
+                    let request =
+                        crate::tools::framework_surface::build_request(&canonical, profile);
                     let (outcome, _record) = host
                         .resolve_framework_surface_with_audit(request)
                         .into_parts();

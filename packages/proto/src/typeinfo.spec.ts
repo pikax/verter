@@ -608,7 +608,7 @@ describe("typeinfo proto TS bindings", () => {
             selector: {
               canonicalId: "/Foo.vue",
               hasExportName: false,
-              frameworkAdapterId: "vue",
+              frameworkProfile: { digest: Uint8Array.from({ length: 32 }, (_, i) => i) },
             },
             context: {
               mode: GraphProjectionMode.EXPANDED,
@@ -667,9 +667,15 @@ describe("typeinfo proto TS bindings", () => {
           value: { nodeBudget: 5000, depthBudget: 256, nodeBudgetMax: 4096, depthBudgetMax: 64 },
         },
       },
+      {
+        kind: {
+          case: "unknownFrameworkProfile",
+          value: { profile: { digest: Uint8Array.from({ length: 32 }, (_, i) => i) } },
+        },
+      },
     ];
 
-    expect(variants.length).toBe(11);
+    expect(variants.length).toBe(12);
 
     for (const init of variants) {
       const err = create(TypeInfoRequestErrorSchema, init);
@@ -692,16 +698,24 @@ describe("typeinfo proto TS bindings", () => {
     const response = create(TypeInfoCapabilityHandshakeResponseSchema, {
       serverVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
       serverSupportedVersions: [1, 2, 3],
+      frameworkProfiles: [
+        { profile: { digest: Uint8Array.from({ length: 32 }, (_, i) => i) }, family: "vue", release: "3", framework: FrameworkTag.VUE },
+      ],
     });
     const responseBytes = toBinary(TypeInfoCapabilityHandshakeResponseSchema, response);
     const responseDecoded = fromBinary(TypeInfoCapabilityHandshakeResponseSchema, responseBytes);
     expect(responseDecoded).toEqual(response);
+    // The advertised digest survives byte-for-byte: it is the reference a
+    // framework-surface selector names.
+    expect(Array.from(responseDecoded.frameworkProfiles[0]?.profile?.digest ?? [])).toEqual(
+      Array.from({ length: 32 }, (_, i) => i),
+    );
   });
 
   it("FrameworkSurfacePayload roundtrips with nested SemanticTypeGraph", () => {
     const payload = create(FrameworkSurfacePayloadSchema, {
       schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
-      selector: { canonicalId: "/Foo.vue", frameworkAdapterId: "vue" },
+      selector: { canonicalId: "/Foo.vue", frameworkProfile: { digest: Uint8Array.from({ length: 32 }, (_, i) => i) } },
       framework: FrameworkTag.VUE,
       graph: {
         schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
@@ -741,7 +755,7 @@ describe("typeinfo proto TS bindings", () => {
         case: "frameworkSurface",
         value: {
           schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
-          selector: { canonicalId: "/Foo.vue", frameworkAdapterId: "vue" },
+          selector: { canonicalId: "/Foo.vue", frameworkProfile: { digest: Uint8Array.from({ length: 32 }, (_, i) => i) } },
           framework: FrameworkTag.VUE,
           graph: { schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION },
           surfaces: everyKind.map((kind) => ({
@@ -821,8 +835,9 @@ describe("typeinfo proto TS bindings", () => {
     // Schema 6 added typed member keys; schema 7 reserves tag 33 for the
     // canonical source-ordered object-spread program; schema 8 adds tag 34,
     // the applied compiler intrinsic (`Awaited<T>`), carrying a closed op
-    // enum and operand node ids rather than a declaration symbol.
-    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(10);
+    // enum and operand node ids rather than a declaration symbol. Schema 11
+    // types the framework-surface selector's profile.
+    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(11);
   });
 
   it("SemanticTypeGraph roundtrips the payload-side relation_proofs table (field 13)", () => {

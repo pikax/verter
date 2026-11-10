@@ -56,6 +56,8 @@ pub use wire::ContextualTypeRequest;
 pub use wire::EvaluateTypeExpressionGraphRequest;
 pub use wire::ExpandGraphAroundRequest;
 pub use wire::FlowNarrowingRequest;
+pub use wire::FrameworkProfileAdvertisement;
+pub use wire::FrameworkProfileRef;
 pub use wire::FrameworkSurfaceDeclarationKind;
 pub use wire::FrameworkSurfaceKindEntry;
 pub use wire::FrameworkSurfaceKindStatus;
@@ -345,7 +347,25 @@ pub use wire::UniqueSymbolKeyExpr;
 /// undemanded kind is neither resolved nor filled. A request below v10 must
 /// leave the field empty and keeps the one-entry-per-known-kind response.
 /// v9 stays accepted under that older contract.
-pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 10;
+///
+/// v11 types the `Component` selector's framework (TR06, VID0 `V-D02`):
+/// `ComponentSelector.framework_adapter_id` (field 4, an open adapter
+/// string) is reserved and `ComponentSelector.framework_profile` (field 5,
+/// a `FrameworkProfileRef`: the 32-byte digest of one host-admitted
+/// `FrameworkProfileId`) replaces it. Profiles are discovered through the
+/// new `TypeInfoCapabilityHandshakeResponse.framework_profiles`
+/// advertisements (field 3, add-only); a well-formed reference the host does
+/// not admit is the new `UnknownFrameworkProfile` error arm (tag 13). The
+/// framework-surface operation's floor moves to 11 — a framework-surface
+/// request below 11 is a `MalformedPayload`, and the response echoes the
+/// typed selector built from the admitted identity. v10 stays accepted for
+/// every other operation.
+pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 11;
+
+/// Byte length of a [`FrameworkProfileRef::digest`]: the canonical digest
+/// of a `FrameworkProfileId`. A reference of any other length is a
+/// `MalformedPayload` before admission is consulted.
+pub const FRAMEWORK_PROFILE_DIGEST_LEN: usize = 32;
 
 // -------------------------------------------------------------------------
 // Typed constructor helpers for the request-error variants. The
@@ -395,6 +415,16 @@ pub fn wire_error_unknown_schema_version(
 pub fn wire_error_malformed_payload(detail: &str) -> wire::TypeInfoRequestErrorMalformedPayload {
     wire::TypeInfoRequestErrorMalformedPayload {
         detail: detail.to_string(),
+    }
+}
+
+/// Build an `UnknownFrameworkProfile` error variant payload echoing the
+/// rejected (well-formed, unadmitted) profile reference.
+pub fn wire_error_unknown_framework_profile(
+    profile: FrameworkProfileRef,
+) -> wire::TypeInfoRequestErrorUnknownFrameworkProfile {
+    wire::TypeInfoRequestErrorUnknownFrameworkProfile {
+        profile: Some(profile),
     }
 }
 

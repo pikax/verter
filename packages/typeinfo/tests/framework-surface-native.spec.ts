@@ -14,13 +14,15 @@
  * decode drifts, or the executor stops surfacing the macro members.
  */
 
-import { create, toBinary } from "@bufbuild/protobuf";
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
   FrameworkSurfaceKind,
   GraphOperation,
   GraphProjectionMode,
   GraphReductionDemand,
   TYPEINFO_GRAPH_SCHEMA_VERSION,
+  TypeInfoCapabilityHandshakeRequestSchema,
+  TypeInfoCapabilityHandshakeResponseSchema,
   TypeInfoGraphRequestSchema,
 } from "@verter/proto";
 import { VerterHost, captureAvailability } from "@verter/native";
@@ -28,7 +30,11 @@ import { describe, expect, it } from "vitest";
 
 import type { FunctionType, TypeDescriptor } from "@verter/type-ir";
 
-import { decodeFrameworkSurfaceResponse, type FrameworkSurface } from "../src/framework-surface.js";
+import {
+  decodeFrameworkSurfaceResponse,
+  type FrameworkSurface,
+  type FrameworkSurfaceError,
+} from "../src/framework-surface.js";
 
 function expectFunction(type: TypeDescriptor | undefined): FunctionType {
   expect(type?.kind).toBe("function");
@@ -57,15 +63,44 @@ const EVERY_KIND: FrameworkSurfaceKind[] = [
   FrameworkSurfaceKind.MODEL,
 ];
 
-/** Encode the wire `TypeInfoGraphRequest` envelope for a registered adapter id. */
-function encodeRequest(canonicalId: string, frameworkAdapterId: string): Buffer {
+/**
+ * Discover the digest of the framework profile `host` advertises for
+ * `family` through the real capability handshake binding — the only way a
+ * client learns a profile reference (schema 11).
+ */
+function discoverProfile(host: VerterHost, family: string): Uint8Array {
+  const request = create(TypeInfoCapabilityHandshakeRequestSchema, {
+    clientVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
+  });
+  const handshake = fromBinary(
+    TypeInfoCapabilityHandshakeResponseSchema,
+    new Uint8Array(
+      host.typeInfoCapabilities(
+        Buffer.from(toBinary(TypeInfoCapabilityHandshakeRequestSchema, request)),
+      ),
+    ),
+  );
+  const digest = handshake.frameworkProfiles.find((p) => p.family === family)?.profile?.digest;
+  if (!digest) {
+    throw new Error(`the host advertises no ${family} profile`);
+  }
+  return digest;
+}
+
+/** Encode the wire `TypeInfoGraphRequest` envelope naming a profile digest. */
+function encodeRequest(canonicalId: string, digest: Uint8Array): Buffer {
   const request = create(TypeInfoGraphRequestSchema, {
     schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
     operation: GraphOperation.FRAMEWORK_SURFACES,
     payload: {
       case: "frameworkSurface",
       value: {
-        selector: { canonicalId, exportName: "", hasExportName: false, frameworkAdapterId },
+        selector: {
+          canonicalId,
+          exportName: "",
+          hasExportName: false,
+          frameworkProfile: { digest },
+        },
         context: {
           mode: GraphProjectionMode.NAVIGATE,
           demand: GraphReductionDemand.PUBLISHED,
@@ -97,8 +132,9 @@ describe("resolveFrameworkSurfaceWithAudit (native binding)", () => {
       source: Buffer.from(VUE_SFC, "utf-8"),
     });
 
+    const vueProfile = discoverProfile(host, "vue");
     const { response, auditRecord } = host.resolveFrameworkSurfaceWithAudit(
-      encodeRequest(canonicalId, "vue"),
+      encodeRequest(canonicalId, vueProfile),
     );
     expect(response).toBeInstanceOf(Buffer);
     // Audit is enabled, so the record rides the result exactly when the
@@ -115,7 +151,13 @@ describe("resolveFrameworkSurfaceWithAudit (native binding)", () => {
     expect("error" in decoded).toBe(false);
     const surface = decoded as FrameworkSurface;
 
-    // A v3 payload carries exactly one entry per known kind.
+    // The decoded selector echo keeps the admitted profile qualification.
+    expect(surface.selector?.canonicalId).toBe(canonicalId);
+    expect(Array.from(surface.selector?.frameworkProfile?.digest ?? [])).toEqual(
+      Array.from(vueProfile),
+    );
+
+    // The response carries exactly one entry per demanded kind.
     expect(surface.kinds.size).toBe(6);
 
     const props = surface.kinds.get(FrameworkSurfaceKind.PROPS)!;
@@ -143,7 +185,7 @@ describe("resolveFrameworkSurfaceWithAudit (native binding)", () => {
     });
   });
 
-  it("returns the typed error arm for an unknown adapter id", () => {
+  it("returns the typed unknownFrameworkProfile error for an unadmitted profile", () => {
     const host = new VerterHost({ auditEnabled: false });
     const canonicalId = "/fixtures/Unknown.vue";
     host.upsert({
@@ -152,43 +194,17 @@ describe("resolveFrameworkSurfaceWithAudit (native binding)", () => {
       source: Buffer.from(VUE_SFC, "utf-8"),
     });
 
-    // Hand-encode an envelope naming a non-existent adapter id.
-    const request = create(TypeInfoGraphRequestSchema, {
-      schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
-      operation: GraphOperation.FRAMEWORK_SURFACES,
-      payload: {
-        case: "frameworkSurface",
-        value: {
-          selector: {
-            canonicalId,
-            exportName: "",
-            hasExportName: false,
-            frameworkAdapterId: "not-a-real-framework",
-          },
-          context: {
-            mode: GraphProjectionMode.NAVIGATE,
-            demand: GraphReductionDemand.PUBLISHED,
-          },
-          closure: { kind: { case: "oneLevel", value: {} } },
-          displayPolicy: {
-            qualification: 1,
-            branding: 1,
-            budgets: { maxStringLength: 4096, maxDepth: 16 },
-          },
-          includeProvenance: false,
-          includeDiagnostics: true,
-          includeProjection: [],
-          schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
-          requestedKinds: EVERY_KIND,
-        },
-      },
-    });
-    const { response } = host.resolveFrameworkSurfaceWithAudit(
-      Buffer.from(toBinary(TypeInfoGraphRequestSchema, request)),
-    );
+    // A well-shaped 32-byte reference the host never minted.
+    const forged = new Uint8Array(32).fill(0xab);
+    const { response } = host.resolveFrameworkSurfaceWithAudit(encodeRequest(canonicalId, forged));
 
     const decoded = decodeFrameworkSurfaceResponse(new Uint8Array(response));
     expect("error" in decoded).toBe(true);
+    const { error } = decoded as FrameworkSurfaceError;
+    expect(error.case).toBe("unknownFrameworkProfile");
+    if (error.case === "unknownFrameworkProfile") {
+      expect(Array.from(error.value.profile?.digest ?? [])).toEqual(Array.from(forged));
+    }
   });
 });
 
@@ -234,7 +250,7 @@ describe("resolveFrameworkSurfaceWithAudit (Svelte callback props)", () => {
     });
 
     const { response } = host.resolveFrameworkSurfaceWithAudit(
-      encodeRequest(canonicalId, "svelte"),
+      encodeRequest(canonicalId, discoverProfile(host, "svelte")),
     );
     const decoded = decodeFrameworkSurfaceResponse(new Uint8Array(response));
     expect("error" in decoded).toBe(false);

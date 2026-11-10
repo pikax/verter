@@ -155,8 +155,11 @@ permanent "no schema change" guarantee. Flow:
    echo, nested framework-surface validator). A malformed envelope returns
    the typed `error` arm BEFORE any registry lookup or semantic dispatch
    (`framework_surface_wire_executor_validates_first`).
-2. Intern `selector.framework_adapter_id` → registry lookup. Unknown id ⇒
-   typed `MalformedPayload` (NO new error variant).
+2. Resolve `selector.framework_profile` (schema 11, a `FrameworkProfileRef`
+   digest advertised by `typeinfo_capabilities`) through the registry's
+   admitted profile index → the sealed `FrameworkProfileId` + its
+   registration. An unadmitted reference ⇒ typed `UnknownFrameworkProfile`;
+   the open `framework_adapter_id` string (field 4) is reserved.
 3. Resolve the selector (default export via the synthesized `default`;
    named export via the shallow inventory, strictly validated against the
    export table). A named-export framework surface is gated on the
@@ -169,8 +172,8 @@ permanent "no schema change" guarantee. Flow:
 4. Requested set = the request's facet demand (`FrameworkSurfaceRequest.
    requested_kinds`, schema 10: non-empty, known, duplicate-free, answered in
    enum-tag order) — exactly one entry per REQUESTED kind, none for an
-   undemanded kind. A request below schema 10 carries no demand and keeps
-   `ALL_FRAMEWORK_SURFACE_KINDS` (one entry per known kind).
+   undemanded kind. The operation's floor is schema 11, so every accepted
+   request carries the demand.
 5. `SurfaceRegistration::Deferred` ⇒ every kind structurally UNSUPPORTED.
    `Adapter` ⇒ `plan_surfaces` over the facts/carrier-only ctx, the
    executor resolves each `PlannedDemand` through the module-private

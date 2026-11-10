@@ -235,6 +235,11 @@ pub struct ResolvedComponentSelector {
     pub canonical: Arc<str>,
     /// The component's export kind.
     pub export: ComponentExport,
+    /// The admitted semantic profile the component is read under — the
+    /// typed half of the `Component` selector (TR06), resolved from the wire
+    /// reference by the registry before any semantic work. Never a display
+    /// family or an adapter spelling.
+    pub framework_profile: verter_identity::successor::FrameworkProfileId,
 }
 
 /// How a component is exported from its owner file.
@@ -334,13 +339,18 @@ mod tests {
 
     #[test]
     fn component_export_distinguishes_default_from_named() {
+        let profile = crate::framework::descriptor::VUE_PROFILE_MANIFEST
+            .mint(&crate::framework::descriptor::carrier_syntax_schema(1))
+            .expect("the built-in Vue manifest is an exact admitted release");
         let d = ResolvedComponentSelector {
             canonical: Arc::from("/a.vue"),
             export: ComponentExport::Default,
+            framework_profile: profile.clone(),
         };
         let n = ResolvedComponentSelector {
             canonical: Arc::from("/a.vue"),
             export: ComponentExport::Named(Arc::from("Foo")),
+            framework_profile: profile,
         };
         assert_ne!(d, n);
     }

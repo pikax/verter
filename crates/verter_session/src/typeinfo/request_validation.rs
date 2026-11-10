@@ -37,7 +37,7 @@ use verter_protocol::typeinfo::graph::{
     FrameworkSurfaceRequest, Operation as WireOperation, ProjectPathGraphRequest, ProjectionMode,
     ProjectionReductionContext, ReductionDemand, ResolveSymbolGraphRequest,
     StructuredTypeExpression, TypeInfoGraphRequest, TypeInfoRequestError,
-    TYPEINFO_GRAPH_SCHEMA_VERSION,
+    FRAMEWORK_PROFILE_DIGEST_LEN, TYPEINFO_GRAPH_SCHEMA_VERSION,
 };
 use verter_protocol::verter::v1::{
     graph_closure_policy, property_key_expr, structured_type_expression as wire_expr,
@@ -119,28 +119,31 @@ pub const SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS: &[u32] = &[
     // Schema 8 remains accepted: v9 adds no field, it states the UTF-8
     // byte unit of every span and validates request span refs.
     8,
-    // Schema 9 remains accepted under its own framework-surface contract:
-    // no requested-kind demand, one response entry per known kind. The v10
-    // `requested_kinds` demand is required only from v10.
+    // Schema 9 remains accepted for the legacy operations (v10 added only
+    // the framework-surface facet demand).
     9,
+    // Schema 10 remains accepted for the legacy operations: v11 changes only
+    // the framework-surface selector, whose operation floor moved to 11.
+    10,
     TYPEINFO_GRAPH_SCHEMA_VERSION,
 ];
 
-/// Minimum schema version the framework-surface operation accepts.
-/// The `framework_surface` RESPONSE arm exists only from schema 3 —
-/// a v2 framework-surface request would pass generic validation yet
-/// receive a response arm its decoder cannot see, so the operation
-/// rejects anything below 3 with
-/// [`TypeInfoRequestError::MalformedPayload`] (NOT
-/// `UnknownSchemaVersion`: v2 stays globally supported for the
-/// legacy operations).
-pub const FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION: u32 = 3;
+/// Minimum schema version the framework-surface operation accepts: 11,
+/// the typed `ComponentSelector.framework_profile` (TR06). The operation's
+/// request vocabulary below 11 (the open `framework_adapter_id` string,
+/// reserved since v11, and the pre-v10 all-known-kinds demand) is
+/// retired, not kept beside the typed selector: a framework-surface
+/// request below 11 is rejected with
+/// [`TypeInfoRequestError::MalformedPayload`] (NOT `UnknownSchemaVersion`:
+/// 3..=10 stay globally supported for the legacy operations, and a v3..v10
+/// framework-surface client could not decode a new error arm).
+pub const FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION: u32 = 11;
 
 /// First schema version whose framework-surface request carries the facet
-/// demand (`FrameworkSurfaceRequest.requested_kinds`). From this version
-/// the list is required (non-empty, no duplicate, no UNSPECIFIED value)
-/// and the response answers exactly the requested kinds; below it the
-/// list must be empty and the response carries every known kind.
+/// demand (`FrameworkSurfaceRequest.requested_kinds`): non-empty, no
+/// duplicate, no UNSPECIFIED value, answered with exactly the requested
+/// kinds. [`FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION`] is above it, so every
+/// accepted framework-surface request carries the demand.
 pub const FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION: u32 = 10;
 
 /// Maximum recursion depth allowed when walking a
@@ -454,14 +457,20 @@ pub fn validate_expand_graph_around_request(
 ///
 /// The payload's `schema_version` runs through the per-operation gate
 /// ([`validate_schema_version_for_operation`]) — the framework-surface
-/// operation requires [`FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION`], so a
-/// v2 payload is rejected with `MalformedPayload` here, before any
-/// adapter lookup or semantic dispatch.
+/// operation requires [`FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION`], so an
+/// older payload is rejected with `MalformedPayload` here, before any
+/// profile lookup or semantic dispatch.
+///
+/// Shape only: the selector's `framework_profile` must be present and
+/// carry a digest of exactly [`FRAMEWORK_PROFILE_DIGEST_LEN`] bytes.
+/// Whether the host ADMITS that profile is the registry's question, asked
+/// by the executor after this validator passes (`UnknownFrameworkProfile`).
 ///
 /// # Errors
 ///
 /// As [`validate_resolve_symbol_graph_request`], plus selector-
-/// presence and the per-operation schema-version gate.
+/// presence, profile-reference shape and the per-operation schema-version
+/// gate.
 pub fn validate_framework_surface_request(
     request: &FrameworkSurfaceRequest,
 ) -> Result<(), TypeInfoRequestError> {
@@ -472,10 +481,17 @@ pub fn validate_framework_surface_request(
     if selector.canonical_id.is_empty() {
         return Err(missing_project_path_error());
     }
-    if selector.framework_adapter_id.is_empty() {
+    let Some(profile) = selector.framework_profile.as_ref() else {
         return Err(malformed_payload_error_with_detail(
-            "framework_adapter_id is required",
+            "framework_profile is required (schema 11): name a profile advertised by the \
+             capability handshake",
         )());
+    };
+    if profile.digest.len() != FRAMEWORK_PROFILE_DIGEST_LEN {
+        return Err(malformed_payload_error_with_string_detail(format!(
+            "framework_profile.digest must be exactly {FRAMEWORK_PROFILE_DIGEST_LEN} bytes, got {}",
+            profile.digest.len()
+        )));
     }
     validate_projection_reduction_context(request.context.as_ref())?;
     validate_closure_policy(request.closure.as_ref())?;
@@ -488,27 +504,17 @@ pub fn validate_framework_surface_request(
     Ok(())
 }
 
-/// The facet-demand rule of [`FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION`]:
-/// a v10+ request names at least one kind, each a known
-/// [`FrameworkSurfaceKind`], none twice; an older request names none (its
-/// response contract is every known kind). Any other shape is a typed
-/// `MalformedPayload` before execution — never a silently widened or
-/// narrowed demand.
+/// The facet-demand rule (schema 10, see
+/// [`FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION`]): the request
+/// names at least one kind, each a known [`FrameworkSurfaceKind`], none
+/// twice. Any other shape is a typed `MalformedPayload` before execution —
+/// never a silently widened or narrowed demand. Unconditional: every
+/// accepted framework-surface schema carries the demand.
 fn validate_requested_surface_kinds(
     request: &FrameworkSurfaceRequest,
 ) -> Result<(), TypeInfoRequestError> {
     use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
 
-    if request.schema_version < FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION {
-        if !request.requested_kinds.is_empty() {
-            return Err(malformed_payload_error_with_string_detail(format!(
-                "requested_kinds requires schema version >= \
-                 {FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION}, got {}",
-                request.schema_version
-            )));
-        }
-        return Ok(());
-    }
     if request.requested_kinds.is_empty() {
         return Err(malformed_payload_error_with_detail(
             "requested_kinds must name at least one framework surface kind",

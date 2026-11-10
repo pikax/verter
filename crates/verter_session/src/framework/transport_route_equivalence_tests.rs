@@ -948,6 +948,10 @@ const NAPI_OUT_OF_SCOPE: &[(&str, &str)] = &[
     ("resolveSymbolWithAudit", "type-resolution product"),
     ("resolveTypeWithAudit", "type-resolution product"),
     ("setImportDependencies", "dependency-resolution input"),
+    (
+        "typeInfoCapabilities",
+        "TypeInfo capability handshake (versions and admitted framework profiles)",
+    ),
 ];
 
 /// The `VerterHost` methods the NAPI probe actually executes.
@@ -1466,6 +1470,10 @@ const WASM_OUT_OF_SCOPE: &[(&str, &str)] = &[
     ("resolveSymbolWithAudit", "type-resolution product"),
     ("resolveTypeWithAudit", "type-resolution product"),
     ("setImportDependencies", "dependency-resolution input"),
+    (
+        "typeInfoCapabilities",
+        "TypeInfo capability handshake (versions and admitted framework profiles)",
+    ),
 ];
 
 /// wasm-bindgen's own memory-management members on every generated class.

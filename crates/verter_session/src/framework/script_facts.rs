@@ -1628,6 +1628,12 @@ pub(crate) mod fixtures {
                 carries_template_analysis_inputs: false,
                 anchors_exports_at_script_setup: false,
                 carrier_probe_rank: 0,
+                profile_manifest: crate::framework::descriptor::FrameworkProfileManifest {
+                    family: "fixture-framework",
+                    release: "1",
+                    admitted_majors: &[1],
+                    claimed_carriers: &[],
+                },
             },
             carrier: None,
             synth: None,

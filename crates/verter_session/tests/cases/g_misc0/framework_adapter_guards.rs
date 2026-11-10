@@ -354,15 +354,21 @@ fn framework_surface_wire_executor_validates_first() {
     let body = strip_comments(&extract_fn_body(&src, "execute_framework_surface"));
 
     // In the executor body, the real `validate_type_info_graph_request` call
-    // MUST appear before the first registry lookup (`framework_registry().get(`)
-    // and before any selector resolution — a malformed envelope is rejected
-    // before any registry / semantic work.
+    // MUST appear before the registry's profile admission
+    // (`.resolve_profile(`) and before any selector resolution — a malformed
+    // envelope is rejected before any registry / semantic work, and an
+    // unadmitted profile before any selector resolution. The executor never
+    // looks a registration up by adapter id.
     let validate_at = body
         .find("validate_type_info_graph_request")
         .expect("executor body must call validate_type_info_graph_request");
     let registry_lookup_at = body
-        .find("framework_registry().get(")
-        .expect("executor body must look up the registry by adapter id");
+        .find(".resolve_profile(")
+        .expect("executor body must admit the selector's profile through the registry");
+    assert!(
+        !body.contains("framework_registry().get("),
+        "the executor dispatches by the admitted profile, never by an adapter-id lookup"
+    );
     let resolve_selector_at = body
         .find("resolve_component_selector")
         .expect("executor body must resolve the component selector");
@@ -370,9 +376,14 @@ fn framework_surface_wire_executor_validates_first() {
     assert!(
         validate_at < registry_lookup_at,
         "validation-first violated: the `validate_type_info_graph_request` \
-         call (offset {validate_at}) must precede the registry lookup \
-         `framework_registry().get(` (offset {registry_lookup_at}) — a \
+         call (offset {validate_at}) must precede the registry's profile \
+         admission `.resolve_profile(` (offset {registry_lookup_at}) — a \
          malformed envelope must be rejected before any registry dispatch."
+    );
+    assert!(
+        registry_lookup_at < resolve_selector_at,
+        "profile admission (offset {registry_lookup_at}) must precede selector \
+         resolution (offset {resolve_selector_at})."
     );
     assert!(
         validate_at < resolve_selector_at,

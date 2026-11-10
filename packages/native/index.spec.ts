@@ -1393,6 +1393,7 @@ describe("VerterHost type declarations in sync with native binary", () => {
       "resolveSymbolWithAudit",
       "resolveTypeWithAudit",
       "setImportDependencies",
+      "typeInfoCapabilities",
       "upsert",
     ].sort();
 
