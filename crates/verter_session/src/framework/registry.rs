@@ -839,6 +839,13 @@ pub enum FrameworkRegistryBuildError {
         /// The adapter that registered the same profile first.
         first_adapter_id: FrameworkAdapterId,
     },
+    /// Two rows register one adapter id; neither is overwritten by insertion
+    /// order (an overwritten row would leave its profile advertised against
+    /// another registration).
+    DuplicateAdapter {
+        /// The adapter id registered twice.
+        adapter_id: FrameworkAdapterId,
+    },
 }
 
 impl std::fmt::Display for FrameworkRegistryBuildError {
@@ -856,6 +863,11 @@ impl std::fmt::Display for FrameworkRegistryBuildError {
                 f,
                 "framework adapters '{first_adapter_id}' and '{adapter_id}' mint the same \
                  semantic profile; one profile has one registration"
+            ),
+            Self::DuplicateAdapter { adapter_id } => write!(
+                f,
+                "framework adapter '{adapter_id}' is registered twice; one adapter id has one \
+                 registration"
             ),
         }
     }
@@ -959,6 +971,9 @@ impl FrameworkAdapterRegistry {
         let mut profiles: FxHashMap<FrameworkProfileWireKey, Arc<RegisteredFrameworkProfile>> =
             FxHashMap::default();
         for (adapter_id, registration) in rows {
+            if registrations.contains_key(&adapter_id) {
+                return Err(FrameworkRegistryBuildError::DuplicateAdapter { adapter_id });
+            }
             let profile = registration
                 .descriptor
                 .profile_manifest
@@ -1980,6 +1995,19 @@ mod tests {
                 FrameworkRegistryBuildError::DuplicateProfile { .. }
             ),
             "got {duplicate:?}"
+        );
+        // One adapter id registered twice — even with distinct manifests —
+        // fails instead of the second row overwriting the first.
+        let twice = FrameworkAdapterRegistry::try_from_registrations([
+            (FrameworkAdapterId::vue(), vue_registration()),
+            (FrameworkAdapterId::vue(), with_release("3.0")),
+        ])
+        .expect_err("one adapter id has one registration");
+        assert_eq!(
+            twice,
+            FrameworkRegistryBuildError::DuplicateAdapter {
+                adapter_id: FrameworkAdapterId::vue(),
+            }
         );
 
         let syntax = carrier_syntax_schema(BUILT_IN_PARSER_GRAMMAR_VERSION);
