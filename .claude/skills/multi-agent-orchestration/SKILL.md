@@ -45,6 +45,18 @@ Roadmap identity stays out of landed code and tests. Production file/module name
 
 In a fresh worktree, run `pnpm install --frozen-lockfile` before JS/TS tests or workspace-importing Node scripts so missing gitignored dependencies do not look like regressions.
 
+### When working in a Gin workspace
+
+When `gin status` succeeds in the checkout, the node runs in a Gin workspace: Gin is the version control there, not Git. Details are in `CLAUDE.md` → "When working in a Gin workspace". There, the workspace Tama placed is the node's candidate, and the worktree, branch, squash and PR steps of this skill are replaced:
+
+- Do not create a `git worktree`, branch, commit or PR for the node. Edit the placed workspace; one implementation or fix owner mutates it at a time, as above.
+- After each finished charter item, run `gin checkpoint --meta done=<numbered charter items>` (cumulative, for example `done=1,2`).
+- Before publishing, run `node scripts/precheck.mjs` (the pre-commit checks; no commit runs the husky hook there).
+- Publish with `gin publish --meta done=<items> --meta unlocks=<child task ids>` as soon as a child's needed items are done, or `unlocks=all` when every child can start. Publishing is the hand-off. Landing, the GitHub projection and its commit message happen outside the workspace, so write no squash message or `Closes #<n>` line.
+- Take parent publications with `gin update`. Reviewers and verifiers inspect the candidate in the workspace (`gin diff`) and need no Git branch.
+
+In a Git clone, the rules above apply unchanged.
+
 Reviewers should inspect one stable node candidate patch, or the explicitly approved atomic multi-node candidate. The trust model does not require machine enforcement of immutability. Any material fix invalidates affected review conclusions by judgment; rerun the relevant review and verification without restamping identities.
 
 ## Train-wide conformance
@@ -69,7 +81,7 @@ Consolidate all findings once per round. One fix agent addresses the full set an
 
 Run targeted evidence during implementation and the owning final gate on the final candidate. Land by squash-merging the reviewed node PR through GitHub; the TAMA controller records the merge and updates the node's issue. For an authorized non-PR landing, verify the reviewed squash commit body has every required mapped-issue closing line, then use the repository's normal landing workflow; pushing or merging that commit to the origin default branch performs issue closure. There is no fast-forward identity, landing receipt, activation command, or confirmation manifest.
 
-Remove disposable worktrees after their results are recorded. Report the implemented node, commit locator hints, review verdicts, verification results, remaining limitations, and cleanup state.
+Remove disposable worktrees after their results are recorded. In a Gin workspace, `gin publish` replaces the PR landing step, and Tama, not the agent, retires the workspace. Report the implemented node, commit locator hints, review verdicts, verification results, remaining limitations, and cleanup state.
 
 See `references/templates.md` for prompts.
 

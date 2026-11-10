@@ -1,0 +1,10 @@
+{
+  "owner": "precheck",
+  "tests": [
+    {
+      "runner": "node-test",
+      "file": "scripts/precheck.test.mjs",
+      "ci": true
+    }
+  ]
+}
