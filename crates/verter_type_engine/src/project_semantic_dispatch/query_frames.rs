@@ -3291,7 +3291,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return FramePoll::Need(need);
                 }
                 FamilyStep::Need(need, family) => {
-                    step = self.resume_family_need_in_place(need, family);
+                    step = self.resume_family_need_in_place(need, *family);
                 }
             }
         }

@@ -683,7 +683,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub(super) fn resume_family_need_in_place(
         &self,
         key: SemanticQueryKey,
-        build: Box<FamilyBuild>,
+        build: FamilyBuild,
     ) -> FamilyStep {
         let retired = build.awaits_retired_read(&self.continuation_stage());
         let counts =
@@ -702,7 +702,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             self.execute_via_cold_build_helper(key)
         };
-        self.resume_family_build(*build, &mut read)
+        self.resume_family_build(build, &mut read)
     }
 
     /// Build `key`'s family through the synchronous producer's driver,
@@ -781,7 +781,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             match step {
                 done @ (FamilyStep::Done(_) | FamilyStep::Value(_)) => return done,
                 FamilyStep::Need(key, build) => {
-                    step = self.resume_family_need_in_place(key, build);
+                    step = self.resume_family_need_in_place(key, *build);
                 }
                 FamilyStep::Load(canonical, build) => {
                     let serve = self.ctx.ensure_indexed_ready_serve(&canonical);
