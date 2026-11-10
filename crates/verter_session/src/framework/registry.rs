@@ -1215,6 +1215,24 @@ impl FrameworkAdapterRegistry {
             })
     }
 
+    /// Whether the adapter that owns `language` classifies its carrier's
+    /// component API calls and store facts — REGISTRY DATA the
+    /// framework-neutral MCP analysis queries read as catalog support instead
+    /// of branching on a framework identity (`is_vue()`). The row is
+    /// confirmed to be the adapter's CARRIER language, so a same-adapter
+    /// TEMPLATE row answers `false`. A non-framework language, an
+    /// unregistered adapter or a non-carrier row declares nothing.
+    #[must_use]
+    pub fn classifies_component_api_calls(&self, language: &FileLanguage) -> bool {
+        language
+            .adapter_id()
+            .and_then(|adapter_id| self.get(adapter_id))
+            .is_some_and(|registration| {
+                registration.descriptor.classifies_component_api_calls
+                    && is_registered_carrier_row(language, &registration.descriptor)
+            })
+    }
+
     /// The adapter id of the unique registered adapter that SYNTHESIZES a
     /// `default` component value (carries a [`ComponentDefaultSynth`] leg).
     ///

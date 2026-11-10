@@ -1627,6 +1627,7 @@ pub(crate) mod fixtures {
                 declares_script_setup_type_bindings: false,
                 carries_template_analysis_inputs: false,
                 anchors_exports_at_script_setup: false,
+                classifies_component_api_calls: false,
                 carrier_probe_rank: 0,
                 profile_manifest: crate::framework::descriptor::FrameworkProfileManifest {
                     family: "fixture-framework",

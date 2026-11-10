@@ -242,6 +242,18 @@ pub struct FrameworkAdapterDescriptor {
     /// descriptor declares it `true`; an adapter whose exports are
     /// ordinary signature statements declares it `false`.
     pub anchors_exports_at_script_setup: bool,
+    /// Whether this adapter's carrier analysis classifies its component API
+    /// calls (lifecycle hooks, `provide`/`inject`, `defineComponent`) and its
+    /// store definitions and uses, so a query over those classified facts is
+    /// complete for the carrier.
+    ///
+    /// The framework-NEUTRAL MCP analysis queries read this REGISTRY-DATA
+    /// capability as their catalog support for a carrier's profile — they do
+    /// NOT branch on a framework identity (`is_vue()`). The Vue descriptor
+    /// declares it `true`; an adapter whose analysis does not classify those
+    /// calls declares it `false`, and the queries refuse its carriers as an
+    /// unsupported capability rather than reporting them clean.
+    pub classifies_component_api_calls: bool,
     /// This carrier's rank in the extension-probe priority for
     /// extension-based dependency resolution: when one bare specifier
     /// matches admitted carriers of several adapters (a same-stem
@@ -896,6 +908,8 @@ pub fn vue_descriptor() -> FrameworkAdapterDescriptor {
         // `<script setup>` top-level bindings are the authored exports,
         // so export spans anchor at the script-setup bindings/macros.
         anchors_exports_at_script_setup: true,
+        // The SFC script analysis classifies Vue API calls and store facts.
+        classifies_component_api_calls: true,
         // The established same-stem probe winner: a `./Widget` collision
         // with a `.svelte` twin resolves to the `.vue` carrier first.
         carrier_probe_rank: 0,
@@ -1066,6 +1080,9 @@ pub fn svelte_descriptor() -> FrameworkAdapterDescriptor {
         // A `.svelte` script's exports are ordinary signature statements,
         // not script-setup auto-exports.
         anchors_exports_at_script_setup: false,
+        // A `.svelte` analysis does not classify Svelte lifecycle, context or
+        // store calls into the component-API facts.
+        classifies_component_api_calls: false,
         // Probed after `.vue` on a same-stem collision.
         carrier_probe_rank: 1,
         profile_manifest: SVELTE_PROFILE_MANIFEST,

@@ -29,6 +29,10 @@ use verter_session_query::analysis::types::{
     AnalysisFlags, AnalyzedMacroKind, VueApiClassification,
 };
 
+use verter_session::participation::{
+    self, CapabilityOperation, DemandPurpose, ParticipationPermit,
+};
+
 use crate::helpers::mcp_err;
 use crate::server::{
     build_script_snapshot, compute_ssr_readiness, registered_block_facts, ComponentGraphParams,
@@ -52,10 +56,25 @@ pub struct DiscoveryWork {
 pub struct ToolReport {
     pub body: Value,
     pub work: DiscoveryWork,
+    /// The typed refusal answered instead of `body`, when participation
+    /// refused the query or superseded it while it ran.
+    pub refusal: Option<ErrorData>,
 }
 
 impl ToolReport {
+    /// A refused query: no index or owner work, the typed refusal as answer.
+    fn refused(error: ErrorData) -> Self {
+        Self {
+            body: Value::Null,
+            work: DiscoveryWork::default(),
+            refusal: Some(error),
+        }
+    }
+
     pub(crate) fn into_result(self) -> Result<CallToolResult, ErrorData> {
+        if let Some(refusal) = self.refusal {
+            return Err(refusal);
+        }
         let json = serde_json::to_string_pretty(&self.body).map_err(|e| mcp_err(e.to_string()))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
@@ -174,7 +193,15 @@ impl<'h> Discovery<'h> {
         ToolReport {
             body,
             work: self.work,
+            refusal: None,
         }
+    }
+
+    /// A unit whose participation cell is withdrawn: the answer is partial
+    /// and names it.
+    fn withhold(&mut self, unit: &str) {
+        self.causes.insert("participation_withdrawn");
+        self.unavailable.insert(Arc::from(unit));
     }
 }
 
@@ -517,14 +544,126 @@ pub fn trace_event_flow(server: &VerterMcpServer, params: &TraceEventFlowParams)
     }))
 }
 
+/// One query over classified component-API facts (lifecycle hooks,
+/// `provide`/`inject`, `defineComponent`, stores), admitted in this
+/// invocation's own participation scope (COX0; UAK0 `D11`) before any index
+/// or owner read, never through a framework identity.
+struct ComponentApiQuery {
+    operation: CapabilityOperation,
+    purpose: DemandPurpose,
+    permit: ParticipationPermit,
+}
+
+impl ComponentApiQuery {
+    /// A bounded workspace query over classified registrations.
+    fn registrations(server: &VerterMcpServer) -> Result<Self, ToolReport> {
+        Self::admit(
+            server,
+            CapabilityOperation::WorkspaceContribution,
+            DemandPurpose::IndexContribution,
+        )
+    }
+
+    /// An explained per-component analysis report.
+    fn analysis_report(server: &VerterMcpServer) -> Result<Self, ToolReport> {
+        Self::admit(
+            server,
+            CapabilityOperation::AnalysisInspection,
+            DemandPurpose::Explain,
+        )
+    }
+
+    /// Admit the workspace-wide demand; a refusal is the typed answer.
+    fn admit(
+        server: &VerterMcpServer,
+        operation: CapabilityOperation,
+        purpose: DemandPurpose,
+    ) -> Result<Self, ToolReport> {
+        participation::admit_component_api_query(
+            &server.participation,
+            &server.host,
+            operation,
+            purpose,
+        )
+        .map(|permit| Self {
+            operation,
+            purpose,
+            permit,
+        })
+        .map_err(|refused| {
+            ToolReport::refused(participation_error(
+                format!(
+                    "verter does not serve this query: {}",
+                    refused.primary.key()
+                ),
+                serde_json::json!({
+                    "primary": refused.primary.key(),
+                    "restrictions": refused
+                        .restrictions
+                        .iter()
+                        .map(|reason| reason.key())
+                        .collect::<Vec<_>>(),
+                }),
+            ))
+        })
+    }
+
+    /// Whether `unit` belongs to this query's population. A unit whose
+    /// adapter does not classify these facts is outside it. A unit whose
+    /// own cell is withdrawn is left out and named, so the answer is never
+    /// presented as complete.
+    fn unit(&self, server: &VerterMcpServer, discovery: &mut Discovery<'_>, unit: &str) -> bool {
+        let catalog = participation::component_api_support(&server.host, unit);
+        match participation::admit_file(
+            &server.participation,
+            &server.host,
+            unit,
+            self.operation,
+            self.purpose,
+            catalog,
+        ) {
+            Ok(_) => true,
+            Err(_) if catalog == participation::CatalogSupport::UnsupportedCapability => false,
+            Err(_) => {
+                discovery.withhold(unit);
+                false
+            }
+        }
+    }
+
+    /// The answer, served only while the demand epoch it was admitted under
+    /// is current.
+    fn finish(self, server: &VerterMcpServer, discovery: Discovery<'_>, body: Value) -> ToolReport {
+        if server.participation.is_current(&self.permit) {
+            discovery.finish(body)
+        } else {
+            ToolReport::refused(participation_error(
+                "participation changed while the query ran; retry it".to_string(),
+                serde_json::json!({ "primary": "superseded" }),
+            ))
+        }
+    }
+}
+
+/// The typed refusal of a participation decision: never an empty answer.
+fn participation_error(message: String, detail: Value) -> ErrorData {
+    ErrorData::invalid_request(
+        message,
+        Some(serde_json::json!({ "verterParticipation": detail })),
+    )
+}
+
 /// Injected keys nobody provides and provided keys nobody injects.
 pub fn validate_provide_inject(server: &VerterMcpServer) -> ToolReport {
+    let query = match ComponentApiQuery::registrations(server) {
+        Ok(query) => query,
+        Err(refused) => return refused,
+    };
     let mut discovery = server.discovery();
     let rows = discovery.candidates(
         IndexSurface::Registrations,
         registration_domain_lookup(registration_domain::PROVIDE_INJECT),
     );
-    let classifier = server.host.language_classifier();
     let mut provides: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut injects: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for candidate in in_path_order(&rows) {
@@ -535,7 +674,7 @@ pub fn validate_provide_inject(server: &VerterMcpServer) -> ToolReport {
             continue;
         }
         let unit = locator(candidate);
-        if !classifier.classify(&unit).is_vue() {
+        if !query.unit(server, &mut discovery, &unit) {
             continue;
         }
         let side = if row.is_usage {
@@ -569,12 +708,13 @@ pub fn validate_provide_inject(server: &VerterMcpServer) -> ToolReport {
         })
         .collect();
 
-    discovery.finish(serde_json::json!({
+    let body = serde_json::json!({
         "total_provide_keys": provides.len(),
         "total_inject_keys": injects.len(),
         "missing_providers": missing_providers,
         "unused_provides": unused_provides,
-    }))
+    });
+    query.finish(server, discovery, body)
 }
 
 // ── Stores ────────────────────────────────────────────────────────
@@ -597,18 +737,21 @@ fn store_units(discovery: &mut Discovery<'_>) -> Vec<Arc<str>> {
 
 /// Per-file store uses and definitions.
 pub fn get_store_usage(server: &VerterMcpServer, params: &OptionalPathParams) -> ToolReport {
+    let query = match ComponentApiQuery::registrations(server) {
+        Ok(query) => query,
+        Err(refused) => return refused,
+    };
     let mut discovery = server.discovery();
     let filter_id = params.path.as_ref().map(|p| server.resolve(p));
-    let classifier = server.host.language_classifier();
     let mut results: Vec<Value> = Vec::new();
     for id in store_units(&mut discovery) {
-        if !classifier.classify(&id).is_vue() {
-            continue;
-        }
         if filter_id
             .as_ref()
             .is_some_and(|filter| id.as_ref() != filter.as_str())
         {
+            continue;
+        }
+        if !query.unit(server, &mut discovery, &id) {
             continue;
         }
         let Some(analysis) = discovery.analysis(&id) else {
@@ -653,22 +796,26 @@ pub fn get_store_usage(server: &VerterMcpServer, params: &OptionalPathParams) ->
         }));
     }
     let files_with_stores = results.len();
-    discovery.finish(serde_json::json!({
+    let body = serde_json::json!({
         "files_with_stores": files_with_stores,
         "results": results,
-    }))
+    });
+    query.finish(server, discovery, body)
 }
 
 /// Components to stores, store to store dependencies, and unused stores.
 pub fn get_store_graph(server: &VerterMcpServer) -> ToolReport {
+    let query = match ComponentApiQuery::registrations(server) {
+        Ok(query) => query,
+        Err(refused) => return refused,
+    };
     let mut discovery = server.discovery();
-    let classifier = server.host.language_classifier();
     let mut store_definitions: Vec<Value> = Vec::new();
     let mut store_usages_by_file: Vec<Value> = Vec::new();
     let mut all_store_ids: Vec<String> = Vec::new();
     let mut used_callees: HashSet<String> = HashSet::new();
     for id in store_units(&mut discovery) {
-        if !classifier.classify(&id).is_vue() {
+        if !query.unit(server, &mut discovery, &id) {
             continue;
         }
         let Some(analysis) = discovery.analysis(&id) else {
@@ -709,25 +856,29 @@ pub fn get_store_graph(server: &VerterMcpServer) -> ToolReport {
         .filter(|id| !used_callees.iter().any(|c| c.contains(id.as_str())))
         .collect();
 
-    discovery.finish(serde_json::json!({
+    let body = serde_json::json!({
         "total_store_definitions": store_definitions.len(),
         "total_files_using_stores": store_usages_by_file.len(),
         "store_definitions": store_definitions,
         "store_usages_by_file": store_usages_by_file,
         "all_store_ids": all_store_ids,
         "unused_stores": unused_stores,
-    }))
+    });
+    query.finish(server, discovery, body)
 }
 
 /// One store's definition, consumers and dependencies.
 pub fn trace_store_flow(server: &VerterMcpServer, params: &TraceStoreFlowParams) -> ToolReport {
+    let query = match ComponentApiQuery::registrations(server) {
+        Ok(query) => query,
+        Err(refused) => return refused,
+    };
     let mut discovery = server.discovery();
-    let classifier = server.host.language_classifier();
     let mut definition_file: Option<String> = None;
     let mut definition_info: Option<Value> = None;
     let mut consumer_files: Vec<Value> = Vec::new();
     for id in store_units(&mut discovery) {
-        if !classifier.classify(&id).is_vue() {
+        if !query.unit(server, &mut discovery, &id) {
             continue;
         }
         let Some(analysis) = discovery.analysis(&id) else {
@@ -773,13 +924,14 @@ pub fn trace_store_flow(server: &VerterMcpServer, params: &TraceStoreFlowParams)
     }
 
     let consumer_count = consumer_files.len();
-    discovery.finish(serde_json::json!({
+    let body = serde_json::json!({
         "store_id": params.store_id,
         "definition_file": definition_file,
         "definition": definition_info,
         "consumer_count": consumer_count,
         "consumers": consumer_files,
-    }))
+    });
+    query.finish(server, discovery, body)
 }
 
 // ── CSS ───────────────────────────────────────────────────────────
@@ -1012,18 +1164,21 @@ pub fn detect_migration_targets(
     server: &VerterMcpServer,
     params: &OptionalPathParams,
 ) -> ToolReport {
+    let query = match ComponentApiQuery::analysis_report(server) {
+        Ok(query) => query,
+        Err(refused) => return refused,
+    };
     let mut discovery = server.discovery();
     let filter = params.path.as_ref().map(|path| server.resolve(path));
-    let classifier = server.host.language_classifier();
     let mut targets: Vec<Value> = Vec::new();
     for id in discovery.units(IndexSurface::ComponentInventory) {
-        if !classifier.classify(&id).is_vue() {
-            continue;
-        }
         if filter
             .as_ref()
             .is_some_and(|filter| id.as_ref() != filter.as_str())
         {
+            continue;
+        }
+        if !query.unit(server, &mut discovery, &id) {
             continue;
         }
         let Some(analysis) = discovery.analysis(&id) else {
@@ -1060,21 +1215,25 @@ pub fn detect_migration_targets(
         }));
     }
     let total = targets.len();
-    discovery.finish(serde_json::json!({
+    let body = serde_json::json!({
         "targets": targets,
         "total": total,
-    }))
+    });
+    query.finish(server, discovery, body)
 }
 
 /// Per-component SSR readiness over every Vue component, with its summary.
 pub fn ssr_project_report(server: &VerterMcpServer) -> ToolReport {
+    let query = match ComponentApiQuery::analysis_report(server) {
+        Ok(query) => query,
+        Err(refused) => return refused,
+    };
     let mut discovery = server.discovery();
-    let classifier = server.host.language_classifier();
     let mut components = Vec::new();
     let mut total_score: f64 = 0.0;
     let mut blocking = Vec::new();
     for canonical in discovery.units(IndexSurface::ComponentInventory) {
-        if !classifier.classify(&canonical).is_vue() {
+        if !query.unit(server, &mut discovery, &canonical) {
             continue;
         }
         let Some(analysis) = discovery.analysis(&canonical) else {
@@ -1114,7 +1273,7 @@ pub fn ssr_project_report(server: &VerterMcpServer) -> ToolReport {
             .cmp(&b["score"].as_u64().unwrap_or(0))
     });
 
-    discovery.finish(serde_json::json!({
+    let body = serde_json::json!({
         "total_components": components.len(),
         "average_score": avg_score,
         "score_distribution": {
@@ -1132,7 +1291,8 @@ pub fn ssr_project_report(server: &VerterMcpServer) -> ToolReport {
         "blocking": blocking.len(),
         "critical_path_blockers": blocking.iter().take(10).collect::<Vec<_>>(),
         "components": components,
-    }))
+    });
+    query.finish(server, discovery, body)
 }
 
 /// Routes cross-referenced with the tracked files and the templates'

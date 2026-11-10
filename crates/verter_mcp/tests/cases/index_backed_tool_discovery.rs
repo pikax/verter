@@ -432,6 +432,82 @@ async fn population_tools_answer_the_fixture_populations() {
     assert!(health.is_object(), "{health}");
 }
 
+/// COX0 (UAK0 `D11`): the component-API queries admit through this
+/// invocation's own participation scope before any index read, never through
+/// a framework identity. Another scope (an editor's) has no say. A withdrawn
+/// query answers its typed refusal, never an empty report, and a unit whose
+/// own cell is withdrawn leaves the answer partial and named.
+#[tokio::test]
+async fn component_api_queries_follow_the_invocation_scope() {
+    use verter_protocol::participation::ParticipationInput;
+    use verter_session::participation::{HostParticipationResolver, ParticipationService};
+
+    let server = fresh_server(&fixture());
+    let publish = |scope: &ParticipationService, presets: Value| {
+        let input: ParticipationInput =
+            serde_json::from_value(serde_json::json!({ "version": 1, "presets": presets }))
+                .expect("well-formed input");
+        let resolver = HostParticipationResolver::new(&server.host, |uri: &str| {
+            uri.strip_prefix("file://").map(str::to_owned)
+        });
+        let decoded = input.decode(&resolver).expect("valid input");
+        assert!(scope
+            .publish_host_inputs(decoded.inputs)
+            .expect("valid mask")
+            .advanced());
+    };
+    let disabled = |target: Value, selector: Value| serde_json::json!([{ "target": target, "selector": selector, "preset": "disabled" }]);
+    let analysis = serde_json::json!({ "kind": "operation", "operation": "inspection.analysis" });
+
+    let editor = ParticipationService::new();
+    publish(
+        &editor,
+        disabled(analysis.clone(), serde_json::json!({ "kind": "all" })),
+    );
+    let served = answers(&server).await;
+    assert_eq!(served["ssr_project_report"]["total_components"], 4);
+
+    // One unit withdrawn: the report leaves it out and says so.
+    publish(
+        server.participation(),
+        disabled(
+            analysis.clone(),
+            serde_json::json!({ "kind": "document", "uri": "file:///app/src/Options.vue" }),
+        ),
+    );
+    let partial = index_tools::ssr_project_report(&server);
+    assert!(partial.refusal.is_none());
+    assert_eq!(partial.body["total_components"], 3);
+    assert_eq!(
+        partial.body["enumeration"]["causes"],
+        serde_json::json!(["participation_withdrawn"])
+    );
+    assert_eq!(
+        partial.body["enumeration"]["unavailable_units"],
+        serde_json::json!(["/app/src/Options.vue"])
+    );
+
+    // The whole facet withdrawn: a typed refusal before any index read.
+    publish(
+        server.participation(),
+        disabled(analysis, serde_json::json!({ "kind": "all" })),
+    );
+    let refused = index_tools::ssr_project_report(&server);
+    let refusal = refused.refusal.expect("a refusal, never an empty report");
+    assert_eq!(
+        refusal.data,
+        Some(serde_json::json!({ "verterParticipation": {
+            "primary": "disabled", "restrictions": ["disabled"]
+        }}))
+    );
+    assert_eq!(refused.work, DiscoveryWork::default(), "no index work");
+    assert_eq!(
+        body(server.validate_provide_inject().await)["total_provide_keys"],
+        1,
+        "the registration queries are their own cell"
+    );
+}
+
 async fn check(incremental: &VerterMcpServer, files: &BTreeMap<&str, String>, step: &str) {
     let live = answers(incremental).await;
     let clean = answers(&fresh_server(files)).await;
