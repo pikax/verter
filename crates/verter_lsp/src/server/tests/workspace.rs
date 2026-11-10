@@ -380,7 +380,7 @@ fn build_workspace_components_enumerates_svelte_and_strips_extension() {
     })
     .unwrap();
 
-    let components = build_workspace_components(&host, "/workspace/src/App.svelte");
+    let components = build_workspace_components(&host, "/workspace/src/App.svelte").value;
     let names: Vec<&str> = components.iter().map(|c| c.name.as_str()).collect();
     assert!(
         names.contains(&"MyButton"),
@@ -447,7 +447,7 @@ fn build_workspace_components_sanitizes_dotted_and_special_chars() {
         .unwrap();
     }
 
-    let components = build_workspace_components(&host, "/ws/src/App.vue");
+    let components = build_workspace_components(&host, "/ws/src/App.vue").value;
     let names: Vec<&str> = components.iter().map(|c| c.name.as_str()).collect();
 
     assert!(names.contains(&"ModelNamed"), "got: {names:?}");
@@ -490,7 +490,7 @@ fn build_workspace_components_preserves_dollar_and_skips_non_ascii_only() {
         .unwrap();
     }
 
-    let components = build_workspace_components(&host, "/ws/src/App.vue");
+    let components = build_workspace_components(&host, "/ws/src/App.vue").value;
     let names: Vec<&str> = components.iter().map(|c| c.name.as_str()).collect();
 
     assert!(
@@ -549,11 +549,13 @@ fn build_workspace_components_dotted_collision_is_deterministic() {
     // Run the enumeration several times; every run must produce byte-identical
     // output (name + path, in the same order).
     let baseline: Vec<(String, String)> = build_workspace_components(&host, "/ws/src/App.vue")
+        .value
         .into_iter()
         .map(|c| (c.name, c.import_path))
         .collect();
     for _ in 0..8 {
         let again: Vec<(String, String)> = build_workspace_components(&host, "/ws/src/App.vue")
+            .value
             .into_iter()
             .map(|c| (c.name, c.import_path))
             .collect();

@@ -4308,3 +4308,4 @@ mod nextest_policy;
 mod synchronization;
 mod transport;
 mod workspace;
+mod workspace_index_routes;

@@ -1,129 +1,181 @@
-// Workspace symbols: aggregate symbols across all indexed Vue files.
+// Workspace symbols: search the component carriers' names through the
+// workspace index.
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use tower_lsp_server::ls_types::*;
+use verter_session::workspace_index::{
+    Candidate, IndexDemand, IndexRow, IndexSurface, KeyFamily, Lookup, NameRole, PartitionFamily,
+    QueryBudgets, StyleRole, StyleSurface, StyleSymbolKind, LEXICAL_PROJECTION_VERSION,
+};
 use verter_session::VerterHost;
+
+use crate::server::server_utils::{IndexBacked, IndexRoute, WORKSPACE_INDEX_BUDGETS};
 
 /// Search for workspace symbols matching a query string.
 ///
-/// Aggregates symbols from all known Vue files in the host:
-/// - Component names (from template analysis)
+/// Answers from the workspace index over the component carriers:
 /// - Top-level bindings (variables, functions, classes)
-/// - Imported bindings
-/// - CSS classes and custom properties
-pub fn workspace_symbols(host: &VerterHost, query: &str) -> Vec<SymbolInformation> {
+/// - Components used in templates
+/// - CSS classes and custom properties defined in style blocks
+///
+/// A non-empty query keeps names containing it, case-insensitively. Symbols
+/// are ordered by file, then bindings, template components and style blocks
+/// in authored order. A walk the index could not certify leaves the answer
+/// partial, with its shortfall.
+pub(crate) fn workspace_symbols(
+    host: &VerterHost,
+    query: &str,
+) -> IndexBacked<Vec<SymbolInformation>> {
+    workspace_symbols_within(host, query, WORKSPACE_INDEX_BUDGETS)
+}
+
+/// One symbol's place in the answer: file, then section, then authored order.
+type SymbolOrder = (Arc<str>, u8, u32, u8, u32);
+
+pub(crate) fn workspace_symbols_within(
+    host: &VerterHost,
+    query: &str,
+    budgets: QueryBudgets,
+) -> IndexBacked<Vec<SymbolInformation>> {
     let query_lower = query.to_lowercase();
-    let file_list = host.list_files();
-    let mut symbols = Vec::new();
+    let wanted = |name: &str| query_lower.is_empty() || name.to_lowercase().contains(&query_lower);
+    // Stylesheet definitions only: markup class uses are no symbols.
+    let demand = IndexDemand::of([
+        IndexSurface::ComponentInventory,
+        IndexSurface::ComponentUses,
+        IndexSurface::Bindings,
+        IndexSurface::StyleDefinitions,
+        IndexSurface::CssVariables,
+    ]);
+    let mut route = IndexRoute::new(host, budgets);
+    let carriers: BTreeSet<Arc<str>> = route
+        .carriers(&demand)
+        .iter()
+        .map(|carrier| Arc::clone(&carrier.basis.locator))
+        .collect();
+    let mut every_name = |partition| {
+        route.walk(
+            &demand,
+            Lookup::Prefix {
+                partition,
+                family: KeyFamily::Lexical,
+                version: LEXICAL_PROJECTION_VERSION,
+                prefix: Arc::from(""),
+            },
+        )
+    };
+    let bindings = every_name(PartitionFamily::Bindings);
+    let uses = every_name(PartitionFamily::Components);
+    let classes = every_name(PartitionFamily::StyleSelectors);
+    let properties = every_name(PartitionFamily::CssVariables);
 
-    for (canonical_id, file_language) in &file_list {
-        if !file_language.is_framework_carrier() {
-            continue;
-        }
-
-        let analysis = match host.get_analysis(canonical_id) {
-            Some(a) => a,
-            None => continue,
-        };
-
-        let uri = canonical_id_to_uri(canonical_id);
-        let uri = match uri {
-            Some(u) => u,
-            None => continue,
-        };
-
-        // Top-level bindings (variables, functions, classes)
-        for binding in &analysis.bindings {
-            if !query_lower.is_empty() && !binding.name.to_lowercase().contains(&query_lower) {
-                continue;
-            }
+    let mut symbols: Vec<(SymbolOrder, SymbolInformation)> = Vec::new();
+    let mut push =
+        |candidate: &Candidate, section: (u8, u32, u8), name: String, kind, container: String| {
+            let locator = &candidate.contribution.basis.locator;
+            let Some(uri) = canonical_id_to_uri(locator) else {
+                return;
+            };
+            let (group, block, member) = section;
             #[allow(deprecated)]
-            symbols.push(SymbolInformation {
-                name: binding.name.clone(),
-                kind: binding_to_symbol_kind(&binding.kind),
+            let symbol = SymbolInformation {
+                name,
+                kind,
                 tags: None,
                 deprecated: None,
                 location: Location {
-                    uri: uri.clone(),
+                    uri,
                     range: Range::default(), // Byte offsets not easily convertible without LineIndex
                 },
-                container_name: Some(short_filename(canonical_id)),
-            });
-        }
+                container_name: Some(container),
+            };
+            symbols.push((
+                (
+                    Arc::clone(locator),
+                    group,
+                    block,
+                    member,
+                    candidate.record_index,
+                ),
+                symbol,
+            ));
+        };
+    let in_carrier =
+        |candidate: &&Candidate| carriers.contains(&candidate.contribution.basis.locator);
 
-        // Components used in template
-        if let Some(template) = analysis.template.as_deref() {
-            for comp in &template.components {
-                if !query_lower.is_empty() && !comp.name.to_lowercase().contains(&query_lower) {
-                    continue;
-                }
-                #[allow(deprecated)]
-                symbols.push(SymbolInformation {
-                    name: comp.name.clone(),
-                    kind: SymbolKind::CLASS,
-                    tags: None,
-                    deprecated: None,
-                    location: Location {
-                        uri: uri.clone(),
-                        range: Range::default(),
-                    },
-                    container_name: Some(format!("<template> in {}", short_filename(canonical_id))),
-                });
-            }
+    for candidate in bindings.iter().filter(in_carrier) {
+        let Some(IndexRow::Name(row)) = candidate.record().map(|record| &record.row) else {
+            continue;
+        };
+        let (NameRole::Declaration, Some(kind)) = (row.role, row.declaration_kind) else {
+            continue;
+        };
+        if !wanted(&row.spelling) {
+            continue;
         }
-
-        // CSS classes
-        for style in analysis.styles.iter() {
-            if let Some(css) = &style.css {
-                for class in &css.classes {
-                    let display_name = format!(".{}", class.name);
-                    if !query_lower.is_empty()
-                        && !display_name.to_lowercase().contains(&query_lower)
-                    {
-                        continue;
-                    }
-                    #[allow(deprecated)]
-                    symbols.push(SymbolInformation {
-                        name: display_name,
-                        kind: SymbolKind::STRING,
-                        tags: None,
-                        deprecated: None,
-                        location: Location {
-                            uri: uri.clone(),
-                            range: Range::default(),
-                        },
-                        container_name: Some(format!(
-                            "<style> in {}",
-                            short_filename(canonical_id)
-                        )),
-                    });
-                }
-
-                // Custom properties
-                for prop in &css.custom_properties {
-                    if !query_lower.is_empty() && !prop.name.to_lowercase().contains(&query_lower) {
-                        continue;
-                    }
-                    #[allow(deprecated)]
-                    symbols.push(SymbolInformation {
-                        name: prop.name.clone(),
-                        kind: SymbolKind::VARIABLE,
-                        tags: None,
-                        deprecated: None,
-                        location: Location {
-                            uri: uri.clone(),
-                            range: Range::default(),
-                        },
-                        container_name: Some(format!(
-                            "<style> in {}",
-                            short_filename(canonical_id)
-                        )),
-                    });
-                }
-            }
-        }
+        let file = short_filename(&candidate.contribution.basis.locator);
+        push(
+            candidate,
+            (0, 0, 0),
+            row.spelling.to_string(),
+            binding_to_symbol_kind(&kind),
+            file,
+        );
     }
 
-    symbols
+    for candidate in uses.iter().filter(in_carrier) {
+        let Some(IndexRow::Component(verter_session::workspace_index::ComponentRow::Usage {
+            tag,
+            ..
+        })) = candidate.record().map(|record| &record.row)
+        else {
+            continue;
+        };
+        if !wanted(tag) {
+            continue;
+        }
+        let file = short_filename(&candidate.contribution.basis.locator);
+        push(
+            candidate,
+            (1, 0, 0),
+            tag.to_string(),
+            SymbolKind::CLASS,
+            format!("<template> in {file}"),
+        );
+    }
+
+    for candidate in classes.iter().chain(&properties).filter(in_carrier) {
+        let Some(IndexRow::Stylesheet(row)) = candidate.record().map(|record| &record.row) else {
+            continue;
+        };
+        let StyleSurface::Style { block } = row.surface else {
+            continue;
+        };
+        if row.role != StyleRole::Definition {
+            continue;
+        }
+        let (name, kind, member) = match row.kind {
+            StyleSymbolKind::Class => (format!(".{}", row.name), SymbolKind::STRING, 0),
+            StyleSymbolKind::CustomProperty => (row.name.to_string(), SymbolKind::VARIABLE, 1),
+            StyleSymbolKind::Id => continue,
+        };
+        if !wanted(&name) {
+            continue;
+        }
+        let file = short_filename(&candidate.contribution.basis.locator);
+        push(
+            candidate,
+            (2, block, member),
+            name,
+            kind,
+            format!("<style> in {file}"),
+        );
+    }
+
+    symbols.sort_by(|a, b| a.0.cmp(&b.0));
+    route.finish(symbols.into_iter().map(|(_, symbol)| symbol).collect())
 }
 
 /// Convert AnalyzedBindingKind to LSP SymbolKind.

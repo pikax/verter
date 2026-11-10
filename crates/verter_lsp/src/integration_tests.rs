@@ -5831,7 +5831,7 @@ fn workspace_symbols_includes_svelte_components() {
     })
     .unwrap();
 
-    let symbols = workspace_symbols(&host, "widget");
+    let symbols = workspace_symbols(&host, "widget").value;
     assert!(
         symbols
             .iter()
@@ -5842,7 +5842,7 @@ fn workspace_symbols_includes_svelte_components() {
 
     // Discrimination: a plain .ts file's symbols are never scanned by this
     // carrier-only search.
-    let plain = workspace_symbols(&host, "plainOnly");
+    let plain = workspace_symbols(&host, "plainOnly").value;
     assert!(
         !plain
             .iter()

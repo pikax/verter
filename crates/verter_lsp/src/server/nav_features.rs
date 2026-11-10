@@ -910,6 +910,9 @@ async fn handle_completion_attempt(
     // authored component whose child contract is not cached yet.
     let native_completion = |native_snapshot: Option<&NativeCompletionSnapshot>| {
         let recognized_authored_component_contract_miss = std::cell::Cell::new(false);
+        // A workspace-component population the index could not certify makes
+        // the list incomplete, so the client asks again instead of caching it.
+        let workspace_components_partial = std::cell::Cell::new(false);
         let result = native_snapshot.and_then(|native| {
             let canonical_id = &native.canonical_id;
             // The WORKSPACE component scan is opt-in: it enumerates components the
@@ -998,7 +1001,9 @@ async fn handle_completion_attempt(
                 }
             };
             let ws_components = if workspace_component_scan {
-                build_workspace_components(server.documents.host(), canonical_id)
+                let answer = build_workspace_components(server.documents.host(), canonical_id);
+                workspace_components_partial.set(answer.shortfall.is_some());
+                answer.value
             } else {
                 Vec::new()
             };
@@ -1026,6 +1031,10 @@ async fn handle_completion_attempt(
                 completion_ssr_context,
                 native.structure.as_ref(),
             )
+        });
+        let result = result.map(|mut result| {
+            result.is_incomplete |= workspace_components_partial.get();
+            result
         });
         (result, recognized_authored_component_contract_miss.get())
     };
@@ -1496,11 +1505,14 @@ async fn handle_completion_attempt(
                                 None => None,
                             },
                         );
-                        return Ok(if merged.is_empty() {
+                        // An empty list that is still incomplete answers as
+                        // incomplete, so the client asks again.
+                        let is_incomplete = is_incomplete || verter_is_incomplete;
+                        return Ok(if merged.is_empty() && !is_incomplete {
                             None
                         } else {
                             Some(CompletionResponse::List(CompletionList {
-                                is_incomplete: is_incomplete || verter_is_incomplete,
+                                is_incomplete,
                                 items: merged,
                             }))
                         });

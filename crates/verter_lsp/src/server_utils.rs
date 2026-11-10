@@ -115,38 +115,311 @@ pub(super) fn wants_code_action_kind(only: Option<&[CodeActionKind]>, kind: &str
     }
 }
 
-/// Does NOT handle alias imports (e.g., `@/components/Foo.vue`).
-/// Build the list of workspace components available for auto-import.
+/// Finite budgets of one workspace-index walk on an LSP route. A population
+/// beyond them answers partial, never as a truncated complete list.
+pub(crate) const WORKSPACE_INDEX_BUDGETS: verter_session::workspace_index::QueryBudgets =
+    verter_session::workspace_index::QueryBudgets {
+        postings: 250_000,
+        records: 250_000,
+    };
+
+/// Why an index-backed route could not certify the population it answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IndexShortfall {
+    Partial {
+        cause: verter_session::workspace_index::PartialCause,
+        unavailable_units: Vec<Arc<str>>,
+    },
+    Cancelled,
+}
+
+/// Counted work of one index-backed route, summed over its walks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct IndexRouteWork {
+    pub(crate) walks: u32,
+    pub(crate) query: verter_session::workspace_index::QueryWork,
+    pub(crate) reconcile: verter_session::workspace_index::IndexReconcileWork,
+}
+
+/// The answer of one index-backed route: its value, and why it is partial
+/// when the index could not certify every walk it made.
+#[derive(Debug)]
+pub(crate) struct IndexBacked<T> {
+    pub(crate) value: T,
+    pub(crate) shortfall: Option<IndexShortfall>,
+    /// The route's counted work: the bounded-work evidence its tests assert.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) work: IndexRouteWork,
+}
+
+/// The walks of one route request over the workspace index. Every walk is
+/// bounded by the route's budgets; the first one that is not complete makes
+/// the whole answer partial.
+pub(crate) struct IndexRoute<'host> {
+    host: &'host verter_session::VerterHost,
+    budgets: verter_session::workspace_index::QueryBudgets,
+    shortfall: Option<IndexShortfall>,
+    work: IndexRouteWork,
+}
+
+impl<'host> IndexRoute<'host> {
+    pub(crate) fn new(
+        host: &'host verter_session::VerterHost,
+        budgets: verter_session::workspace_index::QueryBudgets,
+    ) -> Self {
+        Self {
+            host,
+            budgets,
+            shortfall: None,
+            work: IndexRouteWork::default(),
+        }
+    }
+
+    /// The candidates of one lookup under `demand`.
+    pub(crate) fn walk(
+        &mut self,
+        demand: &verter_session::workspace_index::IndexDemand,
+        lookup: verter_session::workspace_index::Lookup,
+    ) -> Vec<verter_session::workspace_index::Candidate> {
+        let (page, reconcile) =
+            self.host
+                .workspace_index_candidates(demand, lookup, self.budgets, None, &|| false);
+        self.record(page.work, reconcile, &page.status);
+        page.candidates
+    }
+
+    /// Every unit `surface` holds a slot for, rows or not.
+    pub(crate) fn units(
+        &mut self,
+        surface: verter_session::workspace_index::IndexSurface,
+    ) -> Vec<Arc<verter_session::workspace_index::Contribution>> {
+        let demand = verter_session::workspace_index::IndexDemand::of([surface]);
+        let (page, reconcile) =
+            self.host
+                .workspace_index_units(&demand, surface, self.budgets, &|| false);
+        self.record(page.work, reconcile, &page.status);
+        page.units
+    }
+
+    /// The component carriers of the workspace, one inventory slot per unit,
+    /// ordered by canonical id: the units whose component-capable claim holds
+    /// a component subject. `demand` must include the component inventory.
+    pub(crate) fn carriers(
+        &mut self,
+        demand: &verter_session::workspace_index::IndexDemand,
+    ) -> Vec<Arc<verter_session::workspace_index::Contribution>> {
+        use verter_session::workspace_index::{
+            ComponentRow, IndexRow, KeyFamily, Lookup, PartitionFamily,
+        };
+        let subjects = self.walk(
+            demand,
+            Lookup::Prefix {
+                partition: PartitionFamily::Components,
+                family: KeyFamily::Forward,
+                version: 0,
+                prefix: Arc::from(""),
+            },
+        );
+        let mut carriers: Vec<_> = subjects
+            .into_iter()
+            .filter(|candidate| {
+                matches!(
+                    candidate.record().map(|record| &record.row),
+                    Some(IndexRow::Component(
+                        ComponentRow::View { .. } | ComponentRow::ViewUnavailable { .. }
+                    ))
+                )
+            })
+            .map(|candidate| candidate.contribution)
+            .collect();
+        carriers.sort_by(|a, b| a.basis.locator.cmp(&b.basis.locator));
+        carriers.dedup_by(|a, b| a.basis.locator == b.basis.locator);
+        carriers
+    }
+
+    /// Each carrier's template component uses by tag, in authored order,
+    /// keyed by canonical id. `demand` must include the component uses.
+    pub(crate) fn component_uses(
+        &mut self,
+        demand: &verter_session::workspace_index::IndexDemand,
+    ) -> std::collections::BTreeMap<Arc<str>, Vec<Arc<str>>> {
+        use verter_session::workspace_index::{
+            ComponentRow, IndexRow, KeyFamily, Lookup, PartitionFamily,
+        };
+        let uses = self.walk(
+            demand,
+            Lookup::Prefix {
+                partition: PartitionFamily::Components,
+                family: KeyFamily::Exact,
+                version: 0,
+                prefix: Arc::from(""),
+            },
+        );
+        let mut by_file: std::collections::BTreeMap<Arc<str>, Vec<(u32, Arc<str>)>> =
+            std::collections::BTreeMap::new();
+        for candidate in &uses {
+            if let Some(IndexRow::Component(ComponentRow::Usage { tag, .. })) =
+                candidate.record().map(|record| &record.row)
+            {
+                by_file
+                    .entry(Arc::clone(&candidate.contribution.basis.locator))
+                    .or_default()
+                    .push((candidate.record_index, Arc::clone(tag)));
+            }
+        }
+        by_file
+            .into_iter()
+            .map(|(file, mut tags)| {
+                tags.sort_by_key(|(record, _)| *record);
+                (file, tags.into_iter().map(|(_, tag)| tag).collect())
+            })
+            .collect()
+    }
+
+    /// One carrier's full template facts, produced on demand when the host
+    /// holds none. A carrier whose template cannot be read makes the route
+    /// partial, naming the file, rather than silently dropping its uses.
+    pub(crate) fn template(
+        &mut self,
+        canonical: &str,
+    ) -> Option<
+        verter_session_query::retention::heap_size::OwnedValue<
+            verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+        >,
+    > {
+        use verter_session::workspace_index::{FactCoverage, PartialCause};
+        let receipt = self.host.template_facts(canonical);
+        let cause = match &receipt.coverage {
+            FactCoverage::Complete | FactCoverage::Absent => return receipt.value,
+            FactCoverage::Unavailable { .. } => PartialCause::UnavailableInput,
+            FactCoverage::Unsupported { .. } => PartialCause::UnsupportedCoverage,
+        };
+        self.shortfall.get_or_insert(IndexShortfall::Partial {
+            cause,
+            unavailable_units: vec![Arc::from(canonical)],
+        });
+        receipt.value
+    }
+
+    /// A candidate the route could not read: the answer is partial and
+    /// names it.
+    pub(crate) fn note_unavailable(&mut self, canonical: &str) {
+        self.shortfall.get_or_insert(IndexShortfall::Partial {
+            cause: verter_session::workspace_index::PartialCause::UnavailableInput,
+            unavailable_units: vec![Arc::from(canonical)],
+        });
+    }
+
+    fn record(
+        &mut self,
+        query: verter_session::workspace_index::QueryWork,
+        reconcile: verter_session::workspace_index::IndexReconcileWork,
+        status: &verter_session::workspace_index::EnumerationStatus,
+    ) {
+        use verter_session::workspace_index::EnumerationStatus;
+        let work = &mut self.work;
+        work.walks += 1;
+        work.query.key_lookups += query.key_lookups;
+        work.query.posting_visits += query.posting_visits;
+        work.query.records_returned += query.records_returned;
+        work.reconcile.population_checks += reconcile.population_checks;
+        work.reconcile.projections += reconcile.projections;
+        work.reconcile.unchanged += reconcile.unchanged;
+        work.reconcile.retired += reconcile.retired;
+        work.reconcile.publish_attempts += reconcile.publish_attempts;
+        let shortfall = match status {
+            EnumerationStatus::Complete => return,
+            EnumerationStatus::Partial { cause, covered, .. } => IndexShortfall::Partial {
+                cause: cause.clone(),
+                unavailable_units: covered.unavailable_units.clone(),
+            },
+            EnumerationStatus::Cancelled => IndexShortfall::Cancelled,
+        };
+        self.shortfall.get_or_insert(shortfall);
+    }
+
+    pub(crate) fn finish<T>(self, value: T) -> IndexBacked<T> {
+        tracing::trace!(
+            walks = self.work.walks,
+            key_lookups = self.work.query.key_lookups,
+            posting_visits = self.work.query.posting_visits,
+            records_returned = self.work.query.records_returned,
+            projections = self.work.reconcile.projections,
+            population_checks = self.work.reconcile.population_checks,
+            partial = self.shortfall.is_some(),
+            "workspace index route"
+        );
+        IndexBacked {
+            value,
+            shortfall: self.shortfall,
+            work: self.work,
+        }
+    }
+}
+
+/// The protocol answer for a workspace-wide request whose index walk could
+/// not certify its population: LSP `RequestFailed` (-32803), the same
+/// retryable answer as a still-building inventory, carrying the cause. A
+/// partial population is never served as a complete list.
+pub(crate) fn index_partial_error(shortfall: &IndexShortfall) -> tower_lsp_server::jsonrpc::Error {
+    let (cause, unavailable) = match shortfall {
+        IndexShortfall::Partial {
+            cause,
+            unavailable_units,
+        } => (format!("{cause:?}"), unavailable_units.clone()),
+        IndexShortfall::Cancelled => ("Cancelled".to_string(), Vec::new()),
+    };
+    tower_lsp_server::jsonrpc::Error {
+        code: tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803),
+        message: format!("the workspace index answered partially ({cause}); retry").into(),
+        data: Some(serde_json::json!({
+            "partial": cause,
+            "unavailableUnits": unavailable
+                .iter()
+                .map(|unit| unit.as_ref())
+                .collect::<Vec<&str>>(),
+        })),
+    }
+}
+
+/// The workspace components available for auto-import, from the component
+/// carriers of the workspace index.
 ///
-/// Scans all known .vue files in the host, derives PascalCase names from filenames,
-/// and computes relative import paths from the current file.
+/// Derives PascalCase names from carrier filenames and computes import paths
+/// from the current file. Does NOT handle alias imports beyond the host's
+/// preferred specifier. A partial index answer is returned with its
+/// shortfall, so completion reports it as incomplete.
 pub(super) fn build_workspace_components(
     host: &verter_session::VerterHost,
     current_file_id: &str,
-) -> Vec<crate::features::completion::WorkspaceComponent> {
-    let mut files = host.list_files();
+) -> IndexBacked<Vec<crate::features::completion::WorkspaceComponent>> {
+    workspace_components_within(host, current_file_id, WORKSPACE_INDEX_BUDGETS)
+}
+
+pub(super) fn workspace_components_within(
+    host: &verter_session::VerterHost,
+    current_file_id: &str,
+    budgets: verter_session::workspace_index::QueryBudgets,
+) -> IndexBacked<Vec<crate::features::completion::WorkspaceComponent>> {
+    use verter_session::workspace_index::{IndexDemand, IndexSurface};
+    let mut route = IndexRoute::new(host, budgets);
+    // The inventory alone: auto-import never walks a component's template.
+    let carriers = route.carriers(&IndexDemand::of([IndexSurface::ComponentInventory]));
     let current_dir = current_file_id
         .rsplit_once('/')
         .map(|(dir, _)| dir)
         .unwrap_or("");
 
-    // DETERMINISTIC ENUMERATION ORDER. `host.list_files()` is backed by a DashMap,
-    // so its iteration order is non-deterministic run-to-run. Two files can
-    // sanitize to the SAME identifier (e.g. `Model.Named.vue` and `ModelNamed.vue`
-    // → `ModelNamed`); the downstream completion synthesizers dedup by label and
-    // keep the FIRST candidate, so a non-deterministic order would make collision
-    // resolution AND completion-item ordering flap between runs. Sorting by the
-    // canonical file id gives a single stable precedence: the first canonical path
-    // wins a collision, and emitted candidates are in a fixed order.
-    files.sort_by(|a, b| a.0.cmp(&b.0));
-
+    // DETERMINISTIC ENUMERATION ORDER. Two files can sanitize to the SAME
+    // identifier (e.g. `Model.Named.vue` and `ModelNamed.vue` → `ModelNamed`);
+    // the downstream completion synthesizers dedup by label and keep the FIRST
+    // candidate. Carriers come ordered by canonical file id, so the first
+    // canonical path wins a collision and emitted candidates are in a fixed
+    // order whatever order the files were loaded in.
     let mut components = Vec::new();
 
-    for (file_id, kind) in &files {
-        // Only framework CARRIER files (`.vue`, `.svelte`, …).
-        if !kind.is_framework_carrier() {
-            continue;
-        }
+    for carrier in &carriers {
+        let file_id: &str = &carrier.basis.locator;
         // Skip the current file
         if file_id == current_file_id {
             continue;
@@ -186,7 +459,7 @@ pub(super) fn build_workspace_components(
         });
     }
 
-    components
+    route.finish(components)
 }
 
 /// Convert a filename stem to a valid JS-identifier PascalCase name.
