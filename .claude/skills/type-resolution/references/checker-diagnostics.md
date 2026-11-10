@@ -159,8 +159,11 @@ the checker's first failure and records no diagnostic.
 recovery is `Opaque(QueryError::CheckerRecovery)` with a certified basis: it reads, relates and prints
 as `any`, leaves the result complete (no `FlowReturnDegradation`, warm-admissible) and stays
 distinct from an authored `any` and from every typed gap. A consumer tells a recovery from a
-refusal by `FlowReturnResult::checker_diagnostics` and the audit payload's
-`FlowReturnInferencePayload::checker_diagnostics` (code, start, end), never by a partial reason.
+refusal by the result's completeness (`fact()`, no `degradation()`) and the recovery carrier
+(`Opaque(QueryError::CheckerRecovery)`), never by a partial reason.
+`FlowReturnResult::checker_diagnostics` and the audit payload's
+`FlowReturnInferencePayload::checker_diagnostics` (code, start, end) list only the occurrences the
+checker reports; a recovery the settings do not report (TS7023 without `noImplicitAny`) has none.
 
 - **TS2339.** A member read the shared walk missed, off a type that proves it absent
   (`member_proven_absent`): a union or an intersection with every arm lacking it (an arm declaring it

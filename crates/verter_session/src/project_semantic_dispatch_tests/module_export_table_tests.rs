@@ -767,10 +767,30 @@ fn star_exports_exclude_ambiguous_names_and_default() {
     }
     // The table only leaves the excluded name out. A name it does not know of
     // is absent, and reading that as written is the checker's TS2339.
-    let absent = measure("(typeof ns)['zz']");
-    assert!(
-        absent.contains("CheckerRecovery"),
-        "absent member: {absent}"
+    let absent = super::checker_probe_lane_tests::with_probe_in(
+        project,
+        "import * as ns from './index';",
+        "(typeof ns)['zz']",
+        |dispatch, mut node| loop {
+            match dispatch.graph().node_data(node).as_deref() {
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Alias(inner)) => {
+                    node = *inner;
+                }
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Opaque(
+                    verter_type_engine::semantic_query::QueryError::CheckerRecovery {
+                        diagnostic,
+                        ..
+                    },
+                )) => break Some(diagnostic.code.code()),
+                _ => break None,
+            }
+        },
+    );
+    assert_eq!(
+        absent,
+        Some(2339),
+        "absent namespace member: {}",
+        measure("(typeof ns)['zz']")
     );
 }
 

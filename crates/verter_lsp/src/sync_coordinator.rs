@@ -857,11 +857,18 @@ fn absorb_inbox(
     }
 }
 
+/// Whether diagnostics take the native route alone: no provider, or the native
+/// route (`TypeProviderKind::None`) with a provider injected only for explicit
+/// feature queries. Those diagnostics read no provider state.
+fn native_only(deps: &SyncCoordinatorDeps) -> bool {
+    deps.type_provider.is_none() || matches!(deps.type_provider_kind, crate::TypeProviderKind::None)
+}
+
 /// Whether `canonical_id`'s import closure is current enough to publish while a
-/// workspace scan runs. A route with no type provider publishes only Verter's
-/// own diagnostics, which read no provider state.
+/// workspace scan runs. A native-only route publishes only Verter's own
+/// diagnostics, which read no provider state.
 fn dependencies_current(deps: &SyncCoordinatorDeps, canonical_id: &str) -> bool {
-    deps.type_provider.is_none()
+    native_only(deps)
         || deps
             .dependency_receipts
             .is_current(canonical_id, &deps.documents, &deps.vfs_workspace)
@@ -2684,8 +2691,7 @@ async fn publish_merged_diagnostics(
     // declaration hints. The provider result replaces this staged batch below.
     // The selected native route may still have a provider injected for explicit
     // feature queries. Its diagnostics do not owe that provider a carrier sync.
-    let native_only = deps.type_provider.is_none()
-        || matches!(deps.type_provider_kind, crate::TypeProviderKind::None);
+    let native_only = native_only(deps);
     deps.documents
         .publish_diagnostics(
             &uri,
