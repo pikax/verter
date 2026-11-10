@@ -90,6 +90,26 @@ pub(super) async fn handle_initialize(
         std::sync::atomic::Ordering::Release,
     );
     server.subscriptions.install(demand.subscriptions);
+    // The host's initial participation input (COX0). An invalid one refuses
+    // initialization rather than silently serving `auto`.
+    if let Some(input) = params
+        .initialization_options
+        .as_ref()
+        .and_then(|options| options.get("participation"))
+    {
+        let input = serde_json::from_value(input.clone()).map_err(|error| {
+            crate::participation::invalid_params(format!(
+                "initializationOptions.participation: {error}"
+            ))
+        })?;
+        let (_, receipt) = crate::participation::accept(&server.documents, &input)?;
+        tracing::info!(
+            "participation: mask {} fence {} ({} invalid observations)",
+            receipt.mask,
+            receipt.fence,
+            receipt.invalid_evidence.len()
+        );
+    }
     tracing::info!("client subscriptions: {:?}", demand.subscriptions);
     if let Some(stats_enabled) = demand.statistics {
         server.statistics.set_enabled(stats_enabled);
@@ -256,11 +276,20 @@ pub(super) async fn handle_initialize(
 
     // The capability surface reads the serving host's own classification
     // authority for the watcher globs.
-    let capabilities = server_capabilities(
+    let mut capabilities = server_capabilities(
         &encoding,
         resolve_provider,
         server.documents.host().language_classifier(),
     );
+    // The participation receipt of the initial input (COX0): the effective
+    // cells a host gates its own client-local producers on.
+    if let Some(serde_json::Value::Object(experimental)) = capabilities.experimental.as_mut() {
+        experimental.insert(
+            "verterParticipation".to_owned(),
+            serde_json::to_value(crate::participation::current_receipt(&server.documents))
+                .unwrap_or_default(),
+        );
+    }
 
     Ok(InitializeResult {
         capabilities,
@@ -593,6 +622,16 @@ pub(super) async fn handle_did_open(
         tracing::info!("did_open EXIT (virtual): {}", uri.as_str());
         return;
     }
+    // A document whose participation scope has no Full facet owes no eager
+    // work (COX0, DEM0 `DEM-D06`): the open above retained its bytes for a
+    // later admitted demand, and nothing else is scheduled for it.
+    if crate::participation::document_owes_no_eager_work(&server.documents, uri) {
+        tracing::info!(
+            "did_open EXIT (participation owes no eager work): {}",
+            uri.as_str()
+        );
+        return;
+    }
     // Touch MRU for snapshot drain ordering (after did_open registers the canonical ID)
     if let Some(canonical_id) = current_canonical_id.as_ref() {
         server.touch_mru(canonical_id);
@@ -871,6 +910,12 @@ pub(super) async fn handle_did_change(
     // Virtual files don't need TSX sync or diagnostics.
     if is_virtual {
         tracing::info!("did_change EXIT (virtual) v{version}");
+        return;
+    }
+    // A participation scope with no Full facet owes the edit no eager work
+    // (COX0, DEM0 `DEM-D06`): the commit above retained its bytes.
+    if crate::participation::document_owes_no_eager_work(&server.documents, &uri) {
+        tracing::info!("did_change EXIT (participation owes no eager work) v{version}");
         return;
     }
 

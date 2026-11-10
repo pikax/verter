@@ -4,6 +4,7 @@ pub mod types;
 
 pub mod component_meta;
 pub mod consumer_compatibility_manifest;
+pub mod participation;
 pub mod schema;
 pub mod typeinfo;
 

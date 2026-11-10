@@ -1317,7 +1317,16 @@ async fn coordinator_loop(
                         *latest = (*latest).max(attended);
                     }
                     let mut publish_diagnostics = signal.force_diagnostics;
-                    let will_sync = signal.requires_sync
+                    // A document whose participation scope has no Full facet
+                    // (COX0) owes this tick no provider sync and no recompile:
+                    // its publication carries only admitted facets, which is
+                    // none, so it clears. Its owed sync bit stays for the
+                    // transition that re-admits it.
+                    let withdrawn = signal.uri.parse::<Uri>().is_ok_and(|uri| {
+                        crate::participation::document_owes_no_eager_work(&deps.documents, &uri)
+                    });
+                    let will_sync = !withdrawn
+                        && signal.requires_sync
                         && deps.needs_provider_sync.remove(&canonical_id).is_some();
                     if signal.requires_sync {
                         settled_edits.push(canonical_id.clone());
@@ -1333,7 +1342,7 @@ async fn coordinator_loop(
                     // behind. Skipped when this tick will do neither, so a
                     // signal whose work bit an interactive sync already consumed
                     // compiles nothing.
-                    if will_sync || publish_diagnostics {
+                    if !withdrawn && (will_sync || publish_diagnostics) {
                         refresh_carrier_ide_surface(&deps, &canonical_id);
                     }
 
@@ -2794,6 +2803,10 @@ pub(crate) async fn provider_diagnostics_batch(
     canonical_id: &str,
     native: Vec<Diagnostic>,
 ) -> ProviderDiagnosticBatch {
+    // A withdrawn TypeScript publication cell queries no provider (COX0).
+    if !crate::participation::DiagnosticFacets::admitted(documents, canonical_id).typescript {
+        return ProviderDiagnosticBatch::complete(native);
+    }
     if crate::server::self_file_language_for(documents.language_classifier(), canonical_id)
         .is_some()
     {

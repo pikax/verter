@@ -48,6 +48,10 @@ pub struct DocumentRegistry {
     /// the host's lifetime, so protocol paths classify under the host's
     /// framework admission without borrowing the host per call.
     language_classifier: verter_session::framework::HostLanguageClassifier,
+    /// The participation authority of this editor scope (COX0): every
+    /// request, publication and eager document task admits its capability
+    /// cell here first.
+    participation: Arc<verter_session::participation::ParticipationService>,
     /// Map from document URI to document state.
     documents: DashMap<String, DocumentState>,
     /// Shared with the outbound writer, which re-checks a publication's epoch
@@ -600,6 +604,7 @@ impl DocumentRegistry {
         Self {
             host,
             language_classifier,
+            participation: Arc::default(),
             documents: DashMap::new(),
             diagnostics_state: Arc::new(parking_lot::Mutex::new(
                 diagnostics::DiagnosticsState::default(),
@@ -935,6 +940,27 @@ impl DocumentRegistry {
     /// `== "vue"` branch: any admitted carrier (`vue`, `svelte`, …) resolves
     /// to its framework row here and the host upsert parses it through the
     /// registered carrier.
+    /// The canonical id and authoritative file language participation
+    /// qualifies `uri` by (COX0): an open document's own resolved language
+    /// (an unsaved carrier has no carrier path), otherwise its path's.
+    pub(crate) fn participation_subject(&self, uri: &Uri) -> (String, FileLanguage) {
+        let open = self
+            .documents
+            .get(uri.as_str())
+            .map(|document| (document.canonical_id.clone(), document.language_id.clone()));
+        match open {
+            Some((canonical_id, language_id)) => {
+                let language = self.document_file_language(&language_id, &canonical_id);
+                (canonical_id, language)
+            }
+            None => {
+                let canonical_id = uri_to_canonical_id(uri);
+                let language = self.language_classifier().classify(&canonical_id);
+                (canonical_id, language)
+            }
+        }
+    }
+
     fn document_file_language(&self, language_id: &str, canonical_id: &str) -> FileLanguage {
         let classifier = self.language_classifier();
         classifier
@@ -2047,6 +2073,11 @@ impl DocumentRegistry {
     /// Borrow the session host.
     pub fn host(&self) -> &VerterHost {
         &self.host
+    }
+
+    /// The participation authority of this editor scope.
+    pub fn participation(&self) -> &Arc<verter_session::participation::ParticipationService> {
+        &self.participation
     }
 
     /// The serving host's language classifier — the admission-aware

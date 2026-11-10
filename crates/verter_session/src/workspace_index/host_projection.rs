@@ -264,7 +264,8 @@ impl CanonicalEncode for RevisionDescriptor {
 }
 
 /// The unit of one host file. Lineage is the canonical id, so an edit keeps it.
-fn host_unit(canonical: &str) -> SourceUnitId {
+/// Participation selectors address the same unit.
+pub(crate) fn host_unit(canonical: &str) -> SourceUnitId {
     SourceUnitId::from_lineage(
         &SourceId::from_canonical(&SourceDescriptor(canonical)),
         "file",
@@ -363,6 +364,12 @@ impl CanonicalEncode for CarrierFamily<'_> {
 /// Carrier profile of a file. Facts here come from the carrier and its shared
 /// analysis, so this claims the carrier and never fabricates a framework.
 pub(super) fn carrier_claim(language: &FileLanguage) -> ProfileClaim {
+    ProfileClaim::Carrier(carrier_profile(language))
+}
+
+/// The carrier profile of a file language; participation qualifies a
+/// non-framework file's capabilities by it.
+pub(crate) fn carrier_profile(language: &FileLanguage) -> CarrierProfileId {
     let family = Canonical::from_encodable(&CarrierFamily(language))
         .digest()
         .to_hex();
@@ -370,7 +377,7 @@ pub(super) fn carrier_claim(language: &FileLanguage) -> ProfileClaim {
         "verter.session.workspace_index.carrier_family",
         SCHEMA_VERSION,
     );
-    ProfileClaim::Carrier(CarrierProfileId::from_carrier(&family, &schema))
+    CarrierProfileId::from_carrier(&family, &schema)
 }
 
 /// What the scheduler holds for one tracked canonical.

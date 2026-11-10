@@ -124,6 +124,7 @@ pub mod heap_in_use;
 pub(crate) mod idle_collect;
 pub mod interaction_trace;
 pub mod outbound;
+pub mod participation;
 pub mod provider_surface_store;
 pub mod provider_sync;
 pub mod resync_singleflight;

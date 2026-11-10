@@ -2,7 +2,7 @@
 
 use std::sync::OnceLock;
 
-use crate::ids::{CapabilityId, FrameworkAdapterId, LanguageId};
+use crate::ids::{FrameworkAdapterId, LanguageId, ProjectCapabilityId};
 use crate::language::{FileLanguage, ScriptSourceType};
 
 /// The Svelte rune-module language id (the [`FileLanguage::adapter_script_language`]
@@ -20,7 +20,7 @@ pub const SVELTE_RUNE_MODULE_LANGUAGE_ID: &str = "svelte_rune_module";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatedCandidate {
     /// Capability bit that must be derived ON for the candidate to apply.
-    pub capability: CapabilityId,
+    pub capability: ProjectCapabilityId,
     /// Classification when the capability is ON.
     pub candidate: FileLanguage,
     /// Classification when the capability is OFF (and the pure static
@@ -563,7 +563,7 @@ mod tests {
     #[test]
     fn gated_rows_surface_candidates_and_resolve_to_fallback_statically() {
         let candidate = GatedCandidate {
-            capability: CapabilityId::new("fixture-capability"),
+            capability: ProjectCapabilityId::new("fixture-capability"),
             candidate: FileLanguage::FrameworkTemplate {
                 adapter_id: FrameworkAdapterId::new("fixture-framework"),
                 owner_hint: None,

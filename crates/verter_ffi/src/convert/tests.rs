@@ -1109,7 +1109,7 @@ fn svelte_kind_maps_to_the_svelte_carrier_row() {
 #[test]
 fn gated_extension_requires_explicit_kind_at_the_ffi_boundary() {
     use verter_session::{
-        CapabilityId, FileLanguage, FrameworkAdapterId, GatedCandidate, LanguageRow,
+        FileLanguage, FrameworkAdapterId, GatedCandidate, LanguageRow, ProjectCapabilityId,
     };
     // FFI-time classification is STATIC-ONLY: it can never consult the
     // project capability snapshot, so a gated-candidate extension can
@@ -1120,7 +1120,7 @@ fn gated_extension_requires_explicit_kind_at_the_ffi_boundary() {
         LanguageRow::gated(
             "html",
             GatedCandidate {
-                capability: CapabilityId::new("fixture-capability"),
+                capability: ProjectCapabilityId::new("fixture-capability"),
                 candidate: FileLanguage::FrameworkTemplate {
                     adapter_id: FrameworkAdapterId::new("fixture-framework"),
                     owner_hint: None,

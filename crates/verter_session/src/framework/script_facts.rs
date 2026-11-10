@@ -1249,7 +1249,7 @@ fn resolve_script_facts_inner<
             }
             let capability_on = |cap: &str| {
                 host.language_classifier()
-                    .capability_is_enabled(&verter_language::CapabilityId::new(cap))
+                    .capability_is_enabled(&verter_language::ProjectCapabilityId::new(cap))
             };
             let cx = ResolvedValidationCx {
                 candidates: candidates.candidates(),
@@ -1437,7 +1437,7 @@ fn capability_bits_hash(host: &VerterHost, consumed: &[&'static str]) -> Hash16 
     for cap in consumed {
         let on = host
             .language_classifier()
-            .capability_is_enabled(&verter_language::CapabilityId::new(cap));
+            .capability_is_enabled(&verter_language::ProjectCapabilityId::new(cap));
         buf.extend_from_slice(cap.as_bytes());
         buf.push(if on { 1 } else { 0 });
         buf.push(0);

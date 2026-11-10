@@ -41,6 +41,9 @@ export interface ClientFramework {
   clientLanguageIds: readonly string[];
   // The language id(s) whose documents trigger LSP start + TS-plugin configure.
   triggerLanguageIds: readonly string[];
+  // The participation profile id (lower-hex `FrameworkProfileId` digest) the
+  // host names this framework's capability cells by. Never the display id.
+  participationProfileId: string;
   // The framework's virtual-file naming suffixes (from the descriptor column).
   virtualFileSuffixes: FrameworkVirtualFileSuffixes;
 }
@@ -52,6 +55,7 @@ export const CLIENT_FRAMEWORKS: readonly ClientFramework[] = [
     adapterModuleExtensions: [],
     clientLanguageIds: ["vue"],
     triggerLanguageIds: ["vue"],
+    participationProfileId: "e6fdf8f50ec454c5cbc1c41d8bf2f9f2a007d10459dcb8d3b12eb72a5bac4fc0",
     virtualFileSuffixes: {
       ide: [".jsx", ".tsx"],
       importSurface: [".verter.ts"],
@@ -65,6 +69,7 @@ export const CLIENT_FRAMEWORKS: readonly ClientFramework[] = [
     adapterModuleExtensions: [".svelte.js", ".svelte.ts"],
     clientLanguageIds: ["svelte"],
     triggerLanguageIds: ["svelte"],
+    participationProfileId: "cf71848d36c4f01afb21b85580b55fa7f750817c969bdede0345d8be267a7b04",
     virtualFileSuffixes: {
       ide: [".jsx", ".tsx"],
       importSurface: [".verter.ts"],
@@ -104,3 +109,61 @@ export const CLIENT_FRAMEWORK_LANGUAGE_IDS: readonly string[] = ["vue", "svelte"
 
 // Every framework carrier file extension, across registered frameworks.
 export const CLIENT_CARRIER_EXTENSIONS: readonly string[] = [".vue", ".svelte"];
+
+// Every participation capability facet key (COX0), in vocabulary order: the
+// only operation spellings a host may name in a participation input.
+export const PARTICIPATION_OPERATIONS: readonly string[] = [
+  "hover",
+  "hover.inspection",
+  "completion",
+  "completion.resolve",
+  "definition",
+  "typeDefinition",
+  "references",
+  "rename.prepare",
+  "rename",
+  "documentHighlight",
+  "signatureHelp",
+  "documentSymbol",
+  "foldingRange",
+  "selectionRange",
+  "linkedEditing",
+  "documentLink",
+  "callHierarchy.prepare",
+  "callHierarchy.incoming",
+  "callHierarchy.outgoing",
+  "workspaceSymbol",
+  "diagnostics.typescript",
+  "diagnostics.compiler",
+  "diagnostics.componentUsage",
+  "diagnostics.lint",
+  "codeAction.quickFix",
+  "codeAction.organizeImports",
+  "codeAction.refactor",
+  "documentDropEdit",
+  "formatting",
+  "onTypeFormatting.tagClosing",
+  "documentColor",
+  "colorPresentation",
+  "semanticTokens",
+  "inlayHint",
+  "codeLens",
+  "decoration.apiCalls",
+  "decoration.bindingColors",
+  "decoration.propConstness",
+  "inspection.analysis",
+  "inspection.bindingTypes",
+  "inspection.documentStructure",
+  "componentMeta",
+  "componentMeta.surface",
+  "componentMeta.typeExpansion",
+  "workspace.projectOverview",
+  "workspace.componentParents",
+  "workspace.routeTree",
+  "inspection.compiledCode",
+  "inspection.virtualFiles",
+  "inspection.sourceMap",
+  "workspace.contribution",
+  "check.project",
+  "compile",
+];

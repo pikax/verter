@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use verter_language::CapabilityId;
+use verter_language::ProjectCapabilityId;
 
 use verter_session_query::analysis::types::Hash16;
 
@@ -23,7 +23,7 @@ use verter_session_query::analysis::types::Hash16;
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProjectCapabilitySnapshot {
     /// Derived capability bits, ordered for hash stability.
-    enabled: BTreeSet<CapabilityId>,
+    enabled: BTreeSet<ProjectCapabilityId>,
 }
 
 impl ProjectCapabilitySnapshot {
@@ -33,14 +33,14 @@ impl ProjectCapabilitySnapshot {
     }
 
     /// Build a snapshot from derived capability bits.
-    pub fn from_capabilities<I: IntoIterator<Item = CapabilityId>>(bits: I) -> Self {
+    pub fn from_capabilities<I: IntoIterator<Item = ProjectCapabilityId>>(bits: I) -> Self {
         Self {
             enabled: bits.into_iter().collect(),
         }
     }
 
     /// Whether a capability bit is derived ON.
-    pub fn is_enabled(&self, capability: &CapabilityId) -> bool {
+    pub fn is_enabled(&self, capability: &ProjectCapabilityId) -> bool {
         self.enabled.contains(capability)
     }
 
@@ -64,16 +64,16 @@ mod tests {
     #[test]
     fn hash_is_over_derived_bits_and_order_independent() {
         let a = ProjectCapabilitySnapshot::from_capabilities([
-            CapabilityId::new("alpha"),
-            CapabilityId::new("beta"),
+            ProjectCapabilityId::new("alpha"),
+            ProjectCapabilityId::new("beta"),
         ]);
         let b = ProjectCapabilitySnapshot::from_capabilities([
-            CapabilityId::new("beta"),
-            CapabilityId::new("alpha"),
+            ProjectCapabilityId::new("beta"),
+            ProjectCapabilityId::new("alpha"),
         ]);
         assert_eq!(a.hash(), b.hash(), "bit-set hash must be order-independent");
 
-        let c = ProjectCapabilitySnapshot::from_capabilities([CapabilityId::new("alpha")]);
+        let c = ProjectCapabilitySnapshot::from_capabilities([ProjectCapabilityId::new("alpha")]);
         assert_ne!(a.hash(), c.hash(), "different bit sets must hash apart");
         assert_ne!(
             c.hash(),
@@ -84,9 +84,12 @@ mod tests {
 
     #[test]
     fn is_enabled_reads_the_bit_set() {
-        let snapshot = ProjectCapabilitySnapshot::from_capabilities([CapabilityId::new("fixture")]);
-        assert!(snapshot.is_enabled(&CapabilityId::new("fixture")));
-        assert!(!snapshot.is_enabled(&CapabilityId::new("other")));
-        assert!(!ProjectCapabilitySnapshot::empty().is_enabled(&CapabilityId::new("fixture")));
+        let snapshot =
+            ProjectCapabilitySnapshot::from_capabilities([ProjectCapabilityId::new("fixture")]);
+        assert!(snapshot.is_enabled(&ProjectCapabilityId::new("fixture")));
+        assert!(!snapshot.is_enabled(&ProjectCapabilityId::new("other")));
+        assert!(
+            !ProjectCapabilitySnapshot::empty().is_enabled(&ProjectCapabilityId::new("fixture"))
+        );
     }
 }

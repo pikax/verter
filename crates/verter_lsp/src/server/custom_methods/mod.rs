@@ -13,6 +13,7 @@
 mod component_meta;
 #[cfg(test)]
 mod document_structure_tests;
+mod participation_gate;
 
 use std::sync::Arc;
 
@@ -31,7 +32,7 @@ use verter_session::workspace_index::{IndexDemand, IndexSurface};
 impl VerterLanguageServer {
     /// Return a content-free structure only while the client's open/version
     /// stamps and the registry's post-await revision still match exactly.
-    pub async fn document_structure(
+    pub(super) async fn document_structure_admitted(
         &self,
         params: DocumentStructureRequestV1,
     ) -> Result<DocumentStructureResponseV1> {
@@ -312,7 +313,7 @@ impl VerterLanguageServer {
     /// Handle `$/getCompiledCode` request.
     ///
     /// Returns the compiled TSX output for a Vue file URI.
-    pub async fn get_compiled_code(
+    pub(super) async fn get_compiled_code_admitted(
         &self,
         params: GetCompiledCodeParams,
     ) -> Result<Option<CompiledCodeResponse>> {
@@ -349,7 +350,7 @@ impl VerterLanguageServer {
     ///
     /// When a `.vue` file is dropped into a template, inserts a component tag
     /// and an import statement.
-    pub async fn document_drop_edit(
+    pub(super) async fn document_drop_edit_admitted(
         &self,
         params: DocumentDropEditParams,
     ) -> Result<Option<WorkspaceEdit>> {
@@ -391,7 +392,7 @@ impl VerterLanguageServer {
     /// Handle `$/verter/getVirtualFiles` request.
     ///
     /// Returns all virtual files for a Vue document URI.
-    pub async fn get_virtual_files(
+    pub(super) async fn get_virtual_files_admitted(
         &self,
         params: GetVirtualFilesParams,
     ) -> Result<Option<VirtualFilesResponse>> {
@@ -429,7 +430,7 @@ impl VerterLanguageServer {
     /// [`Self::demand_document`]), so the status it is polled alongside is
     /// served ahead of unrelated owed work. The analysis response itself is
     /// unchanged.
-    pub async fn get_analysis(
+    pub(super) async fn get_analysis_admitted(
         &self,
         params: GetAnalysisParams,
     ) -> Result<Option<serde_json::Value>> {
@@ -555,7 +556,7 @@ impl VerterLanguageServer {
     ///
     /// Returns a global project overview: all known files, component usage graph,
     /// and aggregate statistics.
-    pub async fn get_project_overview(
+    pub(super) async fn get_project_overview_admitted(
         &self,
         _params: serde_json::Value,
     ) -> Result<ProjectOverviewResponse> {
@@ -649,7 +650,10 @@ impl VerterLanguageServer {
     /// Handle `$/verter/getRouteTree` request.
     ///
     /// Returns a complete route analysis snapshot for the first workspace root.
-    pub async fn get_route_tree(&self, _params: serde_json::Value) -> Result<serde_json::Value> {
+    pub(super) async fn get_route_tree_admitted(
+        &self,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         tracing::debug!("$/verter/getRouteTree");
 
         if !self.workspace_inventory_ready().await {
@@ -710,7 +714,10 @@ impl VerterLanguageServer {
     /// between the bindings read and the surface capture answers
     /// `ContentModified` instead of mapping one revision's binding spans
     /// through another revision's surface.
-    pub async fn get_binding_types(&self, params: GetAnalysisParams) -> Result<serde_json::Value> {
+    pub(super) async fn get_binding_types_admitted(
+        &self,
+        params: GetAnalysisParams,
+    ) -> Result<serde_json::Value> {
         let uri = params.uri;
         tracing::debug!("$/verter/getBindingTypes: {uri}");
 
@@ -810,7 +817,7 @@ impl VerterLanguageServer {
     ///
     /// Returns all files that use the component defined in the given URI,
     /// along with the props and slots they pass to it.
-    pub async fn get_component_parents(
+    pub(super) async fn get_component_parents_admitted(
         &self,
         params: GetComponentParentsParams,
     ) -> Result<ComponentParentsResponse> {

@@ -368,6 +368,7 @@ pub mod owner_import_surface;
 #[cfg(test)]
 mod parity_tests;
 mod parse;
+pub mod participation;
 /// Portable platform-services boundary: the per-target inventory of
 /// the io/time/scheduling/persistence/process service classes and the
 /// browser-closure dependency guard.
@@ -537,8 +538,8 @@ pub use host_audit_runtime::{
 pub use host_lifecycle::HostReleaseCompletion;
 pub use types::*;
 pub use verter_language::{
-    CapabilityId, FileLanguage, FrameworkAdapterId, GatedCandidate, LanguageId, LanguageRegistry,
-    LanguageRow, ScriptSourceType, StaticClassification, SVELTE_RUNE_MODULE_LANGUAGE_ID,
+    FileLanguage, FrameworkAdapterId, GatedCandidate, LanguageId, LanguageRegistry, LanguageRow,
+    ProjectCapabilityId, ScriptSourceType, StaticClassification, SVELTE_RUNE_MODULE_LANGUAGE_ID,
 };
 pub use verter_semantic_source::decl_lowering::ParseReleaseError;
 

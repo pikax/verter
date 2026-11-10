@@ -2010,7 +2010,11 @@ fn compute_verter_diagnostics_for_with_views(
     uri: &Uri,
     cached_verter_diags: &DashMap<String, CachedVerterDiagEntry>,
     vfs_workspace: Option<&verter_workspace::FilesystemWorkspace>,
+    facets: crate::participation::DiagnosticFacets,
 ) -> Vec<Diagnostic> {
+    // The cache holds only complete-facet sets: a restricted publication runs
+    // just its admitted producers and never reads or warms the full set.
+    let cacheable = facets == crate::participation::DiagnosticFacets::ALL;
     // Check cache: if version AND diagnostics generation both match, return cached.
     let uri_str = uri.as_str();
     let canonical_id = uri_to_canonical_id(uri);
@@ -2019,7 +2023,7 @@ fn compute_verter_diagnostics_for_with_views(
     // advance can produce, or an arm that lands while the file has no compile
     // row is indistinguishable from no arm at all.
     let current_diag_gen = documents.host().get_diagnostics_generation(&canonical_id);
-    if let Some(doc) = documents.get(uri) {
+    if let Some(doc) = documents.get(uri).filter(|_| cacheable) {
         if let Some(cached) = cached_verter_diags.get(uri_str) {
             if cached.0 == doc.version && cached.1 == current_diag_gen {
                 return cached.2.clone();
@@ -2027,7 +2031,7 @@ fn compute_verter_diagnostics_for_with_views(
         }
     }
 
-    let mut diags = if let Some(doc) = documents.get(uri) {
+    let mut diags = if let Some(doc) = documents.get(uri).filter(|_| facets.compiler) {
         let host_diags = documents.get_diagnostics(uri);
         match host_diags {
             Some(snapshot) => map_diagnostics(&snapshot, &doc.line_index),
@@ -2061,7 +2065,9 @@ fn compute_verter_diagnostics_for_with_views(
                 .unwrap_or_default();
 
             let lint_explicitly_configured;
-            if let Some((explicit, linter)) = views_lint {
+            if !facets.lint {
+                lint_explicitly_configured = false;
+            } else if let Some((explicit, linter)) = views_lint {
                 lint_explicitly_configured = explicit;
                 diags.extend(crate::features::diagnostics_bridge::run_linter(
                     linter,
@@ -2085,21 +2091,27 @@ fn compute_verter_diagnostics_for_with_views(
 
             // Component usage diagnostics (unknown props, unknown v-models).
             let host = documents.host();
-            diags.extend(
-                crate::features::component_diagnostics::component_usage_diagnostics(
-                    &analysis,
-                    &doc.line_index,
-                    &|import_source| {
-                        resolve_child_component_for(host, &canonical_id, import_source)
-                    },
-                ),
-            );
+            if facets.component_usage {
+                diags.extend(
+                    crate::features::component_diagnostics::component_usage_diagnostics(
+                        &analysis,
+                        &doc.line_index,
+                        &|import_source| {
+                            resolve_child_component_for(host, &canonical_id, import_source)
+                        },
+                    ),
+                );
+            }
 
             // Projection safety limits are typed component-meta outcomes, not
             // parser diagnostics or lint rules. Resolve the owner surface and
             // map only those two operational reasons onto the macro call span
             // used by editor consumers.
-            if let Some(component_meta) = host.get_component_meta(&canonical_id) {
+            if let Some(component_meta) = facets
+                .compiler
+                .then(|| host.get_component_meta(&canonical_id))
+                .flatten()
+            {
                 let macro_spans: Vec<verter_span::Span> =
                     analysis.macros.iter().map(|mac| mac.span).collect();
                 diags.extend(
@@ -2180,7 +2192,7 @@ fn compute_verter_diagnostics_for_with_views(
     }
 
     // Cache the result
-    if let Some(doc) = documents.get(uri) {
+    if let Some(doc) = documents.get(uri).filter(|_| cacheable) {
         cached_verter_diags.insert(
             uri_str.to_string(),
             (doc.version, current_diag_gen, diags.clone()),
@@ -2217,12 +2229,22 @@ pub(crate) fn verter_owned_diagnostics(
     vfs_workspace: Option<&verter_workspace::FilesystemWorkspace>,
     project_sync: Option<&crate::type_provider::project_sync::ProjectSync>,
 ) -> Vec<Diagnostic> {
+    // Each producer runs only for an admitted facet; a document whose Verter
+    // facets are all withdrawn costs no producer work at all.
+    let facets = crate::participation::DiagnosticFacets::admitted(documents, canonical_id);
+    if !facets.any_verter() {
+        return Vec::new();
+    }
     let mut diags = compute_verter_diagnostics_for_with_views(
         documents,
         uri,
         cached_verter_diags,
         vfs_workspace,
+        facets,
     );
+    if !facets.compiler {
+        return diags;
+    }
 
     // The `verter(project)` ownership diagnostic for a terminally unresolved
     // carrier (`NoProject` / disk-layout carrier-path conflict). A resolved
@@ -2276,7 +2298,17 @@ pub(crate) fn document_diagnostics_for_test(
     cached_verter_diags: &DashMap<String, CachedVerterDiagEntry>,
     vfs_workspace: Option<&verter_workspace::FilesystemWorkspace>,
 ) -> Vec<Diagnostic> {
-    compute_verter_diagnostics_for_with_views(documents, uri, cached_verter_diags, vfs_workspace)
+    let facets = crate::participation::DiagnosticFacets::admitted(
+        documents,
+        &crate::documents::uri_to_canonical_id(uri),
+    );
+    compute_verter_diagnostics_for_with_views(
+        documents,
+        uri,
+        cached_verter_diags,
+        vfs_workspace,
+        facets,
+    )
 }
 
 /// The typed Verter diagnostic code for a carrier whose provider surface could

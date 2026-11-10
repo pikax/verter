@@ -49,7 +49,7 @@ impl VerterLanguageServer {
     /// through `verter_ffi::convert::component_meta_output_to_ffi` so the
     /// JSON wire shape matches NAPI/WASM consumers (D19 byte-equivalence).
     /// Returns `null` when the canonical does not resolve to a component.
-    pub async fn get_component_meta(
+    pub(super) async fn get_component_meta_admitted(
         &self,
         params: GetComponentMetaParams,
     ) -> Result<Option<serde_json::Value>> {
@@ -120,7 +120,7 @@ impl VerterLanguageServer {
     /// the JS consumer can decode them via the same proto generated for
     /// the NAPI / WASM bindings. Returns `null` when the canonical does
     /// not resolve to a component.
-    pub async fn get_component_meta_surface(
+    pub(super) async fn get_component_meta_surface_admitted(
         &self,
         params: GetComponentMetaSurfaceParams,
     ) -> Result<Option<Vec<u8>>> {
@@ -155,7 +155,7 @@ impl VerterLanguageServer {
     /// (D104 + D114) — the `error` field on the response carries the
     /// discriminated kind plus reason metadata. On success, `error` is
     /// `None` and `expansion_bytes` carries the encoded `TypeExpansion`.
-    pub async fn get_component_meta_type_expansion(
+    pub(super) async fn get_component_meta_type_expansion_admitted(
         &self,
         params: GetComponentMetaTypeExpansionParams,
     ) -> Result<GetComponentMetaTypeExpansionResponse> {

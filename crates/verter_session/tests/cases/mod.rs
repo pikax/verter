@@ -62,6 +62,7 @@ mod one_parse_per_style_block;
 mod oracle_driver;
 mod oracle_query_specs_shared;
 mod oracle_tsgo_forbidden;
+mod participation_service;
 mod preprocessor_boundary_contract;
 mod preprocessor_round_trip_parse_count;
 mod relation_nominal_authority;

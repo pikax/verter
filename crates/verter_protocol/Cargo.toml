@@ -14,6 +14,7 @@ prost = "0.14.4"
 serde = { workspace = true }
 serde_json = { workspace = true }
 verter_span = { path = "../verter_span" }
+verter_identity = { workspace = true }
 verter_language = { path = "../verter_language" }
 verter_semantic = { path = "../verter_semantic" }
 verter_session_query = { workspace = true }

@@ -4,6 +4,7 @@
 //! do NOT centralise shared helpers here, and keep this list sorted.
 
 mod component_meta_flags_audit;
+mod participation_input;
 mod proto_audit;
 mod synthetic_slot_binding_graph;
 mod typeinfo_graph_export;

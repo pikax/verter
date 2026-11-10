@@ -46,6 +46,7 @@ verter_execution = { path = "../verter_execution" }
 futures-util = "0.3.34"
 verter_debug_assert = { workspace = true }
 verter_session = { path = "../verter_session" }
+verter_identity = { workspace = true }
 verter_language = { path = "../verter_language" }
 verter_audit = { path = "../verter_audit" }
 verter_scheduler = { path = "../verter_scheduler" }
