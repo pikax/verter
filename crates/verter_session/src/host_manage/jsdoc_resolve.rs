@@ -441,6 +441,24 @@ impl<M: verter_audit::observe::ObserveExec> crate::resolver_core::ComponentMetaR
         ))
     }
 
+    fn declaration_source_is_owner_carrier(
+        &self,
+        owner_canonical: &str,
+        canonical_source: &str,
+    ) -> bool {
+        // Both ends classify through the host's single language authority
+        // (admission-aware: an unadmitted vertical's carrier extension is a
+        // plain script here). An empty or unresolved declaration source
+        // classifies as a plain script and is never a carrier.
+        let classifier = self.host.language_classifier();
+        let owner = classifier.classify(owner_canonical);
+        let Some(owner_adapter) = owner.adapter_id() else {
+            return false;
+        };
+        let source = classifier.classify(canonical_source);
+        source.is_framework_carrier() && source.adapter_id() == Some(owner_adapter)
+    }
+
     fn projectable_owner_local_macro_roots(
         &self,
         owner_canonical: &str,
