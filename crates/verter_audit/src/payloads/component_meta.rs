@@ -39,6 +39,43 @@ pub enum AuditDiagnosticKind {
     Other,
 }
 
+/// Versioned encoding tag of an [`AuditSpan`]. The audit substrate carries
+/// Rust-native facts, so the only encoding is UTF-8 bytes; the tag exists so a
+/// consumer of the generated binding never has to guess the unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "audit.generated.ts")]
+pub enum AuditSpanEncoding {
+    /// UTF-8 bytes, 0-based, half-open, in the file the audited request names.
+    #[serde(rename = "utf8.v1")]
+    #[ts(rename = "utf8.v1")]
+    Utf8,
+}
+
+/// A source range on the audit wire: `[start, end)` in `encoding` units.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export_to = "audit.generated.ts")]
+pub struct AuditSpan {
+    /// Inclusive start offset.
+    pub start: u32,
+    /// Exclusive end offset.
+    pub end: u32,
+    /// The unit `start`/`end` are measured in.
+    pub encoding: AuditSpanEncoding,
+}
+
+impl AuditSpan {
+    /// The audit-wire form of a native byte span. An inverted range is not an
+    /// exact range, so it yields no span rather than a swapped or emptied one.
+    #[must_use]
+    pub fn from_native(span: Span) -> Option<Self> {
+        (span.start <= span.end).then_some(Self {
+            start: span.start,
+            end: span.end,
+            encoding: AuditSpanEncoding::Utf8,
+        })
+    }
+}
+
 /// One audited diagnostic entry. Audit-substrate mirror of
 /// `verter_semantic::analysis::component_meta::ExpansionDiagnostic`
 /// scoped to the macro-expansion pass — projected at the session
@@ -52,12 +89,11 @@ pub struct AuditDiagnosticEntry {
     /// The session-side bridge populates this with the projected
     /// diagnostic context (declaration name, node id, error kind).
     pub message: String,
-    /// SFC-absolute span the diagnostic applies to. `None` when the
-    /// session-side projector could not attribute the diagnostic to a
-    /// concrete source range.
+    /// SFC-absolute span the diagnostic applies to, tagged with its encoding.
+    /// `None` when the session-side projector could not attribute the
+    /// diagnostic to a concrete, exact source range.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(type = "{ start: number; end: number } | null")]
-    pub span: Option<Span>,
+    pub span: Option<AuditSpan>,
     /// Macro index within the script-analysis macro list, if the
     /// diagnostic was attributable to a specific macro invocation.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -441,13 +441,17 @@ impl GraphArena {
         let requested_name_id = self.strings.intern(&declaration.requested_name);
         let resolved_name_id = self.strings.intern(&declaration.resolved_name);
         let canonical_source_id = self.strings.intern(&declaration.canonical_source);
+        // A span is published only when it is an exact half-open range; an
+        // inverted one is absent (`has_span = false`), never swapped or emptied.
+        let exact = declaration.span.start <= declaration.span.end;
         FrameworkSurfaceMemberDeclaration {
             requested_name_id,
             resolved_name_id,
             canonical_source_id,
-            span_start: declaration.span.start,
-            span_end: declaration.span.end,
+            span_start: if exact { declaration.span.start } else { 0 },
+            span_end: if exact { declaration.span.end } else { 0 },
             kind: declaration_kind_for(declaration.kind) as i32,
+            has_span: exact,
         }
     }
 

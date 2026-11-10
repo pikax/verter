@@ -834,8 +834,13 @@ message ResolvedTypeDeclaration {
   uint32 requested_name_id = 1;
   uint32 resolved_name_id = 2;
   uint32 canonical_source_id = 3;
-  uint32 span_start = 4;
-  uint32 span_end = 5;
+  // The declaration's range in the file `canonical_source_id` names.
+  // `span.encoding` is POSITION_ENCODING_UTF8_BYTES; the range's source space
+  // is that declaring file, so `span.source_space_token` is empty. A consumer
+  // rejects any other encoding. Absent when the span is not exact.
+  CanonicalRange span = 8;
+  reserved 4, 5;
+  reserved "span_start", "span_end";
   uint32 kind_id = 6;
   uint32 text_id = 7;
 }
@@ -1118,8 +1123,13 @@ message ResolvedNativeProp {
   bool is_optional = 2;
   uint32 type_annotation_id = 3;
   uint32 visibility_id = 4;
-  uint32 span_start = 5;
-  uint32 span_end = 6;
+  // The property's range in the owning component's source. `span.encoding` is
+  // POSITION_ENCODING_UTF8_BYTES; the owning file is the message's component,
+  // so `span.source_space_token` is empty. A consumer rejects any other
+  // encoding.
+  CanonicalRange span = 7;
+  reserved 5, 6;
+  reserved "span_start", "span_end";
 }
 
 message ResolvedJsdocBlock {

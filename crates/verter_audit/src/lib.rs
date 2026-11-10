@@ -122,8 +122,8 @@ pub use payloads::tags::{
     FlowSliceBudgetAxisTag, LspMethodTag, ProjectionModeTag,
 };
 pub use payloads::{
-    AuditDiagnosticEntry, AuditDiagnosticKind, BundlerBatchPayload, CompilePayload,
-    ComponentMetaPayload, FlowDegradationTag, FlowFailureTag, FlowPartialityTag,
+    AuditDiagnosticEntry, AuditDiagnosticKind, AuditSpan, AuditSpanEncoding, BundlerBatchPayload,
+    CompilePayload, ComponentMetaPayload, FlowDegradationTag, FlowFailureTag, FlowPartialityTag,
     FlowReturnInferencePayload, LspRequestPayload, McpToolPayload, SemanticAnalysisPayload,
     SlowRecordSummary, TypeResolutionPayload, WorkspaceOp, WorkspacePayload,
 };

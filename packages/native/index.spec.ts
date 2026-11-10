@@ -376,6 +376,7 @@ const view = import('./Foo.vue')
         spanEnd: 8,
         exprSpanStart: 0,
         exprSpanEnd: 8,
+        spanEncoding: "utf16.v1",
       },
       {
         syntax: "dynamicImport",
@@ -388,6 +389,7 @@ const view = import('./Foo.vue')
         spanEnd: 24,
         exprSpanStart: 10,
         exprSpanEnd: 24,
+        spanEncoding: "utf16.v1",
       },
       {
         syntax: "dynamicImport",
@@ -401,10 +403,70 @@ const view = import('./Foo.vue')
         spanEnd: 42,
         exprSpanStart: 26,
         exprSpanEnd: 42,
+        spanEncoding: "utf16.v1",
       },
     ]);
 
     expect(specifiers).toEqual(["./exact", "./components/Foo.vue", "./utils"]);
+  });
+
+  it("refuses a module reference read-back with no or an unknown span encoding tag", () => {
+    const host = new VerterHost() as any;
+    const reference = {
+      syntax: "staticImport",
+      semantics: "import",
+      isTypeOnly: false,
+      rawText: "'./exact'",
+      literalSpecifier: "./exact",
+      finiteSpecifiers: [],
+      analyzability: "exact",
+      spanStart: 0,
+      spanEnd: 8,
+      exprSpanStart: 0,
+      exprSpanEnd: 8,
+    };
+    // Untagged positions fail schema validation instead of being read in a guessed unit.
+    expect(() => host.collectResolvableModuleReferenceSpecifiers([reference])).toThrow(
+      /spanEncoding/,
+    );
+    // A tag from another contract version is refused, not reinterpreted.
+    expect(() =>
+      host.collectResolvableModuleReferenceSpecifiers([{ ...reference, spanEncoding: "utf16.v2" }]),
+    ).toThrow(/spanEncoding/);
+    // An inverted range is refused for any known tag.
+    expect(() =>
+      host.collectResolvableModuleReferenceSpecifiers([
+        { ...reference, spanStart: 9, spanEnd: 1, spanEncoding: "utf16.v1" },
+      ]),
+    ).toThrow(/inverted/);
+    expect(
+      host.collectResolvableModuleReferenceSpecifiers([{ ...reference, spanEncoding: "utf16.v1" }]),
+    ).toEqual(["./exact"]);
+  });
+
+  it("getCodeActions requires a versioned offset tag and refuses an in-pair or past-end offset", () => {
+    const host = new VerterHost() as any;
+    // `😀` is two UTF-16 units (offsets 12 and 13 inside `<p>`), four UTF-8 bytes.
+    const source = "<template><p>\u{1F600}x</p></template>";
+    host.upsert({ inputId: "Pair.vue", source, fileKind: "vue" });
+    const emojiStart = source.indexOf("\u{1F600}");
+
+    expect(Array.isArray(host.getCodeActions("Pair.vue", emojiStart, "utf16.v1"))).toBe(true);
+    // The second unit of the surrogate pair is not a boundary: refused, never snapped.
+    expect(() => host.getCodeActions("Pair.vue", emojiStart + 1, "utf16.v1")).toThrow(
+      /NotCharBoundary/,
+    );
+    // Past the end of the source: refused, never clamped to end-of-file.
+    expect(() => host.getCodeActions("Pair.vue", source.length + 1, "utf16.v1")).toThrow(
+      /InvalidBoundary/,
+    );
+    // The same number is a different position under another declared encoding.
+    expect(Array.isArray(host.getCodeActions("Pair.vue", 13 + 4, "utf8.v1"))).toBe(true);
+    // An untagged request or an unversioned / unknown tag is refused.
+    expect(() => host.getCodeActions("Pair.vue", emojiStart)).toThrow();
+    for (const tag of ["", "utf16", "utf-16", "utf16.v2"]) {
+      expect(() => host.getCodeActions("Pair.vue", emojiStart, tag)).toThrow(/encoding tag/);
+    }
   });
 
   it("resolves known module reference dependencies with caller-supplied extension order", () => {
@@ -422,6 +484,7 @@ const view = import('./Foo.vue')
         spanEnd: 9,
         exprSpanStart: 0,
         exprSpanEnd: 9,
+        spanEncoding: "utf16.v1",
       },
     ];
     const knownIds = ["src/widget.ts", "src/widget.vue"];
@@ -812,7 +875,11 @@ import type { Attrs } from './types'
         detailCode: "unavailable-outcome",
         subject: {
           kind: "scriptSetupAttrs",
-          sourceRange: { start: attrsStart, end: attrsStart + "Attrs.".length },
+          sourceRange: {
+            start: attrsStart,
+            end: attrsStart + "Attrs.".length,
+            encoding: "utf8.v1",
+          },
         },
         declarationShapeReason: null,
         memberOrdinal: null,

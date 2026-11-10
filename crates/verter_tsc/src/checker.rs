@@ -70,6 +70,12 @@ pub struct CheckResult {
     /// this — not the input count — is what that per-carrier invariant is
     /// checked against. A refused SFC has no projection to have an outcome for.
     pub admitted_carriers: usize,
+    /// The text of every diagnostic-bearing file that exists only in memory
+    /// (the public-API stubs and ambient shims served as pass-through
+    /// overlays), keyed by the forward-slash path diagnostics name it by.
+    /// A position in such a file is validated against this exact text; it is
+    /// not on disk to be re-read.
+    pub virtual_sources: HashMap<String, std::sync::Arc<str>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -852,6 +858,7 @@ pub fn run(
             public_api_outcomes: Vec::new(),
             public_api_failures: Vec::new(),
             admitted_carriers: 0,
+            virtual_sources: HashMap::new(),
         });
     }
 
@@ -914,9 +921,10 @@ pub fn run(
         prepared,
     )?;
     let mut diagnostics = admission.refusals.clone();
-    diagnostics.extend(in_memory.value);
-    let public_api_outcomes = in_memory.outcomes;
-    let mut public_api_failures = in_memory.failures;
+    diagnostics.extend(in_memory.batch.value);
+    let public_api_outcomes = in_memory.batch.outcomes;
+    let mut public_api_failures = in_memory.batch.failures;
+    let virtual_sources = in_memory.virtual_sources;
 
     // ── Declaration/emit stage: temp-file `tsgo --project` (tsgo `--api` has no
     //    emit surface). Only when `--declaration` is requested. FAIL-CLOSED: an
@@ -975,6 +983,7 @@ pub fn run(
         public_api_outcomes,
         public_api_failures,
         admitted_carriers: admission.admitted.len(),
+        virtual_sources,
     })
 }
 
@@ -1388,6 +1397,13 @@ fn resolve_tsgo_engine_for(
 /// `admitted` is the [`CarrierAdmission`] set, NOT `config.vue_files`: a refused
 /// SFC contributes no carrier, no stub, and no `files` entry, so nothing derived
 /// from it can reach the engine.
+/// The in-memory typecheck's diagnostics and public-API outcomes, with the text
+/// of the pass-through overlay files those diagnostics may be positioned in.
+struct InMemoryTypecheck {
+    batch: PublicApiBatch<Vec<Diagnostic>>,
+    virtual_sources: HashMap<String, std::sync::Arc<str>>,
+}
+
 fn run_inmemory_typecheck(
     host: &VerterHost,
     config: &TsConfig,
@@ -1395,7 +1411,7 @@ fn run_inmemory_typecheck(
     tsconfig_path: &Path,
     tsgo_bin: Option<&Path>,
     prepared: api_check::PreparedEngine,
-) -> Result<PublicApiBatch<Vec<Diagnostic>>, api_check::TypecheckError> {
+) -> Result<InMemoryTypecheck, api_check::TypecheckError> {
     let root = simplify_verbatim_path(&config.root_dir).into_owned();
 
     // The GATED `--api` engine (a supported tsgo native binary — validated
@@ -1521,6 +1537,18 @@ fn run_inmemory_typecheck(
         }
     };
     let virtual_tsconfig_path = slash(&root.join("verter-tsc-check.tsconfig.json"));
+    // Pass-through overlays report positions in their own text; keep it so the
+    // renderer validates against it instead of a file that is not on disk.
+    let virtual_sources: HashMap<String, std::sync::Arc<str>> = overlay_files
+        .iter()
+        .filter(|file| matches!(file.remap, api_check::RemapKind::Passthrough))
+        .map(|file| {
+            (
+                file.path.clone(),
+                std::sync::Arc::from(file.content.as_str()),
+            )
+        })
+        .collect();
 
     let engine_diagnostics = match api_check::typecheck_prepared(
         prepared,
@@ -1540,10 +1568,13 @@ fn run_inmemory_typecheck(
             })?
         }
     };
-    Ok(PublicApiBatch {
-        value: engine_diagnostics,
-        outcomes: stubs.outcomes,
-        failures: stubs.failures,
+    Ok(InMemoryTypecheck {
+        batch: PublicApiBatch {
+            value: engine_diagnostics,
+            outcomes: stubs.outcomes,
+            failures: stubs.failures,
+        },
+        virtual_sources,
     })
 }
 

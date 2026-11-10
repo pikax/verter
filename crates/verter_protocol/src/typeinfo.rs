@@ -106,6 +106,8 @@ pub struct FfiSymbolEntry {
     /// "const" | "let" | "var" | "function" | "asyncFunction" |
     /// "classValue" | "enum"`.
     pub kind: String,
+    /// Encoding of `spanStart`/`spanEnd` (always `utf8.v1`).
+    pub span_encoding: crate::types::SpanEncodingTag,
     /// SFC-absolute span start. Set when `hasSpan = true`.
     #[serde(default)]
     pub span_start: u32,

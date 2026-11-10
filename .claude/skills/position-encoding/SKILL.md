@@ -75,7 +75,9 @@ Spans computed as `content_offset + local_offset` during CSS scanning, where `co
 | **Source maps** | N/A | **0-based** line, **0-based** column | VLQ-encoded. `source_map.rs` converts from PositionResolver via `(line - 1, col - 1)` |
 | **LSP Protocol** | Negotiated (UTF-8/UTF-16/UTF-32) | **0-based** line, **0-based** character | `Position { line: 0, character: 0 }` = first char. `LineIndex` handles conversion |
 | **VS Code API** | UTF-16 code units | **0-based** line, **0-based** character | `new Position(0, 0)` = first char. Matches LSP UTF-16 |
-| **verter_ffi** | UTF-16 code units | N/A (byte offsets only) | NAPI/WASM boundary always communicates in UTF-16 offsets. Reference: `crates/verter_ffi/src/convert.rs:byte_offset_to_utf16()` |
+| **verter_ffi** | UTF-16 code units, tagged `utf16.v1` | N/A (byte offsets only) | NAPI/WASM boundary: every span names its versioned encoding tag; conversion is exact or refused (see "Non-editor public wires"). Reference: `crates/verter_ffi/src/convert/offset.rs` |
+| **verter_mcp** | UTF-8 bytes, fixed `utf8.v1` | N/A (byte offsets only) | Stated on every tool's `_meta` (`verter.dev/coordinates`) and as `spanEncoding` on lint diagnostics / edits |
+| **verter-tsc CLI** | `--position-encoding` (`utf8`\|`utf16`\|`utf32`, default `utf16`) | **1-based** line, **1-based** column | `crates/verter_tsc/src/position.rs`; a position that cannot be converted exactly prints without `(line,col)` |
 | **verter_lsp** | Negotiated encoding (UTF-8, UTF-16, or UTF-32) | **0-based** | LSP negotiates encoding with client during `initialize()`. All positions use negotiated encoding |
 
 ## Line/Column Base Rules (CRITICAL — off-by-one bugs)
@@ -118,11 +120,23 @@ clamps to EOF — the navigation-sentinel default) and `checked_position_to_offs
 Edit-applying and secondary-link paths must use the checked converter; a clamped wrong offset
 corrupts a file or forges a bogus "see declaration" link at EOF.
 
+## Non-editor public wires (NAPI, WASM, MCP, CLI, audit, typeinfo, component-meta)
+
+Rust facts stay UTF-8 byte offsets; a requester's encoding exists only at the adapter that speaks it, converted once against the exact source snapshot, exact or refused. Nothing clamps, snaps or passes bytes through.
+
+- **Tag.** `verter_protocol::types::SpanEncodingTag` (`utf8.v1` / `utf16.v1`; the suffix is the coordinate-contract version, a consumer rejects an unknown tag). `TaggedSpan { start, end, encoding }` is the range shape for spans whose file is not at hand; `Utf8SpanPayload` flattens a top-level `spanEncoding` over an analysis payload without copying it.
+- **Converters.** `verter_ffi::convert::OffsetIndex` (`to_utf16`/`to_utf32`/`convert`/`convert_range` return `Result<_, CoordError>`), `SpanConverter` (one lazily built index per source; `SourceUnavailable` when there is no snapshot), `request_offset_to_byte` + `parse_request_encoding_tag` (ingress), `convert_destructured_block_meta` (bindings are CD1, block bounds CD3, each pair names its own tag).
+- **Diagnostics and lint.** `spanStart`/`spanEnd` are absent when the span cannot be converted exactly and `spanError` carries the typed refusal (`SourceUnavailable`/`NotCharBoundary`/`InvalidBoundary`/`Overflow`); the diagnostic is still reported. `LintDiagnostic.span` stays UTF-8 bytes in Rust — the adapter emits a separate tagged `WireLintDiagnostic` span.
+- **Structural records** (module references, text edits, document symbols, selector matches, destructured bindings) refuse the whole conversion on an unconvertible span rather than ship a wrong range.
+- **Requests.** `getCodeActions(file, offset, offsetEncoding)` requires the tag; a preprocessor diagnostic position requires `positionEncoding: "utf16.v1"` (1-based line, 1-based UTF-16 column; lines end at `\n`, `\r\n`, lone `\r`) and is validated against the input the tool consumed at admission (the diagnostic keeps its message when the position is rejected).
+- **Protobuf.** component-meta `ResolvedTypeDeclaration.span` / `ResolvedNativeProp.span` are `CanonicalRange`s (UTF-8); typeinfo schema 9 states the UTF-8 byte unit of every span and rejects an inverted/file-less request `GraphSpanRef`. Audit spans are `AuditSpan { start, end, encoding }`.
+
 ## Encoding Conversion Reference
 
 | Boundary | Pattern | Reference Implementation |
 | -------- | ------- | ------------------------ |
-| Rust internal → NAPI/WASM | `byte_offset_to_utf16()` | `crates/verter_ffi/src/convert.rs:281` |
+| Rust internal → NAPI/WASM | `OffsetIndex::to_utf16()` / `SpanConverter` (exact or refused) | `crates/verter_ffi/src/convert/offset.rs`, `wire_span.rs` |
+| NAPI/WASM request offset → byte offset | `request_offset_to_byte()` under the request's declared tag | `crates/verter_ffi/src/convert/offset.rs` |
 | Rust internal → LSP client | Negotiated encoding conversion | `crates/verter_lsp/src/documents/mod.rs` |
 | LSP Position → byte offset | `LineIndex::position_to_offset()` | `crates/verter_lsp/src/documents/line_index.rs` |
 | Byte offset → LSP Position | `LineIndex::offset_to_position()` | `crates/verter_lsp/src/documents/line_index.rs` |

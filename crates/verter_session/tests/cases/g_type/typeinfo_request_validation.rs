@@ -409,6 +409,59 @@ fn flow_narrowing_missing_span_fails() {
     assert_eq!(err_variant_label(&err), "MalformedPayload");
 }
 
+/// A request span ref that is inverted, or names no file, is a typed
+/// `MalformedPayload` before execution — never normalised or swapped — for
+/// both span-carrying operations.
+#[test]
+fn span_carrying_requests_refuse_inverted_and_file_less_span_refs() {
+    let span = |canonical_id: &str, start, end| {
+        Some(wire::SpanRef {
+            canonical_id: canonical_id.to_string(),
+            start,
+            end,
+        })
+    };
+    for (label, span) in [
+        ("inverted", span("/a.ts", 9, 4)),
+        ("file-less", span("", 1, 4)),
+    ] {
+        let flow = wire::FlowNarrowingRequest {
+            canonical_id: "/a.ts".to_string(),
+            span: span.clone(),
+            context: Some(default_context()),
+            display_policy: Some(default_display_policy()),
+            include_provenance: false,
+            include_diagnostics: false,
+        };
+        let err = validate_flow_narrowing_request(&flow).unwrap_err();
+        assert_eq!(err_variant_label(&err), "MalformedPayload", "flow {label}");
+        let contextual = wire::ContextualTypeRequest {
+            canonical_id: "/a.ts".to_string(),
+            span,
+            context: Some(default_context()),
+            display_policy: Some(default_display_policy()),
+            include_provenance: false,
+            include_diagnostics: false,
+        };
+        let err = validate_contextual_type_request(&contextual).unwrap_err();
+        assert_eq!(
+            err_variant_label(&err),
+            "MalformedPayload",
+            "contextual {label}"
+        );
+    }
+    // An empty range is a valid zero-width position, not an inverted one.
+    let empty = wire::FlowNarrowingRequest {
+        canonical_id: "/a.ts".to_string(),
+        span: span("/a.ts", 3, 3),
+        context: Some(default_context()),
+        display_policy: Some(default_display_policy()),
+        include_provenance: false,
+        include_diagnostics: false,
+    };
+    validate_flow_narrowing_request(&empty).expect("a zero-width span is exact");
+}
+
 #[test]
 fn flow_narrowing_well_formed_passes() {
     let request = wire::FlowNarrowingRequest {
@@ -609,10 +662,10 @@ fn every_legacy_operation_accepts_schema_two_and_three_op_by_op() {
 }
 
 #[test]
-fn schema_versions_one_and_nine_are_rejected_with_typed_errors() {
-    // 1 is below the floor; 9 is the first version ABOVE the current supported
-    // set ([2, 3, 4, 5, 6, 7, 8]). Both are outside the closed set and rejected.
-    for version in [1u32, 9u32] {
+fn schema_versions_one_and_ten_are_rejected_with_typed_errors() {
+    // 1 is below the floor; 10 is the first version ABOVE the current supported
+    // set ([2, 3, 4, 5, 6, 7, 8, 9]). Both are outside the closed set and rejected.
+    for version in [1u32, 10u32] {
         let err = validate_type_info_graph_request(&legacy_envelope(
             wire::Operation::ResolveSymbol,
             version,
@@ -710,7 +763,7 @@ fn framework_surface_envelope_payload_version_mismatch_is_malformed_payload() {
 }
 
 #[test]
-fn supported_schema_version_set_is_exactly_two_through_eight() {
+fn supported_schema_version_set_is_exactly_two_through_nine() {
     assert_eq!(
         SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
         &[
@@ -720,16 +773,19 @@ fn supported_schema_version_set_is_exactly_two_through_eight() {
             5,
             6,
             7,
+            8,
             TYPEINFO_GRAPH_SCHEMA_VERSION
         ],
         "the supported set holds every version some operation still accepts: \
          schema 2 (legacy-operations-only), schema 3 (the framework-surface \
          floor), schema 4 (member default/origin fields), schema 5 \
          (payload-side relation_proofs table), schema 6 (typed property keys), \
-         and schema 7 (current — the canonical object-spread-program node)",
+         schema 7 (the canonical object-spread-program node), schema 8 (the \
+         compiler-intrinsic application node) and schema 9 (current — the \
+         stated UTF-8 byte unit of every span)",
     );
     assert_eq!(MIN_TYPEINFO_GRAPH_SCHEMA_VERSION, 2);
-    assert_eq!(TYPEINFO_GRAPH_SCHEMA_VERSION, 8);
+    assert_eq!(TYPEINFO_GRAPH_SCHEMA_VERSION, 9);
     assert_eq!(FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION, 3);
 }
 
@@ -737,21 +793,22 @@ fn supported_schema_version_set_is_exactly_two_through_eight() {
 /// error payload's `server_supported_versions`, populated from
 /// `SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS` via
 /// `wire_error_unknown_schema_version` — the single advertisement
-/// source. It reports `[2, 3, 4, 5, 6, 7, 8]`.
+/// source. It reports `[2, 3, 4, 5, 6, 7, 8, 9]`.
 #[test]
-fn unknown_schema_version_error_advertises_two_through_eight() {
-    // Version 9 is the first version OUTSIDE the supported set — it triggers
-    // the UnknownSchemaVersion rejection (8 is now supported).
-    let err = validate_type_info_graph_request(&legacy_envelope(wire::Operation::ResolveSymbol, 9))
-        .unwrap_err();
+fn unknown_schema_version_error_advertises_two_through_nine() {
+    // Version 10 is the first version OUTSIDE the supported set — it triggers
+    // the UnknownSchemaVersion rejection (9 is now supported).
+    let err =
+        validate_type_info_graph_request(&legacy_envelope(wire::Operation::ResolveSymbol, 10))
+            .unwrap_err();
     let payload = match err.kind.as_ref().expect("error kind") {
         type_info_request_error::Kind::UnknownSchemaVersion(p) => p,
         other => panic!("expected UnknownSchemaVersion, got {other:?}"),
     };
     assert_eq!(
         payload.server_supported_versions,
-        vec![2, 3, 4, 5, 6, 7, 8],
-        "the advertisement surface must report exactly [2, 3, 4, 5, 6, 7, 8]",
+        vec![2, 3, 4, 5, 6, 7, 8, 9],
+        "the advertisement surface must report exactly [2, 3, 4, 5, 6, 7, 8, 9]",
     );
     assert_eq!(
         payload.server_supported_versions,
@@ -761,13 +818,13 @@ fn unknown_schema_version_error_advertises_two_through_eight() {
 
     // The constructor itself is the single advertisement source.
     let wire_payload = wire::wire_error_unknown_schema_version(
-        9,
+        10,
         TYPEINFO_GRAPH_SCHEMA_VERSION,
         SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
     );
     assert_eq!(
         wire_payload.server_supported_versions,
-        vec![2, 3, 4, 5, 6, 7, 8]
+        vec![2, 3, 4, 5, 6, 7, 8, 9]
     );
 }
 
@@ -839,8 +896,8 @@ fn op_minimum_gate_walks_every_operation_discriminant() {
 
         // Outside the global set: UnknownSchemaVersion regardless of
         // the operation (global membership runs first). 1 is below the
-        // floor; 9 is the first version above the current set ([2, 3, 4, 5, 6, 7, 8]).
-        for version in [1u32, 9u32] {
+        // floor; 10 is the first version above the current set ([2, 3, 4, 5, 6, 7, 8, 9]).
+        for version in [1u32, 10u32] {
             let err = validate_schema_version_for_operation(operation, version).unwrap_err();
             assert_eq!(
                 err_variant_label(&err),

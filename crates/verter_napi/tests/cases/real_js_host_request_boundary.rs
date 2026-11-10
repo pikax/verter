@@ -2057,7 +2057,11 @@ fn typed_host_failure_preserves_diagnostics_and_utf16_offsets() {
     assert_eq!(diagnostic.severity, "error");
     assert_eq!(diagnostic.code, "HOST_NATIVE_BINDING_UNAVAILABLE");
     assert_eq!(diagnostic.message, "native binding unavailable");
-    assert_eq!((diagnostic.spanStart, diagnostic.spanEnd), (0, 2));
+    assert_eq!(
+        (diagnostic.spanStart, diagnostic.spanEnd),
+        (Some(0), Some(2))
+    );
+    assert_eq!(diagnostic.spanEncoding, "utf16.v1");
     assert!(projected.diagnostics.hasErrors);
 }
 

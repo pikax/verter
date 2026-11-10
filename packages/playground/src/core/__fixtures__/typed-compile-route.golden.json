@@ -10,10 +10,12 @@
       {
         "name": "greeting",
         "sourceStart": 80,
-        "sourceEnd": 88
+        "sourceEnd": 88,
+        "sourceEncoding": "utf16.v1"
       }
     ],
     "blockStart": 1734,
-    "blockEnd": 1843
+    "blockEnd": 1843,
+    "blockEncoding": "utf16.v1"
   }
 }

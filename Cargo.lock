@@ -3676,6 +3676,7 @@ version = "0.0.1-beta.7"
 dependencies = [
  "log",
  "prost",
+ "serde",
  "serde_json",
  "verter_actions",
  "verter_audit",
@@ -3807,6 +3808,7 @@ dependencies = [
  "verter_compiler",
  "verter_css_syntax",
  "verter_diagnostics",
+ "verter_ffi",
  "verter_macro_dto",
  "verter_protocol",
  "verter_semantic",

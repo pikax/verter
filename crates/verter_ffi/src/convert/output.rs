@@ -6,11 +6,12 @@ use verter_session as host;
 
 use crate::types::*;
 
-use super::offset::{mandatory_utf16_offset, mandatory_utf16_offset_with, OffsetIndex};
+use super::error::FfiConversionError;
 use super::string_helpers::{
     host_module_reference_analyzability_to_string, host_module_reference_semantics_to_string,
     host_module_reference_syntax_to_string,
 };
+use super::wire_span::{SpanConversionError, SpanConverter};
 
 /// Preserve the host's closed public-API failure identity at JS boundaries.
 pub fn host_public_api_projection_error_to_ffi(
@@ -20,7 +21,7 @@ pub fn host_public_api_projection_error_to_ffi(
     FfiPublicApiProjectionError {
         code: error.code().to_string(),
         detail_code: error.detail_code().to_string(),
-        subject: error.subject(),
+        subject: error.subject().exact(),
         declaration_shape_reason: error
             .declaration_shape_reason()
             .map(|reason| reason.code().to_string()),
@@ -97,8 +98,11 @@ pub fn host_preprocessor_request_to_ffi(req: &host::PreprocessorRequest) -> FfiP
 }
 pub(super) fn host_module_reference_to_ffi(
     input: host::ScriptModuleReference,
-) -> FfiModuleReference {
-    FfiModuleReference {
+    spans: &SpanConverter<'_>,
+) -> Result<FfiModuleReference, SpanConversionError> {
+    let (span_start, span_end) = spans.utf16_span(input.span)?;
+    let (expr_span_start, expr_span_end) = spans.utf16_span(input.expr_span)?;
+    Ok(FfiModuleReference {
         syntax: host_module_reference_syntax_to_string(input.syntax),
         semantics: host_module_reference_semantics_to_string(input.semantics),
         is_type_only: input.is_type_only,
@@ -107,11 +111,12 @@ pub(super) fn host_module_reference_to_ffi(
         finite_specifiers: input.finite_specifiers,
         static_prefix: input.static_prefix,
         analyzability: host_module_reference_analyzability_to_string(input.analyzability),
-        span_start: input.span.start,
-        span_end: input.span.end,
-        expr_span_start: input.expr_span.start,
-        expr_span_end: input.expr_span.end,
-    }
+        span_start,
+        span_end,
+        expr_span_start,
+        expr_span_end,
+        span_encoding: SpanEncodingTag::Utf16,
+    })
 }
 
 pub fn host_node_kind_to_ffi(input: &host::VirtualNodeKind) -> FfiVirtualNodeKind {
@@ -139,24 +144,27 @@ pub fn host_node_kind_to_ffi(input: &host::VirtualNodeKind) -> FfiVirtualNodeKin
     }
 }
 
-/// Converts one host diagnostic, UTF-16-mapped span included.
+/// Converts one host diagnostic with its span converted to UTF-16.
 ///
 /// The sole per-diagnostic projection every FFI consumer (NAPI and WASM
-/// alike) uses, so severity spelling and UTF-16 span mapping cannot
-/// diverge between the two bindings.
+/// alike) uses, so severity spelling and span mapping cannot diverge between
+/// the two bindings. A span that cannot be converted exactly against `source`
+/// (no snapshot, off-boundary, past-end, inverted) leaves the diagnostic
+/// reported without a span and carries the typed refusal in `span_error`.
 pub fn host_diagnostic_to_ffi(
     diagnostic: &host::HostDiagnostic,
     source: Option<&str>,
 ) -> FfiDiagnostic {
-    project_diagnostic(diagnostic, |byte_offset| {
-        mandatory_utf16_offset(byte_offset, source)
-    })
+    host_diagnostic_to_ffi_with(diagnostic, &SpanConverter::new(source))
 }
 
-fn project_diagnostic(
+/// [`host_diagnostic_to_ffi`] over a caller-held converter, so a batch of
+/// diagnostics of one source shares one offset index.
+pub fn host_diagnostic_to_ffi_with(
     diagnostic: &host::HostDiagnostic,
-    to_utf16: impl Fn(u32) -> u32,
+    spans: &SpanConverter<'_>,
 ) -> FfiDiagnostic {
+    let span = spans.diagnostic_span(diagnostic.span);
     FfiDiagnostic {
         severity: match diagnostic.severity {
             host::HostSeverity::Error => "error".to_string(),
@@ -165,41 +173,53 @@ fn project_diagnostic(
         },
         code: diagnostic.code.clone(),
         message: diagnostic.message.clone(),
-        span_start: to_utf16(diagnostic.span.start),
-        span_end: to_utf16(diagnostic.span.end),
+        span_start: span.start,
+        span_end: span.end,
+        span_encoding: span.encoding,
+        span_error: span.error.map(str::to_string),
     }
 }
 
-/// Converts a diagnostics batch, UTF-16-mapped spans included.
+/// Converts a diagnostics batch with spans converted to UTF-16.
 ///
-/// The batch shares one [`OffsetIndex`] over `source`, built only when
-/// there is a span to convert, so `k` diagnostics visit the source once
-/// rather than once per span. The index lives for this call only. Each span
-/// maps exactly as [`host_diagnostic_to_ffi`] maps it.
+/// The batch shares one offset index over `source`, built on the first span
+/// to convert, so `k` diagnostics visit the source once rather than once per
+/// span. The index lives for this call only. Each span maps exactly as
+/// [`host_diagnostic_to_ffi`] maps it.
 pub fn host_diagnostics_to_ffi(
     input: &host::DiagnosticsSnapshot,
     source: Option<&str>,
 ) -> FfiDiagnosticsSnapshot {
-    let index = source
-        .filter(|_| !input.diagnostics.is_empty())
-        .map(OffsetIndex::new);
+    host_diagnostics_to_ffi_with(input, &SpanConverter::new(source))
+}
+
+/// [`host_diagnostics_to_ffi`] over a caller-held converter, so one result
+/// that also converts other spans of the same source shares one index.
+pub fn host_diagnostics_to_ffi_with(
+    input: &host::DiagnosticsSnapshot,
+    spans: &SpanConverter<'_>,
+) -> FfiDiagnosticsSnapshot {
     FfiDiagnosticsSnapshot {
         diagnostics: input
             .diagnostics
             .iter()
-            .map(|d| {
-                project_diagnostic(d, |byte_offset| {
-                    mandatory_utf16_offset_with(byte_offset, index.as_ref())
-                })
-            })
+            .map(|d| host_diagnostic_to_ffi_with(d, spans))
             .collect(),
         has_errors: input.has_errors,
     }
 }
 
 /// Convert a host update result to its FFI representation.
-pub fn host_update_to_ffi(input: host::HostUpdateResult, source: Option<&str>) -> FfiUpdateResult {
-    FfiUpdateResult {
+///
+/// Module-reference spans are structural facts of the result: one that cannot
+/// be converted exactly against `source` refuses the whole conversion
+/// ([`FfiConversionError::SpanConversion`]) rather than shipping a wrong range.
+pub fn host_update_to_ffi(
+    input: host::HostUpdateResult,
+    source: Option<&str>,
+) -> Result<FfiUpdateResult, FfiConversionError> {
+    let spans = SpanConverter::new(source);
+    Ok(FfiUpdateResult {
         canonical_id: input.canonical_id,
         changed: input.changed,
         slice_changes: FfiSliceChanges {
@@ -234,7 +254,7 @@ pub fn host_update_to_ffi(input: host::HostUpdateResult, source: Option<&str>) -
         removed_virtual_ids: input.removed_virtual_ids,
         changed_lsp_ids: input.changed_lsp_ids,
         removed_lsp_ids: input.removed_lsp_ids,
-        diagnostics: host_diagnostics_to_ffi(&input.diagnostics, source),
+        diagnostics: host_diagnostics_to_ffi_with(&input.diagnostics, &spans),
         external_source_requests: input
             .external_source_requests
             .into_iter()
@@ -266,8 +286,8 @@ pub fn host_update_to_ffi(input: host::HostUpdateResult, source: Option<&str>) -
         module_references: input
             .module_references
             .into_iter()
-            .map(host_module_reference_to_ffi)
-            .collect(),
+            .map(|reference| host_module_reference_to_ffi(reference, &spans))
+            .collect::<Result<Vec<_>, _>>()?,
         preprocessor_requests: input
             .preprocessor_requests
             .iter()
@@ -284,7 +304,7 @@ pub fn host_update_to_ffi(input: host::HostUpdateResult, source: Option<&str>) -
             })
             .collect(),
         parse_duration_ms: input.parse_duration_ms,
-    }
+    })
 }
 
 /// Convert a host virtual file response to its FFI representation.

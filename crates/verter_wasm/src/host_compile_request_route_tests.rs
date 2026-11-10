@@ -585,7 +585,7 @@ fn the_analysis_row_is_the_legacy_reads_template_snapshot_not_its_file_snapshot(
         "/src/App.vue",
         vue_route_request(json!([template_analysis_product()])),
     );
-    let published = &product_row(&response, "analysis")["analysis"];
+    let mut published = product_row(&response, "analysis")["analysis"].clone();
 
     let legacy_raw = method(&host, "getAnalysis")
         .call1(&host, &JsValue::from_str("/src/App.vue"))
@@ -600,12 +600,28 @@ fn the_analysis_row_is_the_legacy_reads_template_snapshot_not_its_file_snapshot(
         legacy["template"].is_object(),
         "fixture drift: the legacy file snapshot must nest a template snapshot"
     );
+    // Each payload names its coordinate contract once, at its own root: the
+    // legacy read tags the whole-file snapshot, the row tags the template
+    // snapshot it publishes alone. Past that tag the two are the same value.
     assert_eq!(
-        *published, legacy["template"],
+        published["spanEncoding"],
+        json!("utf8.v1"),
+        "the analysis row names the UTF-8 coordinate contract"
+    );
+    assert_eq!(
+        legacy["spanEncoding"], published["spanEncoding"],
+        "the legacy read names the same coordinate contract at its root"
+    );
+    published
+        .as_object_mut()
+        .expect("the analysis row is an object")
+        .remove("spanEncoding");
+    assert_eq!(
+        published, legacy["template"],
         "the analysis row must be the legacy read's `template` value"
     );
     assert_ne!(
-        *published, legacy,
+        published, legacy,
         "the analysis row must NOT be the whole-file snapshot"
     );
 }
@@ -900,13 +916,21 @@ fn published_ide_offsets_use_their_own_utf16_coordinate_spaces() {
     // fails here rather than reaching a consumer whose type says otherwise.
     assert_eq!(
         object_keys(published),
-        vec!["bindings", "blockEnd", "blockStart"],
+        vec!["bindings", "blockEncoding", "blockEnd", "blockStart"],
         "the destructured block's published keys must be the ones its declaration states"
     );
     assert_eq!(
         object_keys(binding),
-        vec!["name", "sourceEnd", "sourceStart"],
-        "a binding row's published keys must be the ones its declaration states"
+        vec!["name", "sourceEncoding", "sourceEnd", "sourceStart"],
+        "a binding's published keys must be the ones its declaration states"
+    );
+    assert_eq!(
+        (
+            published["blockEncoding"].as_str(),
+            binding["sourceEncoding"].as_str()
+        ),
+        (Some("utf16.v1"), Some("utf16.v1")),
+        "both coordinate domains name the UTF-16 contract"
     );
 }
 
