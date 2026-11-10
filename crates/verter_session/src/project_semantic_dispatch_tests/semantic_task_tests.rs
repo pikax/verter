@@ -6627,6 +6627,319 @@ mod semantic_poll_contract {
         assert!(graph.resident_flight_keys_for_tests().is_empty());
         drop(other);
     }
+
+    /// A module of generic aliases a path reads through:
+    /// `Pair<"deep">["inner"]["value"]` instantiates `Pair<"deep">`, then
+    /// the `Box<"deep">` its `inner` member applies.
+    const PROJECTION_FILE: &str = "/semantic-task/projection.ts";
+
+    const PROJECTION: &str = "type Box<T> = { value: T };\n\
+                              type Pair<T> = { inner: Box<T> };\n";
+
+    fn projection_host() -> Arc<crate::VerterHost> {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            PROJECTION_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(PROJECTION),
+            crate::FileLanguage::script_ts(),
+        );
+        host.ensure_indexed_ready(PROJECTION_FILE)
+            .expect("the aliases have indexed input before a hop is held");
+        host
+    }
+
+    /// The path `Pair<"deep">["inner"]["value"]` read in `Navigate`, and
+    /// the instantiations its walk reads, in the order it reads them: its
+    /// base `Pair<"deep">`, then the `Box<"deep">` the `inner` member
+    /// applies — each an intermediate hop, read in structural transit.
+    fn projection_keys(
+        host: &crate::VerterHost,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> (SemanticQueryKey, [SemanticQueryKey; 2]) {
+        use verter_type_engine::semantic_query::{
+            DeclIdentity, InstantiateKey, LiteralValue, PathSegment, PayloadArray, PropertyKey,
+        };
+        let graph = dispatch.graph_arc();
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let deep = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "deep".into(),
+        )));
+        let pair = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: DeclIdentity {
+                canonical_id: PROJECTION_FILE.into(),
+                owner,
+                whole_hash: host
+                    .shallow_file_state(PROJECTION_FILE)
+                    .expect("the aliases are indexed")
+                    .whole_hash,
+                decl_name: "Pair".into(),
+            },
+            args: PayloadArray::from(vec![deep]),
+        });
+        let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
+        let path = SemanticQueryKey::ProjectPath {
+            base: pair,
+            path: verter_type_expr::OwnedSlice::from(
+                vec![
+                    PathSegment::Member(PropertyKey::identifier("inner")),
+                    PathSegment::Member(PropertyKey::identifier("value")),
+                ]
+                .into_boxed_slice(),
+            ),
+            context,
+        };
+        let hop = |alias: &str| {
+            SemanticQueryKey::Instantiate(InstantiateKey::new(
+                dispatch.type_slot_for(PROJECTION_FILE, owner, alias),
+                Arc::from([deep]),
+                dispatch.instantiate_context_for(
+                    PROJECTION_FILE,
+                    context.into_structural_transit_with_mode(ProjectionMode::Navigate),
+                ),
+            ))
+        };
+        (path, [hop("Pair"), hop("Box")])
+    }
+
+    /// The hops path walks on `host` computed, wherever they ran.
+    fn projection_hops(host: &crate::VerterHost) -> u64 {
+        host.project_type_store()
+            .semantic_graph()
+            .stats_snapshot()
+            .projection_hops_walked
+    }
+
+    /// The hops `Pair<"deep">["inner"]["value"]` walks: the base
+    /// instantiated, `inner` read off it, its `Box<"deep">` instantiated,
+    /// `value` read off that.
+    const PROJECTION_WALK_HOPS: u64 = 4;
+
+    /// What a polled path did while one of its instantiations was held.
+    struct HeldProjection {
+        /// The first poll returned `Pending` instead of waiting the
+        /// producer out.
+        yielded: bool,
+        /// Hops computed by the first poll.
+        hops_at_hold: u64,
+        /// A second poll here while still held — under a probe that
+        /// forbids every wait — and then its task polled on another thread
+        /// stayed pending.
+        repolled_pending: bool,
+        pending_elsewhere: Option<bool>,
+        /// Hops computed by those repolls.
+        repoll_hops: u64,
+        /// The producer going away woke the root.
+        woken: bool,
+        /// Hops computed over the whole polled read.
+        hops: u64,
+        read: ValueRead,
+    }
+
+    /// The path polled at the production entry on a fresh host while
+    /// another task produces `projection_keys(..).1[held]`; released, its
+    /// task is resumed on another thread and the answer delivered here.
+    fn poll_projection_holding(held: usize) -> (Arc<crate::VerterHost>, HeldProjection) {
+        let host = projection_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let (path, hops) = projection_keys(&host, &dispatch);
+        let (other, lease) = hold_producer(&host, graph, hops[held].clone());
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let before = projection_hops(&host);
+        let mut entry = dispatch.poll_query(path);
+        let (first, hops_at_hold, repolled_pending, pending_elsewhere, repoll_hops) =
+            while_held(lease, || {
+                let first = entry.poll(&waker);
+                let hops_at_hold = projection_hops(&host) - before;
+                if first.is_ready() {
+                    return (first, hops_at_hold, false, None, 0);
+                }
+                let repolled_pending = {
+                    let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                    entry.poll(&waker).is_pending()
+                };
+                let pending_elsewhere = entry.task().map(|task| {
+                    assert_send(task);
+                    std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| task.poll(&waker).is_pending())
+                            .join()
+                            .expect("the pending poll returns")
+                    })
+                });
+                let repoll_hops = projection_hops(&host) - before - hops_at_hold;
+                (
+                    first,
+                    hops_at_hold,
+                    repolled_pending,
+                    pending_elsewhere,
+                    repoll_hops,
+                )
+            });
+        let woken = counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1;
+        let yielded = first.is_pending();
+        let read = match first {
+            Poll::Ready(read) => read,
+            Poll::Pending => resume_elsewhere(&mut entry),
+        };
+        drop(entry);
+        let run = HeldProjection {
+            yielded,
+            hops_at_hold,
+            repolled_pending,
+            pending_elsewhere,
+            repoll_hops,
+            woken,
+            hops: projection_hops(&host) - before,
+            read,
+        };
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+        drop(other);
+        drop(scope);
+        drop(dispatch);
+        (host, run)
+    }
+
+    /// The path read through the synchronous entry on a fresh host: its
+    /// summary and the hops it computed.
+    fn synchronous_projection() -> (ReadSummary, u64) {
+        let host = projection_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let (path, _) = projection_keys(&host, &dispatch);
+        let before = projection_hops(&host);
+        let read = dispatch.execute_via_cold_build_helper(path);
+        (
+            read_summary(&dispatch, &read),
+            projection_hops(&host) - before,
+        )
+    }
+
+    /// A cold path projection whose walk reaches an instantiation another
+    /// task is producing — its base, the first dependency the walk reads —
+    /// returns `Pending` at the polled entry instead of waiting that
+    /// producer out, having computed only the hop that reads it. Polled
+    /// again while held, under a probe that forbids every wait, and then
+    /// polled on another thread, it stays pending and computes nothing.
+    /// Released, it resumes on another thread at that hop and delivers
+    /// exactly what the synchronous entry reads on a fresh host — answer,
+    /// fact status, rails, diagnostics and the whole receipt tree — having
+    /// computed each hop once: the absolute count, so a walk both entries
+    /// replayed alike still fails.
+    #[test]
+    fn a_cold_path_whose_internal_instantiation_is_held_yields_and_resumes_to_the_synchronous_read()
+    {
+        let (synchronous, synchronous_hops) = synchronous_projection();
+        assert_eq!(synchronous.0, "\"deep\"", "{synchronous:?}");
+        assert!(
+            !synchronous.3 && synchronous.5.is_some(),
+            "premise: a complete, priced answer: {synchronous:?}"
+        );
+        assert_eq!(synchronous_hops, PROJECTION_WALK_HOPS);
+
+        let (host, run) = poll_projection_holding(0);
+        assert!(
+            run.yielded,
+            "the path yields while another task instantiates its base"
+        );
+        assert_eq!(run.hops_at_hold, 1, "the walk waits at its first hop");
+        assert!(
+            run.repolled_pending,
+            "a repoll while held stays pending without entering a wait"
+        );
+        assert_eq!(run.pending_elsewhere, Some(true));
+        assert_eq!(run.repoll_hops, 0, "a pending repoll computes no hop");
+        assert!(run.woken, "the producer going away wakes the path");
+        assert_eq!(
+            run.hops, PROJECTION_WALK_HOPS,
+            "no hop is computed again: the walk resumes at the hop it held"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+
+        // Warm, both entries answer alike computing no hop.
+        let (path, _) = projection_keys(&host, &dispatch);
+        let before = projection_hops(&host);
+        let mut dispatch = dispatch;
+        let mut warm = dispatch.poll_query(path.clone());
+        let Poll::Ready(warm_read) = warm.poll(Waker::noop()) else {
+            panic!("a warm path answers on its first poll");
+        };
+        drop(warm);
+        let warm_sync = dispatch.execute_via_cold_build_helper(path);
+        assert_eq!(projection_hops(&host), before, "a warm path walks no hop");
+        assert_eq!(
+            read_summary(&dispatch, &warm_read),
+            read_summary(&dispatch, &warm_sync)
+        );
+    }
+
+    /// Sequential reads: a path whose walk already read its base's
+    /// instantiation and the member off it, and now reads the `Box<"deep">`
+    /// that member applies while another task produces it, returns
+    /// `Pending` holding the hops it completed. Resumed on another thread,
+    /// it continues at the held hop — the completed hops and their read
+    /// are not computed again, counted as physical hops where they are
+    /// computed, outside every charge and its rollback — and delivers
+    /// exactly what the synchronous entry reads, receipt tree included.
+    #[test]
+    fn a_path_waiting_on_its_second_instantiation_resumes_without_walking_its_completed_hops_again()
+    {
+        let (synchronous, synchronous_hops) = synchronous_projection();
+        assert_eq!(synchronous_hops, PROJECTION_WALK_HOPS);
+
+        let (host, run) = poll_projection_holding(1);
+        assert!(
+            run.yielded,
+            "the path yields while another task instantiates its member's alias"
+        );
+        assert_eq!(
+            run.hops_at_hold, 3,
+            "the base, its member and the member's alias were walked before the wait"
+        );
+        assert!(run.repolled_pending);
+        assert_eq!(run.pending_elsewhere, Some(true));
+        assert_eq!(run.repoll_hops, 0, "a pending repoll computes no hop");
+        assert!(run.woken);
+        assert_eq!(
+            run.hops, PROJECTION_WALK_HOPS,
+            "the completed hops are not walked again: one hop remained after the wait"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+    }
+
+    /// A path released while it waits on its held instantiation withdraws
+    /// its wait and leaves nothing open; the producer it waited on is left
+    /// alone, and the dispatcher reads the path afterwards as the
+    /// synchronous entry does.
+    #[test]
+    fn a_path_released_while_its_instantiation_is_held_leaves_nothing_open() {
+        let (synchronous, _) = synchronous_projection();
+        let host = projection_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let (path, hops) = projection_keys(&host, &dispatch);
+        let (other, lease) = hold_producer(&host, graph, hops[1].clone());
+        let mut entry = dispatch.poll_query(path.clone());
+        let pending = while_held(lease, || {
+            let pending = entry.poll(Waker::noop()).is_pending();
+            drop(entry);
+            pending
+        });
+        assert!(pending, "the path yields while its instantiation is held");
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        drop(other);
+        let read = dispatch.execute_via_cold_build_helper(path);
+        assert_eq!(read_summary(&dispatch, &read).0, synchronous.0);
+    }
 }
 
 /// How the subscriber to a held semantic flight is driven through the

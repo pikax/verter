@@ -1120,6 +1120,33 @@ order — a declared base's own `Static` surface read as a query, a value
 base's constructor surface composed in place — and the composed surface
 with its `prototype` property and type-argument specialization) are written
 this way.
+Path projections (`ProjectPath`; `ProjectPathBuild` and `PathWalker` in
+`walk.rs`) are written this way as well, for the hops listed here. The walk
+keeps its frame and result stacks, cycle sets, arm probes, partiality,
+diagnostics and prefix recording as owned state (`WalkState`). The prefix
+recording is an owned `PrefixRecording` that the ledger seals through
+(`ConnectedDemandLedger::seal_prefix`) and ends (`end_prefixes`) when the walk
+completes, when it leaves its linear run, or when the frame holding a
+suspended walk is released (`FamilyBuild::release_retained_accounting`).
+A hop whose dependency is one of these reads names it as the build's need
+and retains its position and what it computed before the read
+(`HopResume`, `HopSite`):
+
+- a declaration placeholder's instantiation;
+- a declaration reference's `ResolveDecl`;
+- an intermediate generic application's `Instantiate`;
+- a deferred `keyof`'s reduction;
+- a deferred indexed access's reduction;
+- each branch of an open conditional, with the true branch's answer kept
+  while the false branch is read;
+- a `typeof` carrier's value, then its pending member.
+
+The build resumes that hop with the answer (`PathWalker::resume_walk`),
+never its step or the walk from its root. The in-place driver
+(`build_project_path`) reads each named dependency where the hop stands.
+Only the path build walks a path. A walk counts
+each hop it computes in `projection_hops_walked`, outside every charge and
+its rollback. Its stages are not counted in `continuation_stages_resumed`.
 The shared signature-list read
 (`SignatureListRead`) is one sub-continuation both overload sets and
 apparent types step, in resolution or declaration order.
@@ -1278,6 +1305,17 @@ edits the module whose `declare global` block contributes `Function` and
 holds the shards: the apparent type's lookup answers `Pending` at the
 contributor's load after both lookups' index reads, and resumes to the
 synchronous entry's read.
+`a_cold_path_whose_internal_instantiation_is_held_yields_and_resumes_to_the_synchronous_read`
+and
+`a_path_waiting_on_its_second_instantiation_resumes_without_walking_its_completed_hops_again`
+poll `Pair<"deep">["inner"]["value"]` while another task produces its
+first or its second hop's instantiation. Each poll returns `Pending` after
+exactly the hops before the held one. A repoll under a forbidding probe and
+a poll of its task on another thread stay pending and compute no hop.
+Released, the path resumes elsewhere to the synchronous entry's read,
+receipt tree included, with each hop computed once (an absolute count).
+`a_path_released_while_its_instantiation_is_held_leaves_nothing_open`
+drops the waiting path.
 
 ### Frame entry loads
 
@@ -1497,9 +1535,28 @@ route the shallow inventories cannot settle — a namespace import, an
 and the static surface's declaration reads (`PortRead::ClassStatic`: a
 prepared declaration's own import routing, a heritage argument's lowering
 and a value base's constructor type), each over files the family already
-loaded. Every other
-family a frame or cold build reaches still builds in one synchronous step:
-path projection, mapped types, `keyof`, template literals, overload sets with explicit type arguments (each candidate instantiates
+loaded.
+
+A path projection is suspendable only at the hops listed under
+[Family continuations](#family-continuations). Its other reads are still
+made in place inside a stage:
+
+- the prelude's union-index distribution;
+- the member and index reads of object, spread-program, heritage
+  intersection, mapped, tuple and array surfaces;
+- apparent-member, apparent-wrapper and apparent-type reads;
+- carrier resolution;
+- a `ReturnType` flow member hop;
+- the reads inside composite joins;
+- terminal expansion and shallow synthesis;
+- the deferred evaluator it drives.
+
+A path whose subject is a carrier or reads an apparent wrapper is still read
+in place where it is needed, as is one spelled as `ProjectMember` or
+`IndexedAccess` sugar. Their entry preludes are not yet retained.
+
+Every other family a frame or cold build reaches still builds in one
+synchronous step: mapped types, `keyof`, template literals, overload sets with explicit type arguments (each candidate instantiates
 through the substitution engine, whose template-literal fold reads in
 place), signature discovery,
 object-spread projection, locator lowering, relations, flow returns and the

@@ -264,6 +264,8 @@ pub(super) enum FamilyBuild {
     ApparentType(ApparentTypeBuild),
     ClassInstanceSurface(ClassInstanceSurfaceBuild),
     ClassStaticSurface(ClassStaticSurfaceBuild),
+    /// A path projection's walk, standing at the read a hop named.
+    ProjectPath(Box<super::walk::ProjectPathBuild>),
 }
 
 impl FamilyBuild {
@@ -294,7 +296,37 @@ impl FamilyBuild {
             | Self::ClassStaticSurface(_)
             | Self::CycleGate(_)
             | Self::ResolveDecl(_)
-            | Self::TemplateUnion(..) => false,
+            | Self::TemplateUnion(..)
+            | Self::ProjectPath(_) => false,
+        }
+    }
+
+    /// Record `key`, a read this build names, in the test dispatch trace
+    /// as the read a synchronous build makes is recorded: a path walk's
+    /// hop reads are recorded wherever its driver reads them.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn trace_need(&self, key: &SemanticQueryKey) {
+        if matches!(self, Self::ProjectPath(_)) {
+            super::raise::DISPATCH_TRACE.with(|t| {
+                t.borrow_mut()
+                    .push(super::raise::query_key_discriminant(key))
+            });
+        }
+    }
+
+    #[cfg(not(any(test, feature = "test-support")))]
+    pub(super) fn trace_need(&self, _key: &SemanticQueryKey) {}
+
+    /// Release what a build stopped between its stages retained on its
+    /// computation's recording: a path walk's open prefix recording puts
+    /// back what the build charged before its first prefix, so the frame
+    /// abandoning that recording leaves those charges its consumer's.
+    pub(super) fn release_retained_accounting(
+        &mut self,
+        ledger: &super::connected_demand::ConnectedDemandLedger<'_>,
+    ) {
+        if let Self::ProjectPath(build) = self {
+            build.walk.release_prefixes(ledger);
         }
     }
 
@@ -311,7 +343,8 @@ impl FamilyBuild {
             | Self::OverloadSet(_)
             | Self::ClassInstanceSurface(_)
             | Self::CycleGate(_)
-            | Self::TemplateUnion(..) => unreachable!("this family reads no resolver port"),
+            | Self::TemplateUnion(..)
+            | Self::ProjectPath(_) => unreachable!("this family reads no resolver port"),
         }
     }
 }
@@ -374,7 +407,8 @@ pub(super) fn builds_as_continuation(key: &SemanticQueryKey) -> bool {
         | SemanticQueryKey::ReduceIntersection { .. }
         | SemanticQueryKey::ApparentType { .. }
         | SemanticQueryKey::ResolveClassSurface { .. }
-        | SemanticQueryKey::ClassifyMaterializationCycleGate(_) => true,
+        | SemanticQueryKey::ClassifyMaterializationCycleGate(_)
+        | SemanticQueryKey::ProjectPath { .. } => true,
         // Explicit type arguments instantiate each candidate through the
         // substitution engine, which still reads in place.
         SemanticQueryKey::ResolveOverloadSet { type_args, .. } => type_args.is_empty(),
@@ -396,6 +430,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticQueryKey::TemplateLiteralReduce { pattern, args, .. } => {
                 Some(self.begin_template_literal_reduce(pattern, args))
             }
+            SemanticQueryKey::ProjectPath {
+                base,
+                path,
+                context,
+            } => Some(self.begin_project_path(*base, path, *context)),
             SemanticQueryKey::ResolveDecl(key) => {
                 Some(self.continuation_stage().begin_resolve_decl(key))
             }
@@ -467,8 +506,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         build: FamilyBuild,
         read: CacheRead<QueryResult<SemanticQueryValue>>,
     ) -> FamilyStep {
-        self.graph().record_continuation_resumed();
+        // A path walk counts its own work, hop by hop, where each hop is
+        // computed (`projection_hops_walked`).
+        if !matches!(build, FamilyBuild::ProjectPath(_)) {
+            self.graph().record_continuation_resumed();
+        }
         match build {
+            FamilyBuild::ProjectPath(build) => {
+                self.resume_project_path(*build, super::narrow_value_cache_read(read))
+            }
             FamilyBuild::TemplateUnion(mut output, fallback) => {
                 let read = super::narrow_value_cache_read(read);
                 output.result = QueryResult::Value(match read.value {
@@ -523,6 +569,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .continuation_stage()
                 .resume_macro_payload_owner(build, serve),
             FamilyBuild::TemplateUnion(..) => unreachable!("a template union is a query read"),
+            FamilyBuild::ProjectPath(_) => unreachable!("a path walk reads queries only"),
             FamilyBuild::ResolveDecl(build) => self
                 .continuation_stage()
                 .resume_resolve_decl_source(*build, serve),
@@ -566,7 +613,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 | FamilyBuild::OverloadSet(_)
                 | FamilyBuild::ClassInstanceSurface(_)
                 | FamilyBuild::CycleGate(_)
-                | FamilyBuild::TemplateUnion(..),
+                | FamilyBuild::TemplateUnion(..)
+                | FamilyBuild::ProjectPath(_),
                 _,
             ) => unreachable!("this family reads no resolver port"),
         }
@@ -625,6 +673,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if build.counts_need_intent() && !self.drives_on_the_runtime(&key) {
             self.record_dispatch_intent_counters(&key);
         }
+        build.trace_need(&key);
         self.execute_via_cold_build_helper(key)
     }
 

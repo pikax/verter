@@ -6592,6 +6592,12 @@ pub struct SemanticGraphStats {
     /// Later stages of those continuations: one per query read a build
     /// named. A count above the reads means a stage ran again.
     pub continuation_stages_resumed: u64,
+    /// Hops a path projection's walk computed, wherever it ran: one per
+    /// node the walk stood at with a segment pending. Counted where the hop
+    /// is computed, outside every charge and its rollback, so a hop
+    /// computed again — a walk resumed from its root, or a helper re-entered
+    /// with its answers cached — counts again.
+    pub projection_hops_walked: u64,
     // ── Path-length histogram percentiles (reservoir-sampled by the
     // `ProjectPath` builder).
     pub path_length_p50: u32,
@@ -12947,7 +12953,7 @@ mod tests {
     ///   mapped_per_k_materializations, substitute_memo_hits,
     ///   substitute_memo_misses, evaluate_deferred_memo_hits,
     ///   evaluate_deferred_memo_misses, continuation_builds_begun,
-    ///   continuation_stages_resumed.
+    ///   continuation_stages_resumed, projection_hops_walked.
     /// - Exceptional-path: same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
@@ -12984,6 +12990,7 @@ mod tests {
             "async_return_payload_count",
             "continuation_builds_begun",
             "continuation_stages_resumed",
+            "projection_hops_walked",
         ];
         for field in expected_to_fire {
             assert!(

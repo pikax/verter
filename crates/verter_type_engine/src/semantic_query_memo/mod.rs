@@ -1904,6 +1904,12 @@ impl SemanticGraphStore {
             .continuation_stages_resumed
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped by a path projection's walk once per hop it computes.
+    pub fn record_projection_hop(&self) {
+        self.stats
+            .projection_hops_walked
+            .fetch_add(1, Ordering::Relaxed);
+    }
     pub fn record_conditional_decided(&self) {
         self.stats
             .conditional_decided_count
