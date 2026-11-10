@@ -62,6 +62,8 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use rustc_hash::FxHashMap;
+
 use super::fact_tree::{self, Node};
 use super::policy::FactPolicy;
 use super::version::FactVersionRef;
@@ -1051,6 +1053,122 @@ impl StorageWeak {
     }
 }
 
+/// A per-thread memo of entries that hold weak handles to fact storage,
+/// bounded in two steps: at its prune threshold it drops the entries whose
+/// storage has died, and when it is still at [`Self::HARD_CAP`] after
+/// pruning it starts again. A prune that keeps its entries — every sealed
+/// set of a demand still alive — moves the next threshold to twice what
+/// survived, so a run of live inserts pays one scan per doubling, never one
+/// scan per insert: a memo that sat at the threshold once scanned its whole
+/// table on every insert after, which made a seal that recorded thousands
+/// of proofs quadratic in them. Every step is a deterministic function of
+/// the insert sequence and the storages' liveness, so a demand's charge is
+/// stable.
+pub(crate) struct PrunedMemo<K, V> {
+    entries: FxHashMap<K, V>,
+    next_prune: usize,
+}
+
+impl<K: Eq + std::hash::Hash, V> PrunedMemo<K, V> {
+    /// The first prune threshold, and the lowest the threshold returns to.
+    pub(crate) const SOFT_CAP: usize = 4096;
+    /// A memo this full after pruning its dead entries starts again.
+    pub(crate) const HARD_CAP: usize = 8192;
+
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: FxHashMap::default(),
+            next_prune: Self::SOFT_CAP,
+        }
+    }
+
+    pub(crate) fn get(&self, key: &K) -> Option<&V> {
+        self.entries.get(key)
+    }
+
+    pub(crate) fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.entries.get_mut(key)
+    }
+
+    pub(crate) fn remove(&mut self, key: &K) -> Option<V> {
+        self.entries.remove(key)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.next_prune = Self::SOFT_CAP;
+    }
+
+    /// Insert `value` under `key`, pruning first when the memo has reached
+    /// its threshold: entries `alive` rejects are dropped, a memo still at
+    /// [`Self::HARD_CAP`] is cleared, and the next threshold is twice what
+    /// remains, never below [`Self::SOFT_CAP`].
+    pub(crate) fn insert(&mut self, key: K, value: V, mut alive: impl FnMut(&V) -> bool) {
+        if self.entries.len() >= self.next_prune {
+            self.entries.retain(|_, value| alive(value));
+            if self.entries.len() >= Self::HARD_CAP {
+                self.entries.clear();
+            }
+            self.next_prune = (self.entries.len() * 2).max(Self::SOFT_CAP);
+        }
+        self.entries.insert(key, value);
+    }
+}
+
+#[cfg(test)]
+mod pruned_memo_tests {
+    use super::PrunedMemo;
+    use std::cell::Cell;
+
+    /// Insert `count` entries whose liveness is `alive`, counting the
+    /// liveness checks the memo's prunes make.
+    fn insert_counting(memo: &mut PrunedMemo<usize, ()>, count: usize, alive: bool) -> usize {
+        let checks = Cell::new(0);
+        for key in 0..count {
+            memo.insert(key, (), |()| {
+                checks.set(checks.get() + 1);
+                alive
+            });
+        }
+        checks.get()
+    }
+
+    /// A run of live inserts scans the memo once at each threshold —
+    /// `SOFT_CAP`, then twice what survived — and starts again at
+    /// `HARD_CAP`, never scanning once per insert.
+    #[test]
+    fn live_entries_are_scanned_once_per_doubling() {
+        let mut memo = PrunedMemo::new();
+        let checks = insert_counting(&mut memo, PrunedMemo::<usize, ()>::HARD_CAP + 1, true);
+        assert_eq!(
+            checks,
+            PrunedMemo::<usize, ()>::SOFT_CAP + PrunedMemo::<usize, ()>::HARD_CAP
+        );
+        assert_eq!(memo.len(), 1, "the memo started again at the hard cap");
+    }
+
+    /// Dead entries are dropped at the threshold, and the threshold returns
+    /// to `SOFT_CAP` for a memo that emptied.
+    #[test]
+    fn dead_entries_are_pruned_at_the_threshold() {
+        let mut memo = PrunedMemo::new();
+        let checks = insert_counting(&mut memo, PrunedMemo::<usize, ()>::SOFT_CAP + 1, false);
+        assert_eq!(checks, PrunedMemo::<usize, ()>::SOFT_CAP);
+        assert_eq!(memo.len(), 1);
+        let checks = insert_counting(&mut memo, PrunedMemo::<usize, ()>::SOFT_CAP, false);
+        assert_eq!(
+            checks,
+            PrunedMemo::<usize, ()>::SOFT_CAP,
+            "the threshold is SOFT_CAP again"
+        );
+    }
+}
+
 /// Proofs that one canonical run is a subset of another, remembered by
 /// storage address: the SAME retained run objects are merged into scope
 /// after scope, and a scope that already holds a run's superset re-merges
@@ -1059,19 +1177,12 @@ impl StorageWeak {
 /// mutates; the weak handles validate liveness, so a freed allocation —
 /// whose address a later one may reuse — can never make a false proof.
 pub(crate) mod subset_memo {
-    use super::{FactSet, StorageWeak};
-    use rustc_hash::FxHashMap;
+    use super::{FactSet, PrunedMemo, StorageWeak};
     use std::cell::RefCell;
 
-    /// Entries beyond this are pruned of dead handles; a memo still past
-    /// [`HARD_CAP`] after pruning starts again. Both are deterministic
-    /// functions of the merge sequence, so a demand's charge is stable.
-    const SOFT_CAP: usize = 4096;
-    const HARD_CAP: usize = 8192;
-
     thread_local! {
-        static PROOFS: RefCell<FxHashMap<(usize, usize), (StorageWeak, StorageWeak)>> =
-            RefCell::new(FxHashMap::default());
+        static PROOFS: RefCell<PrunedMemo<(usize, usize), (StorageWeak, StorageWeak)>> =
+            RefCell::new(PrunedMemo::new());
     }
 
     /// Whether `run ⊆ base` is already proven for these exact storages.
@@ -1108,19 +1219,13 @@ pub(crate) mod subset_memo {
     /// Record that an exact scan found `run ⊆ base`.
     pub(crate) fn record_subset(run: &FactSet, base: &FactSet) {
         PROOFS.with(|proofs| {
-            let mut proofs = proofs.borrow_mut();
-            if proofs.len() >= SOFT_CAP {
-                proofs.retain(|_, (run_weak, base_weak)| {
-                    run_weak.address_while_alive().is_some()
-                        && base_weak.address_while_alive().is_some()
-                });
-            }
-            if proofs.len() >= HARD_CAP {
-                proofs.clear();
-            }
-            proofs.insert(
+            proofs.borrow_mut().insert(
                 (run.address(), base.address()),
                 (run.storage_weak(), base.storage_weak()),
+                |(run_weak, base_weak)| {
+                    run_weak.address_while_alive().is_some()
+                        && base_weak.address_while_alive().is_some()
+                },
             );
         });
     }
