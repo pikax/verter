@@ -153,6 +153,84 @@ the checker's first failure and records no diagnostic.
   (`explicit_overload_recovery`, `getLongestCandidateIndex`) — the same one, or another whose
   instantiated return the call then takes, carrying the fitting candidate's diagnostic.
 
+## Error recovery in a flow
+
+`project_semantic_dispatch/flow_return_recovery.rs` owns the recoveries the flow rail answers. A
+recovery is `Opaque(QueryError::CheckerRecovery)` with a certified basis: it reads, relates and prints
+as `any`, leaves the result complete (no `FlowReturnDegradation`, warm-admissible) and stays
+distinct from an authored `any` and from every typed gap. A consumer tells a recovery from a
+refusal by `FlowReturnResult::checker_diagnostics` and the audit payload's
+`FlowReturnInferencePayload::checker_diagnostics` (code, start, end), never by a partial reason.
+
+- **TS2339.** A member read the shared walk missed, off a type that proves it absent
+  (`member_proven_absent`): a union or an intersection with every arm lacking it (an arm declaring it
+  may be the one a narrowing this rail does not model selects), a closed object surface, a primitive whose wrapper the program declares, a class from its
+  declarations alone (`class_proves_member_absent`, its surface is in flight inside its own member
+  bodies). An undeclared receiver, an open surface, a callable and anything that does not settle
+  prove nothing and keep their typed gap. Reported at the member's name (`OptionalMember::name_spans`,
+  `GatedLeaf::member_spans`, `SymbolicCallee::member_spans`). `SliceContent::receiver_reads` lists an
+  object-literal method's `this` reads the demanded return did not select, as the checker's check of
+  the whole body reports them; a receiver a contextual type supplies reports only what the return
+  reads, and so does every other receiver. A read off the error type is the error type and reports
+  nothing.
+- **TS7023.** An inferred return that requires itself: `any` in every setting, reported at the name
+  the function goes by (`FunctionProgramEntry::report_name`, `SliceObjectMember::spans.name`) under
+  `noImplicitAny`. Three producers, one rule, the checker's `pushTypeResolution`: a call re-entering
+  a return in flight marks every return from it inward (`mark_return_cycle`, the frame takes its mark
+  when it closes); object-literal methods still reading each other when their round stalls; and a
+  return reading an absent member off its own literal's `this`, whose message prints the signature
+  being inferred. A method reading a member already found circular is circular too, since that
+  message prints every member. A declared return is never inferred. The bare self-call is exempt:
+  `return f()` of a function declaration, awaited or not, is skipped. Nested function declarations retain
+  their report name through signature composition; their TS7023 occurrence rides the enclosing flow
+  result and the nested body's replayed diagnostic effects.
+
+- **A written indexed access.** The shell's consumer answers a read that found nothing with TS2339 and
+  the error type (table below) when `indexed_access_proves_absence` holds: every constituent,
+  through the aliases and declarations naming them, settles to a closed object lacking the key and its
+  apparent members. A deferred operator, an open type parameter or a walk that stopped proves nothing and
+  keeps its answer. A conditional over the error type is the error type, signature utilities included, and
+  the error type has no signatures (`SignaturesOfType`).
+- **The error type as a literal's contextual type.** A written union or intersection holding the error
+  type is that type (`contextual_error_type`). The literal's `this` reads it, so a read off `this` reports
+  nothing and no return through it is circular, and its functions have no contextual signature:
+  `report_error_contextual` records TS7006 on each plain unannotated parameter under `noImplicitAny`.
+- **TS2304.** A name `names_nothing_in_program` proves undeclared recovers with `undeclared_name_recovery`,
+  whose origin is the reference. A literal that error type types reports TS2304 at every reference in the
+  flow's own file, each found on the retained parse (`type_reference_name_spans`) skipping what a type
+  parameter, mapped key, `infer` or local declaration binds. A reference in another file is no position of
+  this flow, and a broken lease reports nothing and is never cached.
+- **A literal's reports before its contextual `this`.** The call first reads a context-sensitive argument
+  with no contextual type, whose `this` is its own literal. `forget_own_literal_reports` removes those
+  TS2339 and TS7023 reports when the call gives that literal a marker's `this` or the error type.
+
+Known limits, each a narrower diagnostic rather than a wrong answer: TS2339 on a declared literal's
+`this` prints `typeof value`, and on a literal a generic call infers it prints the literal rather
+than the instantiated contextual type; the code and position are exact. TS7022 (a local holding the
+read) and TS7024 (an anonymous function) are not reported. A cycle through another file's
+initializer stays a typed `Unresolved` failure. TS7006 is reported only where the error type is the
+literal's contextual type, and TS2304 only for a name such a literal's contextual type reads. A literal
+whose contextual type is an authored `any` still reads its own `this`, where the checker reads `any`.
+A read a contextual `this` lacks outside a return is not reported, because that `this`'s members can
+be bodies of their own. A written access's TS2339 carries its code on the answer and no location: the
+shell it comes from has none to give. A receiver whose print the abbreviation model does not reproduce
+keeps its report with a clipped message.
+
+An indexed access's fate follows `getIndexedAccessType`, by the `IndexedAccessOrigin` of its shell:
+
+| Origin | Absent key answers | Set by |
+| --- | --- | --- |
+| `Written` | TS2339 and the error type | the authored lowering of a type-position access |
+| `Instantiated` | `unknown`, nothing reported | instantiating a written access over a generic object or index (`isGenericObjectType`, `isGenericIndexType`) |
+| `Composed` | the typed miss | anything the engine builds for its own reading, and a written access whose genericness depends on what an application over a free parameter names (`Foo<T>['k']`) |
+
+A written access over a non-generic object stays `Written` through instantiation (`{ own: T }['k']`
+is settled where it is written). A key that names no value proves nothing through a surface that
+withholds it: a module object leaves out the names its export table excludes (`SurfaceView::withholds_key`),
+so `(typeof ns)['x']` on an ambiguous star export stays the typed miss while `(typeof ns)['zz']` recovers.
+Recovery sits on the shell's consumers (`absent_read_answer`), never on the shared `IndexedAccess`
+and `ProjectPath` queries, which keep answering the typed miss to every path a consumer demands.
+
 ## Formatted node and walker diagnostics
 
 - `ProjectSemanticDispatch::checker_recovery_message(node)`: the `TS<code>: <message>` a
