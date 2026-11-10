@@ -14557,40 +14557,45 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Emits a whole-path `ProjectPath` edge on the result (when the
     /// result differs from the base) so consumers can recover the
     /// entry path without rebuilding it from per-segment edges.
+    ///
+    /// The build is an owned sequential continuation
+    /// ([`Self::begin_project_path`]): a hop whose dependency read is a
+    /// typed transition stops the walk there, and the build resumes that
+    /// hop with the read's answer ([`Self::resume_project_path`]). This
+    /// entry drives it in place, reading each dependency where the walk
+    /// stands.
     pub(super) fn build_project_path(
         &self,
         base: SemanticNodeId,
         path: &verter_type_expr::OwnedSlice<PathSegment>,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        self.drive_family_in_place(self.begin_project_path(base, path, context))
+    }
+
+    /// The first stage of a path projection's build: its prelude, then its
+    /// walk up to the first dependency read a hop names, the walk retained
+    /// for the stage that resumes it — or the build's output.
+    #[inline(never)]
+    pub(super) fn begin_project_path(
+        &self,
+        mut base: SemanticNodeId,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> super::family_continuation::FamilyStep {
         verter_audit::attribute_n!(MacroMemberWalk, path.len());
         // A member read off a class's polymorphic `this` reads the class
         // instance, and binds `this` in the member to the binder itself.
-        if let Some(instance) = self.this_binder_instance(base) {
-            let mut output = self.build_project_path(instance, path, context);
-            if let QueryResult::Value(node) = output.result {
-                output.result = QueryResult::Value(self.bind_this_receiver(node, base));
-            }
-            return output;
+        let mut this_binders = Vec::new();
+        while let Some(instance) = self.this_binder_instance(base) {
+            this_binders.push(base);
+            base = instance;
+            verter_audit::attribute_n!(MacroMemberWalk, path.len());
         }
-        // §22 fast-reject for the `?[K]` indexed-access shape: `any[K]=any`,
-        // `never[K]=never`, `unknown[K]`=UNCONDITIONAL error, `error[K]=error`.
-        // Member projection (`.foo`) is a distinct surface left to the walker.
-        if Self::project_path_is_indexed_access(path) {
-            if let Some(absorbed) = self.absorb_indexed_access(base) {
-                return absorbed;
-            }
-        }
-        // Union-index distribution (`Obj[A | B]` = `Obj[A] | Obj[B]`). A
-        // single-hop indexed access whose closed domain contains literal keys
-        // or broad key kinds distributes through the shared `IndexedAccess`
-        // query and renormalises. Multi-segment paths, a single broad key, and
-        // open/generic domains fall through to the path walker unchanged
-        // (one engine — this re-dispatches the shared key, never hand-reduces).
-        if let [PathSegment::Index(index)] = path.as_ref() {
-            if let Some(distributed) = self.distribute_union_index(base, index, context) {
-                return distributed;
-            }
+        if let Some(output) = self.project_path_prelude(base, path, context) {
+            return super::family_continuation::FamilyStep::Done(Box::new(
+                self.bind_path_this_receivers(output, &this_binders),
+            ));
         }
         let fence = self.project_generation_signature();
         self.graph().record_path_length(path.len() as u32);
@@ -14620,7 +14625,129 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // non-publication rail).
         let mut walker = PathWalker::new(self, context, &fence);
         walker.record_prefix_receipts(start_base, &walker_path);
-        let result = walker.walk(start_base, walker_path.as_ref());
+        let progress = walker.begin_walk(start_base, walker_path.as_ref());
+        let plan = super::walk::PathPlan {
+            base,
+            path: path.clone(),
+            context,
+            this_binders,
+            start_base,
+            start_index,
+            walker_path,
+            fence,
+        };
+        self.advance_project_path(plan, walker, progress)
+    }
+
+    /// The path build's prelude: a lattice-extreme base absorbing an
+    /// indexed access, or a single union index distributed over its
+    /// members. `None` when the path is walked.
+    fn project_path_prelude(
+        &self,
+        base: SemanticNodeId,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<crate::project_semantic_dispatch::walk::QueryBuildOutput> {
+        // §22 fast-reject for the `?[K]` indexed-access shape: `any[K]=any`,
+        // `never[K]=never`, `unknown[K]`=UNCONDITIONAL error, `error[K]=error`.
+        // Member projection (`.foo`) is a distinct surface left to the walker.
+        if Self::project_path_is_indexed_access(path) {
+            if let Some(absorbed) = self.absorb_indexed_access(base) {
+                return Some(absorbed);
+            }
+        }
+        // Union-index distribution (`Obj[A | B]` = `Obj[A] | Obj[B]`). A
+        // single-hop indexed access whose closed domain contains literal keys
+        // or broad key kinds distributes through the shared `IndexedAccess`
+        // query and renormalises. Multi-segment paths, a single broad key, and
+        // open/generic domains fall through to the path walker unchanged
+        // (one engine — this re-dispatches the shared key, never hand-reduces).
+        if let [PathSegment::Index(index)] = path.as_ref() {
+            if let Some(distributed) = self.distribute_union_index(base, index, context) {
+                return Some(distributed);
+            }
+        }
+        None
+    }
+
+    /// A member read through each class `this` binder in `binders`
+    /// (outermost first) binds `this` in the member to that binder,
+    /// innermost first.
+    fn bind_path_this_receivers(
+        &self,
+        mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput,
+        binders: &[SemanticNodeId],
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        for binder in binders.iter().rev() {
+            if let QueryResult::Value(node) = output.result {
+                output.result = QueryResult::Value(self.bind_this_receiver(node, *binder));
+            }
+        }
+        output
+    }
+
+    /// Carry a path build on from its walk's `progress`: the read a hop
+    /// names, the walk retained, or the build's output once the walk
+    /// completed.
+    fn advance_project_path(
+        &self,
+        plan: super::walk::PathPlan,
+        walker: PathWalker<'_, 'a, C>,
+        progress: super::walk::WalkProgress,
+    ) -> super::family_continuation::FamilyStep {
+        use super::family_continuation::{FamilyBuild, FamilyStep};
+        match progress {
+            super::walk::WalkProgress::Read(key) => FamilyStep::Need(
+                key,
+                Box::new(FamilyBuild::ProjectPath(Box::new(
+                    super::walk::ProjectPathBuild {
+                        walk: walker.into_state(),
+                        plan,
+                    },
+                ))),
+            ),
+            super::walk::WalkProgress::Done(result) => {
+                let mut plan = plan;
+                let binders = std::mem::take(&mut plan.this_binders);
+                let output = self.project_path_output(plan, walker, result);
+                FamilyStep::Done(Box::new(self.bind_path_this_receivers(output, &binders)))
+            }
+        }
+    }
+
+    /// The next stage of a path build, given the answer to the read its
+    /// walk stands at: the hop resumes with it, and nothing the walk
+    /// completed runs again.
+    #[inline(never)]
+    pub(super) fn resume_project_path(
+        &self,
+        build: super::walk::ProjectPathBuild,
+        read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> super::family_continuation::FamilyStep {
+        let super::walk::ProjectPathBuild { walk, plan } = build;
+        let mut walker = PathWalker::from_state(self, walk);
+        let progress = walker.resume_walk(read);
+        self.advance_project_path(plan, walker, progress)
+    }
+
+    /// The path build's output over its walk's terminal `result`.
+    fn project_path_output(
+        &self,
+        plan: super::walk::PathPlan,
+        mut walker: PathWalker<'_, 'a, C>,
+        result: SemanticNodeId,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let super::walk::PathPlan {
+            base,
+            path,
+            context,
+            this_binders: _,
+            start_base,
+            start_index,
+            walker_path,
+            fence,
+        } = plan;
+        let path = &path;
         let prefix_receipts = walker.take_prefix_receipts();
         let intermediate_nodes = std::mem::take(&mut walker.intermediate_nodes);
         // A member read through a reference binds the member's polymorphic

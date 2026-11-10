@@ -1894,7 +1894,11 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
             self.dispatch.leave_instantiate_active(&identity, &args);
         }
         // A frame stopped before it completed leaves no receipt; what it
-        // charged is its consumer's.
+        // charged is its consumer's. A build stopped between its stages
+        // first puts back what it set aside on that recording.
+        if let Some(FrameBuild::Family(family)) = frame.build.as_mut() {
+            family.release_retained_accounting(&self.dispatch.connected_demand);
+        }
         if std::mem::take(&mut frame.recording) {
             self.dispatch.connected_demand.abandon_cost_scope();
         }
@@ -1971,7 +1975,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             | SemanticQueryKey::ResolveOverloadSet { .. }
             | SemanticQueryKey::ApparentType { .. }
             | SemanticQueryKey::ResolveClassSurface { .. }
-            | SemanticQueryKey::ClassifyMaterializationCycleGate(_)) => {
+            | SemanticQueryKey::ClassifyMaterializationCycleGate(_)
+            | SemanticQueryKey::ProjectPath { .. }) => {
                 super::family_continuation::builds_as_continuation(key)
                     && self.reads_as_frame_need(key)
                     && self
@@ -2719,6 +2724,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     if self.reads_as_frame_need(&need)
                         || matches!(&*family, FamilyBuild::TemplateUnion(..)) =>
                 {
+                    family.trace_need(&need);
                     *build = Some(FrameBuild::Family(family));
                     return FramePoll::Need(need);
                 }

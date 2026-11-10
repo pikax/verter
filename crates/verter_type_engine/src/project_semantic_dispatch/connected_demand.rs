@@ -1869,10 +1869,12 @@ impl ConnectedDemandLedger<'_> {
 impl<'a> ConnectedDemandLedger<'a> {
     /// Begin recording the materialized prefixes of the computation
     /// recording at `depth`: what it charged before now stays its own, and
-    /// each [`PrefixRecording::seal_prefix`] seals what it charged since
-    /// the previous prefix as that prefix's receipt. `None` when no
-    /// computation is recording at `depth`.
-    pub(crate) fn record_prefixes(&self, depth: usize) -> Option<PrefixRecording<'_, 'a>> {
+    /// each [`Self::seal_prefix`] seals what it charged since the previous
+    /// prefix as that prefix's receipt. `None` when no computation is
+    /// recording at `depth`. The recording is owned by the computation, so
+    /// it survives the computation's suspension between its stages; it
+    /// ends through [`Self::end_prefixes`].
+    pub(crate) fn record_prefixes(&self, depth: usize) -> Option<PrefixRecording> {
         let mut scopes = self.scopes.borrow_mut();
         if depth == 0 || scopes.len() != depth {
             return None;
@@ -1886,42 +1888,29 @@ impl<'a> ConnectedDemandLedger<'a> {
             tail_steps: std::mem::take(&mut scope.tail_steps),
         };
         Some(PrefixRecording {
-            ledger: self,
             depth,
             held: Some(held),
         })
     }
-}
 
-/// The prefixes one computation materializes on its way to its result,
-/// each sealed as a receipt of its own ([`ConnectedDemandLedger::record_prefixes`]).
-/// What the computation charged before the first prefix stays its own, and
-/// is put back on its recording when this ends, however it ends.
-pub(crate) struct PrefixRecording<'l, 'a> {
-    ledger: &'l ConnectedDemandLedger<'a>,
-    depth: usize,
-    held: Option<CostScope>,
-}
-
-impl PrefixRecording<'_, '_> {
-    /// Seal what the computation charged since the previous prefix — with
-    /// that prefix's receipt as its prerequisite — as the receipt of the
-    /// prefix `identity` it just materialized, paid for this demand and
-    /// `request` exactly as a computed result is; the computation goes on
-    /// with that receipt as its prerequisite. `None` when the computation
-    /// is no longer the recording on top.
+    /// Seal what the computation `recording` belongs to charged since the
+    /// previous prefix — with that prefix's receipt as its prerequisite —
+    /// as the receipt of the prefix `identity` it just materialized, paid
+    /// for this demand and `request` exactly as a computed result is; the
+    /// computation goes on with that receipt as its prerequisite. `None`
+    /// when the computation is no longer the recording on top.
     pub(crate) fn seal_prefix(
         &self,
+        recording: &PrefixRecording,
         identity: CostIdentity,
         request: Option<&crate::request_budget::RequestBudget>,
     ) -> Option<Arc<DemandCostReceipt>> {
-        let ledger = self.ledger;
         let receipt = {
-            let mut scopes = ledger.scopes.borrow_mut();
-            if scopes.len() != self.depth {
+            let mut scopes = self.scopes.borrow_mut();
+            if scopes.len() != recording.depth {
                 return None;
             }
-            ledger.flush_usage(&mut scopes);
+            self.flush_usage(&mut scopes);
             let scope = scopes.last_mut()?;
             let receipt = DemandCostReceipt::with_tail_steps(
                 identity.clone(),
@@ -1935,22 +1924,24 @@ impl PrefixRecording<'_, '_> {
             });
             receipt
         };
-        ledger.paid.borrow_mut().insert(identity.clone());
+        self.paid.borrow_mut().insert(identity.clone());
         if let Some(request) = request {
-            ledger.mark_request_paid(request, identity);
+            self.mark_request_paid(request, identity);
         }
         Some(receipt)
     }
-}
 
-impl Drop for PrefixRecording<'_, '_> {
-    fn drop(&mut self) {
-        let Some(held) = self.held.take() else {
+    /// End `recording`: what its computation charged before the first
+    /// prefix is put back on the computation's recording, however the
+    /// prefixes ended — the walk left its linear run, completed, or was
+    /// released while suspended.
+    pub(crate) fn end_prefixes(&self, mut recording: PrefixRecording) {
+        let Some(held) = recording.held.take() else {
             return;
         };
-        let mut scopes = self.ledger.scopes.borrow_mut();
+        let mut scopes = self.scopes.borrow_mut();
         if let Some(scope) = scopes
-            .get_mut(self.depth - 1)
+            .get_mut(recording.depth - 1)
             .filter(|scope| scope.identity == held.identity)
         {
             scope.exclusive = scope.exclusive.saturating_add(held.exclusive);
@@ -1959,6 +1950,21 @@ impl Drop for PrefixRecording<'_, '_> {
         }
     }
 }
+
+/// The prefixes one computation materializes on its way to its result,
+/// each sealed as a receipt of its own ([`ConnectedDemandLedger::record_prefixes`]).
+/// What the computation charged before the first prefix stays its own, and
+/// is put back on its recording when this ends
+/// ([`ConnectedDemandLedger::end_prefixes`]). Owned state, borrowing no
+/// ledger: a path walk suspended between its hops carries it to the stage
+/// that resumes it.
+pub(crate) struct PrefixRecording {
+    depth: usize,
+    held: Option<CostScope>,
+}
+
+static_assertions::assert_impl_all!(PrefixRecording: Send);
+static_assertions::assert_not_impl_any!(PrefixRecording: Clone, Copy);
 
 /// The recording of one cold computation, open until its build ends. A
 /// recording dropped without [`Self::finish`] — a panic, an early return —
@@ -2180,15 +2186,19 @@ mod ownership_tests {
             )));
             let identity = graph
                 .prepare_rooted_key(SemanticQueryKey::ClassifyTruthinessDomain { subject: node });
-            let receipt = prefixes
-                .seal_prefix(CostIdentity::of_producer(identity.as_task_producer()), None)
+            let receipt = ledger
+                .seal_prefix(
+                    &prefixes,
+                    CostIdentity::of_producer(identity.as_task_producer()),
+                    None,
+                )
                 .unwrap();
             assert_eq!(receipt.exclusive().work, 1);
             assert!(ledger
                 .charge()
                 .unwrap_err()
                 .contains(PartialReasonSet::PROJECTION_WORK_LIMIT));
-            drop(prefixes);
+            ledger.end_prefixes(prefixes);
             ledger.abandon_cost_scope();
             drop(guard);
             receipt
@@ -2316,12 +2326,12 @@ mod advisory_bytes_tests {
         ledger.charge_units(3).unwrap();
         let prefixes = ledger.record_prefixes(1).unwrap();
         ledger.charge_units(5).unwrap();
-        let prefix = prefixes
-            .seal_prefix(CostIdentity::new(Arc::<[u8]>::from([4])), None)
+        let prefix = ledger
+            .seal_prefix(&prefixes, CostIdentity::new(Arc::<[u8]>::from([4])), None)
             .unwrap();
         assert_eq!(prefix.exclusive().work, 5);
         ledger.charge_units(7).unwrap();
-        drop(prefixes);
+        ledger.end_prefixes(prefixes);
         let receipt = ledger.seal_cost_scope(None).unwrap();
         assert_eq!(receipt.exclusive().work, 10);
         assert_eq!(receipt.closure_usage().work, 15);
