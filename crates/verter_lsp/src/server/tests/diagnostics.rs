@@ -3474,6 +3474,101 @@ async fn a_demanded_entry_certifies_during_a_loaded_store_fill_scan_with_a_repla
     );
 }
 
+/// The restart replay wedge with the unrelated work parked on explicit
+/// signals rather than outlasted by a loaded scan. The production workspace
+/// scan is parked after compiling an unrelated carrier, and the demanded
+/// entry's import-publication pass, the one route that mints its
+/// DependencyReady receipt, is held while a restarted client's replay burst
+/// of sibling `did_open` commits lands. The entry stays fail-closed until its
+/// own pass runs, then is certified while the scan is still parked and level
+/// 2 is unannounced. A second burst, landing with the pass held again so no
+/// re-mint can rescue it, must leave the certified receipt current: a sibling
+/// commit advances only the global content generation, never the entry's
+/// delivered closure.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_demanded_entry_certifies_past_a_parked_scan_and_holds_through_a_replay_burst() {
+    const SIBLINGS: usize = 6;
+    let fixture = scan_publication_fixture_with_unrelated(true, 1, SIBLINGS).await;
+    let server = fixture.server();
+    let target_id = fixture.id("src/Target.vue");
+    let (scan_parked, release_scan) = crate::sync_coordinator::test_hooks::block_after_ide_compile(
+        &fixture.id("far/Unrelated.vue"),
+    );
+    let publication = server.import_sync.lock_for(&target_id);
+    let publication_parked = publication.lock().await;
+    let target = fixture.open("src/Target.vue").await;
+    let holds_before = server.sync_coordinator.dependency_holds();
+
+    demand_workspace_scan(server);
+    server.spawn_background_init(None, "parked replay").await;
+    tokio::time::timeout(std::time::Duration::from_secs(20), scan_parked.notified())
+        .await
+        .expect("the workspace scan must reach the unrelated item");
+    fixture.await_ready_announced().await;
+
+    // The first half of the replay lands before the entry has any receipt.
+    for index in 0..SIBLINGS / 2 {
+        fixture.open(&format!("sib/Sibling{index}.vue")).await;
+    }
+    fixture
+        .await_while_polling(
+            &target,
+            || server.sync_coordinator.dependency_holds() > holds_before,
+            "the parked scan must decide the entry's publication and hold it on the missing receipt",
+        )
+        .await;
+    assert!(
+        !server.documents.diagnostics_ready(&target),
+        "an entry whose receipt is unminted must not be certified"
+    );
+    assert!(server.sync_coordinator.workspace_scan_in_progress());
+
+    drop(publication_parked);
+    fixture
+        .await_while_polling(
+            &target,
+            || {
+                server.dependency_readiness_capture(&target).is_ready()
+                    && server.documents.diagnostics_ready(&target)
+                    && server.sync_coordinator.diag_tasks_live() == 0
+            },
+            "the entry must be certified while the scan is parked on unrelated work",
+        )
+        .await;
+    assert!(server.sync_coordinator.workspace_scan_in_progress());
+    assert!(
+        fixture.sync_complete.lock().is_empty(),
+        "level 2 must stay unannounced while a scan item is parked"
+    );
+
+    // The rest of the replay lands with the entry's pass held again: only a
+    // receipt that survives unrelated commits can keep the entry certified.
+    let publication_parked = publication.lock().await;
+    let minted_at = server.import_sync_freshness_key();
+    for index in SIBLINGS / 2..SIBLINGS {
+        fixture.open(&format!("sib/Sibling{index}.vue")).await;
+    }
+    assert_ne!(
+        server.import_sync_freshness_key(),
+        minted_at,
+        "precondition: the replayed commits must advance the global content generation"
+    );
+    assert!(
+        server.dependency_readiness_capture(&target).is_ready(),
+        "replayed sibling commits retired the entry's receipt (minted at {minted_at:?}, \
+         now {:?}) although its delivered closure is untouched",
+        server.import_sync_freshness_key()
+    );
+    assert!(server.documents.diagnostics_ready(&target));
+    assert!(server.sync_coordinator.workspace_scan_in_progress());
+    assert!(fixture.sync_complete.lock().is_empty());
+
+    drop(publication_parked);
+    release_scan.notify_one();
+    fixture.await_sync_complete().await;
+    assert!(!server.sync_coordinator.workspace_scan_in_progress());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn watched_ts_delete_republishes_only_open_importers() {
     use verter_workspace::WorkspaceRead;
