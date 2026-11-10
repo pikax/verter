@@ -2805,8 +2805,16 @@ fn compute_verter_diagnostics(
     // props via the generated TSX and is the source of truth. Gated on the
     // serving KIND, not the in-process provider object: the editor-owned
     // tsserver plugin route validates props through the editor's tsserver
-    // while `type_provider` is `None` in-process.
-    if !matches!(deps.type_provider_kind, crate::TypeProviderKind::None) {
+    // while `type_provider` is `None` in-process. A provider that has given
+    // up for the session validates nothing, so Verter's own facts stay.
+    let provider_available = deps
+        .documents
+        .participation()
+        .state()
+        .mask()
+        .typescript_provider()
+        == verter_language::participation::ProviderAvailability::Available;
+    if provider_available && !matches!(deps.type_provider_kind, crate::TypeProviderKind::None) {
         verter_diags.retain(|d| match &d.code {
             Some(NumberOrString::String(code)) => {
                 code != "verter/unknown-prop" && code != "verter/unknown-model"

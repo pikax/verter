@@ -5256,6 +5256,54 @@ async fn parent_diagnostics_when_opened_against(child_source: &str) -> Vec<Diagn
     compute_verter_diagnostics(&deps, "/workspace/src/Parent.vue", &parent_uri)
 }
 
+/// A serving provider owns prop validation, so Verter's component-usage
+/// diagnostics stand down; a provider that gave up for the session (COX0
+/// `providerUnavailable`) validates nothing, so they are kept.
+#[tokio::test]
+async fn component_usage_diagnostics_stay_when_the_provider_gave_up() {
+    let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+        HostConfig::default(),
+    ))));
+    let parent_uri: Uri = "file:///workspace/src/Parent.vue".parse().expect("uri");
+    for (uri, text) in [
+        (
+            "file:///workspace/src/Child.vue",
+            child_declaring_prop("title"),
+        ),
+        (parent_uri.as_str(), PARENT_PASSING_LABEL.to_string()),
+    ] {
+        let _ = documents.did_open(&TextDocumentItem {
+            uri: uri.parse().expect("uri"),
+            language_id: "vue".to_string(),
+            version: 1,
+            text,
+        });
+    }
+    let mut deps = verter_only_deps(Arc::clone(&documents));
+    deps.type_provider_kind = crate::TypeProviderKind::Tsgo;
+    let unknown_prop = |diagnostics: Vec<Diagnostic>| {
+        diagnostics.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code.as_ref(),
+                Some(NumberOrString::String(code)) if code == "verter/unknown-prop"
+            )
+        })
+    };
+    assert!(!unknown_prop(compute_verter_diagnostics(
+        &deps,
+        "/workspace/src/Parent.vue",
+        &parent_uri
+    )));
+    let _ = documents
+        .participation()
+        .publish_provider(verter_language::participation::ProviderAvailability::Unavailable);
+    assert!(unknown_prop(compute_verter_diagnostics(
+        &deps,
+        "/workspace/src/Parent.vue",
+        &parent_uri
+    )));
+}
+
 /// Wait until the coordinator's publish path has recomputed the PARENT's
 /// diagnostics into a set satisfying `satisfied`, and return that set.
 ///
