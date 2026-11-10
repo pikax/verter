@@ -358,3 +358,84 @@ fn prior_fence_refuses_the_retry_extended_basis() {
     let next = SnapshotFence::bind(&extended);
     assert_eq!(next.admit(&first), Err(TornSnapshot::BasisMismatch));
 }
+
+/// Native fact observations are binary value rows. Identity ignores the
+/// producer's trace order, and a value never aliases a file with the same
+/// bytes.
+#[test]
+fn native_value_commit_is_order_independent() {
+    let first = InputBasis::commit(
+        LoadWave::from_keys(["fact:b", "fact:a", "/a.ts"]),
+        [
+            Observation::value("fact:b", vec![2u8, 0, 1]),
+            file("/a.ts", "a"),
+            Observation::value("fact:a", vec![1u8]),
+        ],
+        [],
+    )
+    .expect("commit");
+    let second = InputBasis::commit(
+        LoadWave::from_keys(["/a.ts", "fact:a", "fact:b"]),
+        [
+            Observation::value("fact:a", vec![1u8]),
+            Observation::value("fact:b", vec![2u8, 0, 1]),
+            Observation::value("fact:a", vec![1u8]),
+            file("/a.ts", "a"),
+        ],
+        [],
+    )
+    .expect("commit");
+    assert_eq!(first.id(), second.id());
+    assert_eq!(first, second);
+    assert_eq!(
+        first.observe("fact:b").unwrap().value_bytes(),
+        Some(&[2u8, 0, 1][..])
+    );
+    assert_eq!(first.observe("fact:b").unwrap().file_content(), None);
+
+    let as_file = InputBasis::commit(
+        LoadWave::from_keys(["fact:a"]),
+        [Observation::file("fact:a", "\u{1}")],
+        [],
+    )
+    .expect("file commit");
+    let as_value = InputBasis::commit(
+        LoadWave::from_keys(["fact:a"]),
+        [Observation::value("fact:a", vec![1u8])],
+        [],
+    )
+    .expect("value commit");
+    assert_ne!(as_file.id(), as_value.id());
+}
+
+#[test]
+fn native_value_conflicting_revision_rejected() {
+    let error = InputBasis::commit(
+        LoadWave::from_keys(["fact:a"]),
+        [
+            Observation::value("fact:a", vec![1u8]),
+            Observation::value("fact:a", vec![2u8]),
+        ],
+        [],
+    )
+    .expect_err("conflicting revision");
+    assert_eq!(
+        error,
+        CommitError::MixedRevision {
+            canonical: "fact:a".into()
+        }
+    );
+    let changed = InputBasis::commit(
+        LoadWave::from_keys(["fact:a"]),
+        [Observation::value("fact:a", vec![2u8])],
+        [],
+    )
+    .expect("commit");
+    let original = InputBasis::commit(
+        LoadWave::from_keys(["fact:a"]),
+        [Observation::value("fact:a", vec![1u8])],
+        [],
+    )
+    .expect("commit");
+    assert_ne!(changed.id(), original.id());
+}

@@ -112,6 +112,29 @@ pub enum ResolutionPopulation {
     Session(SessionFingerprint),
 }
 
+impl ResolutionWorldId {
+    /// Raw world counter, for canonical native encoding only.
+    #[must_use]
+    pub(crate) const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+impl ResolutionPopulation {
+    /// Canonical native encoding: explicit tag plus the session's full
+    /// fingerprint.
+    pub(crate) fn encode_native(self, writer: &mut crate::facts::native_observation::NativeWriter) {
+        match self {
+            Self::Base => {
+                writer.tag(1);
+            }
+            Self::Session(fingerprint) => {
+                writer.tag(2).bytes(&fingerprint.0);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "resolution_world_identity_tests.rs"]
 mod tests;

@@ -449,6 +449,31 @@ impl ResultReceipt {
     pub fn all_leaves(&self, visit: impl FnMut(&FactVersionRef) -> bool) -> bool {
         ReceiptWalk::default().leaves(self, visit)
     }
+
+    /// Append the native observation of every leaf this receipt reaches
+    /// and `walk` has not yet reached: the evidence is expanded, never
+    /// identified by its digest, so the same leaves grouped under other
+    /// receipts encode identically. Duplicates are left for the caller's
+    /// one sort-and-dedup.
+    pub fn native_observations_into(
+        &self,
+        walk: &mut ReceiptWalk,
+        authority: super::native_observation::NativeAuthority,
+        out: &mut Vec<super::native_observation::NativeObservation>,
+    ) -> Result<(), super::native_observation::NativeEncodingError> {
+        let mut failure = None;
+        walk.leaves(self, |leaf| match leaf.native_observation(authority) {
+            Ok(observation) => {
+                out.push(observation);
+                true
+            }
+            Err(error) => {
+                failure = Some(error);
+                false
+            }
+        });
+        failure.map_or(Ok(()), Err)
+    }
 }
 
 /// One walk over several receipts' evidence — every receipt of one
