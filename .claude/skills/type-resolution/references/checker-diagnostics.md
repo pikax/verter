@@ -191,7 +191,7 @@ checker reports; a recovery the settings do not report (TS7023 without `noImplic
 - **A written indexed access.** The shell's consumer answers a read that found nothing with TS2339 and
   the error type (table below) when `indexed_access_proves_absence` holds: every constituent,
   through the aliases and declarations naming them, settles to a closed object lacking the key and its
-  apparent members. A deferred operator, an open type parameter or a walk that stopped proves nothing and
+  apparent members, or is `unknown`, which has no property at all. A deferred operator, an open type parameter or a walk that stopped proves nothing and
   keeps its answer. A conditional over the error type is the error type, signature utilities included, and
   the error type has no signatures (`SignaturesOfType`).
 - **The error type as a literal's contextual type.** A written union or intersection holding the error
@@ -207,13 +207,16 @@ checker reports; a recovery the settings do not report (TS7023 without `noImplic
   with no contextual type, whose `this` is its own literal. `forget_own_literal_reports` removes those
   TS2339 and TS7023 reports when the call gives that literal a marker's `this` or the error type.
 
-Known limits, each a narrower diagnostic rather than a wrong answer: TS2339 on a declared literal's
-`this` prints `typeof value`, and on a literal a generic call infers it prints the literal rather
-than the instantiated contextual type; the code and position are exact. TS7022 (a local holding the
-read) and TS7024 (an anonymous function) are not reported. A cycle through another file's
-initializer stays a typed `Unresolved` failure. TS7006 is reported only where the error type is the
-literal's contextual type, and TS2304 only for a name such a literal's contextual type reads. A literal
-whose contextual type is an authored `any` still reads its own `this`, where the checker reads `any`.
+Known limits in the answer, not only its diagnostics: a cycle through another file's initializer
+stays a typed `Unresolved` failure (a refusal, never a recovered `any`), and a literal whose
+contextual type is an authored `any` still reads its own `this`, where the checker reads `any`, so
+its inferred type can differ.
+
+Known limits in the diagnostics only, the answer exact: TS2339 on a declared literal's `this` prints
+`typeof value`, and on a literal a generic call infers it prints the literal rather than the
+instantiated contextual type; the code and position are exact. TS7022 (a local holding the read) and
+TS7024 (an anonymous function) are not reported. TS7006 is reported only where the error type is the
+literal's contextual type, and TS2304 only for a name such a literal's contextual type reads.
 A read a contextual `this` lacks outside a return is not reported, because that `this`'s members can
 be bodies of their own. A written access's TS2339 carries its code on the answer and no location: the
 shell it comes from has none to give. A receiver whose print the abbreviation model does not reproduce
