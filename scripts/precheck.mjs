@@ -102,31 +102,36 @@ export function commandsFor(rule, absoluteFiles) {
   );
 }
 
-function listFiles(program, args) {
+function listFiles(program, args, separator) {
   const result = spawnSync(program, args, { cwd: ROOT, encoding: "utf8" });
   if (result.error || result.status !== 0) {
     throw new Error(
       `${program} ${args.join(" ")} failed: ${result.error?.message ?? result.stderr.trim()}`,
     );
   }
-  return result.stdout.split(/\r?\n/).filter(Boolean);
+  return result.stdout.split(separator).filter(Boolean);
+}
+
+function isGitWorkTree() {
+  const result = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], {
+    cwd: ROOT,
+    encoding: "utf8",
+  });
+  return !result.error && result.status === 0;
 }
 
 function changedFiles() {
   let files;
-  try {
-    // A Git checkout: changes against HEAD, plus untracked files.
+  if (isGitWorkTree()) {
+    // A Git checkout: changes against HEAD, plus untracked files. NUL-separated output
+    // keeps paths with special characters unquoted. Other Git failures surface as errors.
     files = [
-      ...listFiles("git", ["diff", "--name-only", "HEAD"]),
-      ...listFiles("git", ["ls-files", "--others", "--exclude-standard"]),
+      ...listFiles("git", ["diff", "--name-only", "-z", "HEAD"], "\0"),
+      ...listFiles("git", ["ls-files", "--others", "--exclude-standard", "-z"], "\0"),
     ];
-  } catch (gitError) {
+  } else {
     // A Gin workspace with no Git attached: every file changed since it was created.
-    try {
-      files = listFiles("gin", ["diff", "--names"]);
-    } catch (ginError) {
-      throw new Error(`${gitError.message}\n${ginError.message}`);
-    }
+    files = listFiles("gin", ["diff", "--names"], /\r?\n/);
   }
   // Deleted files are listed but have nothing to check.
   return [...new Set(files)].filter((file) => fs.existsSync(path.join(ROOT, file))).sort();

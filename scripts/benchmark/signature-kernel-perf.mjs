@@ -773,10 +773,10 @@ function summarizeScaling(runs, outcomes) {
 
 function main() {
   const opts = parseArgs(process.argv.slice(2));
-  const repo = run("git", ["rev-parse", "--show-toplevel"]);
   // Both arms build in `git worktree` checkouts and the baseline comes from history,
   // neither of which a Gin workspace provides.
-  if (tryRun("git", ["worktree", "list", "--porcelain"], { cwd: repo }) === null) {
+  const repo = tryRun("git", ["rev-parse", "--show-toplevel"]);
+  if (repo === null || tryRun("git", ["worktree", "list", "--porcelain"], { cwd: repo }) === null) {
     throw new Error(
       "`git worktree` is unavailable in this checkout; run this benchmark from a Git clone",
     );
