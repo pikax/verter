@@ -136,6 +136,9 @@ pub mod evaluate;
 mod family_continuation;
 pub use family_continuation::ContinuationStage;
 mod port_continuations;
+// Callable and relation helpers run inline as owned computations their
+// consumers advance across the reads they wait on.
+mod helper_continuation;
 // The stages of those family builds, written against the stage capability.
 mod continuation_stages;
 pub mod locator_shape;

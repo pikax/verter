@@ -11598,7 +11598,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         ResolveCallStep,
         Option<super::call_resolve::DeclaredCallResult>,
     ) {
-        ProjectSemanticDispatch::execute_contextual_call(self, key, state)
+        // The call computation a non-blocking evaluator advances, driven
+        // in place.
+        let mut call = super::helper_continuation::CallRead::begin(key, std::mem::take(state));
+        let answer = ProjectSemanticDispatch::drive_call_in_place(self, &mut call);
+        *state = call.into_contextual();
+        answer
     }
     fn resume_contextual_call(
         &self,

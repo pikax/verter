@@ -1011,7 +1011,7 @@ does. The entry also implements `Future`, with the full-value read as its
 output.
 
 The entry and the synchronous entry run one implementation. An
-instantiation, a `typeof`, a machinery-root conditional or call, or a
+instantiation, a `typeof`, a machinery-root conditional, call or relation, or a
 callback-typing machinery-root flow return enters as a driven root: the root's connected demand, its query level and the
 dispatcher operation it runs as are opened once and held across polls,
 because the request state they live on moves into the lent task until the
@@ -1339,6 +1339,101 @@ receipt tree included, with each hop computed once (an absolute count).
 `a_path_released_while_its_instantiation_is_held_leaves_nothing_open`
 drops the waiting path.
 
+### Helper continuations
+
+The relation authority and the call executor also run inline, as helpers
+a computation calls under the checker state it holds: an open
+obligation, an inference session, a binding barrier, a contextual call's
+collector. A consumer that must not block runs such a helper as an owned
+computation it advances
+(`project_semantic_dispatch/helper_continuation.rs`):
+
+- It begins the helper, which reads nothing: `RelationRead::pair`
+  (`execute_relate_pair_kind`: a pair behind a binding barrier),
+  `RelationRead::assignable` (`execute_relate_pair`, with the literal-union
+  membership fast path), `RelationRead::member` (`execute_relate_with_occurrence`:
+  a sub-relation depositing into the session open around it),
+  `RelationRead::root` (the `Relate` family's build as its machinery root)
+  and `CallRead::begin` (the call executor's contextual entry, continuing a
+  `ContextualCallState`).
+- It advances the helper with the delivery of the request it last stood at
+  (`advance_relation_read`, `advance_relation_root`, `advance_call_read`,
+  each taking a `HelperDrive`). The helper answers `HelperStep::Done` with
+  its output, or `HelperStep::Request` with the one dependency it reads
+  next, holding everything it computed before the read.
+- A frame of the continuation runtime turns a request into its own need
+  (`helper_request_poll`, which keeps the request's entered claim for the
+  runtime) and hands the delivery back (`helper_delivery`). The
+  synchronous driver (`HelperDrive::InPlace`) makes each read in place, so
+  the helper never stops. A consumer that stops while its helper waits
+  releases it (`release_relation_read`), closing what the helper holds
+  open.
+
+`HelperRequest`, `HelperAwait` and `HelperDelivery` are opaque, owned and
+`Send`; the helpers are `Send` and neither `Clone` nor `Copy`. A delivery
+is the complete `QueryDelivery`, never a node narrowed out of it. The
+request kinds grow as a helper's internal stages are converted, behind the
+same opaque types and frame glue, so its consumers keep driving it the same
+way. The synchronous entries already drive these computations in place:
+`execute_relate_pair`, `execute_relate_pair_kind`, the call walk's
+binding applicability relation and the flow evaluator's contextual call.
+The memoized callable reads stay ordinary query keys a consumer needs:
+`SignaturesOfType`, `ReadSignatureResult`, `ResolveOverloadSet`,
+`AwaitedNormalize` and `AsyncReturnPayload`.
+
+What converts today is a machinery relation root's structural dispatch.
+Driven by a frame, the root's first stage validates its key and opens its
+root obligation frame, owned by the computation as a `RelateRootBuild`,
+and reduces the pair in place up to its structural dispatch (the axis
+refusal, prefilters, projections, conditional readings, excess prepass,
+spread programs and shallow checks, `reduce_relation_before_dispatch`).
+When those leave the pair undecided, the dispatch's first reads — the
+unwraps of both operands' identity carriers — are demanded
+(`OperandDemand`): each operand's first instantiation, the read its carrier
+walk makes first when it reaches it through graph-only steps
+(`relation_operand_first_instantiation`, computed without reading), is
+entered once as the walk would enter it; a warm result answers at once and
+one that must be computed is a request. With every demanded instantiation
+answered, the dispatch runs in place, its walk made once with those reads
+answered by the deliveries. Nothing is demanded that the reduction would
+not read next, so a pair a shallow check decides instantiates no operand,
+and nothing an operand's walk reads after its first instantiation — a
+deeper hop, a deferred evaluation, a key set — is read twice; those reads
+are still made in place. A pair or member relation computes in
+place on either driver. A `Relate` root polled at the production entry, or
+read through the query entry outside every open obligation and any drive —
+not a binding root, not a re-discharge, its symmetric operands already in
+canonical order — is such a frame (`FrameBuild::Relation`): its root
+obligation frame stays open across `Pending`, a release closes it
+undecided, and its completion drains or aborts the members its reduction
+completed against its own publication. The relation authority's own root
+(`execute_relate_root`, behind every pair and member question) drives the
+same root computation in place: relations are the engine's hottest root,
+and a drive per root costs more than the reads it could suspend at. Its
+reduction, inference, SCC discharge and a call's resolution still run in
+place ([Boundaries that still block](#boundaries-that-still-block)).
+
+Graph counters measure the physical work: `relation_roots_opened` (one per
+root obligation frame a machinery root opens) and `relation_reductions`
+(one per structural reduction), counted where the work runs, outside every
+charge and its rollback.
+
+Behaviour, in the session's `semantic_poll_contract` group:
+`a_relation_root_whose_source_operand_is_held_yields_with_its_root_frame_open`
+and
+`a_relation_root_waiting_on_its_target_operand_resumes_without_repeating_its_source`
+relate aliases of `Wrap<"a">` and `Wrap<string>` while another task instantiates the
+source or the target operand (each an alias, so nothing before the
+dispatch reads through it). The first poll answers `Pending` with the
+root frame open and the reduction standing at its dispatch (after the
+completed source instantiation, in the second row); a repoll under a forbidding probe and a
+poll of the task on another thread stay pending and do no work; released,
+the root resumes elsewhere to the synchronous entry's read, receipt tree
+included, with the synchronous entry's absolute work (one root opened).
+`a_relation_root_released_while_its_operand_is_held_leaves_nothing_open`
+and `a_relation_root_is_woken_by_its_requests_cancellation_while_its_operand_is_held`
+drop or cancel the waiting root.
+
 ### Frame entry loads
 
 An instantiation's or a `typeof`'s frame on a production poll's drive
@@ -1588,12 +1683,28 @@ qualified tail over a carrier — is read in place. `keyof`, mapped-type and
 signature-list roots over such subjects still enter the synchronous cold
 admission, since those families do not build as continuations yet.
 
+A helper computation ([Helper continuations](#helper-continuations))
+suspends only at a relation's operand demands. Below that point it runs in
+place, inventoried for conversion by its owner:
+
+- the relation reduction (`reduce_relation` and the structural,
+  signature, variance, excess-property and explanation helpers it calls),
+  its inference collection and fixation, and the SCC discharge and
+  re-discharge at its frame's close;
+- the call executor: candidate preparation, both applicability passes and
+  the relations they make, contextual typing exchanges, final checks,
+  diagnostics, recovery, return solving and the call's SCC discharge;
+- a relation driven in place (inside an open obligation, a binding root,
+  a re-discharge) and a relation a seam joined below a drive's root, which
+  demand nothing first.
+
 Every other family a frame or cold build reaches still builds in one
 synchronous step: mapped types, `keyof`, template literals, overload sets with explicit type arguments (each candidate instantiates
 through the substitution engine, whose template-literal fold reads in
 place), signature discovery,
-object-spread projection, locator lowering, relations, flow returns and the
-call walk below a suspension point. Their nested query reads and resolver
+object-spread projection, locator lowering, a relation's reduction below
+its operand demands, flow returns and the call walk below a suspension
+point. Their nested query reads and resolver
 port calls (`ensure_indexed_ready_serve`, prepared declarations, module
 export tables, route resolution, declaration lowering) remain synchronous
 inside the step. Frame entry loads (above) cover only the loads an
@@ -1627,7 +1738,10 @@ frames, `NestedStore`) and its shared `Rc` state (the frame execution a
 nested evaluator reaches its enclosing frame's bank through, and the
 evaluation memos), and on the dispatch read helpers the body calls
 (signature discovery, the contextual call executor, type-leaf lowering, the
-relation entry) being continuations themselves.
+relation entry) being continuations themselves. The relation entry and the
+contextual call executor have the owned interface the body advances
+([Helper continuations](#helper-continuations)); what runs below their
+first requests is still in place.
 
 These are the production waits a component-meta or compile root can reach
 in the current tree, with the `WaitFamily` each announces. A synchronous
@@ -1638,7 +1752,7 @@ traversals consume those interfaces as they become suspendable.
 | Wait | Family | Owner | Reached from | Pollable form today |
 | --- | --- | --- | --- | --- |
 | Semantic memo flight join (`SemanticGraphStore::acquire_query` with `AcquireWait::Block` → `Subscription::wait`) | SemanticFlight | `verter_type_engine/src/semantic_query_memo/producer.rs` | every synchronous `ProjectSemanticDispatch` query a frame step or a cold build evaluates in place | `Subscription::poll` in `SemanticTask` frames; `AcquireWait::Yield` for the polled entry's own root claim |
-| Synchronous root drive (`ProjectSemanticDispatch::drive_query` → `block_on`) | SemanticDrive | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `execute_read` and every other synchronous dispatch entry, for instantiations, `typeof`, machinery-root conditionals/calls and callback-typing flow returns — including those a cold build evaluates in place | `ThreadDispatch::poll_query` → `SemanticQueryPoll`, for a root query outside any drive |
+| Synchronous root drive (`ProjectSemanticDispatch::drive_query` → `block_on`) | SemanticDrive | `verter_type_engine/src/project_semantic_dispatch/query_frames.rs` | `execute_read` and every other synchronous dispatch entry, for instantiations, `typeof`, machinery-root conditionals/calls/relations and callback-typing flow returns — including those a cold build evaluates in place | `ThreadDispatch::poll_query` → `SemanticQueryPoll`, for a root query outside any drive |
 | Artifact cache singleflight joiner (`cooperative_admit_impl`) | CacheFlight | `verter_type_engine/src/cache_runtime/singleflight.rs` | flow-slice lookups; declaration-lookup, resolvability, owner-collection and shape-cache memo DBs | owned artifact admission with producer transfer; dispatch callers still synchronous |
 | Query-identity candidate singleflight joiner (`cooperative_admit_with_lookup_publish`) | CacheFlight | `verter_type_engine/src/cache_runtime/lookup_publish.rs` | imported-registry symbol resolution | owned query admission with producer transfer; dispatch callers still synchronous |
 | Resolver request singleflight follower (`SingleflightGroup::run_retaining`) | ResolverFlight | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | `OwnedResolverFlight::poll` with producer transfer; callers still synchronous |
