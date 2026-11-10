@@ -391,6 +391,41 @@ pub(super) enum CarrierStep {
 static_assertions::assert_impl_all!(CarrierRead: Send);
 static_assertions::assert_not_impl_any!(CarrierRead: Clone, Copy);
 
+/// A carrier subject's resolution under the capture the deferred evaluator
+/// reads it with ([`ProjectSemanticDispatch::resolve_carrier_subject_node_capturing_suppress`]):
+/// the resolution, standing at the query it reads next, and the capture its
+/// earlier stages observed — the nested fact tracer, the build-local taint
+/// frame and the cold-compute completeness — each installed again for the
+/// stage that resumes it, so a resolution waiting across the steps of a
+/// continuation observes exactly what one native call would.
+pub(super) struct CapturedCarrierRead {
+    read: Box<CarrierRead>,
+    capture: CarrierCapture,
+}
+
+/// What a captured carrier resolution observed so far.
+struct CarrierCapture {
+    tracer: crate::fact_signature_helpers::OwnedStepwiseFactTracer,
+    taint: crate::project_semantic_dispatch::BuildLocalTaint,
+    completeness: crate::semantic_query::ResultCompleteness,
+}
+
+/// Where a captured carrier resolution stands after its latest stage.
+pub(super) enum CapturedCarrierStep {
+    /// The carrier's resolved subject, the observation its stages captured
+    /// (already folded into the enclosing frame) and their completeness.
+    Done(
+        CarrierResolution,
+        crate::project_semantic_dispatch::BuildLocalTaint,
+        crate::semantic_query::ResultCompleteness,
+    ),
+    /// The resolution reads this query next, holding everything it captured.
+    Read(SemanticQueryKey, Box<CapturedCarrierRead>),
+}
+
+static_assertions::assert_impl_all!(CapturedCarrierRead: Send);
+static_assertions::assert_not_impl_any!(CapturedCarrierRead: Clone, Copy);
+
 impl QualifiedTail {
     /// The path read over the settled head `base`.
     pub(super) fn key(&self, base: SemanticNodeId) -> SemanticQueryKey {
@@ -1819,19 +1854,114 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         crate::project_semantic_dispatch::BuildLocalTaint,
         crate::semantic_query::ResultCompleteness,
     ) {
+        let mut step = self.begin_captured_carrier_read(node, context);
+        loop {
+            match step {
+                CapturedCarrierStep::Done(resolved, observed, completeness) => {
+                    return (resolved, observed, completeness)
+                }
+                CapturedCarrierStep::Read(key, capture) => {
+                    let mut key = Some(key);
+                    let mut read =
+                        || self.carrier_read_in_place(key.take().expect("a read is made once"));
+                    step = self.resume_captured_carrier_read(*capture, &mut read);
+                }
+            }
+        }
+    }
+
+    /// The first stage of a carrier subject's resolution under the capture
+    /// [`Self::resolve_carrier_subject_node_capturing_suppress`] reads it
+    /// with: settled at once, or standing at the query it reads next with
+    /// the capture retained ([`CapturedCarrierRead`]).
+    pub(super) fn begin_captured_carrier_read(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> CapturedCarrierStep {
+        let source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
+        let capture = CarrierCapture {
+            tracer: crate::fact_signature_helpers::OwnedStepwiseFactTracer::fanning_out(&source),
+            taint: crate::project_semantic_dispatch::BuildLocalTaint::default(),
+            completeness: crate::semantic_query::ResultCompleteness::Complete,
+        };
+        self.captured_carrier_stage(capture, |dispatch| {
+            dispatch.begin_carrier_read(node, context)
+        })
+    }
+
+    /// The next stage of a captured carrier resolution, given the read it
+    /// stands at: the read is made inside the stage, under the capture.
+    pub(super) fn resume_captured_carrier_read(
+        &self,
+        read: CapturedCarrierRead,
+        deliver: &mut dyn FnMut() -> crate::semantic_query::CacheRead<
+            crate::semantic_query::QueryResult<SemanticNodeId>,
+        >,
+    ) -> CapturedCarrierStep {
+        let CapturedCarrierRead { read, capture } = read;
+        self.captured_carrier_stage(capture, |dispatch| {
+            let answer = dispatch.carrier_resolution_of(deliver());
+            dispatch.resume_carrier_read(*read, answer)
+        })
+    }
+
+    /// Release what an abandoned captured resolution holds: its carrier's
+    /// entry on the normalization record. Its capture is dropped unread.
+    pub(super) fn abandon_captured_carrier_read(&self, read: CapturedCarrierRead) {
+        self.abandon_carrier_read(*read.read);
+    }
+
+    /// One stage of a captured carrier resolution: the stage runs under the
+    /// capture's tracer, taint frame and completeness, which the capture
+    /// keeps when the stage names a read. Once the resolution settles the
+    /// capture is finished as one native resolution's would be.
+    fn captured_carrier_stage(
+        &self,
+        mut capture: CarrierCapture,
+        stage: impl FnOnce(&Self) -> CarrierStep,
+    ) -> CapturedCarrierStep {
+        let source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
         let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-        let observation =
-            crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
-        let (mut resolved, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
-            || self.resolve_carrier_subject_node_inner(node, context),
-        );
-        // Order is LOAD-BEARING: finish the local frame, OR the nested tracer's
-        // non-cacheability AND its instability into `observed.cache_suppress`, and
-        // ONLY THEN re-fold the merged observation into the enclosing frame.
-        // Re-folding the Rail-1-only frame before adding the tracer bits would
-        // recreate the gap the nested tracer exists to close.
-        let mut observed = observation.finish();
+        crate::request_context::fold_result_completeness(capture.completeness);
+        let step = {
+            let _taint = super::StepTaint::install(&self.build_local_taint, &mut capture.taint);
+            let _installed = capture.tracer.install(&source);
+            stage(self)
+        };
+        let resolved = match step {
+            CarrierStep::Read(key, read) => {
+                capture.completeness = crate::request_context::current_cold_compute_completeness();
+                completeness_scope.discard();
+                return CapturedCarrierStep::Read(
+                    key,
+                    Box::new(CapturedCarrierRead { read, capture }),
+                );
+            }
+            CarrierStep::Done(resolved) => resolved,
+        };
+        let CarrierCapture {
+            tracer,
+            taint: mut observed,
+            ..
+        } = capture;
+        let finalise = tracer.finish(&source);
+        self.finish_captured_carrier(resolved, &mut observed, finalise, completeness_scope)
+    }
+
+    /// Finish a settled captured resolution. Order is LOAD-BEARING: OR the
+    /// nested tracer's non-cacheability AND its instability into the
+    /// captured frame's `cache_suppress`, and ONLY THEN re-fold the merged
+    /// observation into the enclosing frame. Re-folding the Rail-1-only
+    /// frame before adding the tracer bits would recreate the gap the
+    /// nested tracer exists to close.
+    fn finish_captured_carrier(
+        &self,
+        mut resolved: CarrierResolution,
+        observed: &mut crate::project_semantic_dispatch::BuildLocalTaint,
+        finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
+        completeness_scope: crate::request_context::ColdComputeCompletenessScope,
+    ) -> CapturedCarrierStep {
         if matches!(
             &finalise,
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
@@ -1865,8 +1995,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let completeness = completeness.merge(resolved.status.completeness());
         completeness_scope.discard();
         crate::request_context::fold_result_completeness(completeness);
-        self.fold_observed_frame_into_top(&observed);
-        (resolved, observed, completeness)
+        self.fold_observed_frame_into_top(observed);
+        CapturedCarrierStep::Done(resolved, std::mem::take(observed), completeness)
     }
 
     /// Carrier-subject head-resolution body (see

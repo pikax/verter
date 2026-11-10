@@ -213,6 +213,8 @@ pub(crate) struct AtomicSemanticGraphStats {
     pub(super) relation_reductions: Tally,
     /// Admission stages query entries computed, once per stage.
     pub(super) admission_stages_walked: Tally,
+    /// Steps deferred evaluations computed, once per step.
+    pub(super) deferred_steps_evaluated: Tally,
     #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub(super) path_length_samples: Mutex<SampleCollector>,
     pub(super) decl_subexpression_lowering_count: Tally,
@@ -292,6 +294,7 @@ impl Default for AtomicSemanticGraphStats {
             relation_roots_opened: Tally::default(),
             relation_reductions: Tally::default(),
             admission_stages_walked: Tally::default(),
+            deferred_steps_evaluated: Tally::default(),
             path_length_samples: Mutex::new(SampleCollector::with_cap(SAMPLE_RESERVOIR_CAP)),
             decl_subexpression_lowering_count: Tally::default(),
             relation_check_count: Tally::default(),
@@ -503,6 +506,7 @@ impl SemanticGraphStore {
             relation_roots_opened: stats.relation_roots_opened.load(Ordering::Relaxed),
             relation_reductions: stats.relation_reductions.load(Ordering::Relaxed),
             admission_stages_walked: stats.admission_stages_walked.load(Ordering::Relaxed),
+            deferred_steps_evaluated: stats.deferred_steps_evaluated.load(Ordering::Relaxed),
             path_length_p50,
             path_length_p95,
             decl_subexpression_lowering_count: stats

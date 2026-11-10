@@ -1137,6 +1137,9 @@ and retains its position and what it computed before the read
 - an intermediate generic application's `Instantiate`;
 - a deferred `keyof`'s reduction;
 - a deferred indexed access's reduction;
+- each read the evaluation of a deferred indexed access's own deferred
+  object names (below), then the access's reduction over the evaluated
+  object;
 - each branch of an open conditional, with the true branch's answer kept
   while the false branch is read;
 - a `typeof` carrier's value, then its pending member.
@@ -1150,6 +1153,53 @@ its rollback. Its stages are not counted in `continuation_stages_resumed`.
 The shared signature-list read
 (`SignatureListRead`) is one sub-continuation both overload sets and
 apparent types step, in resolution or declaration order.
+
+The shared deferred evaluator is a sub-continuation as well
+(`evaluate::DeferredRead`, begun by `begin_deferred_read` and resumed by
+`resume_deferred_read`). It keeps the evaluator's heap worklist as owned
+state: its frames, each with its stage, visited nodes, accumulated
+completeness, availability and cache suppression; each frame's delivering
+fact tracer (`OwnedStepwiseFactTracer::delivering`); the outcome of an
+operand completed for its parent; and whether the top frame's first step
+was paid. A step whose operator reads a query — a `keyof`, mapped type,
+indexed access, `typeof` value, conditional, template literal, a helper
+application's or declaration's instantiation — names that query and
+records what it does with the answer in the frame's stage
+(`DeferredEvaluationStage::AwaitRead`, `ReadThen`). A `BareRef` or
+`ImportType` operand's carrier resolution runs as a `CarrierRead` under
+the capture the evaluator reads it with — its nested tracer, build-local
+taint frame and cold-compute completeness, reinstalled for each stage
+(`carrier::CapturedCarrierRead`). The evaluation's consumer resumes it
+with the answer, which is read or delivered inside the evaluation's
+stage, under the standing frame's tracer and over its open recording, so
+the read's facts, receipt and rails reach exactly the frame that read it
+in place. The cold frames' cost recordings stay open on the connected
+demand's recording stack while the evaluation waits, above the recording
+of the computation it is nested in, as a waiting frame's own recording
+does; they travel with the connected demand, and only the evaluation ends
+them: sealed or abandoned as its frames finish, or abandoned top first
+when its holder is released (`abandon_deferred_read`, through
+`FamilyBuild::release_retained_accounting`). Its connected-demand entry is
+made per stage and never retained. The in-place driver
+(`evaluate_deferred_demand`, behind every `evaluate_deferred_*` entry)
+holds the demand across the evaluation and reads each named query where
+the evaluation stands. Steps are counted in `deferred_steps_evaluated`
+where they run, outside every charge and its rollback; the step that named
+a read is counted once, not again when it resumes with the answer.
+
+A path hop standing at a deferred indexed access whose object is itself
+deferred evaluates that object this way (`HopSite::DeferredOperand`): each
+read the evaluation names is the path build's need, delivered back into
+the evaluation (`FamilyBuild` resumes take the delivery, not the read, for
+this reason). The path build is the only consumer converted so far; every
+other `evaluate_deferred_*` caller still drives the evaluation in place.
+Inside a step the evaluation still answers in place what is not a query
+read of its own: the answer of an access read that found no value
+(`absent_access_answer`: its absence proof and the structural demand it
+normalizes through), the settling
+of a `keyof` carrier through its declaration (`settled_key_of_carrier`),
+prepared declaration kinds and alias bodies, and the carrier head's
+resolver lookups.
 
 Six of these are certified suspendable at every dependency they name, with
 each seam held under test: declaration lookups (each route hop's load,
@@ -1338,6 +1388,18 @@ Released, the path resumes elsewhere to the synchronous entry's read,
 receipt tree included, with each hop computed once (an absolute count).
 `a_path_released_while_its_instantiation_is_held_leaves_nothing_open`
 drops the waiting path.
+`a_hop_whose_deferred_operand_reads_a_held_instantiation_yields_and_resumes_to_the_synchronous_read`
+and
+`a_deferred_operand_waiting_on_its_second_read_resumes_without_evaluating_its_completed_steps_again`
+poll a path whose hop stands at `Pair<Pair<"deep">>["inner"]["value"]["inner"]`
+while another task produces the instantiation its deferred object's
+evaluation reads first, or the one it reads second after completing its
+inner frame. Each poll returns `Pending` with the evaluation retained, a
+repoll and a poll on another thread compute nothing, and released, the
+path resumes elsewhere to the synchronous entry's read, receipt tree
+included, with each evaluator step and hop computed once (absolute
+counts). `a_path_released_while_its_deferred_operand_is_held_leaves_nothing_open`
+drops the path at either read and requires no open cost recording.
 
 ### Helper continuations
 
@@ -1667,7 +1729,9 @@ made in place inside a stage:
 - a `ReturnType` flow member hop;
 - the reads inside composite joins;
 - terminal expansion and shallow synthesis;
-- the deferred evaluator it drives.
+- the deferred evaluations its other hops and its terminal drive in place
+  (the deferred object of a hop's indexed access is a sub-continuation;
+  above), and what the evaluator still answers in place inside a step.
 
 A projection read through sugar or over a carrier or apparent-wrapper subject
 is admitted by its retained entry admission (above), from a polled root and

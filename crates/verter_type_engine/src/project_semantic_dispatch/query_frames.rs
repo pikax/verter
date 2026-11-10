@@ -2381,13 +2381,13 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
         // first puts back what it set aside on that recording.
         match frame.build.take() {
             Some(FrameBuild::Family(mut family) | FrameBuild::FamilyAdmitted(mut family, _)) => {
-                family.release_retained_accounting(&self.dispatch.connected_demand);
+                family.release_retained_accounting(&self.dispatch);
             }
             // An admission stopped between its stages releases the carrier
             // it holds on the normalization record.
             Some(FrameBuild::Admitting(admission) | FrameBuild::AdmittingSource(admission, ..)) => {
                 let AdmissionBuild { mut family, entry } = *admission;
-                family.release_retained_accounting(&self.dispatch.connected_demand);
+                family.release_retained_accounting(&self.dispatch);
                 self.dispatch.abandon_query_entry(entry);
             }
             other => frame.build = other,
@@ -3120,16 +3120,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A read named from kernel handles retired while the frame waited
         // answers nothing: it is dropped unread, its rails and receipt never
         // the build's, and the build reads its source again.
-        let read = if family.awaits_retired_read(&self.continuation_stage()) {
-            drop(delivery);
-            super::family_continuation::retired_read()
-        } else {
+        let retired = family.awaits_retired_read(&self.continuation_stage());
+        let mut delivery = Some((delivery, admitted));
+        // The delivery is consumed where the build consumes its read: as
+        // its stage begins, or inside the deferred evaluation a path hop
+        // stands in, under that evaluation's tracer and recording.
+        let mut read = || {
+            let (mut delivery, admitted) = delivery.take().expect("a delivery is read once");
+            if retired {
+                drop(delivery);
+                return super::family_continuation::retired_read();
+            }
             // An admitted key's read is attributed with its admission's
             // prelude before the build consumes it, as the synchronous
-            // entry attributes the read it admitted.
-            let mut delivery = delivery;
+            // entry attributes the read it admitted. The admission ran in
+            // the frame, outside the tracer of a deferred evaluation the
+            // read is now delivered into, so its facts are observed again
+            // here, where the synchronous entry's reader observed them.
             if let Some(admitted) = admitted {
                 let AdmittedNeed { key, prelude } = *admitted;
+                prelude.replay_facts();
                 delivery.read = self.attribute_query_read(&key, false, delivery.read, &prelude);
             }
             self.read_frame_delivery(FrameDelivery {
@@ -3137,7 +3147,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 depth: depth + 1,
             })
         };
-        let step = self.resume_family_build(*family, read);
+        let step = self.resume_family_build(*family, &mut read);
         self.advance_family_frame(key, build, step, suspends_loads)
     }
 
@@ -3281,8 +3291,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return FramePoll::Need(need);
                 }
                 FamilyStep::Need(need, family) => {
-                    let read = self.read_family_need_in_place(need, &family);
-                    step = self.resume_family_build(*family, read);
+                    step = self.resume_family_need_in_place(need, *family);
                 }
             }
         }

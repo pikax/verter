@@ -1376,6 +1376,14 @@ enum HopSite {
         object: SemanticNodeId,
         index: IndexKey,
     },
+    /// A deferred indexed access whose object is itself deferred: the
+    /// object's evaluation on the shared deferred evaluator, standing at the
+    /// read it named, and the index the hop reads off the evaluated object.
+    DeferredOperand {
+        evaluation: Box<super::evaluate::DeferredRead>,
+        index: crate::semantic_query::IndexKey,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+    },
     /// An open conditional's true branch projected over the rest of the
     /// path; its false branch is projected next.
     ConditionalTrue {
@@ -1459,20 +1467,49 @@ pub(super) struct PathPlan {
 }
 
 impl WalkState {
-    /// End the prefix recording a walk released between its stages still
-    /// holds: what its build charged before the first prefix is put back
-    /// on the build's recording, which its releaser then abandons.
-    pub(super) fn release_prefixes(
+    /// Release what a walk released between its stages still holds: a hop's
+    /// deferred evaluation standing at its read abandons its recordings,
+    /// which sit above the build's own, and the walk's prefix recording puts
+    /// back what its build charged before the first prefix on the build's
+    /// recording, which its releaser then abandons.
+    pub(super) fn release<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
-        ledger: &super::connected_demand::ConnectedDemandLedger<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
     ) {
+        if matches!(
+            &self.awaiting,
+            Some(HopResume {
+                site: HopSite::DeferredOperand { .. },
+                ..
+            })
+        ) {
+            if let Some(HopResume {
+                site: HopSite::DeferredOperand { evaluation, .. },
+                ..
+            }) = self.awaiting.take()
+            {
+                dispatch.abandon_deferred_read(*evaluation);
+            }
+        }
         if let Some(recording) = self
             .prefixes
             .as_mut()
             .and_then(|prefixes| prefixes.recording.take())
         {
-            ledger.end_prefixes(recording);
+            dispatch.connected_demand.end_prefixes(recording);
         }
+    }
+
+    /// Whether the read the walk stands at is a carrier resolution's,
+    /// which its consumers count as their own dispatch intent.
+    pub(super) fn awaits_carrier_read(&self) -> bool {
+        matches!(
+            &self.awaiting,
+            Some(HopResume {
+                site: HopSite::DeferredOperand { evaluation, .. },
+                ..
+            }) if evaluation.reads_for_carrier()
+        )
     }
 }
 
@@ -2252,18 +2289,50 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// Resume the walk at the hop that named its last read, with that
     /// read's answer: the hop continues from what it computed before the
     /// read, and nothing the walk completed runs again.
+    ///
+    /// `deliver` makes or delivers that read. A hop standing at a read its
+    /// deferred operand's evaluation named has the read delivered inside the
+    /// evaluation's stage, under the evaluation's own tracer and recording,
+    /// where the in-place evaluation made it; any other hop folds the read
+    /// into the walk first.
     pub(super) fn resume_walk(
         &mut self,
-        read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+        deliver: &mut dyn FnMut() -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
     ) -> WalkProgress {
         let resume = self
             .awaiting
             .take()
             .expect("a walk resumes at the hop that named its read");
-        let value = self.fold_read(read);
         let mut frames = std::mem::take(&mut self.frames);
         let mut results = std::mem::take(&mut self.results);
-        let next = self.resume_hop(resume, value, &mut frames, &mut results);
+        let next = match resume.site {
+            HopSite::DeferredOperand {
+                evaluation,
+                index,
+                origin,
+            } => {
+                let step = self.dispatch.resume_deferred_read(evaluation, deliver);
+                self.deferred_operand_hop(
+                    step,
+                    resume.current,
+                    &resume.path,
+                    resume.index,
+                    resume.arm_read,
+                    origin,
+                    index,
+                    &mut results,
+                )
+            }
+            site => {
+                let value = self.fold_read(deliver());
+                self.resume_hop(
+                    HopResume { site, ..resume },
+                    value,
+                    &mut frames,
+                    &mut results,
+                )
+            }
+        };
         self.frames = frames;
         self.results = results;
         match next {
@@ -3260,17 +3329,76 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         read.value
     }
 
+    /// Carry a hop standing at a deferred access on from its object's
+    /// evaluation `step`: the read the evaluation names next, the evaluation
+    /// retained in the hop ([`HopSite::DeferredOperand`]); or, once it
+    /// completed, the hop's indexed read of `index` off the evaluated
+    /// object.
+    #[allow(clippy::too_many_arguments)]
+    fn deferred_operand_hop(
+        &mut self,
+        step: super::evaluate::DeferredStep,
+        current: SemanticNodeId,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        index: usize,
+        arm_read: Option<ArmRead>,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+        ix: crate::semantic_query::IndexKey,
+        results: &mut Vec<SemanticNodeId>,
+    ) -> Option<HopRead> {
+        let outcome = match step {
+            super::evaluate::DeferredStep::Read(key, evaluation) => {
+                return Some(HopRead {
+                    key,
+                    resume: HopResume {
+                        current,
+                        path: path.clone(),
+                        index,
+                        arm_read,
+                        site: HopSite::DeferredOperand {
+                            evaluation,
+                            index: ix,
+                            origin,
+                        },
+                    },
+                });
+            }
+            super::evaluate::DeferredStep::Done(outcome) => outcome,
+        };
+        let object = match self.adopt_deferred_operand(outcome) {
+            QueryResult::Value(node) => node,
+            _ => {
+                results.push(self.opaque_miss());
+                return None;
+            }
+        };
+        Some(HopRead {
+            key: SemanticQueryKey::IndexedAccess {
+                base: object,
+                index: ix.clone(),
+                mode: ProjectionMode::Navigate,
+            },
+            resume: HopResume {
+                current,
+                path: path.clone(),
+                index,
+                arm_read,
+                site: HopSite::IndexedAccess {
+                    origin,
+                    object,
+                    index: ix,
+                },
+            },
+        })
+    }
+
     /// Adopt an operand evaluated by the shared heap worklist with the
     /// same partiality and positional guarantees as a nested query read.
-    fn evaluate_deferred_operand(
+    fn adopt_deferred_operand(
         &mut self,
-        node: SemanticNodeId,
-        context: crate::semantic_query::ProjectionReductionContext,
+        outcome: super::evaluate::EvaluateDeferredOutcome,
     ) -> QueryResult<SemanticNodeId> {
-        let output = self
-            .dispatch
-            .evaluate_deferred_semantic_node_with_context(node, context)
-            .into_query_build_output(self.dispatch);
+        let output = outcome.into_query_build_output(self.dispatch);
         self.cache_suppress |= output.cache_suppress;
         if output.completeness.is_partial() {
             match (&output.result, output.approximation) {
@@ -4915,22 +5043,23 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // TERMINAL segment runs in the caller's mode — that is
                     // handled after the loop by
                     // `resolve_expanded_terminal_carrier`.
-                    let mut object = *object;
+                    let object = *object;
                     let ix = ix.clone();
                     // Resolve nested operands on the shared evaluator's
                     // worklist. Re-entering one query per authored index
                     // otherwise makes a finite path consume native depth.
+                    // The evaluation is the hop's own sub-continuation: a
+                    // read it names stops the walk with the evaluation
+                    // retained, and the hop resumes it with the answer.
                     if matches!(self.graph().node_data(object).as_deref(), Some(SemanticNodeData::IndexedAccess { .. })) {
-                        object = match self.evaluate_deferred_operand(
+                        let step = self.dispatch.begin_deferred_read(
                             object,
                             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Navigate),
-                        ) {
-                            QueryResult::Value(node) => node,
-                            _ => {
-                                results.push(self.opaque_miss());
-                                return None;
-                            }
-                        };
+                            super::evaluate::DeferredEvaluationDemand::Shell,
+                        );
+                        return self.deferred_operand_hop(
+                            step, current, path, index, arm_read, origin, ix, results,
+                        );
                     }
                     return Some(HopRead {
                         key: SemanticQueryKey::IndexedAccess {
@@ -6453,6 +6582,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     return None;
                 }
                 current = resolved;
+            }
+            HopSite::DeferredOperand { .. } => {
+                unreachable!("a deferred operand's read is delivered to its evaluation")
             }
             HopSite::ConditionalTrue {
                 check,
