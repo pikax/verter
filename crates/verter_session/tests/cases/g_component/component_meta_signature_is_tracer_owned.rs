@@ -35,9 +35,11 @@ use std::sync::Arc;
 
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
 use verter_session_query::facts::{
-    fact_cache::{DerivedFactKind, FactVersionRef},
+    fact_cache::{DerivedFactKind, FactVersionRef, ResolveImportsFactRef},
     fact_read_set::FactReadSetFinalise,
+    resolution::ResolutionFactRef,
 };
+use verter_session_query::resolution::ResolutionPopulation;
 
 fn build_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
@@ -64,6 +66,60 @@ fn sorted<'a>(facts: impl IntoIterator<Item = &'a FactVersionRef>) -> Vec<String
     let mut v: Vec<String> = facts.into_iter().map(|f| format!("{f:?}")).collect();
     v.sort();
     v
+}
+
+/// The session population that a host's resolution facts were decided
+/// in, or `None` when the facts name no session population.
+///
+/// A resolution fact names the population of the workspace engine that
+/// decided it, and every engine mints its own `SessionFingerprint`
+/// (#1016). One host's facts therefore name exactly one session
+/// population; a second would mean a fact from another session leaked
+/// into this host's read set.
+fn session_population(facts: &[FactVersionRef]) -> Option<ResolutionPopulation> {
+    let mut session = None;
+    for fact in facts {
+        let FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(resolution)) = fact
+        else {
+            continue;
+        };
+        let population = resolution.key.population();
+        if !matches!(population, ResolutionPopulation::Session(_)) {
+            continue;
+        }
+        match session {
+            None => session = Some(population),
+            Some(seen) => assert_eq!(
+                seen, population,
+                "one host's resolution facts must name one session population",
+            ),
+        }
+    }
+    session
+}
+
+/// `facts` with every resolution fact decided in session population
+/// `from` moved into `to`. Only the population changes: each fact's
+/// key otherwise and its version are kept exactly, and every other
+/// fact is returned unchanged.
+fn in_session_population(
+    facts: &[FactVersionRef],
+    from: ResolutionPopulation,
+    to: ResolutionPopulation,
+) -> Vec<FactVersionRef> {
+    facts
+        .iter()
+        .map(|fact| match fact {
+            FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(resolution))
+                if resolution.key.population() == from =>
+            {
+                FactVersionRef::ResolveImports(ResolveImportsFactRef::Resolution(
+                    ResolutionFactRef::new(resolution.key.in_population(to), resolution.version),
+                ))
+            }
+            other => other.clone(),
+        })
+        .collect()
 }
 
 /// `/src/types.ts` content — a cross-file dep imported by the owner.
@@ -108,7 +164,9 @@ fn published_component_meta_signature_equals_finalized_tracer_read_set() {
     // so the trace is a genuine cold compute (no warm
     // resolved-meta cache short-circuit skewing the observed reads).
     // Identical content ⇒ identical content hashes ⇒ the traced fact
-    // set must equal the first host's published `facts` rail.
+    // set must equal the first host's published `facts` rail, up to the
+    // session population each host's own engine mints for its
+    // resolution facts (rebased below).
     let trace_host = build_host();
     upsert(
         &trace_host,
@@ -150,6 +208,26 @@ fn published_component_meta_signature_equals_finalized_tracer_read_set() {
         })
         .cloned()
         .collect();
+
+    // The trace ran on its own host, whose engine minted its own
+    // session population (#1016), so its resolution facts name that
+    // population where the published rail names the first host's.
+    // Rebase exactly that one population — nothing else about any fact
+    // — so the comparison below still requires every resolution fact's
+    // key and version to match.
+    let traced_minus_owner_route = match (
+        session_population(&traced_minus_owner_route),
+        session_population(&published.facts.to_vec()),
+    ) {
+        (Some(trace_session), Some(published_session)) => {
+            in_session_population(&traced_minus_owner_route, trace_session, published_session)
+        }
+        (None, None) => traced_minus_owner_route,
+        (trace_session, published_session) => panic!(
+            "both hosts' resolution facts must name a session population, or neither: \
+             traced={trace_session:?} published={published_session:?}",
+        ),
+    };
 
     // EXACT set equality — tracer-owned-signature discrimination. The
     // published `facts` rail IS the finalized tracer read set with the
