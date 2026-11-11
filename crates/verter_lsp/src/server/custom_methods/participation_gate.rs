@@ -189,6 +189,30 @@ impl VerterLanguageServer {
 }
 
 impl VerterLanguageServer {
+    /// Bring the client's dynamic registrations in line with the current
+    /// participation mask (COX0): a method no served profile admits is
+    /// unregistered, a re-admitted one registered again.
+    ///
+    /// The transaction runs detached: a cancelled request that started it
+    /// never drops a client request in flight before its bookkeeping is
+    /// recorded, so the recorded registrations always match the client's.
+    pub(crate) async fn reconcile_registrations(&self) {
+        if self.dynamic_registrations.get().is_none() {
+            return;
+        }
+        let server = self.clone();
+        let transaction = tokio::spawn(async move {
+            if let Some(registrations) = server.dynamic_registrations.get() {
+                registrations
+                    .reconcile(&server.client, &server.documents)
+                    .await;
+            }
+        });
+        if let Err(error) = transaction.await {
+            tracing::warn!("participation registration task failed: {error}");
+        }
+    }
+
     /// `$/verter/updateParticipation`: replace this scope's participation
     /// input whole. An effective change publishes the new mask and demand
     /// epoch before any newer demand is admitted. Every open document then
@@ -249,6 +273,9 @@ impl VerterLanguageServer {
             }
             self.refresh_deferred_decorations();
         }
+        // Also on an unchanged mask: a registration the client refused
+        // earlier is retried here.
+        self.reconcile_registrations().await;
         Ok(receipt)
     }
 }

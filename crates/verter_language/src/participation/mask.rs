@@ -664,6 +664,44 @@ impl CapabilityOwnershipMask {
         })
     }
 
+    /// Whether some site may admit an interactive demand of `operation` for
+    /// `profile`: its profile-wide cell admits one, or a narrower (document
+    /// or region) declaration sets a mode that may. Conservative: a host
+    /// keeps such a method registered and refuses per request where the
+    /// cell is withdrawn, and never unregisters a method a site admits.
+    pub fn may_admit_interactive(
+        &self,
+        profile: &ProfileRef,
+        operation: CapabilityOperation,
+    ) -> bool {
+        let capability = CapabilityId::new(profile.clone(), operation);
+        let profile_wide = self.admit(&AdmissionRequest {
+            capability: &capability,
+            site: RequestSite::default(),
+            purpose: DemandPurpose::Interactive,
+            provider: ProviderRequirement::NotRequired,
+            catalog: CatalogSupport::Supported,
+        });
+        let refused = match profile_wide {
+            Ok(_) => return true,
+            Err(refused) => refused.restrictions,
+        };
+        // Global facts no narrower declaration can lift.
+        if refused.contains(NonExecutionReason::UnsupportedClientFeature)
+            || refused.contains(NonExecutionReason::DisabledOptionalVisualLayer)
+        {
+            return false;
+        }
+        self.presets.iter().any(|declaration| {
+            declaration.selector != SelectorScope::AllSources
+                && declaration.target.covers_parts(profile, operation)
+                && matches!(
+                    declaration.preset,
+                    ParticipationPreset::Auto | ParticipationPreset::Full
+                )
+        })
+    }
+
     fn overlapping<'m>(
         &'m self,
         capability: &CapabilityId,

@@ -497,6 +497,10 @@ pub struct ServerCore {
     /// The recurring notifications the client subscribed to at `initialize`;
     /// shared with every producer of one.
     pub(crate) subscriptions: Arc<crate::demand_plan::ClientSubscriptions>,
+    /// The methods this client registers dynamically, negotiated at
+    /// `initialize` and reconciled against the participation mask (COX0).
+    pub(crate) dynamic_registrations:
+        std::sync::OnceLock<crate::capabilities::registration::DynamicRegistrations>,
     /// Cached verter diagnostics per document:
     /// URI → (document_version, diagnostics_generation, diagnostics).
     /// Avoids re-running host + lint + component diagnostics when both push and
@@ -1618,6 +1622,7 @@ impl VerterLanguageServer {
             client_refreshes_inlay_hints: std::sync::atomic::AtomicBool::new(false),
             client_applies_versioned_edits: std::sync::atomic::AtomicBool::new(false),
             subscriptions,
+            dynamic_registrations: std::sync::OnceLock::new(),
             cached_verter_diags,
             provider_sync_states,
             decl_overlay_owner,
