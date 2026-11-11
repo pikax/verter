@@ -15,7 +15,7 @@
 use std::borrow::Cow;
 
 use tower_lsp_server::jsonrpc;
-use tower_lsp_server::ls_types::Uri;
+use tower_lsp_server::ls_types::{Position, Uri};
 use verter_identity::identity::SourceUnitId;
 use verter_language::participation::{
     AdmissionRequest, CapabilityId, CapabilityOperation, CatalogSupport, DemandPurpose,
@@ -72,6 +72,9 @@ pub(crate) fn superseded_error() -> jsonrpc::Error {
 pub(crate) struct DocumentSite {
     capability_profile: ProfileRef,
     unit: SourceUnitId,
+    /// The carrier-minted role of the region a positional demand lands in;
+    /// `None` for a document-wide demand.
+    region_role: Option<&'static str>,
 }
 
 impl DocumentSite {
@@ -83,6 +86,7 @@ impl DocumentSite {
         Self {
             capability_profile: language_profile(documents.host(), &language),
             unit: file_unit(&canonical),
+            region_role: None,
         }
     }
 
@@ -92,7 +96,18 @@ impl DocumentSite {
             None => Self {
                 capability_profile: file_profile(documents.host(), canonical),
                 unit: file_unit(canonical),
+                region_role: None,
             },
+        }
+    }
+
+    /// The site of a positional demand: the document's site, in the region
+    /// `position` lands in. A stylesheet-region withdrawal therefore refuses
+    /// a hover in a `<style>` section while template hover stays served.
+    pub(crate) fn at(documents: &DocumentRegistry, uri: &Uri, position: &Position) -> Self {
+        Self {
+            region_role: region_role_at(documents, uri, position),
+            ..Self::of(documents, uri)
         }
     }
 
@@ -103,8 +118,42 @@ impl DocumentSite {
     pub(crate) fn request_site(&self) -> RequestSite<'_> {
         RequestSite {
             unit: Some(&self.unit),
-            region_role: None,
+            region_role: self.region_role,
         }
+    }
+}
+
+/// The carrier-minted role of the section `position` lands in, read from the
+/// document's registered structure inventory: `style`, `template` or
+/// `script`. Outside every section, in a custom section, or before the
+/// document's structure is registered, the demand is document-wide (`None`).
+pub(crate) fn region_role_at(
+    documents: &DocumentRegistry,
+    uri: &Uri,
+    position: &Position,
+) -> Option<&'static str> {
+    use verter_language::parse_artifact::carrier_inventory::{CarrierBlock, SectionRole};
+    let document = documents.get(uri)?;
+    let snapshot = document.feature_snapshot.as_ref()?;
+    let offset = document.line_index.position_to_offset(position)?;
+    let role = snapshot
+        .structure()
+        .inventory()
+        .blocks()
+        .iter()
+        .find_map(|block| match block {
+            CarrierBlock::Section { role, syntax, .. }
+                if syntax.content_span.start <= offset && offset <= syntax.content_span.end =>
+            {
+                Some(role)
+            }
+            _ => None,
+        })?;
+    match role {
+        SectionRole::Style { .. } => Some("style"),
+        SectionRole::TemplateHost => Some("template"),
+        SectionRole::Script { .. } => Some("script"),
+        SectionRole::Custom { .. } => None,
     }
 }
 
@@ -116,6 +165,19 @@ pub(crate) fn admit(
     documents: &DocumentRegistry,
     operation: CapabilityOperation,
     uri: Option<&Uri>,
+    purpose: DemandPurpose,
+    provider: ProviderRequirement,
+) -> Result<ParticipationPermit, NonExecution> {
+    admit_at(documents, operation, uri, None, purpose, provider)
+}
+
+/// [`admit`], for a demand at `position` in its document: admitted against
+/// the cell of the region the position lands in.
+pub(crate) fn admit_at(
+    documents: &DocumentRegistry,
+    operation: CapabilityOperation,
+    uri: Option<&Uri>,
+    position: Option<&Position>,
     purpose: DemandPurpose,
     provider: ProviderRequirement,
 ) -> Result<ParticipationPermit, NonExecution> {
@@ -131,7 +193,10 @@ pub(crate) fn admit(
     };
     match uri {
         Some(uri) => {
-            let site = DocumentSite::of(documents, uri);
+            let site = match position {
+                Some(position) => DocumentSite::at(documents, uri, position),
+                None => DocumentSite::of(documents, uri),
+            };
             request(&site.capability(operation), site.request_site())
         }
         None => {
@@ -170,6 +235,27 @@ pub(crate) fn admits(
         documents,
         operation,
         Some(uri),
+        purpose,
+        ProviderRequirement::NotRequired,
+    )
+    .is_ok()
+}
+
+/// Whether `operation` at `position` in `uri` is admitted for `purpose`
+/// right now: the gate of one produced item of a document-wide answer, by
+/// the region it lands in.
+pub(crate) fn admits_at(
+    documents: &DocumentRegistry,
+    operation: CapabilityOperation,
+    uri: &Uri,
+    position: &Position,
+    purpose: DemandPurpose,
+) -> bool {
+    admit_at(
+        documents,
+        operation,
+        Some(uri),
+        Some(position),
         purpose,
         ProviderRequirement::NotRequired,
     )

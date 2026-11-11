@@ -883,16 +883,61 @@ impl VerterLanguageServer {
         purpose: DemandPurpose,
         answer: impl std::future::Future<Output = Result<T>>,
     ) -> Result<(T, verter_session::participation::ParticipationPermit)> {
-        let permit = crate::participation::admit(
-            &self.documents,
-            operation,
-            uri,
-            purpose,
-            verter_language::participation::ProviderRequirement::NotRequired,
-        )
-        .map_err(crate::participation::refusal_error)?;
+        self.participating_at(operation, uri, None, purpose, answer)
+            .await
+    }
+
+    /// [`Self::participating_with_permit`] for a demand at `position`: it is
+    /// admitted against the cell of the region the position lands in, read
+    /// after every edit already received has committed, and served only while
+    /// the position still lands in that region.
+    pub(super) async fn participating_at<T>(
+        &self,
+        operation: Op,
+        uri: Option<&Uri>,
+        position: Option<&Position>,
+        purpose: DemandPurpose,
+        answer: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<(T, verter_session::participation::ParticipationPermit)> {
+        let located = uri.zip(position);
+        let (admitted, region) = {
+            // The edit-commit fence: the region is read from the revision
+            // the request addresses, not one an in-flight edit replaces.
+            let _edit_commit = match located {
+                Some(_) => Some(self.did_change_mutex.lock().await),
+                None => None,
+            };
+            let region = located.map(|(uri, position)| {
+                crate::participation::region_role_at(&self.documents, uri, position)
+            });
+            let admitted = crate::participation::admit_at(
+                &self.documents,
+                operation,
+                uri,
+                position,
+                purpose,
+                verter_language::participation::ProviderRequirement::NotRequired,
+            );
+            (admitted, region)
+        };
+        let permit = admitted.map_err(crate::participation::refusal_error)?;
         let answer = Box::pin(answer).await?;
-        if self.documents.participation().is_current(&permit) {
+        // The answer's revision may place the position in another region
+        // (an open or edit that committed while it was computed): it is
+        // served only when that region's cell admits the demand as well.
+        let region_admits = located.zip(region).is_none_or(|((uri, position), region)| {
+            crate::participation::region_role_at(&self.documents, uri, position) == region
+                || crate::participation::admit_at(
+                    &self.documents,
+                    operation,
+                    Some(uri),
+                    Some(position),
+                    purpose,
+                    verter_language::participation::ProviderRequirement::NotRequired,
+                )
+                .is_ok()
+        });
+        if self.documents.participation().is_current(&permit) && region_admits {
             Ok((answer, permit))
         } else {
             Err(crate::participation::superseded_error())
@@ -908,6 +953,25 @@ impl VerterLanguageServer {
     ) -> Result<T> {
         self.participating(operation, uri, DemandPurpose::Interactive, answer)
             .await
+    }
+
+    /// [`Self::interactive`] for a positional editor request.
+    pub(super) async fn interactive_at<T>(
+        &self,
+        operation: Op,
+        uri: &Uri,
+        position: Position,
+        answer: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        self.participating_at(
+            operation,
+            Some(uri),
+            Some(&position),
+            DemandPurpose::Interactive,
+            answer,
+        )
+        .await
+        .map(|(answer, _)| answer)
     }
 
     /// Code actions: each kind is its own cell. A request no kind admits is
@@ -926,13 +990,19 @@ impl VerterLanguageServer {
     {
         const KINDS: [Op; 3] = [Op::QuickFix, Op::OrganizeImports, Op::Refactor];
         let uri = &params.text_document.uri.clone();
+        let position = params.range.start;
         let mut admitted = Vec::with_capacity(KINDS.len());
         let mut refusal = None;
+        // The same edit-commit fence as [`Self::participating_at`]: the
+        // region is read from the revision the request addresses.
+        let edit_commit = self.did_change_mutex.lock().await;
+        let region = crate::participation::region_role_at(&self.documents, uri, &position);
         for kind in KINDS {
-            match crate::participation::admit(
+            match crate::participation::admit_at(
                 &self.documents,
                 kind,
                 Some(uri),
+                Some(&position),
                 DemandPurpose::Interactive,
                 verter_language::participation::ProviderRequirement::NotRequired,
             ) {
@@ -942,6 +1012,7 @@ impl VerterLanguageServer {
                 }
             }
         }
+        drop(edit_commit);
         if let (true, Some(refused)) = (admitted.is_empty(), refusal) {
             return Err(crate::participation::refusal_error(refused));
         }
@@ -972,6 +1043,16 @@ impl VerterLanguageServer {
         if admitted
             .iter()
             .any(|(_, permit)| !participation.is_current(permit))
+            || (crate::participation::region_role_at(&self.documents, uri, &position) != region
+                && !admitted.iter().all(|(kind, _)| {
+                    crate::participation::admits_at(
+                        &self.documents,
+                        *kind,
+                        uri,
+                        &position,
+                        DemandPurpose::Interactive,
+                    )
+                }))
         {
             return Err(crate::participation::superseded_error());
         }
@@ -1928,9 +2009,11 @@ impl LanguageServer for VerterLanguageServer {
             .text_document
             .uri
             .clone();
-        self.interactive(
+        let position = params.text_document_position_params.position;
+        self.interactive_at(
             Op::Hover,
-            Some(&uri),
+            &uri,
+            position,
             nav_features_audit::handle_hover_with_audit(self, params),
         )
         .await
@@ -1938,10 +2021,12 @@ impl LanguageServer for VerterLanguageServer {
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = params.text_document_position.text_document.uri.clone();
+        let position = params.text_document_position.position;
         let (response, permit) = self
-            .participating_with_permit(
+            .participating_at(
                 Op::Completion,
                 Some(&uri),
+                Some(&position),
                 DemandPurpose::Interactive,
                 nav_features_audit::handle_completion_with_audit(self, params),
             )
@@ -2019,9 +2104,11 @@ impl LanguageServer for VerterLanguageServer {
             .text_document
             .uri
             .clone();
-        self.interactive(
+        let position = params.text_document_position_params.position;
+        self.interactive_at(
             Op::Definition,
-            Some(&uri),
+            &uri,
+            position,
             nav_features_audit::handle_goto_definition_with_audit(self, params),
         )
         .await
@@ -2036,6 +2123,7 @@ impl LanguageServer for VerterLanguageServer {
             .text_document
             .uri
             .clone();
+        let position = params.text_document_position_params.position;
         let answer = crate::audit_harness::run_with_deadline(
             self.request_deadline(|b| b.goto_definition),
             async {
@@ -2047,15 +2135,17 @@ impl LanguageServer for VerterLanguageServer {
                 .await
             },
         );
-        self.interactive(Op::TypeDefinition, Some(&uri), answer)
+        self.interactive_at(Op::TypeDefinition, &uri, position, answer)
             .await
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
         let uri = params.text_document_position.text_document.uri.clone();
-        self.interactive(
+        let position = params.text_document_position.position;
+        self.interactive_at(
             Op::References,
-            Some(&uri),
+            &uri,
+            position,
             nav_features_audit::handle_references_with_audit(self, params),
         )
         .await
@@ -2066,6 +2156,7 @@ impl LanguageServer for VerterLanguageServer {
         params: TextDocumentPositionParams,
     ) -> Result<Option<PrepareRenameResponse>> {
         let uri = params.text_document.uri.clone();
+        let position = params.position;
         let answer = crate::audit_harness::run_with_deadline(
             self.request_deadline(|b| b.goto_definition),
             async {
@@ -2077,15 +2168,17 @@ impl LanguageServer for VerterLanguageServer {
                 .await
             },
         );
-        self.interactive(Op::PrepareRename, Some(&uri), answer)
+        self.interactive_at(Op::PrepareRename, &uri, position, answer)
             .await
     }
 
     async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
         let uri = params.text_document_position.text_document.uri.clone();
-        self.interactive(
+        let position = params.text_document_position.position;
+        self.interactive_at(
             Op::Rename,
-            Some(&uri),
+            &uri,
+            position,
             nav_features_audit::handle_rename_with_audit(self, params),
         )
         .await
@@ -2136,11 +2229,12 @@ impl LanguageServer for VerterLanguageServer {
             .text_document
             .uri
             .clone();
+        let position = params.text_document_position_params.position;
         let answer = crate::audit_harness::run_with_deadline(
             self.request_deadline(|b| b.goto_definition),
             aux_features::handle_document_highlight(self, params),
         );
-        self.interactive(Op::DocumentHighlight, Some(&uri), answer)
+        self.interactive_at(Op::DocumentHighlight, &uri, position, answer)
             .await
     }
 
@@ -2150,6 +2244,7 @@ impl LanguageServer for VerterLanguageServer {
             .text_document
             .uri
             .clone();
+        let position = params.text_document_position_params.position;
         let answer = crate::audit_harness::run_with_deadline(
             self.request_deadline(|b| b.code_action),
             async {
@@ -2161,7 +2256,7 @@ impl LanguageServer for VerterLanguageServer {
                 .await
             },
         );
-        self.interactive(Op::SignatureHelp, Some(&uri), answer)
+        self.interactive_at(Op::SignatureHelp, &uri, position, answer)
             .await
     }
 
@@ -2214,9 +2309,11 @@ impl LanguageServer for VerterLanguageServer {
             .text_document
             .uri
             .clone();
-        self.interactive(
+        let position = params.text_document_position_params.position;
+        self.interactive_at(
             Op::LinkedEditing,
-            Some(&uri),
+            &uri,
+            position,
             aux_features::handle_linked_editing_range(self, params),
         )
         .await
@@ -2234,12 +2331,37 @@ impl LanguageServer for VerterLanguageServer {
 
     async fn document_color(&self, params: DocumentColorParams) -> Result<Vec<ColorInformation>> {
         let uri = params.text_document.uri.clone();
-        self.interactive(
-            Op::DocumentColor,
-            Some(&uri),
-            aux_features::handle_document_color(self, params),
-        )
-        .await
+        let revision = || {
+            self.documents
+                .get(&uri)
+                .map(|document| document.document_revision)
+        };
+        let produced_from = revision();
+        let colors = self
+            .interactive(
+                Op::DocumentColor,
+                Some(&uri),
+                aux_features::handle_document_color(self, params),
+            )
+            .await?;
+        // Each color is served only where its own region's cell admits it,
+        // so a stylesheet-region withdrawal leaves no Verter color there. The
+        // regions are read from the revision the colors were produced from.
+        if revision() != produced_from {
+            return Err(crate::participation::superseded_error());
+        }
+        Ok(colors
+            .into_iter()
+            .filter(|color| {
+                crate::participation::admits_at(
+                    &self.documents,
+                    Op::DocumentColor,
+                    &uri,
+                    &color.range.start,
+                    DemandPurpose::Interactive,
+                )
+            })
+            .collect())
     }
 
     async fn color_presentation(
@@ -2247,9 +2369,11 @@ impl LanguageServer for VerterLanguageServer {
         params: ColorPresentationParams,
     ) -> Result<Vec<ColorPresentation>> {
         let uri = params.text_document.uri.clone();
-        self.interactive(
+        let position = params.range.start;
+        self.interactive_at(
             Op::ColorPresentation,
-            Some(&uri),
+            &uri,
+            position,
             aux_features::handle_color_presentation(self, params),
         )
         .await
@@ -2270,9 +2394,11 @@ impl LanguageServer for VerterLanguageServer {
         params: DocumentOnTypeFormattingParams,
     ) -> Result<Option<Vec<TextEdit>>> {
         let uri = params.text_document_position.text_document.uri.clone();
-        self.interactive(
+        let position = params.text_document_position.position;
+        self.interactive_at(
             Op::OnTypeTagClosing,
-            Some(&uri),
+            &uri,
+            position,
             aux_features::handle_on_type_formatting(self, params),
         )
         .await
@@ -2299,9 +2425,11 @@ impl LanguageServer for VerterLanguageServer {
             .text_document
             .uri
             .clone();
-        self.interactive(
+        let position = params.text_document_position_params.position;
+        self.interactive_at(
             Op::CallHierarchyPrepare,
-            Some(&uri),
+            &uri,
+            position,
             aux_features::handle_prepare_call_hierarchy(self, params),
         )
         .await
