@@ -2264,8 +2264,14 @@ fn assert_a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answer
             &format!("poll {nth} of {polls} ({percent}% of a cold request)"),
         ));
     }
-    assert!(cancelled > 0, "some family-entry cancellation landed inside a request");
-    assert!(cancelled_at_a_poll > 0, "some poll cancellation landed inside a request");
+    assert!(
+        cancelled > 0,
+        "some family-entry cancellation landed inside a request"
+    );
+    assert!(
+        cancelled_at_a_poll > 0,
+        "some poll cancellation landed inside a request"
+    );
 }
 
 /// A retry after a cancellation anywhere in a request over two sibling
