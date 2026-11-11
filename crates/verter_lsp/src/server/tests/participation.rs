@@ -627,6 +627,59 @@ async fn workspace_scope_open_schedules_no_eager_work() {
         .contains(&uri_to_canonical_id(&uri)));
 }
 
+/// PC09 at the server: a positional request is admitted against the cell of
+/// the region it lands in, so a stylesheet-region overlap refuses a hover in
+/// `<style>` while template hover is still served.
+#[tokio::test]
+async fn positional_requests_carry_their_region_role() {
+    const STYLED: &str = "<template>\n  <div class=\"a\">{{ msg }}</div>\n</template>\n<script setup lang=\"ts\">\nconst msg = 'hi'\n</script>\n<style>\n.a { color: red; }\n</style>\n";
+    let service = service();
+    let server = service.inner();
+    let uri = open_test_vue(server, "/cox0/Styled.vue", STYLED);
+    server
+        .update_participation(input(serde_json::json!({ "version": 1, "ownership": [{
+            "profile": profile_ref(server, &uri),
+            "operation": "hover",
+            "selector": { "kind": "regionRole", "role": "style" },
+            "evidence": "f".repeat(64),
+        }]})))
+        .await
+        .expect("valid input");
+    let at = |line, character| Position { line, character };
+    let hover = |position| HoverParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        },
+        work_done_progress_params: Default::default(),
+    };
+
+    let refused = server.hover(hover(at(7, 2))).await.unwrap_err();
+    assert_eq!(refusal(&refused), Some("workspaceOnly"));
+    if let Err(error) = server.hover(hover(at(1, 4))).await {
+        assert_ne!(
+            error.code,
+            tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803),
+            "template hover is not withdrawn: {error:?}"
+        );
+    }
+    let admits = |operation, position| {
+        crate::participation::admits_at(
+            &server.documents,
+            operation,
+            &uri,
+            &position,
+            verter_language::participation::DemandPurpose::Interactive,
+        )
+    };
+    assert!(!admits(Op::Hover, at(7, 2)));
+    assert!(admits(Op::Hover, at(4, 2)), "script hover stays");
+    assert!(
+        admits(Op::Completion, at(7, 2)),
+        "only the overlapping facet"
+    );
+}
+
 /// PC09 at the host boundary: a stylesheet-region overlap withdraws only
 /// the style-region cell, and the receipt reports exactly that, so a host
 /// gates its client-local producers on the same cells.
