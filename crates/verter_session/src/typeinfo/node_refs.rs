@@ -3,8 +3,9 @@
 //! A typeinfo request that answers a fact registers, after the answer is
 //! exported, an [`IssuedRefKey`] for every exported position it can replay
 //! exactly: the declaration root of a resolve-symbol graph, and every
-//! framework-surface member (a prop or exposed member value) whose producing
-//! macro published a replayable source. The key is the whole tuple a later
+//! framework-surface member (a prop, exposed, options or slot member value)
+//! whose producer, a Vue macro or a Svelte source family, published a
+//! replayable source. The key is the whole tuple a later
 //! request must present:
 //!
 //! - the fact's descriptor-specific [`QueryIdentity`], minted from the
@@ -91,10 +92,10 @@ pub(crate) enum NativeReplayLocator {
     FrameworkMember(Box<FrameworkMemberLocator>),
 }
 
-/// Which producer of a component's surface contributed a member: Vue's
-/// actual macro (its kind and its index in the owner's macro inventory, not
-/// the surface kind it aggregates into), the owner the macro is written in,
-/// and the request's admitted profile and component selector.
+/// One member of a component's framework surface, with the producer that
+/// contributed it (Vue's actual macro, or the Svelte source family), the
+/// authored owner its source replays under, and the request's admitted
+/// profile and component selector.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FrameworkMemberLocator {
     /// The component's canonical.
@@ -103,15 +104,13 @@ pub(crate) struct FrameworkMemberLocator {
     pub(crate) component_export: crate::typeinfo::framework_surface::plan::ComponentExport,
     /// The admitted semantic profile the component was read under.
     pub(crate) framework_profile: verter_identity::successor::FrameworkProfileId,
-    /// The authored owner the producing macro is written in: the scope the
-    /// member's source replays under.
+    /// The authored owner the member's source is anchored in: the scope it
+    /// replays under.
     pub(crate) scope_owner: TopLevelOwnerId,
     /// The wire surface kind the member is exported under.
     pub(crate) surface: verter_protocol::typeinfo::graph::FrameworkSurfaceKind,
-    /// The producing macro's actual kind.
-    pub(crate) macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
-    /// The producing macro's index in the owner's macro inventory.
-    pub(crate) macro_index: u32,
+    /// The producer that contributed the member.
+    pub(crate) producer: MemberProducer,
     /// The member's role in its surface.
     pub(crate) role: MemberRole,
     /// The member's published name.
@@ -120,13 +119,62 @@ pub(crate) struct FrameworkMemberLocator {
     pub(crate) source: verter_type_expr::facts::SemanticTypeSource,
 }
 
+/// The producer that contributed a framework member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemberProducer {
+    /// A Vue macro: its actual kind and its index in the owner's macro
+    /// inventory, never the surface kind it aggregates into.
+    VueMacro {
+        /// The macro's kind.
+        kind: verter_session_query::analysis::types::AnalyzedMacroKind,
+        /// The macro's index in the owner's macro inventory.
+        index: u32,
+    },
+    /// A Svelte source family.
+    Svelte(crate::typeinfo::framework_surface::plan::SvelteSurfaceSource),
+}
+
 /// A framework member's role in its surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemberRole {
     /// A prop's value type.
-    PropValue,
+    Prop,
     /// An exposed member's value type.
-    ExposeValue,
+    Exposed,
+    /// An options member's value type.
+    OptionsMember,
+    /// A slot's realized callable: the member value read through its
+    /// realized callable root, as the slots surface exports it.
+    Slot,
+}
+
+/// The authored owner `source`'s replay is anchored in: the anchor owner of
+/// its authored body, of the authored base a projected source replays off,
+/// or of the symbol a shallow reference names. `None` for a source that is
+/// not a replayable locator.
+pub(crate) fn source_scope_owner(
+    source: &verter_type_expr::facts::SemanticTypeSource,
+) -> Option<TopLevelOwnerId> {
+    use verter_type_expr::facts::{ProjectedTypeFact, ResolvedLocalShape, SemanticTypeSource};
+    use verter_type_expr::locators::AuthoredBodyLocator;
+    let body = match source {
+        SemanticTypeSource::Authored(body) => body,
+        SemanticTypeSource::Synthesized(ResolvedLocalShape::Ref(symbol)) => {
+            return Some(symbol.anchor.owner);
+        }
+        SemanticTypeSource::Projected(
+            ProjectedTypeFact::MemberPath { base, .. }
+            | ProjectedTypeFact::CallableOccurrence { base, .. }
+            | ProjectedTypeFact::IndexPosition { base, .. },
+        ) => base,
+        _ => return None,
+    };
+    Some(match body {
+        AuthoredBodyLocator::DeclBody(slot) => slot.anchor.owner,
+        AuthoredBodyLocator::AugmentationBody(body) => body.anchor.owner,
+        AuthoredBodyLocator::JsdocTypedefBody(body) => body.anchor.owner,
+        AuthoredBodyLocator::MacroPayload(payload) => payload.anchor.owner,
+    })
 }
 
 impl FrameworkMemberLocator {
@@ -157,19 +205,20 @@ impl FrameworkMemberLocator {
             .field_enum_discriminant(5, surface_kind_tag(self.surface))
             .field_enum_discriminant(6, member_role_tag(self.role))
             .field_str(7, &self.member_name)
-            .field_enum_discriminant(8, macro_kind_tag(self.macro_kind))
-            .field_u32(9, self.macro_index)
+            .field_enum_discriminant(8, producer_tag(self.producer))
+            .field_u32(9, producer_ordinal(self.producer))
             .field_bytes(10, &source);
         Some(*encoder.digest().as_bytes())
     }
 }
 
-/// Whether `source` is a replayable locator form: an authored body, or a
-/// projected member path, callable occurrence or index position off one.
-/// Closed and synthesized result shapes and synthetic carriers are not:
-/// they are answers, not addresses.
+/// Whether `source` is a replayable locator form: an authored body, a
+/// projected member path, callable occurrence or index position off one, or
+/// a shallow reference naming a symbol by its anchor. Closed and other
+/// synthesized result shapes and synthetic carriers are not: they are
+/// answers, not addresses.
 pub(crate) fn is_replayable_source(source: &verter_type_expr::facts::SemanticTypeSource) -> bool {
-    use verter_type_expr::facts::{ProjectedTypeFact, SemanticTypeSource};
+    use verter_type_expr::facts::{ProjectedTypeFact, ResolvedLocalShape, SemanticTypeSource};
     match source {
         SemanticTypeSource::Authored(_) => true,
         SemanticTypeSource::Projected(projected) => match projected {
@@ -182,9 +231,14 @@ pub(crate) fn is_replayable_source(source: &verter_type_expr::facts::SemanticTyp
             | ProjectedTypeFact::ConstructSignature(_)
             | ProjectedTypeFact::Surface(_) => false,
         },
-        SemanticTypeSource::Synthesized(_)
-        | SemanticTypeSource::Closed(_)
-        | SemanticTypeSource::SyntheticSlotBinding(_) => false,
+        SemanticTypeSource::Synthesized(shape) => match shape {
+            ResolvedLocalShape::Ref(_) => true,
+            ResolvedLocalShape::Object(_)
+            | ResolvedLocalShape::Tuple(_)
+            | ResolvedLocalShape::IndexedAccess(_)
+            | ResolvedLocalShape::Leaf(_) => false,
+        },
+        SemanticTypeSource::Closed(_) | SemanticTypeSource::SyntheticSlotBinding(_) => false,
     }
 }
 
@@ -202,8 +256,39 @@ const fn surface_kind_tag(kind: verter_protocol::typeinfo::graph::FrameworkSurfa
 
 const fn member_role_tag(role: MemberRole) -> u32 {
     match role {
-        MemberRole::PropValue => 1,
-        MemberRole::ExposeValue => 2,
+        MemberRole::Prop => 1,
+        MemberRole::Exposed => 2,
+        MemberRole::OptionsMember => 3,
+        MemberRole::Slot => 4,
+    }
+}
+
+/// The producer family tag: a Vue macro kind, or a Svelte source family.
+const fn producer_tag(producer: MemberProducer) -> u32 {
+    use crate::typeinfo::framework_surface::plan::SvelteSurfaceSource as Svelte;
+    match producer {
+        MemberProducer::VueMacro { kind, .. } => macro_kind_tag(kind),
+        MemberProducer::Svelte(source) => {
+            100 + match source {
+                Svelte::RunesProps => 1,
+                Svelte::LegacyExportLet => 2,
+                Svelte::Bindable => 3,
+                Svelte::SnippetProps => 4,
+                Svelte::LegacySlotInventory => 5,
+                Svelte::LegacyDispatcher => 6,
+                Svelte::CallbackPropEvents => 7,
+                Svelte::InstanceExports => 8,
+            }
+        }
+    }
+}
+
+/// The producer's ordinal: a Vue macro's inventory index; zero for a Svelte
+/// source family, which has one producer per component.
+const fn producer_ordinal(producer: MemberProducer) -> u32 {
+    match producer {
+        MemberProducer::VueMacro { index, .. } => index,
+        MemberProducer::Svelte(_) => 0,
     }
 }
 
@@ -825,9 +910,39 @@ pub(crate) fn replay_issued_in_view<M: verter_audit::observe::ObserveExec>(
                 )
                 .map(|outcome| outcome.at_optional_boundary());
             let node = (*raised.value()).map(|hot| hot.node());
-            Ok(node)
+            Ok(match locator.role {
+                // A slot is exported as its realized callable root.
+                MemberRole::Slot => node.map(|node| realized_callable_root(dispatch, node)),
+                MemberRole::Prop | MemberRole::Exposed | MemberRole::OptionsMember => node,
+            })
         }
     }
+}
+
+/// The realized callable root of `node`, read as the slots surface reads a
+/// slot member, or `node` itself when it has none.
+pub(crate) fn realized_callable_root<C: verter_type_engine::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    node: SemanticNodeId,
+) -> SemanticNodeId {
+    use verter_type_engine::semantic_query::surface_resolution::SurfaceResolution;
+    let view = verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeView::new(
+        dispatch, node,
+    );
+    let realized = view
+        .owning()
+        .realized_callable_root(
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                ProjectionMode::Navigate,
+            ),
+        )
+        .map(|resolution| match resolution {
+            SurfaceResolution::Resolved(id) | SurfaceResolution::OpenPresence(id) => {
+                Some(id.into_inner())
+            }
+            _ => None,
+        });
+    realized.value().unwrap_or(node)
 }
 
 /// Every key the index holds, oldest record first.

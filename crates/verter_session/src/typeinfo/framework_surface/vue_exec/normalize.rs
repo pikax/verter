@@ -394,6 +394,44 @@ pub(crate) fn object_members_from_typeinfo_surface<
         .collect()
 }
 
+/// Each public named member's value SOURCE POSITION for a
+/// `defineOptions<T>()` / `defineExpose<T>()` object-member surface: the
+/// same graph-native closed / shallow-ref / projected member-path ladder
+/// ([`member_value_source`]) off the macro's stamped type-argument base that
+/// [`exposed_from_typeinfo_surface`] publishes, or the typed required-source
+/// failure for a genuine miss. One row per member
+/// [`object_members_from_typeinfo_surface`] publishes, in the same order.
+#[must_use]
+pub(crate) fn member_value_sources_from_typeinfo_surface<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
+    resolved: &impl ResolvedSurfaceAccess,
+) -> Vec<crate::typeinfo::framework_surface::results::MemberValueSource> {
+    let macro_surface = resolved.macro_surface();
+    let type_arg_base = ctx
+        .ensure_indexed_ready_serve(macro_surface.owner_canonical.as_ref())
+        .map(|serve| serve.indexed)
+        .as_ref()
+        .and_then(|indexed| indexed.snapshot.macros.get(macro_surface.macro_index))
+        .and_then(|mac| mac.parsed_type_argument.clone())
+        .map(verter_type_expr::locators::AuthoredBodyLocator::MacroPayload);
+    macro_surface
+        .surface
+        .members
+        .iter()
+        .filter(|member| member.visibility.is_public())
+        .filter_map(|member| {
+            let name = member.published_name()?.to_string();
+            let source = member_value_source(dispatch, member, type_arg_base.as_ref())
+                .map(verter_type_expr::facts::SourcePosition::Present)
+                .unwrap_or_else(unavailable_required_member_source);
+            Some(crate::typeinfo::framework_surface::results::MemberValueSource { name, source })
+        })
+        .collect()
+}
+
 /// Normalize a `defineExpose<T>()` macro surface into
 /// [`ResolvedExposeField`](crate::typeinfo::framework_surface::results::ResolvedExposeField)
 /// rows: one field per named public member, carrying its JSDoc sliced from

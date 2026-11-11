@@ -111,11 +111,12 @@ mod normalize_slots;
 // `vue_exec::props_from_typeinfo_surface` path.
 pub(crate) use normalize::{
     emits_from_typeinfo_surface, exposed_from_typeinfo_surface, index_signatures_from_surface,
-    object_members_from_typeinfo_surface, props_from_typeinfo_surface,
+    member_value_sources_from_typeinfo_surface, object_members_from_typeinfo_surface,
+    props_from_typeinfo_surface,
 };
 pub(crate) use normalize_slots::{
     slot_member_types_from_typeinfo_surface, slot_return_publications_from_typeinfo_surface,
-    slots_from_typeinfo_surface,
+    slot_value_sources_from_typeinfo_surface, slots_from_typeinfo_surface,
 };
 
 crate::output_sinks::define_output_capability! {
@@ -1034,10 +1035,13 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
                             let slot_member_types = slot_member_types_from_typeinfo_surface(
                                 dispatch, &resolved, &slots,
                             );
+                            let slot_sources =
+                                slot_value_sources_from_typeinfo_surface(ctx, &resolved, &slots);
                             MacroSurfaceDtos {
                                 slots: Some(slots),
                                 slot_return_publications,
                                 slot_member_types,
+                                slot_sources,
                                 ..MacroSurfaceDtos::default()
                             }
                         }
@@ -1054,6 +1058,9 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
                                         dispatch, &resolved,
                                     ),
                                 },
+                            ),
+                            option_sources: member_value_sources_from_typeinfo_surface(
+                                ctx, dispatch, &resolved,
                             ),
                             ..MacroSurfaceDtos::default()
                         },

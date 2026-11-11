@@ -223,6 +223,60 @@ pub(crate) fn slot_member_types_from_typeinfo_surface<
         .collect()
 }
 
+/// Each normalized slot's value SOURCE: the projected member path off the
+/// macro's stamped type argument to the slot member, whose realized callable
+/// root is the value the slots surface exports. A slot with no stamped base
+/// or no surface member gets the typed required-source failure.
+pub(crate) fn slot_value_sources_from_typeinfo_surface<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
+    resolved: &impl ResolvedSurfaceAccess,
+    slots: &[AnalyzedSlotField],
+) -> Vec<crate::typeinfo::framework_surface::results::MemberValueSource> {
+    use verter_type_expr::facts::{
+        ProjectedTypeFact, SemanticSourceFailure, SemanticTypeSource, SourcePosition,
+    };
+    use verter_type_expr::locators::AuthoredBodyLocator;
+    let macro_surface = resolved.macro_surface();
+    let indexed = ctx
+        .ensure_indexed_ready_serve(macro_surface.owner_canonical.as_ref())
+        .map(|serve| serve.indexed);
+    let base = indexed
+        .as_ref()
+        .and_then(|indexed| indexed.snapshot.macros.get(macro_surface.macro_index))
+        .and_then(|mac| mac.parsed_type_argument.as_ref());
+    slots
+        .iter()
+        .map(|slot| {
+            let key = macro_surface
+                .surface
+                .members
+                .iter()
+                .find(|member| {
+                    member.visibility.is_public()
+                        && member.published_name().as_deref() == Some(slot.name.as_str())
+                })
+                .and_then(|member| member.key.cloned_known());
+            let source = base.zip(key).map_or_else(
+                || SourcePosition::Failed(SemanticSourceFailure::UnrepresentableRequiredPayload),
+                |(base, key)| {
+                    SourcePosition::Present(SemanticTypeSource::Projected(
+                        ProjectedTypeFact::MemberPath {
+                            base: AuthoredBodyLocator::MacroPayload(base.clone()),
+                            path: From::from(vec![key].into_boxed_slice()),
+                        },
+                    ))
+                },
+            );
+            crate::typeinfo::framework_surface::results::MemberValueSource {
+                name: slot.name.clone(),
+                source,
+            }
+        })
+        .collect()
+}
+
 /// Build the producer-owned return publication aligned with every normalized
 /// slot row. The replay address is the stamped macro type argument plus the
 /// slot member name; a missing base is a typed required-source failure.

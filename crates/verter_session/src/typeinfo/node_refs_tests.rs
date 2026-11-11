@@ -470,22 +470,33 @@ fn framework_envelope(
     host: &VerterHost,
     kinds: &[verter_protocol::typeinfo::graph::FrameworkSurfaceKind],
 ) -> TypeInfoGraphRequest {
+    framework_envelope_for(host, SFC, "vue", kinds)
+}
+
+/// A framework-surface envelope for `canonical` under the advertised
+/// `family` profile, demanding `kinds`.
+fn framework_envelope_for(
+    host: &VerterHost,
+    canonical: &str,
+    family: &str,
+    kinds: &[verter_protocol::typeinfo::graph::FrameworkSurfaceKind],
+) -> TypeInfoGraphRequest {
     let profile = host
         .typeinfo_capabilities(&wire::TypeInfoCapabilityHandshakeRequest {
             client_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
         })
         .framework_profiles
         .into_iter()
-        .find(|advertised| advertised.family == "vue")
+        .find(|advertised| advertised.family == family)
         .and_then(|advertised| advertised.profile)
-        .expect("the host advertises a vue profile");
+        .unwrap_or_else(|| panic!("the host advertises a {family} profile"));
     TypeInfoGraphRequest {
         schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
         operation: Operation::FrameworkSurfaces as i32,
         payload: Some(type_info_graph_request::Payload::FrameworkSurface(
             wire::FrameworkSurfaceRequest {
                 selector: Some(wire::ComponentSelector {
-                    canonical_id: SFC.to_string(),
+                    canonical_id: canonical.to_string(),
                     export_name: String::new(),
                     has_export_name: false,
                     framework_profile: Some(profile),
@@ -556,7 +567,6 @@ fn framework_props_issue_replayable_member_references() {
     let issued = lookup_issued(&host, &keys[0]).expect("the issued member is found");
     let locator = member_locator(&issued).clone();
     assert_eq!(&*locator.member_name, "item");
-    assert_eq!(locator.macro_kind, AnalyzedMacroKind::DefineProps);
 
     // The row the surface published, read through the macro's own bundle.
     let indexed = host.ensure_indexed_ready(SFC).expect("indexed");
@@ -566,7 +576,17 @@ fn framework_props_issue_replayable_member_references() {
         .iter()
         .position(|mac| mac.kind == AnalyzedMacroKind::DefineProps)
         .expect("a defineProps macro");
-    assert_eq!(locator.macro_index as usize, macro_index);
+    assert_eq!(
+        locator.producer,
+        MemberProducer::VueMacro {
+            kind: AnalyzedMacroKind::DefineProps,
+            index: u32::try_from(macro_index).expect("a small macro index"),
+        }
+    );
+    assert_eq!(
+        locator.scope_owner, indexed.snapshot.macros[macro_index].owner,
+        "the source replays under its producing macro owner"
+    );
     let dtos = host
         .vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
             owner_canonical: Arc::from(SFC),
@@ -643,4 +663,209 @@ fn framework_member_role_is_independent_of_sibling_facets() {
         (keys[1].basis, keys[1].slot, keys[1].role),
         "the same member under the same basis has the same address components"
     );
+}
+
+/// The member names every issued framework-member key addresses.
+fn issued_member_names(host: &VerterHost) -> Vec<String> {
+    issued_keys_for_tests(host)
+        .iter()
+        .filter_map(|key| lookup_issued(host, key))
+        .filter_map(|issued| match issued.locator() {
+            NativeReplayLocator::FrameworkMember(locator) => Some(locator.member_name.to_string()),
+            NativeReplayLocator::Declaration(_) => None,
+        })
+        .collect()
+}
+
+/// The issued reference addressing `name`.
+fn issued_member(host: &VerterHost, name: &str) -> IssuedRef {
+    issued_keys_for_tests(host)
+        .iter()
+        .filter_map(|key| lookup_issued(host, key))
+        .find(|issued| {
+            matches!(issued.locator(), NativeReplayLocator::FrameworkMember(locator)
+                if &*locator.member_name == name)
+        })
+        .unwrap_or_else(|| panic!("`{name}` is addressed: {:?}", issued_member_names(host)))
+}
+
+/// The shallow member type `issued` replays to under a fresh admitted view.
+fn replayed_member_type(
+    host: &VerterHost,
+    issued: &IssuedRef,
+) -> Option<crate::typeinfo::framework_surface::results::NamedTypeMemberOutput> {
+    in_request(host, |view, ctx, dispatch| {
+        assert_eq!(
+            admit_issued_in_view(view.view(), &FactValidationView::new(ctx), issued),
+            Ok(())
+        );
+        let node = replay_issued_in_view(host, ctx, dispatch, issued)
+            .expect("the admitted member replays")
+            .expect("to its value");
+        verter_type_engine::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
+            dispatch, node,
+        )
+        .map(crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::from_raised_shallow)
+    })
+}
+
+/// The DTO bundle `canonical`'s first macro of `kind` resolves to.
+fn macro_dtos(
+    host: &VerterHost,
+    canonical: &str,
+    kind: verter_session_query::analysis::types::AnalyzedMacroKind,
+) -> Arc<crate::typeinfo::framework_surface::results::MacroSurfaceDtos> {
+    let indexed = host.ensure_indexed_ready(canonical).expect("indexed");
+    let macro_index = indexed
+        .snapshot
+        .macros
+        .iter()
+        .position(|mac| mac.kind == kind)
+        .expect("the macro exists");
+    host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+        owner_canonical: Arc::from(canonical),
+        macro_index,
+        macro_kind: kind,
+        root_identity: indexed.whole_hash,
+        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+    })
+    .expect("vue admits the component")
+}
+
+const SLOTS_SFC: &str = "/slots.vue";
+const SLOTS_SFC_SOURCE: &str = r#"<script setup lang="ts">
+interface Row { id: number }
+defineOptions<{ config: { row: Row } }>();
+defineSlots<{ default(props: { row: Row }): unknown }>();
+</script>
+<template><div></div></template>
+"#;
+
+/// Options members and slots are addressed by their own value sources: an
+/// options member replays to the member type the options surface exported,
+/// and a slot replays through its realized callable root to the slot type
+/// the slots surface exported.
+#[test]
+fn framework_options_and_slots_issue_replayable_member_references() {
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_standalone(&host, SLOTS_SFC, SLOTS_SFC_SOURCE);
+    let _ = host.resolve_framework_surface_with_audit(framework_envelope_for(
+        &host,
+        SLOTS_SFC,
+        "vue",
+        &[FrameworkSurfaceKind::Options, FrameworkSurfaceKind::Slots],
+    ));
+
+    let options = macro_dtos(&host, SLOTS_SFC, AnalyzedMacroKind::DefineOptions);
+    let config = options
+        .options
+        .as_ref()
+        .and_then(|surface| surface.members.iter().find(|m| m.name == "config"))
+        .expect("the config option");
+    let issued = issued_member(&host, "config");
+    assert_eq!(member_locator(&issued).role, MemberRole::OptionsMember);
+    assert_eq!(replayed_member_type(&host, &issued), config.value);
+
+    let slots = macro_dtos(&host, SLOTS_SFC, AnalyzedMacroKind::DefineSlots);
+    let slot = slots
+        .slot_member_types
+        .iter()
+        .find(|m| m.name == "default")
+        .expect("the default slot");
+    let issued = issued_member(&host, "default");
+    assert_eq!(member_locator(&issued).role, MemberRole::Slot);
+    assert_eq!(replayed_member_type(&host, &issued), slot.value);
+}
+
+const MODEL_SFC: &str = "/model.vue";
+const MODEL_SFC_SOURCE: &str = r#"<script setup lang="ts">
+interface Item { id: number }
+defineProps<{ modelValue: Item; other: Item }>();
+defineModel<Item>();
+</script>
+<template><div></div></template>
+"#;
+
+/// A member name two producers contribute (a declared `modelValue` prop and
+/// `defineModel`'s synthesized one) is ambiguous: neither is addressed,
+/// while an unambiguous sibling prop is.
+#[test]
+fn ambiguous_member_names_are_not_addressed() {
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_standalone(&host, MODEL_SFC, MODEL_SFC_SOURCE);
+    let _ = host.resolve_framework_surface_with_audit(framework_envelope_for(
+        &host,
+        MODEL_SFC,
+        "vue",
+        &[FrameworkSurfaceKind::Props],
+    ));
+    let names = issued_member_names(&host);
+    assert!(names.iter().any(|name| name == "other"), "{names:?}");
+    assert!(!names.iter().any(|name| name == "modelValue"), "{names:?}");
+}
+
+const SVELTE: &str = "/comp.svelte";
+const SVELTE_SOURCE: &str = r#"<script lang="ts">
+  interface Item { id: number }
+  let { item }: { item: Item } = $props();
+</script>
+"#;
+
+/// A Svelte component's typed `$props()` members are addressed under the
+/// runes-props source family, replay under the owner their authored anchor
+/// is written in, and reach the member type the props surface exported.
+#[test]
+fn svelte_props_issue_replayable_member_references() {
+    use crate::typeinfo::framework_surface::plan::SvelteSurfaceSource;
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_standalone(&host, SVELTE, SVELTE_SOURCE);
+    let _ = host.resolve_framework_surface_with_audit(framework_envelope_for(
+        &host,
+        SVELTE,
+        "svelte",
+        &[FrameworkSurfaceKind::Props],
+    ));
+    let issued = issued_member(&host, "item");
+    let locator = member_locator(&issued).clone();
+    assert_eq!(
+        locator.producer,
+        MemberProducer::Svelte(SvelteSurfaceSource::RunesProps)
+    );
+    // The named member type publishes as a shallow reference to `Item`,
+    // replayed in the declaring owner's scope.
+    assert!(
+        matches!(
+            &locator.source,
+            verter_type_expr::facts::SemanticTypeSource::Synthesized(
+                verter_type_expr::facts::ResolvedLocalShape::Ref(symbol)
+            ) if symbol.anchor.symbol.as_ref() == "Item"
+        ),
+        "{:?}",
+        locator.source
+    );
+    assert_eq!(
+        Some(locator.scope_owner),
+        source_scope_owner(&locator.source)
+    );
+    let exported = in_request(&host, |_, ctx, dispatch| {
+        match crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
+            ctx,
+            dispatch,
+            SVELTE,
+            SvelteSurfaceSource::RunesProps,
+        ) {
+            crate::typeinfo::framework_surface::results::ResolvedOutcome::Resolved(dtos) => dtos
+                .prop_fields()
+                .iter()
+                .find(|row| row.analysis.name == "item")
+                .and_then(|row| row.member_type.clone()),
+            other => panic!("the runes props resolve: {other:?}"),
+        }
+    });
+    assert!(exported.is_some(), "the item prop exports a member type");
+    assert_eq!(replayed_member_type(&host, &issued), exported);
 }
