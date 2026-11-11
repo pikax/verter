@@ -200,7 +200,7 @@ enum ClassAwait<'e> {
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
         again: bool,
         value: MemberAwait<'e>,
-        observations: Option<super::super::flow_return_fact::ReadObservationScope<'e>>,
+        observations: Option<super::super::flow_return_fact::HeldReadObservation>,
     },
 }
 
@@ -365,11 +365,11 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 self.st.canonical,
                 self.st.owner,
                 &class.type_parameters,
-                Some(self.st.binder_env),
+                Some(&**self.st.binder_env),
                 Some(class.offset),
             ))
         });
-        let env = class_env.as_deref().unwrap_or(self.st.binder_env);
+        let env = class_env.as_deref().unwrap_or(&**self.st.binder_env);
         let source_plan = class.type_parameters.iter().all(|parameter| env.exact_binders.contains(parameter.name.as_ref()))
             && class.members.iter().all(|member| matches!(member.key, SliceObjectKey::Static(_)) && match &member.value {
                 SliceClassMemberValue::Initializer { value, .. } => super::independent_member_expression(value)
@@ -409,10 +409,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         &mut self,
         frame: &mut ClassEvalFrame<'e>,
         delivered: Option<Positional<SemanticNodeId>>,
-    ) -> ClassStep<'e>
-    where
-        'd: 'e,
-    {
+    ) -> ClassStep<'e> {
         let class = frame.class;
         match std::mem::replace(&mut frame.awaiting, ClassAwait::Nothing) {
             ClassAwait::Start => match &class.heritage {
@@ -432,7 +429,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 let Some(Positional::Value(constructor)) = delivered else {
                     return ClassStep::Done(Positional::Unmodeled);
                 };
-                let frame_env = self.st.binder_env;
+                let frame_env: &FlowBinderEnv = self.st.binder_env;
                 let env: &FlowBinderEnv = frame.class_env.as_deref().unwrap_or(frame_env);
                 let mut type_arguments = Vec::with_capacity(heritage.type_arguments.len());
                 for argument in heritage.type_arguments.iter() {
@@ -543,30 +540,32 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
         again: bool,
         value: SemanticNodeId,
-        observations: Option<super::super::flow_return_fact::ReadObservationScope<'_>>,
+        observations: Option<super::super::flow_return_fact::HeldReadObservation>,
     ) {
         let member = &frame.class.members[index];
         let receiver = frame.receiver.clone().expect("the class's receiver");
         if !again && receiver.forward_read.get() && is_class_function(&member.value) {
             if let Some(observations) = observations {
-                let _ = observations.finish(()).discard();
+                let _ = self
+                    .dispatch
+                    .finish_held_read_observation(observations)
+                    .discard();
             }
             self.st.degradation = degradation;
             frame.again.push(index);
             return;
         }
         if let Some(observations) = observations {
-            let _ = self.dispatch.adopt_read(observations.finish(()));
+            let _ = self
+                .dispatch
+                .adopt_read(self.dispatch.finish_held_read_observation(observations));
         }
         self.record_receiver_member(&receiver, member, value);
         frame.values[index] = Some(value);
     }
 
     /// Evaluate the class's next member, or finish the class.
-    fn class_next_member<'e>(&mut self, frame: &mut ClassEvalFrame<'e>) -> ClassStep<'e>
-    where
-        'd: 'e,
-    {
+    fn class_next_member<'e>(&mut self, frame: &mut ClassEvalFrame<'e>) -> ClassStep<'e> {
         let class = frame.class;
         loop {
             let (index, again) = if let Some(&index) = frame.order.get(frame.next) {
@@ -586,7 +585,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 return ClassStep::Done(self.finish_class_value(frame));
             };
             let degradation = self.st.degradation;
-            let frame_env = self.st.binder_env;
+            let frame_env: &FlowBinderEnv = self.st.binder_env;
             let value = match &class.members[index].value {
                 SliceClassMemberValue::Declared(ty) => {
                     let env: &FlowBinderEnv = frame.class_env.as_deref().unwrap_or(frame_env);
@@ -625,7 +624,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                 index,
                                 degradation,
                                 again,
-                                observations: Some(self.dispatch.begin_read_observation()),
+                                observations: Some(self.dispatch.hold_read_observation()),
                                 value: if getter {
                                     MemberAwait::Getter
                                 } else {
@@ -654,7 +653,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             .map(|value| value.expect("every member evaluated"))
             .collect();
         let graph = self.dispatch.graph();
-        let frame_env = self.st.binder_env;
+        let frame_env: &FlowBinderEnv = self.st.binder_env;
         let env: &FlowBinderEnv = class_env.as_deref().unwrap_or(frame_env);
         let methods_complete = class.members.iter().zip(&values).all(|(member, value)| {
             let SliceClassMemberValue::Method(expr) = &member.value else {

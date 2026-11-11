@@ -909,19 +909,18 @@ Recorded plainly so no reader mistakes absence for a pass:
   region run, and when that completes the evaluator is popped, the
   signature composed on its parent and the parent's region resumed with
   it. What a nested evaluator borrows (its parameters, binder
-  environment and slice content) is kept by the drive's store until the
-  drive returns or unwinds (a safe
-  append-only chain: every reference into it is checked by the borrow
-  checker, with no release protocol), and the frames around it are a
-  shared chain, so no evaluator borrows a native frame of the one around
-  it and the native stack a nest takes no longer depends on its depth.
+  environment and slice content) is owned by its own activation cell
+  (`NestedActivationCell`, a `self_cell` whose evaluator state and region
+  run borrow only the inputs it owns), and the frames around it are a
+  shared chain of owned snapshots, so no evaluator borrows a native frame,
+  or another activation, of the one around it and the native stack a nest
+  takes no longer depends on its depth.
   `deep_input_tests.rs` → `arrows_nested_10000_deep_answer_on_production_stacks`
   answers TypeScript 7.1.0-beta's `1` for `ReturnType<typeof pf> extends
   Function ? 1 : 2` over 10,000 nested arrows on a 1 MiB caller;
   evaluating the return's nested function in place overflows it.
-  `flow_return_nested.rs` → `nested_store_tests` hold the store's
-  release: every item once, when the store drops or a panic unwinds
-  through it, and a million items on a 64 KiB thread.
+  `flow_return_nested.rs` → `activation_cell_contracts` holds that an
+  activation cell borrows nothing outside itself (`'static`).
 
 * **Every position suspends at a nested function value.** A statement
   or a call reaching a nested function value suspends the same way a
