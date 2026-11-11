@@ -3159,20 +3159,39 @@ fn assert_stress_size_spread_infers_every_constituent_and_the_later_write(widths
     );
 }
 
+/// A two-way and a three-way spread read through an inference: the gate
+/// versions of the stress-size spreads in the nightly scale tier
+/// ([`nightly_scale::a_369_by_271_spread_infers_every_constituent_and_the_later_write`],
+/// [`nightly_scale::a_50_by_50_by_39_spread_infers_every_constituent_and_the_later_write`]),
+/// just under the checker's 100,000-constituent cross-product limit. Here
+/// the products are 999 and 100: every constituent and the later write are
+/// checked exactly as there.
 #[test]
-fn a_369_by_271_spread_infers_every_constituent_and_the_later_write() {
-    assert_stress_size_spread_infers_every_constituent_and_the_later_write(&[369, 271]);
+fn a_37_by_27_spread_infers_every_constituent_and_the_later_write() {
+    assert_stress_size_spread_infers_every_constituent_and_the_later_write(&[37, 27]);
 }
 
 #[test]
-fn a_50_by_50_by_39_spread_infers_every_constituent_and_the_later_write() {
-    assert_stress_size_spread_infers_every_constituent_and_the_later_write(&[50, 50, 39]);
+fn a_5_by_5_by_4_spread_infers_every_constituent_and_the_later_write() {
+    assert_stress_size_spread_infers_every_constituent_and_the_later_write(&[5, 5, 4]);
 }
 
 /// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
 /// Each has a gate version outside this module.
 mod nightly_scale {
     use super::*;
+
+    /// Gate version: [`super::a_37_by_27_spread_infers_every_constituent_and_the_later_write`].
+    #[test]
+    fn a_369_by_271_spread_infers_every_constituent_and_the_later_write() {
+        assert_stress_size_spread_infers_every_constituent_and_the_later_write(&[369, 271]);
+    }
+
+    /// Gate version: [`super::a_5_by_5_by_4_spread_infers_every_constituent_and_the_later_write`].
+    #[test]
+    fn a_50_by_50_by_39_spread_infers_every_constituent_and_the_later_write() {
+        assert_stress_size_spread_infers_every_constituent_and_the_later_write(&[50, 50, 39]);
+    }
 
     #[test]
     fn cold_query_entries_fit_within_the_checker_relation_envelope() {

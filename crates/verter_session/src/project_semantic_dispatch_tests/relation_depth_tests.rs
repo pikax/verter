@@ -659,17 +659,10 @@ fn alias_union_chain(depth: usize) -> String {
     source
 }
 
-/// A union written over an alias of a union is the one union the checker's
-/// `getUnionType` flattens it to: related one level deep, whatever the
-/// aliases' nesting, and read from an explicit stack.
-///
-/// Measured over [`alias_union_chain`] at 200, 2,000 and 10,000 aliases
-/// (all four settings agree): `[An] extends [{ v: 1 } | { w: 1 }] ? 1 : 2`
-/// and `[An] extends [{ v?: 1; w?: 1 }] ? 1 : 2` are `1`, `[An] extends [{
-/// v: 1 }] ? 1 : 2` is `2`.
-#[test]
-fn a_union_over_aliases_of_unions_relates_as_one_union() {
-    let depth = 1000;
+/// The checker's answers over [`alias_union_chain`] at `depth` aliases, as
+/// failures: every probe of
+/// [`nightly_scale::a_union_over_aliases_of_unions_relates_as_one_union`].
+fn union_over_aliases_failures(depth: usize) -> Vec<String> {
     let rows = [
         (
             format!("[A{depth}] extends [{{ v: 1 }} | {{ w: 1 }}] ? 1 : 2"),
@@ -685,13 +678,52 @@ fn a_union_over_aliases_of_unions_relates_as_one_union() {
         .iter()
         .map(|(probe, answer)| (probe.as_str(), *answer))
         .collect();
-    let failures =
-        super::checker_probe_lane_tests::mismatches_in_one_host(&alias_union_chain(depth), &rows);
+    super::checker_probe_lane_tests::mismatches_in_one_host(&alias_union_chain(depth), &rows)
+}
+
+/// A union written over an alias of a union is the one union the checker's
+/// `getUnionType` flattens it to: related one level deep, whatever the
+/// aliases' nesting, and read from an explicit stack.
+///
+/// The gate version of [`nightly_scale::a_union_over_aliases_of_unions_relates_as_one_union`]:
+/// 250 aliases on a 512 KiB thread, against 1,000 on the test thread's
+/// 2 MiB, leave each alias the same native stack or less, so a read that
+/// recursed per alias would overflow here first.
+#[test]
+fn a_union_over_250_aliases_of_unions_relates_as_one_union_on_a_small_stack() {
+    let failures = std::thread::Builder::new()
+        .stack_size(512 << 10)
+        .spawn(|| union_over_aliases_failures(250))
+        .expect("spawn the probing thread")
+        .join()
+        .expect("the probe answers");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Full-size workloads, run by the nightly scale tier (`.config/nextest.toml`).
+/// Each has a gate version outside this module.
+mod nightly_scale {
+    use super::*;
+
+    /// A union written over an alias of a union is the one union the checker's
+    /// `getUnionType` flattens it to: related one level deep, whatever the
+    /// aliases' nesting, and read from an explicit stack.
+    ///
+    /// Measured over [`alias_union_chain`] at 200, 2,000 and 10,000 aliases
+    /// (all four settings agree): `[An] extends [{ v: 1 } | { w: 1 }] ? 1 : 2`
+    /// and `[An] extends [{ v?: 1; w?: 1 }] ? 1 : 2` are `1`, `[An] extends [{
+    /// v: 1 }] ? 1 : 2` is `2`.
+    ///
+    /// Gate version: [`a_union_over_250_aliases_of_unions_relates_as_one_union_on_a_small_stack`].
+    #[test]
+    fn a_union_over_aliases_of_unions_relates_as_one_union() {
+        let failures = union_over_aliases_failures(1000);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}
+
 /// The same union over 2,000 aliases: the checker answers `1` (see
-/// [`a_union_over_aliases_of_unions_relates_as_one_union`]). The lane
+/// [`nightly_scale::a_union_over_aliases_of_unions_relates_as_one_union`]). The lane
 /// reads each alias of the chain with one `Instantiate` query, and the
 /// request's projection-operation fuse (`HostConfig::projection_op_budget`,
 /// 2,000 by default, `verter_type_engine::request_budget::RequestBudget`) counts every
