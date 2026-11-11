@@ -2378,6 +2378,73 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
 mod corpus_suite {
     use super::*;
 
+    /// The tests each corpus lane runs as: every lane drives a fresh host
+    /// per row, so one test over the whole corpus grows with every row added
+    /// and passes the speed gate's deadline on a loaded machine. Each lane is
+    /// [`SHARDS`] tests instead, `<lane>::shard_NN`, one per consecutive
+    /// slice of the corpus ([`shard`]); together they check every row exactly
+    /// as the lane did.
+    const SHARDS: usize = 16;
+
+    /// The `index`th of [`SHARDS`] consecutive slices of the corpus; the
+    /// slices cover it, each row in exactly one.
+    fn shard(index: usize) -> &'static [Row] {
+        let size = CORPUS.len().div_ceil(SHARDS);
+        let start = (index * size).min(CORPUS.len());
+        &CORPUS[start..(start + size).min(CORPUS.len())]
+    }
+
+    macro_rules! sharded_lane {
+        ($lane:ident: $($shard:ident = $index:literal),+ $(,)?) => {
+            mod $lane {
+                $(
+                    #[test]
+                    fn $shard() {
+                        super::$lane(super::shard($index));
+                    }
+                )+
+
+                // One test per shard: a shard without its test is a slice
+                // of the corpus no lane checks.
+                const _: () = assert!([$($index),+].len() == super::SHARDS);
+            }
+        };
+    }
+
+    macro_rules! sharded_lanes {
+        ($($lane:ident),+ $(,)?) => {
+            $(
+                sharded_lane!($lane:
+                    shard_00 = 0, shard_01 = 1, shard_02 = 2, shard_03 = 3,
+                    shard_04 = 4, shard_05 = 5, shard_06 = 6, shard_07 = 7,
+                    shard_08 = 8, shard_09 = 9, shard_10 = 10, shard_11 = 11,
+                    shard_12 = 12, shard_13 = 13, shard_14 = 14, shard_15 = 15,
+                );
+            )+
+        };
+    }
+
+    sharded_lanes!(
+        corpus_runtime_lane,
+        corpus_tsx_lane,
+        corpus_flow_lane,
+        corpus_svelte_twins,
+    );
+
+    // This lane measures through optional audit capture, so it exists only
+    // with the instrumentation feature.
+    #[cfg(feature = "semantic-observe")]
+    sharded_lanes!(corpus_expect_and_boundary_lane);
+
+    #[test]
+    fn the_shards_cover_the_corpus_once() {
+        let rows: Vec<&str> = (0..SHARDS)
+            .flat_map(|index| shard(index).iter().map(|row| row.id))
+            .collect();
+        let corpus: Vec<&str> = CORPUS.iter().map(|row| row.id).collect();
+        assert_eq!(rows, corpus);
+    }
+
     /// Set `U6_CORPUS_DUMP=1` to print every row's MEASURED lane values
     /// instead of asserting them. This is how a NEW row's expectations are
     /// first obtained; it is never how a row is verified.
@@ -2766,11 +2833,10 @@ mod corpus_suite {
         }
     }
 
-    #[test]
-    fn corpus_runtime_lane() {
+    fn corpus_runtime_lane(rows: &[Row]) {
         let dump = dump_mode();
         let mut failures = Vec::new();
-        for row in CORPUS {
+        for row in rows {
             if matches!(row.runtime, Runtime::Skip) && !dump {
                 continue;
             }
@@ -2909,11 +2975,10 @@ mod corpus_suite {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
-    #[test]
-    fn corpus_tsx_lane() {
+    fn corpus_tsx_lane(rows: &[Row]) {
         let dump = dump_mode();
         let mut failures = Vec::new();
-        for row in CORPUS {
+        for row in rows {
             if matches!(row.tsx, Tsx::Skip) && !dump {
                 continue;
             }
@@ -3002,11 +3067,10 @@ mod corpus_suite {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
-    #[test]
-    fn corpus_flow_lane() {
+    fn corpus_flow_lane(rows: &[Row]) {
         let dump = dump_mode();
         let mut failures = Vec::new();
-        for row in CORPUS {
+        for row in rows {
             let function = match row.flow {
                 Flow::Skip if !dump => continue,
                 Flow::Result { function, .. } | Flow::Declared { function, .. } => function,
@@ -3168,14 +3232,13 @@ mod corpus_suite {
     /// refusal row ([`Flow::NoValue`] + [`Boundary::AuditRefusal`])
     /// asserts the typed non-admission contract: both calls refuse,
     /// cold, never warm-served.
-    #[test]
-    fn corpus_expect_and_boundary_lane() {
+    fn corpus_expect_and_boundary_lane(rows: &[Row]) {
         use super::u6_flow_expect_tests::{
             check_boundary, check_boundary_refusal, drive_expect_boundary_with_lib,
         };
         let dump = dump_mode();
         let mut failures = Vec::new();
-        for row in CORPUS {
+        for row in rows {
             let wants =
                 !matches!(row.expect, Expect::Skip) || !matches!(row.boundary, Boundary::Skip);
             if !wants && !dump {
@@ -4486,11 +4549,10 @@ mod corpus_suite {
         );
     }
 
-    #[test]
-    fn corpus_svelte_twins() {
+    fn corpus_svelte_twins(rows: &[Row]) {
         let dump = dump_mode();
         let mut failures = Vec::new();
-        for row in CORPUS {
+        for row in rows {
             if matches!(row.svelte, Svelte::Skip) && !dump {
                 continue;
             }
