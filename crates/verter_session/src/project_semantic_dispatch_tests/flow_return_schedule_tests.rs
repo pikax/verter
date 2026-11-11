@@ -294,9 +294,10 @@ fn a_deep_chain_over_a_reduced_budget_ends_on_the_work_rail() {
 /// chain, and `{ v: string | number; tag: "c"; }` for the chain of generic
 /// `const` arrow functions and for the chain through local arrow
 /// functions.
-/// The other call shapes at 101 levels: the gate version of the 128-level
-/// test in the nightly scale tier. Each answers like its three-level chain
-/// under that chain's depth cap, and runs on 768 KiB. The forms need 256 to
+/// The other call shapes: the gate version of the 128-level test in the
+/// nightly scale tier. Each 32-level chain, longer than the cap, answers like
+/// its three-level chain under that chain's depth cap, and each 101-level
+/// chain runs on 768 KiB. The forms need 256 to
 /// 512 KiB of fixed stack, so 768 KiB leaves at most 5.1 KiB a level over 101
 /// levels, against at least the 4.0 to 6.0 KiB that 1 MiB leaves over 128
 /// levels for the same fixed need. The chains are past the checker's
@@ -313,15 +314,21 @@ fn chains_through_other_call_shapes_consume_no_depth_per_level_to_101_levels() {
             let short_source = chain(3);
             let depth = depth_needed(&short_source);
             (
-                witness_under_caps(&chain(101), MAX_CONNECTED_PROJECTION_WORK, depth).0,
+                witness_under_caps(&chain(32), MAX_CONNECTED_PROJECTION_WORK, depth).0,
                 witness_outcome(&short_source),
                 depth,
             )
         });
         assert_tagged_value(&short, &arms);
+        // A chain longer than the cap that consumed depth per level would be
+        // refused under it.
+        assert!(
+            depth < 32,
+            "the short {shape} chain needs a query depth of {depth}"
+        );
         assert_eq!(
             long, short,
-            "the 101-level {shape} chain answers like the short one under its depth cap \
+            "the 32-level {shape} chain answers like the short one under its depth cap \
              ({depth})"
         );
         let on_small_stack = on_stack(768 << 10, move || witness_outcome(&chain(101)));
@@ -1252,13 +1259,14 @@ fn a_new_instantiation_of_a_warm_101_level_local_arrow_chain_answers_on_a_one_me
     );
 }
 
-/// A new instantiation of a warm local-arrow chain at 16, 50 and 101 levels:
+/// A new instantiation of a warm local-arrow chain at 8, 16 and 32 levels:
 /// the gate version of the 16-, 64- and 200-level test in the nightly scale
-/// tier. One more level costs the same at every length, and the 101-level
-/// chain is past the checker's instantiation depth of 100.
+/// tier. One more level costs the same at every length; the chain past the
+/// checker's instantiation depth of 100 answers in
+/// [`a_new_instantiation_of_a_warm_101_level_local_arrow_chain_answers_on_a_one_mebibyte_stack`].
 #[test]
-fn a_new_instantiation_of_a_warm_local_arrow_chain_costs_the_same_work_per_level_to_101_levels() {
-    assert_warm_local_arrow_work_per_level([16, 50, 101]);
+fn a_new_instantiation_of_a_warm_local_arrow_chain_costs_the_same_work_per_level_to_32_levels() {
+    assert_warm_local_arrow_work_per_level([8, 16, 32]);
 }
 
 /// One more level of a warm local-arrow chain's new instantiation costs the
@@ -1474,11 +1482,11 @@ fn warm_second_work(chain: ChainSource, levels: usize, second: &str) -> usize {
 #[track_caller]
 fn assert_warm_argument_form(chain: ChainSource, witness: &str, second: &str) {
     assert_warm_second_answers(&chain(200), witness, second);
-    assert_warm_argument_work_per_level(chain, second);
+    assert_warm_argument_work_per_level(chain, second, [16, 32, 64]);
 }
 
 /// A new instantiation of a warm 101-level `chain` answers on a 1 MiB stack,
-/// and one more level costs the same work at 16, 32 and 64 levels: the gate
+/// and one more level costs the same work at 8, 16 and 32 levels: the gate
 /// version of [`assert_warm_argument_form`]'s 200 levels on the 2 MiB default
 /// test stack.
 /// The forms need 384 to 512 KiB of fixed stack, measured at ten levels, so
@@ -1492,14 +1500,14 @@ fn assert_warm_argument_form_to_101_levels(chain: ChainSource, witness: &str, se
     on_stack(1 << 20, move || {
         assert_warm_second_answers(&chain(101), &witness_print, &second_print)
     });
-    assert_warm_argument_work_per_level(chain, second);
+    assert_warm_argument_work_per_level(chain, second, [8, 16, 32]);
 }
 
 /// One more level of a warm `chain`'s new instantiation costs the same work
-/// at 16, 32 and 64 levels.
+/// at each of `lengths`.
 #[track_caller]
-fn assert_warm_argument_work_per_level(chain: ChainSource, second: &str) {
-    let per_level: Vec<usize> = [16, 32, 64]
+fn assert_warm_argument_work_per_level(chain: ChainSource, second: &str, lengths: [usize; 3]) {
+    let per_level: Vec<usize> = lengths
         .into_iter()
         .map(|levels| {
             warm_second_work(chain, levels + 1, second) - warm_second_work(chain, levels, second)
@@ -1774,18 +1782,29 @@ fn an_object_literal_argument_chain_costs_the_same_work_per_level_to_101_levels(
     );
 }
 
-/// A new instantiation of a warm chain through local arrow functions is
-/// read off the chain's uninstantiated return: no level is evaluated again
-/// under the new instantiation, so the 256-level chain answers, clean and
+/// A new instantiation of a warm 101-level chain through local arrow
+/// functions answers, clean and admitted, on a 512 KiB stack: the gate
+/// version of the 256-level test in the nightly scale tier. The chain is
+/// past the checker's instantiation depth of 100.
+#[test]
+fn a_new_instantiation_of_a_101_level_chain_is_read_off_its_uninstantiated_return() {
+    assert_new_instantiation_is_read_off_the_uninstantiated_return(101);
+}
+
+/// A new instantiation of a warm `levels`-level chain through local arrow
+/// functions is read off the chain's uninstantiated return: no level is
+/// evaluated again under the new instantiation, so it answers, clean and
 /// admitted, on a 512 KiB stack.
 ///
 /// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
 /// `noImplicitAny` settings alike, measured at 256 levels):
 /// `second(v: boolean)` is `{ v: boolean; tag: "c"; }`.
-#[test]
-fn a_new_instantiation_of_a_warm_local_arrow_chain_is_read_off_its_uninstantiated_return() {
-    let mut source = local_arrow_chain(256);
-    source.push_str("export function second(v: boolean) { return l255(v); }\n");
+fn assert_new_instantiation_is_read_off_the_uninstantiated_return(levels: usize) {
+    let mut source = local_arrow_chain(levels);
+    source.push_str(&format!(
+        "export function second(v: boolean) {{ return l{}(v); }}\n",
+        levels - 1
+    ));
     let host = host_with(&[(PATH, source.as_str())]);
     let warm = {
         let host = Arc::clone(&host);
@@ -1810,7 +1829,17 @@ fn a_new_instantiation_of_a_warm_local_arrow_chain_is_read_off_its_uninstantiate
 /// (`K: class<T> { own!: T; }`): the nested clause is its own declaration,
 /// with binders distinct from every level's `T`, so each level's
 /// instantiation is read off its uninstantiated return without touching
-/// the nested parameter. Each 256-level chain answers, and a new
+/// the nested parameter. Each 101-level chain answers, and a new
+/// instantiation of the warm chain answers on a 512 KiB stack: the gate
+/// version of the 256-level test in the nightly scale tier. The chains are
+/// past the checker's instantiation depth of 100.
+#[test]
+fn a_101_level_chain_returning_a_same_name_generic_answers() {
+    assert_same_name_generic_heads_answer(101);
+}
+
+/// Each `levels`-level chain whose head returns a nested generic
+/// declaration re-declaring the chain's binder name answers, and a new
 /// instantiation of the warm chain answers on a 512 KiB stack.
 ///
 /// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
@@ -1819,8 +1848,7 @@ fn a_new_instantiation_of_a_warm_local_arrow_chain_is_read_off_its_uninstantiate
 /// `second(v: boolean)` is `{ v: boolean; tag: "c"; id: <T>(z: T) => T; }`
 /// over the function head; over the class head the `id` member is
 /// `K: { new <T>(): { own: T; }; }`.
-#[test]
-fn a_256_level_chain_returning_a_same_name_generic_answers() {
+fn assert_same_name_generic_heads_answer(levels: usize) {
     for (head, member, keeps_its_clause) in [
         (
             "id: <T,>(z: T) => z",
@@ -1829,12 +1857,12 @@ fn a_256_level_chain_returning_a_same_name_generic_answers() {
         ),
         ("K: class<T> { own!: T; }", "K", constructor_of_its_own_t),
     ] {
-        let source = local_arrow_chain(256).replacen(
+        let source = local_arrow_chain(levels).replacen(
             "{ v: x, tag: \"c\" as const }",
             &format!("{{ v: x, tag: \"c\" as const, {head} }}"),
             1,
         );
-        assert_same_name_generic_chain_answers(source, 256, member, keeps_its_clause, 512 << 10);
+        assert_same_name_generic_chain_answers(source, levels, member, keeps_its_clause, 512 << 10);
     }
 }
 
@@ -2995,6 +3023,21 @@ mod nightly_scale {
     #[test]
     fn a_128_level_chain_returning_a_same_name_function_type_answers() {
         assert_same_name_function_type_chain_answers(128);
+    }
+
+    /// A new instantiation of a warm 256-level local-arrow chain answers on
+    /// a 512 KiB stack; see
+    /// [`assert_new_instantiation_is_read_off_the_uninstantiated_return`].
+    #[test]
+    fn a_new_instantiation_of_a_warm_local_arrow_chain_is_read_off_its_uninstantiated_return() {
+        assert_new_instantiation_is_read_off_the_uninstantiated_return(256);
+    }
+
+    /// 256-level chains returning a same-name generic answer; see
+    /// [`assert_same_name_generic_heads_answer`].
+    #[test]
+    fn a_256_level_chain_returning_a_same_name_generic_answers() {
+        assert_same_name_generic_heads_answer(256);
     }
 
     /// An edit to a module in the middle of a warm generic chain reaches the
