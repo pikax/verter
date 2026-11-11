@@ -2249,6 +2249,7 @@ fn assert_a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answer
     }
 
     // Cancelled at the Nth poll, spread over a cold request's polls.
+    let mut cancelled_at_a_poll = 0;
     for percent in [0, 5, 10, 25, 50, 75, 90, 110] {
         let host = host_with(&[(PATH, source.as_str())]);
         let token = CancellationToken::new();
@@ -2257,13 +2258,14 @@ fn assert_a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answer
             let _cancel = verter_type_engine::cancel_trace::cancel_at_poll(token.clone(), nth);
             answer(&host, token)
         };
-        cancelled += usize::from(check(
+        cancelled_at_a_poll += usize::from(check(
             &host,
             got,
             &format!("poll {nth} of {polls} ({percent}% of a cold request)"),
         ));
     }
-    assert!(cancelled > 0, "some cancellation landed inside a request");
+    assert!(cancelled > 0, "some family-entry cancellation landed inside a request");
+    assert!(cancelled_at_a_poll > 0, "some poll cancellation landed inside a request");
 }
 
 /// A retry after a cancellation anywhere in a request over two sibling

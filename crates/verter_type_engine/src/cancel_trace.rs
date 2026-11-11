@@ -108,8 +108,9 @@ thread_local! {
     static POLL_HOOK: RefCell<Option<PollHook>> = const { RefCell::new(None) };
 }
 
-/// Disarms the poll hook it was returned with.
-pub struct PollHookGuard(());
+/// Disarms the poll hook it was returned with, on the thread that
+/// installed it (it is not `Send`).
+pub struct PollHookGuard(std::marker::PhantomData<*const ()>);
 
 impl Drop for PollHookGuard {
     fn drop(&mut self) {
@@ -121,12 +122,14 @@ fn install_poll_hook(
     cancel_at: Option<(verter_execution::cancellation::CancellationToken, usize)>,
 ) -> PollHookGuard {
     POLL_HOOK.with(|cell| {
-        *cell.borrow_mut() = Some(PollHook {
+        let mut slot = cell.borrow_mut();
+        assert!(slot.is_none(), "one poll hook at a time on a thread");
+        *slot = Some(PollHook {
             polls: 0,
             cancel_at,
-        })
+        });
     });
-    PollHookGuard(())
+    PollHookGuard(std::marker::PhantomData)
 }
 
 /// Cancel `token` as the `nth` (1-based) cancellation poll on this thread
