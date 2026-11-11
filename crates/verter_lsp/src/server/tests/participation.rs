@@ -277,6 +277,151 @@ async fn disabled_open_schedules_no_eager_work() {
         .contains(&uri_to_canonical_id(&uri)));
 }
 
+/// A document opened while its scope owed no eager work is owed that work
+/// once its scope is re-admitted: the provider-sync work bits are re-armed,
+/// not only the coordinator woken, so the provider is synced.
+#[tokio::test]
+async fn readmitted_document_rearms_provider_sync() {
+    let service = service();
+    let server = service.inner();
+    server
+        .update_participation(everywhere("disabled"))
+        .await
+        .expect("valid input");
+    let uri: Uri = "file:///cox0/Later.vue".parse().expect("uri");
+    server
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "vue".to_owned(),
+                version: 1,
+                text: APP.to_owned(),
+            },
+        })
+        .await;
+    let canonical = uri_to_canonical_id(&uri);
+    assert!(!server.needs_deferred_sync.contains(&canonical));
+
+    server
+        .update_participation(everywhere("full"))
+        .await
+        .expect("valid input");
+    assert!(server.needs_ide_sync.contains(&canonical));
+    assert!(server.needs_deferred_sync.contains(&canonical));
+}
+
+/// Withdrawing only the TypeScript diagnostic facet leaves every Verter
+/// producer admitted, so the Verter half keeps its version cache.
+#[tokio::test]
+async fn typescript_only_withdrawal_keeps_the_verter_cache() {
+    let service = service();
+    let server = service.inner();
+    let uri = open_test_vue(server, "/cox0/App.vue", APP);
+    server
+        .update_participation(input(serde_json::json!({ "version": 1, "presets": [
+            { "target": { "kind": "operation", "operation": "diagnostics.typescript" },
+              "selector": { "kind": "all" }, "preset": "disabled" }
+        ]})))
+        .await
+        .expect("valid input");
+    let cache = DashMap::new();
+    crate::server::verter_owned_diagnostics(
+        &server.documents,
+        &uri,
+        &uri_to_canonical_id(&uri),
+        &cache,
+        None,
+        None,
+    );
+    assert!(
+        cache.contains_key(uri.as_str()),
+        "the Verter set is complete"
+    );
+}
+
+/// Provider unavailable is its own state, reported by the provider's owner:
+/// a provider whose lifecycle gives up withdraws only the TypeScript
+/// diagnostic facet, as `providerUnavailable`, and the Verter facets keep
+/// publishing.
+#[tokio::test]
+async fn provider_exhaustion_withdraws_only_the_typescript_facet() {
+    use crate::participation::DiagnosticFacets;
+    use verter_language::participation::ProviderAvailability;
+    let provider = Arc::new(MockTypeProvider::new());
+    let service = make_hover_test_service(provider.clone());
+    let server = service.inner();
+    let uri = open_test_vue(server, "/cox0/App.vue", APP);
+    let canonical = uri_to_canonical_id(&uri);
+    assert_eq!(
+        DiagnosticFacets::admitted(&server.documents, &canonical),
+        DiagnosticFacets::ALL
+    );
+
+    let before = server.documents.participation().fence();
+    provider.exhaust();
+    // The owner's report is delivered by the observer task; yield until it
+    // published, bounded so a lost report fails instead of hanging.
+    for _ in 0..1_000 {
+        if server.documents.participation().fence() != before {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        server
+            .documents
+            .participation()
+            .state()
+            .mask()
+            .typescript_provider(),
+        ProviderAvailability::Unavailable
+    );
+    assert_eq!(
+        DiagnosticFacets::admitted(&server.documents, &canonical),
+        DiagnosticFacets {
+            typescript: false,
+            ..DiagnosticFacets::ALL
+        }
+    );
+    assert!(server.folding_range(folding(&uri)).await.is_ok());
+}
+
+/// Verter-only mode selects no TypeScript authority, so its TypeScript
+/// facet is unavailable from the start; an editor-owned authority is not
+/// this server's to withdraw.
+#[tokio::test]
+async fn verter_only_mode_starts_without_a_typescript_authority() {
+    use verter_language::participation::ProviderAvailability;
+    let availability = |kind| {
+        let (service, _socket) = tower_lsp_server::LspService::new(move |_client| {
+            VerterLanguageServer::new(
+                crate::outbound::Outbound::default(),
+                LspConfig {
+                    host: Arc::new(VerterHost::new_standalone(HostConfig::default())),
+                    type_provider: None,
+                    project_sync_mode: ProjectSyncMode::FullProject,
+                    type_provider_kind: kind,
+                    type_provider_topology: crate::TypeProviderTopology::implied_by(kind),
+                    mcp_port: None,
+                    type_provider_reason: None,
+                    type_provider_advisory: None,
+                    suppress_imported_carrier_prewarm: false,
+                },
+            )
+        });
+        let state = service.inner().documents.participation().state();
+        state.mask().typescript_provider()
+    };
+    assert_eq!(
+        availability(crate::TypeProviderKind::None),
+        ProviderAvailability::Unavailable
+    );
+    assert_eq!(
+        availability(crate::TypeProviderKind::EditorTsserver),
+        ProviderAvailability::Available
+    );
+}
+
 /// Every code-action kind is its own cell: a request no kind admits is
 /// refused, and produced actions are attributed by their LSP kind.
 #[tokio::test]

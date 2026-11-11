@@ -923,15 +923,26 @@ async function startVueLanguageServer(
     };
   };
   adoptParticipationCells(new ParticipationCells());
+  // An observation that changed while no client was running: the starting
+  // client's initialization input may predate it, so the first receipt is
+  // reconciled with a full replacement (an equivalent input changes nothing).
+  let participationChangedWhileStopped = false;
   const adoptInitialParticipation = (started: LanguageClient) => {
     const experimental = started.initializeResult?.capabilities?.experimental as
       | { verterParticipation?: ParticipationReceipt }
       | undefined;
     adoptParticipationCells(new ParticipationCells(experimental?.verterParticipation));
+    if (participationChangedWhileStopped) {
+      participationChangedWhileStopped = false;
+      void updateParticipation();
+    }
   };
   const updateParticipation = async () => {
     const current = client;
-    if (!current.isRunning()) return;
+    if (!current.isRunning()) {
+      participationChangedWhileStopped = true;
+      return;
+    }
     try {
       const receipt = await current.sendRequest<ParticipationReceipt>(
         UPDATE_PARTICIPATION_METHOD,

@@ -690,6 +690,16 @@ pub trait TypeProvider: Send + Sync {
         None
     }
 
+    /// Whether this provider has given up for the session: `true` once its
+    /// one engine's recovery exhausted the restart budget, after which no
+    /// answer will come from it again. `None` (the default) when no single
+    /// lifecycle governs every answer: a pool provider's engines recover
+    /// independently, so one engine giving up does not make the provider
+    /// unavailable.
+    fn exhaustion(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        None
+    }
+
     // ── Background-priority file operations ────────────────────────────
 
     fn open_file_background(&self, path: &str, content: &str) -> ProviderFuture<'_, ()> {

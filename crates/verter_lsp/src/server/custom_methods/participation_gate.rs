@@ -220,8 +220,28 @@ impl VerterLanguageServer {
                 if was_disabled
                     && !crate::participation::document_owes_no_eager_work(&self.documents, uri)
                 {
+                    // Its open and edits skipped every eager step: re-arm the
+                    // sync work bits, the dependency tracking and the
+                    // import-dependency receipt an open owes, or the
+                    // coordinator would skip the provider sync and a
+                    // diagnostics pull could wait on a receipt nothing mints.
+                    self.touch_mru(&canonical_id);
+                    if crate::server::carrier_language_for(
+                        self.documents.language_classifier(),
+                        &canonical_id,
+                    )
+                    .is_some()
+                    {
+                        self.refresh_carrier_dependency_tracking(&canonical_id);
+                    }
                     self.documents.schedule_semantic_analysis(uri);
+                    self.needs_ide_sync.insert(canonical_id.clone());
+                    self.needs_deferred_sync.insert(canonical_id.clone());
                     self.sync_coordinator.signal(canonical_id, uri_str, now);
+                    self.spawn_import_dependency_publication(
+                        uri,
+                        super::super::import_publication::PublicationUrgency::Immediate,
+                    );
                 } else {
                     self.sync_coordinator
                         .signal_diagnostics_only(canonical_id, uri_str, now);

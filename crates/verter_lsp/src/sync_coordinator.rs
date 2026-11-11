@@ -114,6 +114,37 @@ pub struct SyncCoordinatorHandle {
     pub(crate) receipts: CoordinatorReceipts,
 }
 
+/// A [`SyncCoordinatorHandle`] that does not keep the coordinator alive: a
+/// long-lived observer upgrades it only to signal, so the coordinator still
+/// shuts down once every strong handle is gone.
+#[derive(Clone)]
+pub(crate) struct WeakSyncCoordinatorHandle {
+    documents: std::sync::Weak<DocumentRegistry>,
+    wake_tx: mpsc::WeakSender<()>,
+    pending: Arc<parking_lot::Mutex<HashMap<String, PendingSignal>>>,
+    changes: ChangeTracker,
+    touches: TouchTracker,
+    scanning: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    receipts: CoordinatorReceipts,
+}
+
+impl WeakSyncCoordinatorHandle {
+    /// The strong handle, while the coordinator still runs.
+    pub(crate) fn upgrade(&self) -> Option<SyncCoordinatorHandle> {
+        Some(SyncCoordinatorHandle {
+            documents: self.documents.clone(),
+            wake_tx: self.wake_tx.upgrade()?,
+            pending: Arc::clone(&self.pending),
+            changes: Arc::clone(&self.changes),
+            touches: Arc::clone(&self.touches),
+            scanning: Arc::clone(&self.scanning),
+            #[cfg(test)]
+            receipts: self.receipts.clone(),
+        })
+    }
+}
+
 /// TEST-ONLY receipts a test waits on instead of polling or sleeping.
 ///
 /// These are the coordinator's own transitions, published where they
@@ -211,6 +242,20 @@ struct PendingSignal {
 }
 
 impl SyncCoordinatorHandle {
+    /// A handle that signals without keeping the coordinator alive.
+    pub(crate) fn downgrade(&self) -> WeakSyncCoordinatorHandle {
+        WeakSyncCoordinatorHandle {
+            documents: self.documents.clone(),
+            wake_tx: self.wake_tx.downgrade(),
+            pending: Arc::clone(&self.pending),
+            changes: Arc::clone(&self.changes),
+            touches: Arc::clone(&self.touches),
+            scanning: Arc::clone(&self.scanning),
+            #[cfg(test)]
+            receipts: self.receipts.clone(),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) async fn pause_dispatch_for_test(&self) -> tokio::sync::OwnedMutexGuard<()> {
         Arc::clone(&self.receipts.dispatch_barrier)
@@ -2760,8 +2805,16 @@ fn compute_verter_diagnostics(
     // props via the generated TSX and is the source of truth. Gated on the
     // serving KIND, not the in-process provider object: the editor-owned
     // tsserver plugin route validates props through the editor's tsserver
-    // while `type_provider` is `None` in-process.
-    if !matches!(deps.type_provider_kind, crate::TypeProviderKind::None) {
+    // while `type_provider` is `None` in-process. A provider that has given
+    // up for the session validates nothing, so Verter's own facts stay.
+    let provider_available = deps
+        .documents
+        .participation()
+        .state()
+        .mask()
+        .typescript_provider()
+        == verter_language::participation::ProviderAvailability::Available;
+    if provider_available && !matches!(deps.type_provider_kind, crate::TypeProviderKind::None) {
         verter_diags.retain(|d| match &d.code {
             Some(NumberOrString::String(code)) => {
                 code != "verter/unknown-prop" && code != "verter/unknown-model"

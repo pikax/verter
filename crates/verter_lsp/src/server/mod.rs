@@ -1509,6 +1509,12 @@ impl VerterLanguageServer {
                 subscriptions: Arc::clone(&subscriptions),
             },
         );
+        crate::participation::observe_provider_availability(
+            &documents,
+            config.type_provider_kind,
+            config.type_provider.as_deref(),
+            &sync_coordinator,
+        );
 
         let core = ServerCore {
             client,

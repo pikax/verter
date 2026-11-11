@@ -372,6 +372,9 @@ struct Shared<P: ?Sized> {
     /// Desired state can be ahead of this map: a held or failed write is not
     /// an application receipt.
     applied_files: StdRwLock<HashMap<String, Arc<str>>>,
+    /// Turns `true`, once, when recovery exhausts its restart budget: the
+    /// instance stays down for the session.
+    exhausted: watch::Sender<bool>,
     /// Per-hub synchronization at the compensating receipt-removal fence.
     #[cfg(test)]
     compensation_receipt_release_started: Notify,
@@ -554,6 +557,7 @@ where
             generated_unit_resolver: std::sync::OnceLock::new(),
             overlay: overlay::LazyOverlayCore::new(),
             applied_files: StdRwLock::new(HashMap::new()),
+            exhausted: watch::channel(false).0,
             #[cfg(test)]
             compensation_receipt_release_started: Notify::new(),
         });
@@ -1319,6 +1323,7 @@ where
                 "{log_name} restart limit reached ({max_restarts}) - staying in verter-only mode"
             );
             state.shared.lifecycle().phase = Phase::Exhausted;
+            state.shared.exhausted.send_replace(true);
             state.notifier.notify(
                 NotifySeverity::Error,
                 format!(

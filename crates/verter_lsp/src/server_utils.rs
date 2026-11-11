@@ -2012,9 +2012,10 @@ fn compute_verter_diagnostics_for_with_views(
     vfs_workspace: Option<&verter_workspace::FilesystemWorkspace>,
     facets: crate::participation::DiagnosticFacets,
 ) -> Vec<Diagnostic> {
-    // The cache holds only complete-facet sets: a restricted publication runs
-    // just its admitted producers and never reads or warms the full set.
-    let cacheable = facets == crate::participation::DiagnosticFacets::ALL;
+    // The cache holds only complete Verter sets: a restricted publication runs
+    // just its admitted producers and never reads or warms the full set. The
+    // TypeScript facet is not computed here, so its withdrawal keeps the cache.
+    let cacheable = facets.all_verter();
     // Check cache: if version AND diagnostics generation both match, return cached.
     let uri_str = uri.as_str();
     let canonical_id = uri_to_canonical_id(uri);
