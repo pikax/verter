@@ -12,13 +12,14 @@
 //! here can parse carrier source, analyze semantics, route or serialize a
 //! request.
 //!
-//! The coordinate, provenance, document and renderer modules implement no
-//! parser, printer, edit, map, range/cursor, route or protocol policy; the
+//! The coordinate, provenance, document, renderer and edit modules implement
+//! no parser, printer, map, range/cursor, route or protocol policy; the
 //! private modules below are reserved homes for that later formatter work. See
 //! `docs/arch/kernel/formatter.md` for the owning architecture contract.
 
 pub mod coordinates;
 pub mod doc;
+pub mod edit;
 pub mod provenance;
 pub mod render;
 mod width;
@@ -32,7 +33,6 @@ mod provenance_tests;
 // declaration-only: its doc line names the work that fills it, and each
 // owning implementation writes inside its own reserved module only.
 mod cursor;
-mod edit;
 mod embedded;
 mod explain;
 mod position_map;

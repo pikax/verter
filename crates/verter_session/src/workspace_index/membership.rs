@@ -179,6 +179,7 @@ pub(crate) fn publishable_membership(
             claim: observation.claim,
             project: None,
             partition: PartitionFamily::ProjectMembership,
+            facet: 0,
         },
         basis: observation.basis,
         provenance: observation.provenance,

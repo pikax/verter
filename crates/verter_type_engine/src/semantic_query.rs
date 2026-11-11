@@ -1955,22 +1955,12 @@ pub enum FlowReturnDegradation {
     UnrepresentableCallee,
     /// A generic call whose type argument is inferred from the return of
     /// a context-sensitive argument the call resolver could not continue
-    /// ([`ResolveCallFailure::ContextSensitiveInference`]): a method whose
-    /// return reads a `this` no marker types — the object literal being
-    /// inferred, whose own member read the checker recovers as TS2339 and
-    /// whose circular return as TS7023. The call position carries the
-    /// typed unresolved marker. Distinct from
+    /// ([`ResolveCallFailure::ContextSensitiveInference`]). The call position
+    /// carries the typed unresolved marker. Distinct from
     /// [`Self::UnrepresentableCallee`], so a consumer tells this inference
     /// refusal from a callee that is not callable, accepts no overload, or
     /// whose applicability went undecided.
     ContextSensitiveInference,
-    /// A member read off a receiver that declares no such member — an object
-    /// literal's own `this` when no marker types it — evaluated to the typed
-    /// miss: the checker reports TS2339 there and continues with its error
-    /// type, a recovery this rail does not model. The first observed cause
-    /// wins, so a call refused because a context-sensitive argument's return
-    /// holds that miss reports this read, never only the refusal.
-    AbsentReceiverMember,
     /// A binding whose initializer failed with a typed flow failure was
     /// observed; the observation evaluated to `any`.
     FailedBindingInitializer,
@@ -2079,9 +2069,6 @@ pub enum FlowReturnFailure {
     /// An in-flight dependency could not be decided (a torn view, a
     /// missing non-cycle edge, or a nonconverging recursive component).
     Unresolved,
-    /// The recursive component has no concrete semantic seed (an empty
-    /// recursive cycle — holds only).
-    EmptyCycle,
     /// The demanded `(demand, input)` point is beyond the whole-return /
     /// empty-input point the evaluation models — fail closed, never a
     /// silently widened whole-return result and never a sibling
@@ -2901,7 +2888,7 @@ impl MapperKind {
                 value_id = *inner;
             }
             let (object, index) = match graph.node_data(value_id).as_deref() {
-                Some(SemanticNodeData::IndexedAccess { object, index }) => (*object, index.clone()),
+                Some(SemanticNodeData::IndexedAccess { object, index, .. }) => (*object, index.clone()),
                 _ => return MapperKind::Computed,
             };
             if object != source {
@@ -4632,6 +4619,9 @@ pub struct SurfaceView {
     pub(crate) index_signatures: Arc<[IndexSignature]>,
     pub(crate) keyspace: Option<SemanticNodeId>,
     has_index_signature: bool,
+    /// Names this surface leaves out although the declarations behind it may
+    /// well answer them: a missing member proves nothing about these.
+    withheld_keys: Option<Arc<[verter_type_expr::OwnedStr]>>,
 }
 
 impl SurfaceView {
@@ -4657,6 +4647,7 @@ impl SurfaceView {
             index_signatures: self.index_signatures.clone(),
             keyspace: self.keyspace.clone(),
             has_index_signature: self.has_index_signature.clone(),
+            withheld_keys: self.withheld_keys.clone(),
         }
     }
 }
@@ -5232,6 +5223,7 @@ impl SurfaceView {
             index_signatures,
             keyspace,
             has_index_signature,
+            withheld_keys: None,
         }
     }
 
@@ -5264,7 +5256,30 @@ impl SurfaceView {
             index_signatures: Arc::from(index_signatures.into_boxed_slice()),
             keyspace,
             has_index_signature,
+            withheld_keys: None,
         }
+    }
+
+    /// This surface, leaving out the names `withheld`.
+    #[must_use]
+    pub(crate) fn withholding_keys(mut self, withheld: Vec<verter_type_expr::OwnedStr>) -> Self {
+        self.withheld_keys = (!withheld.is_empty()).then(|| Arc::from(withheld.into_boxed_slice()));
+        self
+    }
+
+    /// Hand each name this surface withholds to `encode`, in order.
+    pub(crate) fn encode_withheld_keys(&self, mut encode: impl FnMut(&str)) {
+        for key in self.withheld_keys.iter().flat_map(|keys| keys.iter()) {
+            encode(key.as_ref());
+        }
+    }
+
+    /// Whether this surface leaves `name` out without proving it absent.
+    pub(crate) fn withholds_key(&self, name: &str) -> bool {
+        self.withheld_keys
+            .iter()
+            .flat_map(|keys| keys.iter())
+            .any(|key| key.as_ref() == name)
     }
 
     pub fn from_init(init: SurfaceViewInit) -> Self {
@@ -5568,6 +5583,7 @@ impl std::hash::Hash for SurfaceView {
         self.entries.hash(state);
         self.keyspace.hash(state);
         self.has_index_signature.hash(state);
+        self.withheld_keys.hash(state);
     }
 }
 
@@ -6598,6 +6614,37 @@ pub struct SemanticGraphStats {
     /// computed again — a walk resumed from its root, or a helper re-entered
     /// with its answers cached — counts again.
     pub projection_hops_walked: u64,
+    /// Machinery relation roots whose root obligation frame opened,
+    /// wherever they ran: one per root whose first stage opened its frame.
+    /// Counted where the frame opens, outside every charge and
+    /// its rollback, so a root entered again counts again.
+    pub relation_roots_opened: u64,
+    /// Structural relation reductions performed, root and nested alike:
+    /// one per pair the reducer ran over. Counted where the reduction
+    /// starts, outside every charge and its rollback, so a reduction run
+    /// again counts again.
+    pub relation_reductions: u64,
+    /// Candidates call resolutions began checking, wherever they ran: one
+    /// per candidate whose parameters, arity and receiver the check read
+    /// before relating its arguments. Counted where the check begins,
+    /// outside every charge and its rollback, so a candidate begun again —
+    /// a walk resumed from its root — counts again.
+    pub call_candidates_begun: u64,
+    /// Argument relations call resolutions' first inference pass ran,
+    /// wherever they ran: one per argument related to its parameter.
+    /// Counted where the relation runs, outside every charge and its
+    /// rollback, so an argument related again counts again.
+    pub call_arguments_related: u64,
+    /// Stages query entries computed admitting their keys, wherever they
+    /// ran: one per stage of an entry's sugar, carrier, apparent-wrapper and
+    /// signature-subject normalization, counted where the stage runs,
+    /// outside every charge and its rollback.
+    pub admission_stages_walked: u64,
+    /// Steps deferred evaluations computed, wherever they ran: one per
+    /// evaluator step, counted where the step runs, outside every charge
+    /// and its rollback. A step computed again — an evaluation restarted
+    /// from its root, or re-entered with its answers cached — counts again.
+    pub deferred_steps_evaluated: u64,
     // ── Path-length histogram percentiles (reservoir-sampled by the
     // `ProjectPath` builder).
     pub path_length_p50: u32,
@@ -10021,7 +10068,7 @@ pub enum SemanticQueryKey {
     /// `ProgramAnalysisFactRef::FlowBody` fact rail. Value domain:
     /// [`SemanticQueryValueTag::FlowReturn`]; only a COMPLETE evaluation
     /// admits — every degraded shape (`Unsupported` / `Missing` /
-    /// `Budget` / `EmptyCycle` / `Unresolved`) is `ReturnOnly` and never
+    /// `Budget` / `Unresolved`) is `ReturnOnly` and never
     /// enters the family memo.
     ///
     /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
@@ -11150,6 +11197,21 @@ impl ObjectSpreadProgram {
     }
 }
 
+/// Which access a deferred `T[K]` shell stands for, as far as an absent key
+/// goes: the checker's `getIndexedAccessType` answers by whether it holds an
+/// access node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IndexedAccessOrigin {
+    /// An access the engine composed for its own reading; an absent key stays
+    /// the typed miss.
+    Composed,
+    /// An access written in a type position: an absent key is the checker's
+    /// TS2339, read as its error type.
+    Written,
+    /// The instantiation of a written access over a generic object or index:
+    /// an absent key is `unknown`, and nothing is reported.
+    Instantiated,
+}
 #[derive(Debug)]
 pub enum SemanticNodeData {
     /// A compiler-native intrinsic operation applied to its operands, kept
@@ -11244,6 +11306,9 @@ pub enum SemanticNodeData {
     IndexedAccess {
         object: SemanticNodeId,
         index: IndexKey,
+        /// Which access this shell stands for, which decides what an absent
+        /// key answers.
+        origin: IndexedAccessOrigin,
     },
     /// Deferred mapped-type shell used when the solver/bridge needs to
     /// preserve `{ [K in Source]: Value }` structure across the dispatch
@@ -11640,9 +11705,14 @@ impl SemanticNodeData {
                 expressions: expressions.share(),
             },
             Self::KeyOf { base } => Self::KeyOf { base: base.clone() },
-            Self::IndexedAccess { object, index } => Self::IndexedAccess {
+            Self::IndexedAccess {
+                object,
+                index,
+                origin,
+            } => Self::IndexedAccess {
                 object: object.clone(),
                 index: index.clone(),
+                origin: *origin,
             },
             Self::Mapped { source, mapper } => Self::Mapped {
                 source: source.clone(),
@@ -11924,12 +11994,14 @@ impl PartialEq for SemanticNodeData {
                 Self::IndexedAccess {
                     object: ao,
                     index: ai,
+                    origin: aorigin,
                 },
                 Self::IndexedAccess {
                     object: bo,
                     index: bi,
+                    origin: borigin,
                 },
-            ) => ao == bo && ai == bi,
+            ) => ao == bo && ai == bi && aorigin == borigin,
             (
                 Self::Mapped {
                     source: asrc,
@@ -12142,9 +12214,14 @@ impl std::hash::Hash for SemanticNodeData {
             Self::KeyOf { base } => {
                 base.hash(state);
             }
-            Self::IndexedAccess { object, index } => {
+            Self::IndexedAccess {
+                object,
+                index,
+                origin,
+            } => {
                 object.hash(state);
                 index.hash(state);
+                origin.hash(state);
             }
             Self::Mapped { source, mapper } => {
                 source.hash(state);
@@ -12953,7 +13030,8 @@ mod tests {
     ///   mapped_per_k_materializations, substitute_memo_hits,
     ///   substitute_memo_misses, evaluate_deferred_memo_hits,
     ///   evaluate_deferred_memo_misses, continuation_builds_begun,
-    ///   continuation_stages_resumed, projection_hops_walked.
+    ///   continuation_stages_resumed, projection_hops_walked,
+    ///   admission_stages_walked, deferred_steps_evaluated.
     /// - Exceptional-path: same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
@@ -12991,6 +13069,12 @@ mod tests {
             "continuation_builds_begun",
             "continuation_stages_resumed",
             "projection_hops_walked",
+            "relation_roots_opened",
+            "relation_reductions",
+            "call_candidates_begun",
+            "call_arguments_related",
+            "admission_stages_walked",
+            "deferred_steps_evaluated",
         ];
         for field in expected_to_fire {
             assert!(

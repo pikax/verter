@@ -25,6 +25,7 @@ use crate::features::references::{
     collect_template_css_ref_spans, find_css_target_in_style_refs,
     find_css_target_in_template_refs, markup_class_token_at, CssRefTarget,
 };
+use crate::server::server_utils::{IndexBacked, IndexRoute, WORKSPACE_INDEX_BUDGETS};
 
 /// The CSS class name at `offset` (template attribute entry, markup class
 /// token, or style class occurrence), regardless of scope.
@@ -164,38 +165,88 @@ pub(crate) fn global_class_spans_in_file(
     spans
 }
 
-/// Collect cross-file locations for a global class across every host-known
-/// file (excluding `origin_canonical` — the origin file's spans come from the
-/// native same-file path). Candidate files are prefiltered by a cheap source
-/// containment check; the actual spans come from each file's typed analysis.
+/// Collect cross-file locations for a global class (excluding
+/// `origin_canonical` — the origin file's spans come from the native
+/// same-file path).
+///
+/// The workspace index names the candidate files: those with a stylesheet
+/// definition of the class (or, unless `declarations_only`, a template use of
+/// it). Each candidate's own analysis then decides which spans are global
+/// declarations or usages, so a scoped or module declaration never crosses
+/// the file boundary. Files come in canonical-id order. An index walk that
+/// could not certify its population leaves the answer partial.
 pub(crate) fn collect_cross_file_global_class_locations(
     host: &verter_session::VerterHost,
     origin_canonical: Option<&str>,
     name: &str,
     encoding: PositionEncodingKind,
     declarations_only: bool,
-) -> Vec<Location> {
+) -> IndexBacked<Vec<Location>> {
+    global_class_locations_within(
+        host,
+        origin_canonical,
+        name,
+        encoding,
+        declarations_only,
+        WORKSPACE_INDEX_BUDGETS,
+    )
+}
+
+pub(crate) fn global_class_locations_within(
+    host: &verter_session::VerterHost,
+    origin_canonical: Option<&str>,
+    name: &str,
+    encoding: PositionEncodingKind,
+    declarations_only: bool,
+    budgets: verter_session::workspace_index::QueryBudgets,
+) -> IndexBacked<Vec<Location>> {
+    use verter_session::workspace_index::{
+        IndexDemand, IndexRow, IndexSurface, Lookup, PartitionFamily, PostingKey, StyleRole,
+        StyleSymbolKind,
+    };
+    let mut route = IndexRoute::new(host, budgets);
+    // Stylesheet definitions post under the exact name, template uses under
+    // the reverse one. A definition answer demands only stylesheet facts.
+    let mut keys = vec![PostingKey::exact(PartitionFamily::StyleSelectors, name)];
+    let mut surfaces = vec![IndexSurface::StyleDefinitions];
+    if !declarations_only {
+        keys.push(PostingKey::reverse(PartitionFamily::StyleSelectors, name));
+        surfaces.push(IndexSurface::MarkupClassReferences);
+    }
+    let candidates = route.walk(&IndexDemand::of(surfaces), Lookup::Keys(keys));
+    let files: std::collections::BTreeSet<std::sync::Arc<str>> = candidates
+        .iter()
+        .filter(|candidate| {
+            matches!(
+                candidate.record().map(|record| &record.row),
+                Some(IndexRow::Stylesheet(row))
+                    if row.kind == StyleSymbolKind::Class
+                        && (!declarations_only || row.role == StyleRole::Definition)
+            )
+        })
+        .map(|candidate| std::sync::Arc::clone(&candidate.contribution.basis.locator))
+        .filter(|canonical| Some(canonical.as_ref()) != origin_canonical)
+        .collect();
+
     let mut out: Vec<Location> = Vec::new();
-    for (canonical, _language) in host.list_files() {
-        if Some(canonical.as_str()) == origin_canonical {
-            continue;
-        }
-        let Some(source) = host.get_source(&canonical) else {
-            continue;
-        };
-        // Cheap candidate prefilter only — the typed analysis below is the
-        // sole authority for actual spans.
-        if !source.contains(name) {
-            continue;
-        }
-        let Some(analysis) = host.get_analysis(&canonical) else {
+    for canonical in &files {
+        // A candidate whose facts cannot be read leaves the answer partial.
+        let (Some(source), Some(mut analysis)) =
+            (host.get_source(canonical), host.get_analysis(canonical))
+        else {
+            route.note_unavailable(canonical);
             continue;
         };
+        // A template-free host holds no template for a cold carrier; its
+        // markup uses come from the template produced on demand.
+        if !declarations_only && analysis.template.is_none() {
+            analysis.template = route.template(canonical);
+        }
         let spans = global_class_spans_in_file(name, &source, &analysis, declarations_only);
         if spans.is_empty() {
             continue;
         }
-        let Some(uri) = crate::type_provider::merge::file_path_to_uri(&canonical) else {
+        let Some(uri) = crate::type_provider::merge::file_path_to_uri(canonical) else {
             continue;
         };
         let line_index = LineIndex::new(&source, encoding.clone());
@@ -211,7 +262,7 @@ pub(crate) fn collect_cross_file_global_class_locations(
             }
         }
     }
-    out
+    route.finish(out)
 }
 
 #[cfg(test)]

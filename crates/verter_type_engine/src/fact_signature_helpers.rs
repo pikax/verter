@@ -158,24 +158,75 @@ fn finalise_compute_scope<W: verter_session_query::facts::clocks::WorkspaceClock
 /// scope, when the compute completes. Its observations stop at its own
 /// scope: the owner replays the finalised set (or a carrier holding it)
 /// into the scope that consumes the compute, as
-/// [`install_delivering_fact_tracer`] does.
+/// [`install_delivering_fact_tracer`] does. The [`OwnedStepwiseFactTracer`]
+/// it steps with the basis source it holds.
 pub(crate) struct StepwiseFactTracer<'h, W> {
     source: FactTracerBasisSource<'h, W>,
-    tracer: crate::resolver_core::resolver_context::OwnedFactTracer,
-    #[cfg(any(test, feature = "test-support"))]
-    forced: bool,
+    inner: OwnedStepwiseFactTracer,
 }
 
 impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     StepwiseFactTracer<'h, W>
 {
     pub(crate) fn new(source: FactTracerBasisSource<'h, W>) -> Self {
-        let tracer = crate::resolver_core::resolver_context::OwnedFactTracer::new(
-            source.live_basis(),
-            source.fact_policy(),
-        );
+        let inner = OwnedStepwiseFactTracer::delivering(&source);
+        Self { source, inner }
+    }
+
+    /// Install the tracer for one step; the scope uninstalls it.
+    pub(crate) fn install(
+        &mut self,
+    ) -> crate::resolver_core::resolver_context::OwnedTracerScope<'_> {
+        self.inner.install(&self.source)
+    }
+
+    /// The compute completed: finalise what it observed.
+    pub(crate) fn finish(self) -> FactReadSetFinalise {
+        self.inner.finish(&self.source)
+    }
+}
+
+/// The fact tracer of a compute that runs in steps and owns nothing of the
+/// context that stepped it — a query entry's admission or a deferred
+/// evaluation, carried across its suspensions inside the frame or root that
+/// drives it. It is installed only while one of the compute's steps runs,
+/// and finalised once, against the basis source of whichever context
+/// completes it, as [`install_fact_tracer`] finalises. One made by
+/// [`Self::fanning_out`] fans each observation out to the scopes below it on
+/// the running thread, as [`install_fact_tracer`]'s scope does; one made by
+/// [`Self::delivering`] stops them at its own scope, for its owner to
+/// deliver, as [`install_delivering_fact_tracer`]'s does.
+pub(crate) struct OwnedStepwiseFactTracer {
+    tracer: crate::resolver_core::resolver_context::OwnedFactTracer,
+    #[cfg(any(test, feature = "test-support"))]
+    forced: bool,
+}
+
+impl OwnedStepwiseFactTracer {
+    pub(crate) fn fanning_out<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
+        source: &FactTracerBasisSource<'_, W>,
+    ) -> Self {
+        Self::over(
+            crate::resolver_core::resolver_context::OwnedFactTracer::fanning_out(
+                source.live_basis(),
+                source.fact_policy(),
+            ),
+        )
+    }
+
+    pub(crate) fn delivering<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
+        source: &FactTracerBasisSource<'_, W>,
+    ) -> Self {
+        Self::over(
+            crate::resolver_core::resolver_context::OwnedFactTracer::new(
+                source.live_basis(),
+                source.fact_policy(),
+            ),
+        )
+    }
+
+    fn over(tracer: crate::resolver_core::resolver_context::OwnedFactTracer) -> Self {
         Self {
-            source,
             tracer,
             #[cfg(any(test, feature = "test-support"))]
             forced: false,
@@ -183,20 +234,25 @@ impl<'h, W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     }
 
     /// Install the tracer for one step; the scope uninstalls it.
-    pub(crate) fn install(
+    pub(crate) fn install<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
         &mut self,
+        #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_variables))]
+        source: &FactTracerBasisSource<'_, W>,
     ) -> crate::resolver_core::resolver_context::OwnedTracerScope<'_> {
         let scope = self.tracer.install();
         #[cfg(any(test, feature = "test-support"))]
         if !std::mem::replace(&mut self.forced, true) {
-            force_tracer_refusal(&self.source, None);
+            force_tracer_refusal(source, None);
         }
         scope
     }
 
     /// The compute completed: finalise what it observed.
-    pub(crate) fn finish(self) -> FactReadSetFinalise {
-        finalise_compute_scope(&self.source, self.tracer.into_read_set())
+    pub(crate) fn finish<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
+        self,
+        source: &FactTracerBasisSource<'_, W>,
+    ) -> FactReadSetFinalise {
+        finalise_compute_scope(source, self.tracer.into_read_set())
     }
 }
 

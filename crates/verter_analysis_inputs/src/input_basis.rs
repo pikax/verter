@@ -136,6 +136,10 @@ pub enum ObservationKind {
     File { content: Arc<str> },
     /// Directory listing captured at commit.
     Directory { entries: Vec<DirectoryEntry> },
+    /// Canonically encoded native observation captured at commit: a typed
+    /// fact key's committed version, an effective environment, or another
+    /// producer-owned value. Never a fabricated file.
+    Value { bytes: Arc<[u8]> },
 }
 
 /// One positive observation in a committed basis.
@@ -187,6 +191,20 @@ impl Observation {
         })
     }
 
+    /// Native value observation. `bytes` is the producer's canonical
+    /// encoding and the revision is its digest, so two different encodings
+    /// of one canonical fail commit as [`CommitError::MixedRevision`].
+    #[must_use]
+    pub fn value(canonical: impl Into<Arc<str>>, bytes: impl Into<Arc<[u8]>>) -> Self {
+        let bytes = bytes.into();
+        let revision = content_revision(&bytes);
+        Self {
+            canonical: canonical.into(),
+            revision,
+            kind: ObservationKind::Value { bytes },
+        }
+    }
+
     /// Canonical identity.
     #[must_use]
     pub fn canonical(&self) -> &str {
@@ -210,7 +228,7 @@ impl Observation {
     pub fn file_content(&self) -> Option<&str> {
         match &self.kind {
             ObservationKind::File { content } => Some(content.as_ref()),
-            ObservationKind::Directory { .. } => None,
+            ObservationKind::Directory { .. } | ObservationKind::Value { .. } => None,
         }
     }
 
@@ -219,7 +237,16 @@ impl Observation {
     pub fn directory_entries(&self) -> Option<&[DirectoryEntry]> {
         match &self.kind {
             ObservationKind::Directory { entries } => Some(entries),
-            ObservationKind::File { .. } => None,
+            ObservationKind::File { .. } | ObservationKind::Value { .. } => None,
+        }
+    }
+
+    /// Encoded bytes when this observation is a native value.
+    #[must_use]
+    pub fn value_bytes(&self) -> Option<&[u8]> {
+        match &self.kind {
+            ObservationKind::Value { bytes } => Some(bytes),
+            ObservationKind::File { .. } | ObservationKind::Directory { .. } => None,
         }
     }
 }
@@ -525,6 +552,7 @@ fn kind_tag(kind: &ObservationKind) -> u8 {
     match kind {
         ObservationKind::File { .. } => 0,
         ObservationKind::Directory { .. } => 1,
+        ObservationKind::Value { .. } => 2,
     }
 }
 

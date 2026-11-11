@@ -1229,6 +1229,56 @@ struct CompositeJoin {
     index: usize,
 }
 
+impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
+    /// Whether the program declares the global wrapper the primitive `node`
+    /// reads its members from.
+    pub(super) fn apparent_wrapper_settles(&self, node: SemanticNodeId, origin: &str) -> bool {
+        use super::apparent_type::GlobalWrapper;
+        let wrapper = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => "String",
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => "Number",
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => "Boolean",
+            Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => "BigInt",
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => "Symbol",
+            Some(SemanticNodeData::Literal(literal)) => match literal {
+                verter_type_expr::LiteralValue::String(_) => "String",
+                verter_type_expr::LiteralValue::Number(_) => "Number",
+                verter_type_expr::LiteralValue::Boolean(_) => "Boolean",
+                verter_type_expr::LiteralValue::BigInt(_) => "BigInt",
+            },
+            _ => return false,
+        };
+        matches!(
+            self.global_wrapper_surface(wrapper, &[], origin),
+            GlobalWrapper::Surface(_)
+        )
+    }
+
+    /// Whether the global `Object` type every object reads declares `name`,
+    /// or does not settle.
+    pub(super) fn global_object_declares(&self, name: &str, origin: &str) -> bool {
+        use super::apparent_type::GlobalWrapper;
+        match self.global_wrapper_surface("Object", &[], origin) {
+            GlobalWrapper::Absent => false,
+            GlobalWrapper::Unsettled => true,
+            GlobalWrapper::Surface(object) => {
+                let Some(SemanticNodeData::Object(view)) = self
+                    .graph()
+                    .node_data(object)
+                    .as_deref()
+                    .map(SemanticNodeData::clone)
+                else {
+                    return true;
+                };
+                !matches!(
+                    view.project_known_key(&PropertyKey::identifier(Arc::from(name))),
+                    crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                )
+            }
+        }
+    }
+}
+
 /// Whether an apparent type declares a member
 /// ([`PathWalker::apparent_member_surface`]).
 enum ApparentMember {
@@ -1319,8 +1369,21 @@ enum HopSite {
     Declaration,
     /// A deferred `keyof` reduced.
     KeyOf,
-    /// A deferred indexed access reduced.
-    IndexedAccess,
+    /// A deferred indexed access reduced: its origin, operand and index
+    /// answer a read the operand proves absent.
+    IndexedAccess {
+        origin: crate::semantic_query::IndexedAccessOrigin,
+        object: SemanticNodeId,
+        index: IndexKey,
+    },
+    /// A deferred indexed access whose object is itself deferred: the
+    /// object's evaluation on the shared deferred evaluator, standing at the
+    /// read it named, and the index the hop reads off the evaluated object.
+    DeferredOperand {
+        evaluation: Box<super::evaluate::DeferredRead>,
+        index: crate::semantic_query::IndexKey,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+    },
     /// An open conditional's true branch projected over the rest of the
     /// path; its false branch is projected next.
     ConditionalTrue {
@@ -1404,20 +1467,49 @@ pub(super) struct PathPlan {
 }
 
 impl WalkState {
-    /// End the prefix recording a walk released between its stages still
-    /// holds: what its build charged before the first prefix is put back
-    /// on the build's recording, which its releaser then abandons.
-    pub(super) fn release_prefixes(
+    /// Release what a walk released between its stages still holds: a hop's
+    /// deferred evaluation standing at its read abandons its recordings,
+    /// which sit above the build's own, and the walk's prefix recording puts
+    /// back what its build charged before the first prefix on the build's
+    /// recording, which its releaser then abandons.
+    pub(super) fn release<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
-        ledger: &super::connected_demand::ConnectedDemandLedger<'_>,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
     ) {
+        if matches!(
+            &self.awaiting,
+            Some(HopResume {
+                site: HopSite::DeferredOperand { .. },
+                ..
+            })
+        ) {
+            if let Some(HopResume {
+                site: HopSite::DeferredOperand { evaluation, .. },
+                ..
+            }) = self.awaiting.take()
+            {
+                dispatch.abandon_deferred_read(*evaluation);
+            }
+        }
         if let Some(recording) = self
             .prefixes
             .as_mut()
             .and_then(|prefixes| prefixes.recording.take())
         {
-            ledger.end_prefixes(recording);
+            dispatch.connected_demand.end_prefixes(recording);
         }
+    }
+
+    /// Whether the read the walk stands at is a carrier resolution's,
+    /// which its consumers count as their own dispatch intent.
+    pub(super) fn awaits_carrier_read(&self) -> bool {
+        matches!(
+            &self.awaiting,
+            Some(HopResume {
+                site: HopSite::DeferredOperand { evaluation, .. },
+                ..
+            }) if evaluation.reads_for_carrier()
+        )
     }
 }
 
@@ -2197,18 +2289,50 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// Resume the walk at the hop that named its last read, with that
     /// read's answer: the hop continues from what it computed before the
     /// read, and nothing the walk completed runs again.
+    ///
+    /// `deliver` makes or delivers that read. A hop standing at a read its
+    /// deferred operand's evaluation named has the read delivered inside the
+    /// evaluation's stage, under the evaluation's own tracer and recording,
+    /// where the in-place evaluation made it; any other hop folds the read
+    /// into the walk first.
     pub(super) fn resume_walk(
         &mut self,
-        read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+        deliver: &mut dyn FnMut() -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
     ) -> WalkProgress {
         let resume = self
             .awaiting
             .take()
             .expect("a walk resumes at the hop that named its read");
-        let value = self.fold_read(read);
         let mut frames = std::mem::take(&mut self.frames);
         let mut results = std::mem::take(&mut self.results);
-        let next = self.resume_hop(resume, value, &mut frames, &mut results);
+        let next = match resume.site {
+            HopSite::DeferredOperand {
+                evaluation,
+                index,
+                origin,
+            } => {
+                let step = self.dispatch.resume_deferred_read(evaluation, deliver);
+                self.deferred_operand_hop(
+                    step,
+                    resume.current,
+                    &resume.path,
+                    resume.index,
+                    resume.arm_read,
+                    origin,
+                    index,
+                    &mut results,
+                )
+            }
+            site => {
+                let value = self.fold_read(deliver());
+                self.resume_hop(
+                    HopResume { site, ..resume },
+                    value,
+                    &mut frames,
+                    &mut results,
+                )
+            }
+        };
         self.frames = frames;
         self.results = results;
         match next {
@@ -2369,8 +2493,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     }
                 },
             };
-            self.graph()
-                .intern_preserving_scope(base, SemanticNodeData::IndexedAccess { object, index })
+            self.graph().intern_preserving_scope(
+                base,
+                SemanticNodeData::IndexedAccess {
+                    object,
+                    index,
+                    origin: crate::semantic_query::IndexedAccessOrigin::Composed,
+                },
+            )
         })
     }
 
@@ -2686,6 +2816,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .any(|member| member.key.as_known().is_none())
             && absent(name)
             && name.element_access_equivalent().as_ref().is_none_or(absent)
+            && !matches!(name, PropertyKey::String(text) if view.withholds_key(text.as_ref()))
     }
 
     /// Record the step an indexed access takes through an index signature
@@ -3198,17 +3329,76 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         read.value
     }
 
+    /// Carry a hop standing at a deferred access on from its object's
+    /// evaluation `step`: the read the evaluation names next, the evaluation
+    /// retained in the hop ([`HopSite::DeferredOperand`]); or, once it
+    /// completed, the hop's indexed read of `index` off the evaluated
+    /// object.
+    #[allow(clippy::too_many_arguments)]
+    fn deferred_operand_hop(
+        &mut self,
+        step: super::evaluate::DeferredStep,
+        current: SemanticNodeId,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        index: usize,
+        arm_read: Option<ArmRead>,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+        ix: crate::semantic_query::IndexKey,
+        results: &mut Vec<SemanticNodeId>,
+    ) -> Option<HopRead> {
+        let outcome = match step {
+            super::evaluate::DeferredStep::Read(key, evaluation) => {
+                return Some(HopRead {
+                    key,
+                    resume: HopResume {
+                        current,
+                        path: path.clone(),
+                        index,
+                        arm_read,
+                        site: HopSite::DeferredOperand {
+                            evaluation,
+                            index: ix,
+                            origin,
+                        },
+                    },
+                });
+            }
+            super::evaluate::DeferredStep::Done(outcome) => outcome,
+        };
+        let object = match self.adopt_deferred_operand(outcome) {
+            QueryResult::Value(node) => node,
+            _ => {
+                results.push(self.opaque_miss());
+                return None;
+            }
+        };
+        Some(HopRead {
+            key: SemanticQueryKey::IndexedAccess {
+                base: object,
+                index: ix.clone(),
+                mode: ProjectionMode::Navigate,
+            },
+            resume: HopResume {
+                current,
+                path: path.clone(),
+                index,
+                arm_read,
+                site: HopSite::IndexedAccess {
+                    origin,
+                    object,
+                    index: ix,
+                },
+            },
+        })
+    }
+
     /// Adopt an operand evaluated by the shared heap worklist with the
     /// same partiality and positional guarantees as a nested query read.
-    fn evaluate_deferred_operand(
+    fn adopt_deferred_operand(
         &mut self,
-        node: SemanticNodeId,
-        context: crate::semantic_query::ProjectionReductionContext,
+        outcome: super::evaluate::EvaluateDeferredOutcome,
     ) -> QueryResult<SemanticNodeId> {
-        let output = self
-            .dispatch
-            .evaluate_deferred_semantic_node_with_context(node, context)
-            .into_query_build_output(self.dispatch);
+        let output = outcome.into_query_build_output(self.dispatch);
         self.cache_suppress |= output.cache_suppress;
         if output.completeness.is_partial() {
             match (&output.result, output.approximation) {
@@ -3768,6 +3958,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             SemanticNodeData::IndexedAccess {
                 object,
                 index: IndexKey::Computed(index),
+                origin: crate::semantic_query::IndexedAccessOrigin::Composed,
             },
         );
         let mut output = QueryBuildOutput::from((QueryResult::Value(carrier), self.fence.clone()))
@@ -3854,7 +4045,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// declared in, so the entry's key names that project. A path whose
     /// FIRST step reads a shared subject's wrapper arrives already rewritten
     /// to the demand project's wrapper
-    /// ([`ProjectSemanticDispatch::scope_apparent_wrapper_subject`]); a
+    /// (the wrapper stage of its entry's admission, `query_entry`); a
     /// later step under a shared subject, or a read with no demand site at
     /// all, is scoped to the demand, which the key cannot name — that entry
     /// stays out of the shared memo.
@@ -4834,7 +5025,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         },
                     });
                 }
-                SemanticNodeData::IndexedAccess { object, index: ix } => {
+                SemanticNodeData::IndexedAccess {
+                    object,
+                    index: ix,
+                    origin,
+                } => {
+                    let origin = *origin;
                     // Path-precision rule (mirrors the `InstantiationRef`
                     // intermediate-hop demotion above and `evaluate.rs`):
                     // this arm only runs inside `while index < path.len()`,
@@ -4847,27 +5043,28 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // TERMINAL segment runs in the caller's mode — that is
                     // handled after the loop by
                     // `resolve_expanded_terminal_carrier`.
-                    let mut object = *object;
+                    let object = *object;
                     let ix = ix.clone();
                     // Resolve nested operands on the shared evaluator's
                     // worklist. Re-entering one query per authored index
                     // otherwise makes a finite path consume native depth.
+                    // The evaluation is the hop's own sub-continuation: a
+                    // read it names stops the walk with the evaluation
+                    // retained, and the hop resumes it with the answer.
                     if matches!(self.graph().node_data(object).as_deref(), Some(SemanticNodeData::IndexedAccess { .. })) {
-                        object = match self.evaluate_deferred_operand(
+                        let step = self.dispatch.begin_deferred_read(
                             object,
                             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Navigate),
-                        ) {
-                            QueryResult::Value(node) => node,
-                            _ => {
-                                results.push(self.opaque_miss());
-                                return None;
-                            }
-                        };
+                            super::evaluate::DeferredEvaluationDemand::Shell,
+                        );
+                        return self.deferred_operand_hop(
+                            step, current, path, index, arm_read, origin, ix, results,
+                        );
                     }
                     return Some(HopRead {
                         key: SemanticQueryKey::IndexedAccess {
                             base: object,
-                            index: ix,
+                            index: ix.clone(),
                             mode: ProjectionMode::Navigate,
                         },
                         resume: HopResume {
@@ -4875,7 +5072,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             path: path.clone(),
                             index,
                             arm_read,
-                            site: HopSite::IndexedAccess,
+                            site: HopSite::IndexedAccess {
+                                origin,
+                                object,
+                                index: ix,
+                            },
                         },
                     });
                 }
@@ -6362,17 +6563,28 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 }
                 current = resolved;
             }
-            HopSite::IndexedAccess => {
+            HopSite::IndexedAccess {
+                origin,
+                object,
+                index: ix,
+            } => {
                 let QueryResult::Value(resolved) = value else {
                     results.push(self.opaque_miss());
                     return None;
                 };
+                let resolved = self
+                    .dispatch
+                    .absent_read_answer(origin, resolved, object, &ix, self.context)
+                    .unwrap_or(resolved);
                 if resolved == current {
                     results.push(self.preserve_deferred_path(current, &path[index..]));
                     self.record_intermediate(None);
                     return None;
                 }
                 current = resolved;
+            }
+            HopSite::DeferredOperand { .. } => {
+                unreachable!("a deferred operand's read is delivered to its evaluation")
             }
             HopSite::ConditionalTrue {
                 check,
@@ -9244,7 +9456,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             // arm) — and the RESOLVED value contributes its surface. An
             // access the query cannot close contributes nothing (the honest
             // unresolvable fallback).
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 let object = *object;
                 let index = index.clone();
                 drop(data);
@@ -9725,6 +9937,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     _ => self.graph().intern_node(SemanticNodeData::IndexedAccess {
                         object: source,
                         index: IndexKey::Computed(key_arg),
+                        origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                     }),
                 }
             } else {
@@ -10214,6 +10427,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         _ => self.graph().intern_node(SemanticNodeData::IndexedAccess {
                             object: source,
                             index: IndexKey::from_known(key.key.clone()),
+                            origin: crate::semantic_query::IndexedAccessOrigin::Composed,
                         }),
                     }
                 } else if value_expr_is_k_independent {
@@ -11986,14 +12200,67 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
-    /// A literal index absent from an exact closed domain, including the
-    /// apparent members the ordinary path reader adds. This proves absence
-    /// without asking the unavailable member for a value.
+    /// A literal index `base` proves absent, through the aliases and
+    /// declarations `base` names: every constituent of a composite lacks it
+    /// (`getPropertyOfType`), so the read is the checker's TS2339. A
+    /// constituent that does not settle to an object, a deferred operator or
+    /// an open type parameter among them, proves nothing.
     pub(super) fn indexed_access_proves_absence(
         &self,
         base: SemanticNodeId,
         index: &IndexKey,
         context: crate::semantic_query::ProjectionReductionContext,
+    ) -> bool {
+        let origin = self
+            .graph()
+            .node_scope(base)
+            .and_then(|scope| scope.canonical_file());
+        let mut pending = vec![base];
+        let mut seen = rustc_hash::FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let concrete = match self.unwrap_identity_carrier_for_relation(node) {
+                super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+                super::relation::IdentityCarrierUnwrap::Unresolvable => return false,
+            };
+            let data = self.graph().node_data(concrete);
+            match data.as_deref() {
+                Some(SemanticNodeData::Union(arms)) => {
+                    pending.extend(arms.iter().copied());
+                }
+                Some(SemanticNodeData::Intersection(arms)) => {
+                    pending.extend(arms.iter().copied());
+                }
+                Some(SemanticNodeData::Object(_)) => {
+                    if !self.object_proves_index_absent(concrete, index, context, origin.clone()) {
+                        return false;
+                    }
+                }
+                // `unknown` has no property at all.
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => {}
+                _ => match self
+                    .normalize_node_for_structural_fact_demand(concrete, context)
+                    .into_complete_node()
+                {
+                    Some(resolved) if resolved != concrete => pending.push(resolved),
+                    _ => return false,
+                },
+            }
+        }
+        true
+    }
+
+    /// A literal index absent from an exact closed domain, including the
+    /// apparent members the ordinary path reader adds. This proves absence
+    /// without asking the unavailable member for a value.
+    fn object_proves_index_absent(
+        &self,
+        base: SemanticNodeId,
+        index: &IndexKey,
+        context: crate::semantic_query::ProjectionReductionContext,
+        origin: Option<verter_type_expr::OwnedStr>,
     ) -> bool {
         let key = match index {
             IndexKey::String(name) => PropertyKey::String(verter_type_expr::OwnedStr::from(name)),
@@ -12018,7 +12285,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         walker.origin_file = self
             .graph()
             .node_scope(base)
-            .and_then(|scope| scope.canonical_file());
+            .and_then(|scope| scope.canonical_file())
+            .or(origin);
         self.probe_optional(|| {
             matches!(
                 walker.apparent_member_surface(base, view, &key),

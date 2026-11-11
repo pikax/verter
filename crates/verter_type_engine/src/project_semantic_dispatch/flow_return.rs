@@ -46,7 +46,8 @@ use super::flow_return_callee::{
     UtilityClause,
 };
 use super::flow_return_products::{
-    FlowBindingLayer, FlowFrameProducts as FlowProductStore, FlowWriteObservation,
+    FlowBindingLayer, FlowFrameExecution, FlowFrameProducts as FlowProductStore,
+    FlowWriteObservation, SharedFlowExecution,
 };
 use super::flow_solve::{FlowPartialReason, FlowSolveOutcome, NoValueFlowResult};
 use super::walk::QueryBuildOutput;
@@ -223,7 +224,6 @@ pub(crate) fn degradation_reason(degradation: FlowReturnDegradation) -> PartialR
         | FlowReturnDegradation::UnresolvedValue
         | FlowReturnDegradation::UnrepresentableCallee
         | FlowReturnDegradation::ContextSensitiveInference
-        | FlowReturnDegradation::AbsentReceiverMember
         | FlowReturnDegradation::FailedBindingInitializer => PartialReason::FlowReturnUninferred,
         FlowReturnDegradation::NonCallableBinding
         | FlowReturnDegradation::UnappliedWriteEffect
@@ -566,6 +566,7 @@ pub mod flow_admission_fault_injection {
     impl ProductObservation {
         pub(crate) fn capture(
             products: &super::super::flow_return_products::FlowFrameProducts,
+            frame: &super::super::flow_return_products::FlowFrameExecution,
             evidence: Option<&super::super::flow_products::FlowProductEvidence>,
             report: super::super::dispatch_txn::flow_obligation_state::FlowDischargeReport,
         ) -> Self {
@@ -573,8 +574,9 @@ pub mod flow_admission_fault_injection {
             use super::super::flow_solve::FlowDomain;
             Self {
                 products: products
-                    .state
-                    .ordered_entries()
+                    .read(frame)
+                    .into_iter()
+                    .flat_map(|read| read.ordered_entries())
                     .map(|(key, value)| {
                         let value = match value {
                             FlowProductValue::ReachingValue(value) => ObservedProduct::Definitions(
@@ -600,9 +602,7 @@ pub mod flow_admission_fault_injection {
                         (key.domain(), key.node().index(), value)
                     })
                     .collect(),
-                executed: products
-                    .execution
-                    .borrow()
+                executed: frame
                     .execution
                     .selected_sites()
                     .flat_map(|site| {
@@ -952,33 +952,6 @@ struct FlowEvaluationOutcome {
     /// THIS evaluation to the serving store and request generation. The
     /// finalization driver refuses anything else as a typed partial.
     provenance: super::dispatch_txn::flow_obligation_state::FlowEvaluationProvenance,
-}
-
-/// The §3.4 materialised point set a FAILED frame evaluation records.
-///
-/// A hold-only [`FlowReturnFailure::EmptyCycle`] is the one failure the
-/// component discharge RESURRECTS to `Complete`
-/// (`discharge_flow_component_to_fixed_point` admits exactly `Complete`
-/// and `EmptyCycle`): its value IS the join of its hold targets, and the
-/// point that join serves is the frame's own demand point. The
-/// resurrection copies only the outcome, so an empty set here would
-/// publish an entry `cached_satisfies` (an `.any(...)` over the recorded
-/// set) can never satisfy — a candidate holding a slot, a reverse-index
-/// registration and a FIFO budget admission while being permanently
-/// unreadable.
-///
-/// Every OTHER failure is a real no-value outcome that never publishes,
-/// so it records nothing.
-fn failure_materialized_set(
-    failure: FlowReturnFailure,
-    key: &FlowReturnKey,
-) -> crate::semantic_query::demand::MaterializedSet {
-    use crate::semantic_query::demand::{MaterializedPoint, MaterializedSet};
-    if matches!(failure, FlowReturnFailure::EmptyCycle) {
-        MaterializedSet::single(MaterializedPoint::new(key.demand.point.clone()))
-    } else {
-        MaterializedSet::empty()
-    }
 }
 
 /// The frame-pop result.
@@ -3333,6 +3306,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Mark every inferred return from the in-flight `target` inward as
+    /// requiring itself, as `pushTypeResolution` marks the resolution stack.
+    pub(super) fn mark_return_cycle(&self, target: &FlowReturnKey) {
+        let mut txn = self.dispatch_txn.borrow_mut();
+        let Some(from) = txn
+            .reentry()
+            .find(&ObligationIdentity::FlowReturn(target.clone()))
+        else {
+            return;
+        };
+        let members: Vec<FlowReturnKey> = txn.reentry().flow_returns_from(from).cloned().collect();
+        txn.circular_returns.extend(members);
+    }
+
     fn execute_flow_return_validated(&self, key: FlowReturnKey) -> FlowReturnStep {
         // Per-request dispatch-mask trace, mirroring the cold-build choke
         // point: an INLINE flow evaluation (under an open relation or flow
@@ -5303,6 +5290,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 knobs.product_executions.lock().unwrap().push(
                     flow_admission_fault_injection::ProductObservation::capture(
                         witness.products,
+                        &witness.frame_execution.borrow(),
                         witness.product_evidence,
                         report.clone(),
                     ),
@@ -5787,14 +5775,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             || self_cycle;
         // The ONE discharge: every flow member and the root reach the
         // equation fixed point `result_i = seed_i ∪ (⋃ hold targets)`
-        // together — an EmptyCycle with no discharged target stays
-        // `ReturnOnly` and poisons the component.
+        // together.
         let mut outcome = outcome;
         // The mixed component (this root included, when it has holds or
         // drained members) discharges to ONE joint fixed point through
         // the shared close helper: a SELF-cycle converges to its seed,
-        // a hold-only empty cycle resurrects on its targets' admitted
-        // returns, and the call members' replay + return equation
+        // and the call members' replay + return equation
         // iterates against the flow side's current values.
         let replay_substitution: super::dispatch_txn::ProvisionalSubstitution = relation_members
             .iter()
@@ -6167,8 +6153,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// the ONE discharge every close path (flow root, relation root) runs.
     /// Every entry's admitted result is the least fixed point of
     /// `result_i = seed_i ∪ (⋃ hold targets' results)`: a Complete
-    /// outcome IS the member's concrete seed join; a hold-only EmptyCycle
-    /// outcome has no seed. An entry whose hold targets cannot all
+    /// outcome IS the member's concrete seed join. An entry whose hold targets cannot all
     /// discharge (a target outside the component, or a component with no
     /// concrete seed) stays degraded — the whole tagged component then
     /// refuses admission.
@@ -6363,21 +6348,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let Some(result) = discharged else {
                 continue;
             };
-            // ONLY a hold-only empty cycle is resurrectable. Its "failure"
-            // is an artefact of evaluation order — it genuinely has no
-            // seed of its own and its value IS the join of its hold
-            // targets. Every OTHER failure kind is a real no-value
-            // outcome, and stamping it `Complete` from its targets'
-            // results would publish a value the member's own evaluation
-            // never produced.
-            if !matches!(
-                entry.outcome,
-                FlowReturnPendingOutcome::EvaluatedValue(_)
-                    | FlowReturnPendingOutcome::NoValue {
-                        failure: FlowReturnFailure::EmptyCycle,
-                        ..
-                    }
-            ) {
+            // A failure is a real no-value outcome: stamping it `Complete`
+            // from its targets' results would publish a value the member's
+            // own evaluation never produced.
+            if !matches!(entry.outcome, FlowReturnPendingOutcome::EvaluatedValue(_)) {
                 continue;
             }
             // The widened value is a NEW value, so its verdict is
@@ -7243,11 +7217,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return degraded(FlowReturnFailure::Unresolved, self_roots);
             }
         };
-        let Ok(mut products) = FlowProductStore::new(execution, &bound) else {
+        let Ok((mut products, frame_execution)) = FlowProductStore::new(execution, &bound) else {
             return degraded(FlowReturnFailure::Unresolved, self_roots);
         };
+        let frame_execution: SharedFlowExecution =
+            std::rc::Rc::new(std::cell::RefCell::new(frame_execution));
         seed_selected_parameters(
             &mut products,
+            &mut frame_execution.borrow_mut(),
             &ir.params,
             &params,
             &ir.bindings,
@@ -7281,8 +7258,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::semantic_query::checker_policy::TupleSplicePosition::Expression,
         );
         let value_observations = crate::request_context::ColdComputeCompletenessScope::enter();
-        let mut evaluator = FlowEvaluator {
-            dispatch: &flow_cx,
+        let mut evaluator_state = FlowEvaluatorState {
             call_receivers: rustc_hash::FxHashMap::default(),
             call_arguments: Arc::clone(&ir.call_arguments),
             self_slot: Some(key),
@@ -7296,6 +7272,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             canonical,
             owner,
             nullability: key.context.policy.nullability,
+            circular_return: std::cell::Cell::new(false),
+            frame_declares_return: ir.declared_return.is_some(),
+            bare_self_return: None,
             no_implicit_any: key.context.policy.no_implicit_any,
             use_unknown_in_catch_variables: key.context.policy.use_unknown_in_catch_variables,
             no_implicit_this: key.context.policy.no_implicit_this,
@@ -7312,6 +7291,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map(|carrier| Arc::clone(&carrier.plan)),
             anchor: frame_anchor,
             products,
+            frame_execution: std::rc::Rc::clone(&frame_execution),
             narrowing_writes: Vec::new(),
             observations: BodyCompletionObservations::none(),
             member_filter,
@@ -7365,6 +7345,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             inherits_contextual_object_receiver: false,
             object_first_pass_context: ObjectFirstPassContext::default(),
         };
+        let mut evaluator = FlowEvaluator::over(&flow_cx, &mut evaluator_state);
         evaluator.bind_explicit_this(ir.declared_this.as_ref());
         let holds;
         let yield_contributions;
@@ -7379,6 +7360,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let frame_products;
         let inferred_predicate;
         let checker_diagnostics;
+        let circular_return;
         let independent_members;
         let independent_returns;
         let constructive_return;
@@ -7386,28 +7368,43 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (contributors, body_falls_through) = {
             evaluator.seed_hoisted_var_declarations(&ir.body);
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
+            evaluator.report_receiver_reads(ir.receiver_reads.as_ref());
             evaluator.promote_pending_statement_gap();
-            inferred_predicate = evaluator.inferred_predicate;
+            inferred_predicate = evaluator.st.inferred_predicate;
+            circular_return = (self.take_return_cycle(key) || evaluator.st.circular_return.get())
+                && ir.declared_return.is_none();
+            if circular_return {
+                let occurrence = entry
+                    .report_name()
+                    .and_then(|name| evaluator.circular_return_occurrence(name));
+                if let Some(occurrence) = occurrence {
+                    evaluator.record_checker_diagnostic(occurrence);
+                }
+            }
             checker_diagnostics = {
-                let mut occurrences = std::mem::take(&mut evaluator.checker_diagnostics);
+                let mut occurrences = std::mem::take(&mut evaluator.st.checker_diagnostics);
                 occurrences.sort();
                 occurrences
             };
-            holds = std::mem::take(&mut evaluator.holds);
-            yield_contributions = std::mem::take(&mut evaluator.yield_contributions);
-            observations = evaluator.observations;
-            independent_members = evaluator.independent_members;
-            independent_returns = evaluator.independent_returns;
+            holds = std::mem::take(&mut evaluator.st.holds);
+            yield_contributions = std::mem::take(&mut evaluator.st.yield_contributions);
+            observations = evaluator.st.observations;
+            independent_members = evaluator.st.independent_members;
+            independent_returns = evaluator.st.independent_returns;
             constructive_return = outcome
                 .as_ref()
                 .ok()
                 .filter(|values| values.len() == 1)
-                .and_then(|values| evaluator.constructive_values.get(&values[0].node))
+                .and_then(|values| evaluator.st.constructive_values.get(&values[0].node))
                 .cloned();
-            constructed_values = std::mem::take(&mut evaluator.constructive_values);
-            call_evidence = std::mem::take(&mut evaluator.call_evidence);
-            executed_walk = std::mem::take(&mut evaluator.executed_walk);
-            let finished = evaluator.products.finish(evaluator.plan.as_deref());
+            constructed_values = std::mem::take(&mut evaluator.st.constructive_values);
+            call_evidence = std::mem::take(&mut evaluator.st.call_evidence);
+            executed_walk = std::mem::take(&mut evaluator.st.executed_walk);
+            let finished = evaluator
+                .st
+                .frame_execution
+                .borrow_mut()
+                .finish(evaluator.st.plan.as_deref());
             products_finished = finished.is_ok();
             product_budget_exceeded = match &finished {
                 Err(FlowProductFailure::BudgetExceeded(exceeded)) => Some(*exceeded),
@@ -7423,15 +7420,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             frame_product_evidence = finished.ok().flatten();
-            degradation = evaluator.degradation;
-            frame_bindings = evaluator.bindings.clone();
-            frame_products = evaluator.products.clone();
+            degradation = evaluator.st.degradation;
+            frame_bindings = evaluator.st.bindings.clone();
+            frame_products = evaluator.st.products.clone();
             // Fold in every cross-file heritage hop the `instanceof`
             // narrowing observed (see the field doc on
             // `FlowEvaluator::heritage_self_roots`): a `class_heritage_bases`
             // read is `ReturnOnly` and records no fact of its own, so those
             // reads must join the frame's published self-roots explicitly.
-            for root in std::mem::take(&mut evaluator.heritage_self_roots) {
+            for root in std::mem::take(&mut evaluator.st.heritage_self_roots) {
                 if !self_roots.contains(&root) {
                     self_roots.push(root);
                 }
@@ -7541,11 +7538,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             frame_product_evidence
         };
-        let contributors = if executed_walk.local_aborted && contributors.is_ok() {
-            Err(FlowReturnFailure::Unresolved)
-        } else {
-            contributors
-        };
+        let contributors =
+            if executed_walk.local_aborted && contributors.is_ok() && !circular_return {
+                Err(FlowReturnFailure::Unresolved)
+            } else {
+                contributors
+            };
         let witness = FlowExecutionWitness {
             executed_selection: executed_walk.completed_selection(planned.selection()),
             skeleton: &skeleton,
@@ -7554,6 +7552,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             bindings: &frame_bindings,
             product_evidence: frame_product_evidence.as_ref(),
             products: &frame_products,
+            frame_execution: &frame_execution,
             constructed_values: &constructed_values,
         };
         let contributors = match contributors {
@@ -7566,20 +7565,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                     self_roots,
                     holds,
-                    materialized: failure_materialized_set(failure, key),
-                    fresh_seed: matches!(failure, FlowReturnFailure::EmptyCycle),
-                    // A hold-only empty cycle DID evaluate its whole slice
-                    // — the component discharge resurrects its value from
-                    // the join — so its discharge report is real evidence.
-                    // Every other failure truncated the evaluation: no
-                    // report.
-                    discharge: if matches!(failure, FlowReturnFailure::EmptyCycle) {
-                        demand_carrier
-                            .as_ref()
-                            .map(|carrier| self.flow_evaluation_discharge_report(carrier, &witness))
-                    } else {
-                        None
-                    },
+                    materialized: crate::semantic_query::demand::MaterializedSet::empty(),
+                    fresh_seed: false,
+                    // A failure truncated the evaluation: no report.
+                    discharge: None,
                     provenance,
                 };
             }
@@ -7612,7 +7601,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let result = self
                     .attach_inferred_predicate(result, inferred_predicate)
                     .with_checker_diagnostics(checker_diagnostics.into());
-                let result = if whole_return_point {
+                let result = if circular_return {
+                    // The error type stands for the whole return, whatever
+                    // the body's other returns and its form.
+                    let recovery = self.graph().intern_node(
+                        crate::semantic_query::checker_policy::checker_error_type(
+                            crate::semantic_query::checker_policy::circular_return(),
+                        ),
+                    );
+                    result
+                        .with_return_type(self.graph().store(), recovery)
+                        .without_function_kind()
+                } else if whole_return_point {
                     self.attach_function_kind_wrap(
                         result,
                         skeleton.kind,
@@ -7633,20 +7633,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                     self_roots,
                     holds,
-                    materialized: failure_materialized_set(failure, key),
-                    fresh_seed: matches!(failure, FlowReturnFailure::EmptyCycle),
-                    // A hold-only empty cycle DID evaluate its whole slice
-                    // — the component discharge resurrects its value from
-                    // the join — so its discharge report is real evidence.
-                    // Every other failure truncated the evaluation: no
-                    // report.
-                    discharge: if matches!(failure, FlowReturnFailure::EmptyCycle) {
-                        demand_carrier
-                            .as_ref()
-                            .map(|carrier| self.flow_evaluation_discharge_report(carrier, &witness))
-                    } else {
-                        None
-                    },
+                    materialized: crate::semantic_query::demand::MaterializedSet::empty(),
+                    fresh_seed: false,
+                    // A failure truncated the evaluation: no report.
+                    discharge: None,
                     provenance,
                 };
             }
@@ -8803,7 +8793,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 arms.push(graph.intern_node(SemanticNodeData::Primitive(primitive)));
             } else {
-                return Err(FlowReturnFailure::EmptyCycle);
+                // Every return is the function calling itself: the checker
+                // skips them all and the return is `never`.
+                arms.push(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)));
             }
         }
         // TypeScript's return-position reunion applies SUBTYPE REDUCTION
@@ -10741,6 +10733,8 @@ use call_stack::{CallArgumentWait, CallDrive, CallFunctionWait, CallInFlight, Ca
 mod call_effects;
 #[path = "flow_return_contextual.rs"]
 mod contextual;
+#[path = "flow_return_recovery.rs"]
+mod recovery;
 use contextual::ContextualSignature;
 #[path = "flow_return_arm_index.rs"]
 mod arm_index;
@@ -11074,6 +11068,34 @@ pub(super) trait FlowDemandDriver {
         canonical: &str,
         call_span: verter_span::Span,
     ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence>;
+    /// One type as the checker prints it in a message; `None` when its
+    /// print is not known exactly.
+    fn print_checker_type(&self, node: SemanticNodeId) -> Option<String>;
+    /// The checker's print of `node`, cut where its own abbreviation model
+    /// runs out.
+    fn print_checker_type_clipped(&self, node: SemanticNodeId) -> String;
+    /// Whether the global `Object` type every object reads declares `name`,
+    /// or does not settle.
+    fn global_object_declares(&self, name: &str, canonical: &str) -> bool;
+    /// Whether the program declares the global wrapper the primitive `node`
+    /// reads its members from.
+    fn apparent_wrapper_settles(&self, node: SemanticNodeId, canonical: &str) -> bool;
+    /// Whether the class reads from its declarations as having no member
+    /// `name`.
+    fn class_proves_member_absent(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+    ) -> bool;
+    /// Mark every return from the in-flight `target` inward as requiring
+    /// itself.
+    fn mark_return_cycle(&self, target: &FlowReturnKey);
+    /// Whether the return `key` was marked as requiring itself; takes the
+    /// mark.
+    fn take_return_cycle(&self, key: &FlowReturnKey) -> bool;
     /// Spread-normalise the tuple an array literal produces.
     fn normalize_expression_tuple_spread(
         &self,
@@ -11095,6 +11117,12 @@ pub(super) trait FlowDemandDriver {
         canonical: &str,
     ) -> Option<SemanticNodeId>;
     fn contextual_carrier_view(&self, node: SemanticNodeId) -> SemanticNodeId;
+    fn contextual_error_type(&self, node: SemanticNodeId) -> Option<SemanticNodeId>;
+    fn contextual_undeclared_names(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+    ) -> Vec<crate::semantic_query::CheckerDiagnosticOccurrence>;
     fn contextual_object_member(
         &self,
         state: &mut super::call_resolve::ContextualCallState,
@@ -11588,7 +11616,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         ResolveCallStep,
         Option<super::call_resolve::DeclaredCallResult>,
     ) {
-        ProjectSemanticDispatch::execute_contextual_call(self, key, state)
+        // The call computation a non-blocking evaluator advances, driven
+        // in place.
+        let mut call = super::helper_continuation::CallRead::begin(key, std::mem::take(state));
+        let answer = ProjectSemanticDispatch::drive_call_in_place(self, &mut call);
+        *state = call.into_contextual();
+        answer
     }
     fn resume_contextual_call(
         &self,
@@ -11788,6 +11821,36 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence> {
         ProjectSemanticDispatch::bind_checker_recovery(self, node, canonical, call_span)
     }
+    fn print_checker_type(&self, node: SemanticNodeId) -> Option<String> {
+        self.print_diagnostic_type(node)
+    }
+    fn print_checker_type_clipped(&self, node: SemanticNodeId) -> String {
+        self.print_diagnostic_type_clipped(node)
+    }
+    fn global_object_declares(&self, name: &str, canonical: &str) -> bool {
+        ProjectSemanticDispatch::global_object_declares(self, name, canonical)
+    }
+    fn apparent_wrapper_settles(&self, node: SemanticNodeId, canonical: &str) -> bool {
+        ProjectSemanticDispatch::apparent_wrapper_settles(self, node, canonical)
+    }
+    fn class_proves_member_absent(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+    ) -> bool {
+        ProjectSemanticDispatch::class_proves_member_absent(
+            self, canonical, owner, class, args, name,
+        )
+    }
+    fn mark_return_cycle(&self, target: &FlowReturnKey) {
+        ProjectSemanticDispatch::mark_return_cycle(self, target);
+    }
+    fn take_return_cycle(&self, key: &FlowReturnKey) -> bool {
+        self.dispatch_txn.borrow_mut().circular_returns.remove(key)
+    }
     fn normalize_expression_tuple_spread(
         &self,
         elements: &[crate::semantic_query::TupleElement],
@@ -11817,6 +11880,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     }
     fn contextual_carrier_view(&self, node: SemanticNodeId) -> SemanticNodeId {
         ProjectSemanticDispatch::contextual_carrier_view(self, node)
+    }
+    fn contextual_error_type(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        ProjectSemanticDispatch::contextual_error_type(self, node)
+    }
+    fn contextual_undeclared_names(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+    ) -> Vec<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        ProjectSemanticDispatch::contextual_undeclared_names(self, node, canonical)
     }
     fn contextual_object_member(
         &self,
@@ -12669,6 +12742,35 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         self.driver
             .bind_checker_recovery(node, canonical, call_span)
     }
+    fn print_checker_type(&self, node: SemanticNodeId) -> Option<String> {
+        self.driver.print_checker_type(node)
+    }
+    fn print_checker_type_clipped(&self, node: SemanticNodeId) -> String {
+        self.driver.print_checker_type_clipped(node)
+    }
+    fn global_object_declares(&self, name: &str, canonical: &str) -> bool {
+        self.driver.global_object_declares(name, canonical)
+    }
+    fn apparent_wrapper_settles(&self, node: SemanticNodeId, canonical: &str) -> bool {
+        self.driver.apparent_wrapper_settles(node, canonical)
+    }
+    fn class_proves_member_absent(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        args: &[SemanticNodeId],
+        name: &str,
+    ) -> bool {
+        self.driver
+            .class_proves_member_absent(canonical, owner, class, args, name)
+    }
+    fn mark_return_cycle(&self, target: &FlowReturnKey) {
+        self.driver.mark_return_cycle(target);
+    }
+    fn take_return_cycle(&self, key: &FlowReturnKey) -> bool {
+        self.driver.take_return_cycle(key)
+    }
     fn normalize_expression_tuple_spread(
         &self,
         elements: &[crate::semantic_query::TupleElement],
@@ -12699,6 +12801,16 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn contextual_carrier_view(&self, node: SemanticNodeId) -> SemanticNodeId {
         self.driver.contextual_carrier_view(node)
+    }
+    fn contextual_error_type(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        self.driver.contextual_error_type(node)
+    }
+    fn contextual_undeclared_names(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+    ) -> Vec<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        self.driver.contextual_undeclared_names(node, canonical)
     }
     fn contextual_object_member(
         &self,
@@ -13000,9 +13112,25 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
 /// with them.
 type SharedEvaluationMemo<K, V> = std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashMap<K, V>>>;
 
-/// The per-frame evaluator state.
-struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
+/// One frame's evaluator as it advances: the driver its reads go through,
+/// lent for this advancement, over the frame's own evaluator state. The
+/// state names no driver, so it outlives any one advancement; the driver is
+/// supplied again each time the frame advances.
+struct FlowEvaluator<'s, 'd, 'b, D: FlowDemandDriver> {
     dispatch: &'d FlowCx<'d, D>,
+    st: &'s mut FlowEvaluatorState<'b>,
+}
+
+impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
+    /// Advance `st` with `dispatch` as its driver.
+    fn over(dispatch: &'d FlowCx<'d, D>, st: &'s mut FlowEvaluatorState<'b>) -> Self {
+        Self { dispatch, st }
+    }
+}
+
+/// The per-frame evaluator state: everything a frame's evaluation keeps
+/// between its steps, and no driver.
+struct FlowEvaluatorState<'b> {
     /// The receiver value of a member call on a value the indexed program
     /// cannot evaluate (a call's result: `b.m().m()`), by the call's whole
     /// span — every call of a chain starts where the chain does, so only
@@ -13071,7 +13199,7 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// of one root evaluation and dropped with it. Request-scoped: it holds
     /// only unions this evaluation's guards narrowed.
     arm_indexes: SharedEvaluationMemo<SemanticNodeId, std::rc::Rc<arm_index::ArmIndex>>,
-    canonical: &'d str,
+    canonical: &'b str,
     owner: verter_type_expr::TopLevelOwnerId,
     /// The `null` / `undefined` algebra of the function's own project
     /// (its key's policy; a nested function value inherits its enclosing
@@ -13109,6 +13237,11 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// function-scoped subjects survive a lexical scope close because the
     /// close replays exactly the scope's own declaration shadows.
     products: FlowProductStore,
+    /// The product authority every snapshot of this frame advances under —
+    /// its declaration bank, budget, evidence and write sequence. Snapshots
+    /// never hold it; a nested evaluator reaches its enclosing frame's
+    /// through [`EnclosingFrame::frame_execution`].
+    frame_execution: SharedFlowExecution,
     /// The guard facts this frame has WRITTEN, in write order — the
     /// establishment ledger a scoped guard's mark truncates and a
     /// union-of-facts guard reads its per-disjunct contribution from.
@@ -13157,6 +13290,17 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// modeled-`any` substitution for a value it could not model). Rides
     /// the SUCCESS carrier; a degraded result is `ReturnOnly`.
     degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+    /// Whether this frame's return requires itself: the checker's TS7023,
+    /// whose return is its error type whatever else the body returns.
+    circular_return: std::cell::Cell<bool>,
+    /// Whether the function declares its return, which is then never
+    /// inferred from the body.
+    frame_declares_return: bool,
+    /// The call a `return` statement holds alone, when it calls the function
+    /// by its own name: the checker skips that return
+    /// (`checkAndAggregateReturnExpressionTypes`), every other re-entry is
+    /// circular.
+    bare_self_return: Option<verter_span::Span>,
     /// `noImplicitAny` of the function's own project — whether an
     /// unannotated `let` / `var` of the auto-typed form is auto-typed or
     /// declared as its initializer's widened type.
@@ -13480,6 +13624,9 @@ struct FlowExecutionWitness<'w> {
     /// product evidence its own bindings rest on.
     product_evidence: Option<&'w FlowProductEvidence>,
     products: &'w FlowProductStore,
+    /// The product authority `products` was produced under, sealed.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    frame_execution: &'w SharedFlowExecution,
     /// Successful finite class construction certificates, tied to actual nodes.
     constructed_values: &'w rustc_hash::FxHashMap<SemanticNodeId, ConstructiveValue>,
 }
@@ -13964,6 +14111,7 @@ pub fn standing_narrowings(
 /// parameter input as definition provenance; no later initializer is claimed.
 fn seed_selected_parameters(
     products: &mut FlowProductStore,
+    frame: &mut FlowFrameExecution,
     parameters: &[verter_session_query::flow::slice::SliceParam],
     values: &[SemanticNodeId],
     bindings: &FlowBindingMap,
@@ -13997,9 +14145,10 @@ fn seed_selected_parameters(
         };
         let subject = FlowProductSubject::Local(binding);
         if binding == *input {
-            products.set_declared_type(&subject, Some(*value));
+            products.set_declared_type(frame, &subject, Some(*value));
         }
         products.bind_at(
+            frame,
             &subject,
             DefiniteAssignmentProduct::assigned(),
             ReachingTypeProduct::of(*value),
@@ -14064,11 +14213,12 @@ fn narrowing_facts_of(products: &FlowProductStore) -> Vec<FlowNarrowingFact> {
 /// are both in canonical fact order, so that check is one merge walk.
 fn reestablish_narrowings(
     products: &mut FlowProductStore,
+    frame: &mut FlowFrameExecution,
     root: &FlowProductSubject,
     facts: &[FlowNarrowingFact],
 ) {
     let Some(identity) = products.identity(root) else {
-        products.remove(super::flow_solve::FlowDomain::Narrowing, root);
+        products.remove(frame, super::flow_solve::FlowDomain::Narrowing, root);
         return;
     };
     let standing: &[FlowNarrowingFact] = products
@@ -14106,7 +14256,7 @@ fn reestablish_narrowings(
             fresh_literal: fact.fresh_literal,
         }))
         .collect();
-    products.set_narrowing(root, NarrowingProduct::new(merged));
+    products.set_narrowing(frame, root, NarrowingProduct::new(merged));
 }
 
 /// Record `path` under `root` narrowing to `node` in `products` — the ONE
@@ -14127,6 +14277,7 @@ fn numeric_member_name(name: &str) -> Option<f64> {
 
 fn push_narrowing_into(
     products: &mut FlowProductStore,
+    frame: &mut FlowFrameExecution,
     root: &FlowProductSubject,
     path: &Arc<[Arc<str>]>,
     narrowed: FlowNarrowed,
@@ -14147,7 +14298,7 @@ fn push_narrowing_into(
         binding: match products.identity(root) {
             Some(identity) => identity,
             None => {
-                products.remove(super::flow_solve::FlowDomain::Narrowing, root);
+                products.remove(frame, super::flow_solve::FlowDomain::Narrowing, root);
                 return;
             }
         },
@@ -14155,7 +14306,7 @@ fn push_narrowing_into(
         narrowed_to: narrowed,
         fresh_literal,
     });
-    products.set_narrowing(root, NarrowingProduct::new(facts));
+    products.set_narrowing(frame, root, NarrowingProduct::new(facts));
 }
 
 /// The outcome of evaluating ONE POSITION — a sub-expression, or one call
@@ -14291,6 +14442,9 @@ struct EnclosingFrame<'b> {
     function: verter_session_query::function_program::FunctionProgramKey,
     binder_env: &'b FlowBinderEnv,
     products: FlowProductStore,
+    /// The product authority `products` advances under: a capture
+    /// authority the nested evaluator lowers installs into its bank.
+    frame_execution: SharedFlowExecution,
     outside: usize,
     outer: EnclosingFrames<'b>,
 }
@@ -14302,11 +14456,13 @@ impl<'b> EnclosingFrames<'b> {
         function: verter_session_query::function_program::FunctionProgramKey,
         binder_env: &'b FlowBinderEnv,
         products: FlowProductStore,
+        frame_execution: SharedFlowExecution,
     ) -> Self {
         Self(Some(std::rc::Rc::new(EnclosingFrame {
             function,
             binder_env,
             products,
+            frame_execution,
             outside: self.len(),
             outer: self.clone(),
         })))
@@ -14588,6 +14744,30 @@ enum ObjectEvalStep<'e> {
 }
 
 /// One link of an optional chain read by [`FlowEvaluator::optional_chain_link`].
+/// Whether an object-literal member's function declares its return.
+fn member_declares_return(member: &verter_session_query::flow::slice::SliceObjectMember) -> bool {
+    matches!(
+        member.value,
+        verter_session_query::flow::slice::SliceExpr::NestedFunctionValue {
+            has_declared_return: true,
+            ..
+        }
+    )
+}
+
+/// Where one link of an optional chain stands.
+#[derive(Clone, Copy)]
+struct OptionalLinkSite {
+    /// The link's ordinal in its chain.
+    index: usize,
+    /// The link's member name, when it has one.
+    name_span: Option<verter_session_query::flow::frame_span::FrameSpan>,
+    /// Whether the link reads an object literal's own `this`: the chain's
+    /// first link off that `this`. A later link reads a member's type,
+    /// which the checker prints without the literal.
+    reads_own_literal: bool,
+}
+
 enum OptionalLink {
     /// The link's read, off `base` — the value the link was read from,
     /// after its own nullish strip.
@@ -14613,7 +14793,7 @@ enum NullishStrip {
     AllNullish,
 }
 
-impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
+impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     fn bind_explicit_this(
         &mut self,
         declared: Option<&verter_session_query::flow::slice::GatedType>,
@@ -14621,13 +14801,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let Some(declared) = declared else {
             return;
         };
-        let binder = if signature_answer_is_frame_shadowed(self.dispatch, self.binder_env, declared)
-        {
-            self.unmodeled_position()
-        } else {
-            self.lower_body_type(declared.ty())
-        };
-        self.receiver = Some(std::rc::Rc::new(
+        let binder =
+            if signature_answer_is_frame_shadowed(self.dispatch, self.st.binder_env, declared) {
+                self.unmodeled_position()
+            } else {
+                self.lower_body_type(declared.ty())
+            };
+        self.st.receiver = Some(std::rc::Rc::new(
             class_expression::ClassReceiver::of_type(binder, Some(binder)).explicit(),
         ));
     }
@@ -14638,25 +14818,26 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         #[cfg(any(test, feature = "test-support"))]
         UNION_CONSTRUCTION_MEMBERS.with(|count| count.set(count.get() + members.len()));
         self.dispatch
-            .intern_normalized_union(members, self.nullability)
+            .intern_normalized_union(members, self.st.nullability)
     }
 
     /// The flow policy of the function's own project, which a nested
     /// function's content lowers under.
     fn policy(&self) -> verter_session_query::flow::policy::FlowReturnPolicy {
         verter_session_query::flow::policy::FlowReturnPolicy {
-            nullability: self.nullability,
-            no_implicit_any: self.no_implicit_any,
-            use_unknown_in_catch_variables: self.use_unknown_in_catch_variables,
-            no_implicit_this: self.no_implicit_this,
+            nullability: self.st.nullability,
+            no_implicit_any: self.st.no_implicit_any,
+            use_unknown_in_catch_variables: self.st.use_unknown_in_catch_variables,
+            no_implicit_this: self.st.no_implicit_this,
         }
     }
 
     /// Promote the first statement-level gap only when evaluation found no
     /// concrete degradation.
     fn promote_pending_statement_gap(&mut self) {
-        if self.degradation.is_none() {
-            self.degradation = self
+        if self.st.degradation.is_none() {
+            self.st.degradation = self
+                .st
                 .pending_statement_gap
                 .map(crate::semantic_query::FlowReturnDegradation::FlowGap);
         }
@@ -14732,7 +14913,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         outcome: Positional<SemanticNodeId>,
         holds_before: usize,
     ) -> SemanticNodeId {
-        self.holds.truncate(holds_before);
+        self.st.holds.truncate(holds_before);
         match outcome {
             Positional::Value(node) => node,
             Positional::Hold | Positional::Unmodeled => self.unmodeled_position(),
@@ -14788,7 +14969,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .collect();
             frame.entry_order =
                 self.dispatch
-                    .contextual_object_order(state, &names, self.canonical);
+                    .contextual_object_order(state, &names, self.st.canonical);
             frame.inference = Some(state);
             self.drive_object_literal(&mut frame)
         } else {
@@ -14808,19 +14989,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         offset: u32,
         contextual: Option<SemanticNodeId>,
     ) -> Positional<SemanticNodeId> {
-        let enclosing = self.object_first_pass_context;
-        self.object_first_pass_context = ObjectFirstPassContext {
+        let enclosing = self.st.object_first_pass_context;
+        self.st.object_first_pass_context = ObjectFirstPassContext {
             ty: contextual,
             marked: contextual.is_some_and(|ty| {
                 self.dispatch
-                    .contextual_object_this_type(ty, self.canonical)
+                    .contextual_object_this_type(ty, self.st.canonical)
                     .is_some()
             }),
         };
         let mut frame = self.object_eval_frame(entries, offset, false, contextual);
         frame.skips_context_sensitive = true;
         let result = self.drive_object_literal(&mut frame);
-        self.object_first_pass_context = enclosing;
+        self.st.object_first_pass_context = enclosing;
         result
     }
 
@@ -14841,7 +15022,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             marked: frame.first_pass_context.marked
                 || ty.is_some_and(|ty| {
                     self.dispatch
-                        .contextual_object_this_type(ty, self.canonical)
+                        .contextual_object_this_type(ty, self.st.canonical)
                         .is_some()
                 }),
         }
@@ -14879,37 +15060,48 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         assignment_fresh: bool,
         contextual: Option<SemanticNodeId>,
     ) -> ObjectEvalFrame<'e> {
-        let enclosing_contextual_this = self.contextual_object_this;
-        let enclosing_contextual_receiver = self.contextual_object_receiver.clone();
-        let inherits_receiver = std::mem::take(&mut self.inherits_contextual_object_receiver);
-        self.contextual_object_this = contextual
+        let enclosing_contextual_this = self.st.contextual_object_this;
+        let enclosing_contextual_receiver = self.st.contextual_object_receiver.clone();
+        let inherits_receiver = std::mem::take(&mut self.st.inherits_contextual_object_receiver);
+        self.st.contextual_object_this = contextual
             .and_then(|context| {
                 self.dispatch
-                    .contextual_object_this_type(context, self.canonical)
+                    .contextual_object_this_type(context, self.st.canonical)
             })
             .or(enclosing_contextual_this.filter(|_| inherits_receiver));
+        let contextual_error =
+            contextual.and_then(|context| self.dispatch.contextual_error_type(context));
+        if contextual_error.is_some() || self.st.contextual_object_this.is_some() {
+            self.forget_own_literal_reports(entries);
+        }
+        if let (Some(context), Some(_)) = (contextual, contextual_error) {
+            self.report_error_contextual(context, entries);
+        }
         let contextual_this = self
+            .st
             .no_implicit_this
             .then(|| {
-                self.contextual_object_this.or_else(|| {
-                    contextual.and_then(|context| {
-                        self.dispatch
-                            .contextual_object_this_type(context, self.canonical)
-                            .or_else(|| {
-                                let context = self.dispatch.resolved_reduction_view(context);
-                                (!matches!(
-                                    self.dispatch.graph().node_data(context).as_deref(),
-                                    Some(
-                                        SemanticNodeData::TypeParam { .. }
-                                            | SemanticNodeData::Primitive(
-                                                PrimitiveKind::Any | PrimitiveKind::Unknown
-                                            )
-                                    )
-                                ))
-                                .then_some(context)
-                            })
+                contextual_error
+                    .or(self.st.contextual_object_this)
+                    .or_else(|| {
+                        contextual.and_then(|context| {
+                            self.dispatch
+                                .contextual_object_this_type(context, self.st.canonical)
+                                .or_else(|| {
+                                    let context = self.dispatch.resolved_reduction_view(context);
+                                    (!matches!(
+                                        self.dispatch.graph().node_data(context).as_deref(),
+                                        Some(
+                                            SemanticNodeData::TypeParam { .. }
+                                                | SemanticNodeData::Primitive(
+                                                    PrimitiveKind::Any | PrimitiveKind::Unknown
+                                                )
+                                        )
+                                    ))
+                                    .then_some(context)
+                                })
+                        })
                     })
-                })
             })
             .flatten();
         let infer_literal_members = contextual_this.is_none()
@@ -14996,8 +15188,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 let receiver = class_expression::ClassReceiver::new(
                     contextual_this.unwrap_or_else(|| {
                         self.dispatch.this_binder(
-                            self.canonical,
-                            self.owner,
+                            self.st.canonical,
+                            self.st.owner,
                             &Arc::from(super::substitute::object_literal_this_name(offset)),
                             None,
                         )
@@ -15020,12 +15212,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if let Some(receiver) = receiver.as_ref() {
             receiver.declared.borrow_mut().extend(declared);
         }
-        self.contextual_object_receiver = receiver.clone();
-        let enclosing_receiver = self.receiver.clone();
+        self.st.contextual_object_receiver = receiver.clone();
+        let enclosing_receiver = self.st.receiver.clone();
         ObjectEvalFrame {
             values_completed: true,
             first_pass_contributes: false,
-            first_pass_context: self.object_first_pass_context,
+            first_pass_context: self.st.object_first_pass_context,
             withheld_functions: false,
             inference: None,
             skips_context_sensitive: false,
@@ -15075,7 +15267,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         'd: 'e,
     {
         if let Some(outcome) = delivered {
-            self.object_first_pass_context = frame.first_pass_context;
+            self.st.object_first_pass_context = frame.first_pass_context;
             match std::mem::replace(&mut frame.awaiting, ObjectEvalAwait::Nothing) {
                 ObjectEvalAwait::Nothing => unreachable!("an outcome delivered to no request"),
                 ObjectEvalAwait::Spread {
@@ -15086,7 +15278,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     effect_position,
                     degradation,
                 } => {
-                    self.holds.truncate(holds_before);
+                    self.st.holds.truncate(holds_before);
                     let Positional::Value(operand) = outcome else {
                         return self.object_eval_abandon(frame);
                     };
@@ -15159,7 +15351,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 .as_ref()
                                 .is_some_and(|receiver| receiver.forward_read.get())
                             {
-                                self.degradation = degradation;
+                                self.st.degradation = degradation;
                                 frame.retry_spreads.push((
                                     position,
                                     effects.len(),
@@ -15196,8 +15388,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     holds_before,
                     widens_unique_symbols,
                 } => {
-                    frame.values_completed &=
-                        matches!(outcome, Positional::Value(_)) && self.holds.len() == holds_before;
+                    frame.values_completed &= matches!(outcome, Positional::Value(_))
+                        && self.st.holds.len() == holds_before;
                     if frame.skips_context_sensitive
                         && member.context_sensitive
                         && matches!(
@@ -15245,11 +15437,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             .as_ref()
                             .expect("a literal with deferred members has a receiver"),
                     );
+                    let value =
+                        self.settle_method_cycle(&receiver, member, value, again, degradation);
                     if !again && receiver.forward_read.get() {
                         if observations.finish(()).discard().is_err() {
                             return ObjectEvalStep::Done(Positional::Unmodeled);
                         }
-                        self.degradation = degradation;
+                        self.st.degradation = degradation;
                         frame.again.push((position, member));
                     } else {
                         if self.dispatch.adopt_read(observations.finish(())).is_err() {
@@ -15291,12 +15485,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         member.value,
                         verter_session_query::flow::slice::SliceExpr::Object { .. }
                     ) {
-                        self.object_first_pass_context =
+                        self.st.object_first_pass_context =
                             self.object_first_pass_member_context(frame, member);
                         frame.awaiting = ObjectEvalAwait::Value {
                             member,
                             member_value: &member.value,
-                            holds_before: self.holds.len(),
+                            holds_before: self.st.holds.len(),
                             widens_unique_symbols: false,
                         };
                         return self.object_eval_child(&member.value);
@@ -15309,7 +15503,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         frame,
                         member,
                         &member.value,
-                        self.holds.len(),
+                        self.st.holds.len(),
                         false,
                         Positional::Value(any),
                         None,
@@ -15350,7 +15544,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         visibility: verter_type_expr::MemberVisibility::Public,
                         excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
                         spans: member.spans,
-                        declaration_origin: Some(verter_type_expr::OwnedStr::from(self.canonical)),
+                        declaration_origin: Some(verter_type_expr::OwnedStr::from(
+                            self.st.canonical,
+                        )),
                         declared_in_macro_type_arg:
                             crate::semantic_query::MacroOwnBodyStamp::default(),
                         merge_role: crate::semantic_query::MergeRoleStamp::default(),
@@ -15381,14 +15577,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // (`settle_composite_part`): the callee's return is
                     // not this object's value. It cannot become a marker
                     // member either, so it fails the literal closed.
-                    self.object_first_pass_context = frame.first_pass_context;
+                    self.st.object_first_pass_context = frame.first_pass_context;
                     frame.awaiting = ObjectEvalAwait::Spread {
-                        holds_before: self.holds.len(),
+                        holds_before: self.st.holds.len(),
                         readonly: *readonly,
                         source,
                         ordinal,
                         effect_position: None,
-                        degradation: self.degradation,
+                        degradation: self.st.degradation,
                     };
                     if let Some(receiver) = frame.receiver.as_ref() {
                         receiver.forward_read.set(false);
@@ -15402,9 +15598,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // value cannot be a plain skip — the whole evaluation is
             // undecided (recursive object construction is beyond the
             // direct same-slot hold the return sites model).
-            let holds_before = self.holds.len();
+            let holds_before = self.st.holds.len();
             if frame.skips_context_sensitive {
-                self.object_first_pass_context =
+                self.st.object_first_pass_context =
                     self.object_first_pass_member_context(frame, member);
             }
             let member_value = if frame.assignment_fresh {
@@ -15432,7 +15628,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // A mutable member with no contextual type widens a `unique
             // symbol` value to `symbol`.
             let widens_unique_symbols = member_context.is_none() && !member.readonly;
-            self.inherits_contextual_object_receiver = matches!(
+            self.st.inherits_contextual_object_receiver = matches!(
                 member.value,
                 verter_session_query::flow::slice::SliceExpr::Object { .. }
             );
@@ -15476,7 +15672,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         child: &'e verter_session_query::flow::slice::SliceExpr,
     ) -> ObjectEvalStep<'e> {
-        self.inherits_contextual_object_receiver = matches!(
+        self.st.inherits_contextual_object_receiver = matches!(
             child,
             verter_session_query::flow::slice::SliceExpr::Object { .. }
         );
@@ -15491,7 +15687,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     where
         'd: 'e,
     {
-        self.receiver = frame.receiver.clone();
+        self.st.receiver = frame.receiver.clone();
         if frame.receiver.is_some() {
             let (next, again) = if let Some(&next) = frame.deferred.get(frame.deferred_next) {
                 frame.deferred_next += 1;
@@ -15509,18 +15705,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     frame.retry_spreads.get(frame.retry_spread_next)
                 {
                     frame.retry_spread_next += 1;
-                    self.receiver = frame
+                    self.st.receiver = frame
                         .enclosing_receiver
                         .as_ref()
                         .expect("enclosing receiver")
                         .clone();
                     frame.awaiting = ObjectEvalAwait::Spread {
-                        holds_before: self.holds.len(),
+                        holds_before: self.st.holds.len(),
                         readonly,
                         source,
                         ordinal,
                         effect_position: Some((position, width)),
-                        degradation: self.degradation,
+                        degradation: self.st.degradation,
                     };
                     return self.object_eval_child(source);
                 } else {
@@ -15534,8 +15730,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             frame.awaiting = ObjectEvalAwait::Method {
                 position,
                 member,
-                degradation: self.degradation,
-                holds_before: self.holds.len(),
+                degradation: self.st.degradation,
+                holds_before: self.st.holds.len(),
                 again,
                 observations: self.dispatch.begin_read_observation(),
             };
@@ -15585,7 +15781,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             _ => self.widen_value_position_read(member_value, value),
         };
         let value = if widens_unique_symbols {
-            widen_unique_symbols(self.dispatch, value, self.nullability)
+            widen_unique_symbols(self.dispatch, value, self.st.nullability)
         } else {
             value
         };
@@ -15621,7 +15817,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             visibility: verter_type_expr::MemberVisibility::Public,
             excess_origin: verter_type_expr::ExcessPropertyOrigin::FreshOwn,
             spans: member.spans,
-            declaration_origin: Some(verter_type_expr::OwnedStr::from(self.canonical)),
+            declaration_origin: Some(verter_type_expr::OwnedStr::from(self.st.canonical)),
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
             merge_role: crate::semantic_query::MergeRoleStamp::default(),
         };
@@ -15807,9 +16003,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     }
 
     fn object_eval_abandon<'e>(&mut self, frame: &mut ObjectEvalFrame<'e>) -> ObjectEvalStep<'e> {
-        self.contextual_object_this = frame.enclosing_contextual_this;
-        self.contextual_object_receiver = frame.enclosing_contextual_receiver.clone();
-        self.receiver = frame
+        self.st.contextual_object_this = frame.enclosing_contextual_this;
+        self.st.contextual_object_receiver = frame.enclosing_contextual_receiver.clone();
+        self.st.receiver = frame
             .enclosing_receiver
             .take()
             .expect("the literal's enclosing receiver");
@@ -15824,7 +16020,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// again for every literal around it.
     fn value_mentions_receiver(&self, value: SemanticNodeId, binder: SemanticNodeId) -> bool {
         let graph = self.dispatch.graph();
-        let mut free = self.this_free_values.borrow_mut();
+        let mut free = self.st.this_free_values.borrow_mut();
         let mut visited: Vec<SemanticNodeId> = Vec::new();
         let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
         let mut holds_a_binder = false;
@@ -15881,8 +16077,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         frame: &mut ObjectEvalFrame<'_>,
     ) -> Positional<SemanticNodeId> {
-        self.contextual_object_this = frame.enclosing_contextual_this;
-        self.contextual_object_receiver = frame.enclosing_contextual_receiver.clone();
+        self.st.contextual_object_this = frame.enclosing_contextual_this;
+        self.st.contextual_object_receiver = frame.enclosing_contextual_receiver.clone();
         if frame.spread_seen {
             self.object_eval_flush_effects(frame);
         }
@@ -15912,6 +16108,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let spread_seen = frame.spread_seen;
         let late_bound = std::mem::take(&mut frame.late_bound);
         let receiver = frame.receiver.take();
+        let absent_reads = receiver
+            .as_ref()
+            .map(|receiver| std::mem::take(&mut *receiver.absent_reads.borrow_mut()))
+            .unwrap_or_default();
         let enclosing_receiver = frame
             .enclosing_receiver
             .take()
@@ -15923,7 +16123,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 || (frame.first_pass_context.marked && frame.withheld_functions))
             && !frame.entries.is_empty()
         {
-            self.receiver = enclosing_receiver;
+            self.st.receiver = enclosing_receiver;
             return Positional::Value(
                 self.dispatch
                     .graph()
@@ -15939,7 +16139,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .iter()
                 .any(|member| self.value_mentions_receiver(member.value, receiver.binder))
         });
-        self.receiver = enclosing_receiver;
+        self.st.receiver = enclosing_receiver;
         if spread_seen || entries.is_empty() {
             if late_bound.any() {
                 return Positional::Unmodeled;
@@ -15949,7 +16149,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     is_literal: true,
                     effects: crate::semantic_query::PayloadArray::from(effects.into_boxed_slice()),
                 }),
-                self.binder_env.scope.clone(),
+                self.st.binder_env.scope.clone(),
             ));
         }
         // A late-bound member contributes to the literal's implicit index
@@ -16015,8 +16215,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             self.dispatch.graph().intern_node_with_scope(
                 SemanticNodeData::ClassExpressionInstance {
                     identity: Arc::new(crate::semantic_query::ClassExpressionIdentity {
-                        canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
-                        owner: self.owner,
+                        canonical_id: verter_type_expr::OwnedStr::from(self.st.canonical),
+                        owner: self.st.owner,
                         offset,
                         name: verter_type_expr::OwnedStr::from("(object literal)"),
                         outer_clauses: verter_type_expr::OwnedSlice::from([]),
@@ -16028,7 +16228,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     type_arguments: crate::semantic_query::PayloadArray::from([]),
                     surface,
                 },
-                self.binder_env.scope.clone(),
+                self.st.binder_env.scope.clone(),
             )
         };
         let node = identify(intern(surface_members));
@@ -16041,15 +16241,22 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 verter_session_query::flow::slice::SliceObjectEntry::Member(member)
                     if member.method_kind.is_none()
                         && matches!(member.key, verter_session_query::flow::slice::SliceObjectKey::Static(_))))
-            && self.degradation.is_none()
+            && self.st.degradation.is_none()
             && !crate::request_context::current_cold_compute_completeness().is_partial()
             && crate::request_context::current_execution_abort().is_none()
         {
-            self.constructive_values.insert(node, ConstructiveValue::Object);
+            self.st.constructive_values.insert(node, ConstructiveValue::Object);
         }
         if unwidened_differs {
             let unwidened = identify(intern(unwidened_members));
-            self.unwidened_views.insert(node, unwidened);
+            self.st.unwidened_views.insert(node, unwidened);
+        }
+        if !absent_reads.is_empty() {
+            if let Some(printed) = self.dispatch.print_checker_type(node) {
+                for (name, span) in absent_reads {
+                    self.record_member_diagnostic(&name, &printed, span);
+                }
+            }
         }
         Positional::Value(node)
     }
@@ -16315,7 +16522,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> Option<SemanticNodeId> {
         let _demand_scope = self
             .dispatch
-            .enter_lexical_demand(Arc::from(self.canonical));
+            .enter_lexical_demand(Arc::from(self.st.canonical));
         let crate::semantic_query::QueryResult::Value(output) =
             self.dispatch
                 .demand_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
@@ -16455,7 +16662,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             | verter_session_query::flow::slice::SliceExpr::Array { .. }
             | verter_session_query::flow::slice::SliceExpr::Union { .. }
             | verter_session_query::flow::slice::SliceExpr::Satisfies { .. } => {
-                self.unwidened_views.get(&node).copied()
+                self.st.unwidened_views.get(&node).copied()
             }
             _ => None,
         }
@@ -16502,7 +16709,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if unique.len() >= 2 {
             match self
                 .dispatch
-                .reduce_arms_to_supertypes(&unique, self.nullability)
+                .reduce_arms_to_supertypes(&unique, self.st.nullability)
             {
                 ReunionReduction::Reduced(reduced) => unique = reduced,
                 ReunionReduction::Undecided => {
@@ -16626,16 +16833,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     let outcome = match (delivered.take(), element_context) {
                         (Some(outcome), _) => outcome,
                         (None, Some(element_context)) => {
-                            frame.holds_before = self.holds.len();
+                            frame.holds_before = self.st.holds.len();
                             self.eval_in_context(value, pre_widening.as_deref(), element_context)
                         }
                         (None, None) => {
-                            frame.holds_before = self.holds.len();
+                            frame.holds_before = self.st.holds.len();
                             return ArrayEvalStep::Descend(value);
                         }
                     };
                     let node = self.settle_composite_part(outcome, frame.holds_before);
-                    frame.certified_elements &= self.constructive_values.contains_key(&node);
+                    frame.certified_elements &= self.st.constructive_values.contains_key(&node);
                     let widening_nullish = self.widening_nullish_value(value, freshness);
                     if frame.tupled {
                         let element = crate::semantic_query::TupleElement {
@@ -16661,7 +16868,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             _ => self.widen_value_position_read(value, node),
                         };
                         let read = if element_context.is_none() {
-                            widen_unique_symbols(self.dispatch, read, self.nullability)
+                            widen_unique_symbols(self.dispatch, read, self.st.nullability)
                         } else {
                             read
                         };
@@ -16673,7 +16880,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     if frame.tupled {
                         let element = crate::semantic_query::TupleElement {
                             label: None,
-                            value: if self.nullability.is_strict() {
+                            value: if self.st.nullability.is_strict() {
                                 undefined
                             } else {
                                 any
@@ -16693,10 +16900,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 SliceArrayElement::Spread { source } => {
                     frame.spread_seen = true;
                     let Some(outcome) = delivered.take() else {
-                        frame.holds_before = self.holds.len();
+                        frame.holds_before = self.st.holds.len();
                         return ArrayEvalStep::Descend(source);
                     };
-                    self.holds.truncate(frame.holds_before);
+                    self.st.holds.truncate(frame.holds_before);
                     let Positional::Value(source) = outcome else {
                         return ArrayEvalStep::Done(Positional::Unmodeled);
                     };
@@ -16728,7 +16935,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                     super::build::ExpressionSplice::Copy => {
                                         for element in elements.iter() {
                                             let mut element = element.copy();
-                                            if element.optional && self.nullability.is_strict() {
+                                            if element.optional && self.st.nullability.is_strict() {
                                                 element.value =
                                                     self.union(&[element.value, undefined]);
                                             }
@@ -16807,23 +17014,24 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             let node = intern_tuple(&tuple);
             let view = intern_tuple(&tuple_view);
             if view != node {
-                self.unwidened_views.insert(node, view);
+                self.st.unwidened_views.insert(node, view);
             }
             if frame.certified_elements && !frame.spread_seen && !tuple.is_empty() {
-                self.constructive_values
+                self.st
+                    .constructive_values
                     .insert(node, ConstructiveValue::Tuple);
             }
             return Positional::Value(node);
         }
         let (element, view) = if parts.is_empty() {
-            if self.nullability.is_strict() {
+            if self.st.nullability.is_strict() {
                 let never = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never));
                 (never, never)
             } else {
                 (any, undefined)
             }
         } else {
-            if !self.nullability.is_strict() {
+            if !self.st.nullability.is_strict() {
                 if parts
                     .iter()
                     .any(|(arm, _)| !is_nullable_node(graph, arm.node))
@@ -16856,7 +17064,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 element: view,
                 readonly: false,
             });
-            self.unwidened_views.insert(node, view);
+            self.st.unwidened_views.insert(node, view);
         }
         Positional::Value(node)
     }
@@ -16893,7 +17101,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             SemanticNodeData::Array { element, .. } => out.push(*element),
                             _ => return None,
                         }
-                    } else if element.optional && self.nullability.is_strict() {
+                    } else if element.optional && self.st.nullability.is_strict() {
                         out.push(self.union(&[element.value, undefined]));
                     } else {
                         out.push(element.value);
@@ -16951,13 +17159,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     verter_session_query::flow::slice::SliceNarrowRoot::Local {
                         binding, ..
                     } => self
+                        .st
                         .auto_typed_locals
                         .contains(&self.canonical_runtime_subject(binding)),
                     verter_session_query::flow::slice::SliceNarrowRoot::Param { .. } => false,
                 };
                 match self.eval_evolving_rhs(value, freshness) {
                     Positional::Value(node) if !auto_typed => Positional::Value(
-                        widen_unique_symbols(self.dispatch, node, self.nullability),
+                        widen_unique_symbols(self.dispatch, node, self.st.nullability),
                     ),
                     other => other,
                 }
@@ -16987,9 +17196,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         root: Option<&verter_session_query::flow::slice::SliceExpr>,
     ) {
-        self.expression_write_nodes.clear();
-        self.capture_write_lookahead.clear();
-        if self.member_filter.is_some() {
+        self.st.expression_write_nodes.clear();
+        self.st.capture_write_lookahead.clear();
+        if self.st.member_filter.is_some() {
             return;
         }
         let Some(root) = root else {
@@ -17004,11 +17213,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // writes of the same statement (evaluation order) without
         // disturbing the live reaching the statement's own in-order walk
         // consumes.
-        let scratch = self.products.clone();
-        let live = std::mem::replace(&mut self.products, scratch);
-        let narrowing_base = self.narrowing_writes.len();
-        let holds_base = self.holds.len();
-        let fresh_deposit_base = self.call_fresh_literal_returns.len();
+        let scratch = self.st.products.clone();
+        let live = std::mem::replace(&mut self.st.products, scratch);
+        let narrowing_base = self.st.narrowing_writes.len();
+        let holds_base = self.st.holds.len();
+        let fresh_deposit_base = self.st.call_fresh_literal_returns.len();
         for write in writes {
             let verter_session_query::flow::slice::SliceExpr::Assignment {
                 target,
@@ -17022,8 +17231,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 continue;
             };
             let outcome = self.eval_write_rhs(target, value, freshness);
-            self.expression_write_nodes.insert(*span, outcome.clone());
-            self.holds.truncate(holds_base);
+            self.st
+                .expression_write_nodes
+                .insert(*span, outcome.clone());
+            self.st.holds.truncate(holds_base);
             if let Positional::Value(node) = outcome {
                 let widening_nullish = self.widening_nullish_value(value, freshness);
                 let written = self.apply_write(
@@ -17046,20 +17257,22 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     } => binding.clone(),
                 };
                 let subject = self.canonical_runtime_subject(&subject);
-                match self.capture_write_lookahead.get(&subject) {
+                match self.st.capture_write_lookahead.get(&subject) {
                     Some(&earlier) => {
                         let joined = self.union(&[earlier, written]);
-                        self.capture_write_lookahead.insert(subject, joined);
+                        self.st.capture_write_lookahead.insert(subject, joined);
                     }
                     None => {
-                        self.capture_write_lookahead.insert(subject, written);
+                        self.st.capture_write_lookahead.insert(subject, written);
                     }
                 }
             }
         }
-        self.narrowing_writes.truncate(narrowing_base);
-        self.call_fresh_literal_returns.truncate(fresh_deposit_base);
-        self.products = live;
+        self.st.narrowing_writes.truncate(narrowing_base);
+        self.st
+            .call_fresh_literal_returns
+            .truncate(fresh_deposit_base);
+        self.st.products = live;
     }
 
     /// The property key one structurally lowered member names, or `None`
@@ -17087,9 +17300,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         };
         // A hold inside a KEY is not this object's value any more than a
         // hold inside a spread source is: drop it and read the outcome.
-        let holds_before = self.holds.len();
+        let holds_before = self.st.holds.len();
         let outcome = self.eval_expr(expression);
-        self.holds.truncate(holds_before);
+        self.st.holds.truncate(holds_before);
         let Positional::Value(node) = outcome else {
             return class_expression::MemberKey::Unmodeled;
         };
@@ -17138,11 +17351,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     }
 
     fn record_degradation(&mut self, degradation: crate::semantic_query::FlowReturnDegradation) {
-        self.degradation.get_or_insert(degradation);
+        self.st.degradation.get_or_insert(degradation);
     }
 
     fn param_subject(&self, ordinal: u32) -> Option<FlowProductSubject> {
-        self.param_names
+        self.st
+            .param_names
             .get(ordinal as usize)?
             .binding
             .map(FlowProductSubject::Local)
@@ -17167,11 +17381,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         root: &verter_session_query::flow::slice::SliceNarrowRoot,
     ) -> Option<FlowProductSubject> {
         let binding = self.canonical_runtime_subject(&self.narrow_subject(root));
-        self.products.contains_subject(&binding).then_some(binding)
+        self.st
+            .products
+            .contains_subject(&binding)
+            .then_some(binding)
     }
 
     fn local_value(&self, binding: &FlowProductSubject) -> Option<SemanticNodeId> {
-        self.products.reaching(binding)
+        self.st.products.reaching(binding)
     }
 
     fn local_declared(&self, binding: &FlowProductSubject) -> Option<SemanticNodeId> {
@@ -17181,27 +17398,30 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .flow
             .declared_authority_work
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.products.runtime_declared_type(binding)
+        self.st
+            .products
+            .runtime_declared_type(&self.st.frame_execution.borrow(), binding)
     }
 
     /// Whether `binding` is the checker's AUTO-TYPED variable in this frame
     /// (`noImplicitAny` on, an unannotated `let` / `var` with no initializer
     /// or a bare `null` / `undefined` one).
     pub(super) fn is_auto_typed_local(&self, binding: &FlowProductSubject) -> bool {
-        self.auto_typed_locals
+        self.st
+            .auto_typed_locals
             .contains(&self.canonical_runtime_subject(binding))
     }
 
     fn local_assignment(&self, binding: &FlowProductSubject) -> DefiniteAssignmentProduct {
-        self.products.assignment(binding)
+        self.st.products.assignment(binding)
     }
 
     fn local_widening(&self, binding: &FlowProductSubject) -> Option<WideningMembership> {
-        self.products.widening(binding).cloned()
+        self.st.products.widening(binding).cloned()
     }
 
     fn param_write(&self, ordinal: u32) -> Option<SemanticNodeId> {
-        self.products.reaching(&self.param_subject(ordinal)?)
+        self.st.products.reaching(&self.param_subject(ordinal)?)
     }
 
     /// The snapshot of the frame's narrowing overlay — the mark a guard
@@ -17210,15 +17430,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn narrowing_snapshot(&self) -> NarrowingSnapshot {
         NarrowingSnapshot {
             facts: self
+                .st
                 .products
                 .subjects_in(super::flow_solve::FlowDomain::Narrowing)
                 .into_iter()
                 .map(|subject| {
-                    let facts = self.products.narrowing(&subject).cloned();
+                    let facts = self.st.products.narrowing(&subject).cloned();
                     (subject, facts)
                 })
                 .collect(),
-            writes: self.narrowing_writes.len(),
+            writes: self.st.narrowing_writes.len(),
         }
     }
 
@@ -17227,18 +17448,26 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// since loses its facts.
     fn restore_narrowings(&mut self, mark: NarrowingSnapshot) {
         for subject in self
+            .st
             .products
             .subjects_in(super::flow_solve::FlowDomain::Narrowing)
         {
-            self.products
-                .remove(super::flow_solve::FlowDomain::Narrowing, &subject);
+            self.st.products.remove(
+                &mut self.st.frame_execution.borrow_mut(),
+                super::flow_solve::FlowDomain::Narrowing,
+                &subject,
+            );
         }
         for (subject, facts) in mark.facts {
             if let Some(facts) = facts {
-                self.products.set_narrowing(&subject, facts);
+                self.st.products.set_narrowing(
+                    &mut self.st.frame_execution.borrow_mut(),
+                    &subject,
+                    facts,
+                );
             }
         }
-        self.narrowing_writes.truncate(mark.writes);
+        self.st.narrowing_writes.truncate(mark.writes);
     }
 
     /// Restore `into`'s narrowing overlay to a `try` statement's ENTRY
@@ -17273,12 +17502,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         into: &mut FlowProductStore,
     ) {
         let written: rustc_hash::FxHashSet<FlowProductSubject> = into
-            .writes_since(&entry.write_observation)
+            .writes_since(
+                &mut self.st.frame_execution.borrow_mut(),
+                &entry.write_observation,
+            )
             .iter()
             .map(|subject| self.canonical_runtime_subject(subject))
             .collect();
         for subject in into.subjects_in(super::flow_solve::FlowDomain::Narrowing) {
-            into.remove(super::flow_solve::FlowDomain::Narrowing, &subject);
+            into.remove(
+                &mut self.st.frame_execution.borrow_mut(),
+                super::flow_solve::FlowDomain::Narrowing,
+                &subject,
+            );
         }
         for subject in entry
             .products
@@ -17290,7 +17526,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             let written = written.contains(&subject);
             let value = into.reaching(&subject);
             if !written && value == entry.products.reaching(&subject) {
-                into.set_narrowing(&subject, product.clone());
+                into.set_narrowing(
+                    &mut self.st.frame_execution.borrow_mut(),
+                    &subject,
+                    product.clone(),
+                );
                 continue;
             }
             let mut kept: Vec<FlowNarrowingFact> = Vec::with_capacity(product.facts().len());
@@ -17302,7 +17542,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     });
                 }
             }
-            into.set_narrowing(&subject, NarrowingProduct::new(kept));
+            into.set_narrowing(
+                &mut self.st.frame_execution.borrow_mut(),
+                &subject,
+                NarrowingProduct::new(kept),
+            );
         }
     }
 
@@ -17351,13 +17595,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             return;
         };
         push_narrowing_into(
-            &mut self.products,
+            &mut self.st.products,
+            &mut self.st.frame_execution.borrow_mut(),
             &root,
             &subject.path,
             narrowed.clone(),
             fresh_literal,
         );
-        self.narrowing_writes
+        self.st
+            .narrowing_writes
             .push(NarrowingLedgerEntry::Established {
                 root,
                 subject: subject.clone(),
@@ -17393,7 +17639,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         verter_session_query::flow::slice::SliceNarrowSubject,
         FlowNarrowed,
     )> {
-        standing_narrowings(&self.narrowing_writes[mark.writes.min(self.narrowing_writes.len())..])
+        standing_narrowings(
+            &self.st.narrowing_writes[mark.writes.min(self.st.narrowing_writes.len())..],
+        )
     }
 
     /// `narrowings`, every remainder built.
@@ -17427,12 +17675,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let first = incoming.first().expect("a continuation has a predecessor");
         let frame_algebra = super::flow_products::DispatchFlowAlgebra {
             dispatch: self.dispatch,
-            nullability: self.nullability,
+            nullability: self.st.nullability,
         };
         if incoming.len() == 1 {
+            let mut frame = self.st.frame_execution.borrow_mut();
             return FlowLayerState {
-                products: FlowProductStore::join(&[&first.products], observation, &frame_algebra),
-                write_observation: self.products.observe_writes(),
+                products: FlowProductStore::join(
+                    &mut frame,
+                    &[&first.products],
+                    observation,
+                    &frame_algebra,
+                ),
+                write_observation: self.st.products.observe_writes(&frame),
             };
         }
         #[cfg(any(test, feature = "test-support"))]
@@ -17475,9 +17729,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }
             products
         };
-        let joined = FlowLayerState {
-            products: FlowProductStore::join(&products, observation, algebra),
-            write_observation: self.products.observe_writes(),
+        let joined = {
+            let mut frame = self.st.frame_execution.borrow_mut();
+            FlowLayerState {
+                products: FlowProductStore::join(&mut frame, &products, observation, algebra),
+                write_observation: self.st.products.observe_writes(&frame),
+            }
         };
         #[cfg(any(test, feature = "test-support"))]
         if let Some(observed) = observed {
@@ -17585,6 +17842,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         let fresh = (fact.fresh_literal == Some(narrowed))
                             .then_some(WideningMembership::All);
                         products.set_reaching_type(
+                            &mut self.st.frame_execution.borrow_mut(),
                             subject,
                             ReachingTypeProduct::of(narrowed).with_widening(fresh),
                         );
@@ -17599,7 +17857,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                     .collect()
                             })
                             .unwrap_or_default();
-                        products.set_narrowing(subject, NarrowingProduct::new(kept));
+                        products.set_narrowing(
+                            &mut self.st.frame_execution.borrow_mut(),
+                            subject,
+                            NarrowingProduct::new(kept),
+                        );
                     }
                     products
                 })
@@ -17632,13 +17894,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) {
         let definition = match binding {
             FlowProductSubject::Local(binding) => Some(
-                self.skeleton
+                self.st
+                    .skeleton
                     .binding(*binding)
                     .initializer
-                    .map(|site| self.flow_graph.expr_site_node(site))
-                    .unwrap_or_else(|| self.flow_graph.binding_node(*binding)),
+                    .map(|site| self.st.flow_graph.expr_site_node(site))
+                    .unwrap_or_else(|| self.st.flow_graph.binding_node(*binding)),
             ),
             FlowProductSubject::Captured(_) => self
+                .st
                 .products
                 .key(super::flow_solve::FlowDomain::ReachingValue, binding)
                 .map(|key| key.node()),
@@ -17651,7 +17915,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let single_path = if kind == verter_session_query::flow::slice::SliceBindingKind::Var {
             false
         } else {
-            self.products.assignment(binding).single_path()
+            self.st.products.assignment(binding).single_path()
         };
         self.bind_local_at(
             binding,
@@ -17675,13 +17939,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) {
         let definition = match binding {
             FlowProductSubject::Local(binding) => Some(
-                self.skeleton
+                self.st
+                    .skeleton
                     .binding(*binding)
                     .initializer
-                    .map(|site| self.flow_graph.expr_site_node(site))
-                    .unwrap_or_else(|| self.flow_graph.binding_node(*binding)),
+                    .map(|site| self.st.flow_graph.expr_site_node(site))
+                    .unwrap_or_else(|| self.st.flow_graph.binding_node(*binding)),
             ),
             FlowProductSubject::Captured(_) => self
+                .st
                 .products
                 .key(super::flow_solve::FlowDomain::ReachingValue, binding)
                 .map(|key| key.node()),
@@ -17689,7 +17955,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let single_path = if kind == verter_session_query::flow::slice::SliceBindingKind::Var {
             false
         } else {
-            self.products.assignment(binding).single_path()
+            self.st.products.assignment(binding).single_path()
         };
         self.bind_local_at(binding, single_path, reaching, degraded, definition);
     }
@@ -17700,10 +17966,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn is_evolving_subject(&self, subject: &FlowProductSubject) -> bool {
         match subject {
             FlowProductSubject::Local(_) => self
+                .st
                 .evolving_locals
                 .contains(&self.canonical_runtime_subject(subject)),
             FlowProductSubject::Captured(identity) => {
-                self.no_implicit_any && identity.evolving_array
+                self.st.no_implicit_any && identity.evolving_array
             }
         }
     }
@@ -17714,7 +17981,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// off — without it.
     fn evolving_declared_type(&self) -> SemanticNodeId {
         let graph = self.dispatch.graph();
-        let element = if self.no_implicit_any || !self.nullability.is_strict() {
+        let element = if self.st.no_implicit_any || !self.st.nullability.is_strict() {
             PrimitiveKind::Any
         } else {
             PrimitiveKind::Never
@@ -17733,7 +18000,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> ReachingTypeProduct {
         let finalized = self
             .dispatch
-            .finalize_evolving_array(&elements, self.nullability);
+            .finalize_evolving_array(&elements, self.st.nullability);
         if finalized.incomplete {
             self.record_degradation(FlowReturnDegradation::FlowGap(
                 verter_session_query::flow::policy::FlowGap::NominalRelation,
@@ -17765,7 +18032,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             SliceEvolvingOperationKind::Append(arguments) => {
                 let mut added: Vec<EvolvingElement> = Vec::new();
                 for argument in arguments.iter() {
-                    let holds_before = self.holds.len();
+                    let holds_before = self.st.holds.len();
                     let outcome = self.eval_expr(&argument.value);
                     let node = self.settle_composite_part(outcome, holds_before);
                     if argument.spread {
@@ -17775,7 +18042,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                     node: widen_fresh_read_node(
                                         self.dispatch,
                                         node,
-                                        self.nullability,
+                                        self.st.nullability,
                                     ),
                                     widening_nullish: false,
                                 }))
@@ -17787,7 +18054,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         }
                     } else {
                         added.push(EvolvingElement {
-                            node: widen_fresh_read_node(self.dispatch, node, self.nullability),
+                            node: widen_fresh_read_node(self.dispatch, node, self.st.nullability),
                             widening_nullish: self
                                 .widening_nullish_value(&argument.value, &argument.freshness),
                         });
@@ -17805,12 +18072,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 value,
                 freshness,
             } => {
-                let holds_before = self.holds.len();
+                let holds_before = self.st.holds.len();
                 let outcome = self.eval_expr(index);
                 let index = self.settle_composite_part(outcome, holds_before);
-                let holds_before = self.holds.len();
+                let holds_before = self.st.holds.len();
                 let outcome = self.eval_expr(value);
-                self.holds.truncate(holds_before);
+                self.st.holds.truncate(holds_before);
                 let Positional::Value(node) = outcome else {
                     return outcome;
                 };
@@ -17818,7 +18085,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 match self.assignable(index, number) {
                     Some(true) => {
                         let element = EvolvingElement {
-                            node: widen_fresh_read_node(self.dispatch, node, self.nullability),
+                            node: widen_fresh_read_node(self.dispatch, node, self.st.nullability),
                             widening_nullish: self.widening_nullish_value(value, freshness),
                         };
                         self.evolve(&subject, vec![element]);
@@ -17840,12 +18107,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             SliceEvolvingOperationKind::Reset {
                 definition, value, ..
             } => {
-                let holds_before = self.holds.len();
+                let holds_before = self.st.holds.len();
                 let outcome = self.eval_expr(value);
-                self.holds.truncate(holds_before);
+                self.st.holds.truncate(holds_before);
                 // Without `noImplicitAny` the binding is declared as the
                 // empty literal's widened type, and the write holds it.
-                let product = if self.no_implicit_any {
+                let product = if self.st.no_implicit_any {
                     self.evolving_product(Vec::new())
                 } else {
                     ReachingTypeProduct::of(self.evolving_declared_type())
@@ -17853,9 +18120,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 let single_path = if self.uses_conditional_definition_policy(&subject) {
                     false
                 } else {
-                    self.products.assignment(&subject).single_path()
+                    self.st.products.assignment(&subject).single_path()
                 };
-                let definition = self.flow_graph.expr_site_node(*definition);
+                let definition = self.st.flow_graph.expr_site_node(*definition);
                 self.bind_local_at(&subject, single_path, product, false, Some(definition));
                 outcome
             }
@@ -17873,18 +18140,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         alternate: &verter_session_query::flow::slice::SliceExpr,
         guard: &verter_session_query::flow::slice::SliceGuard,
     ) -> Positional<SemanticNodeId> {
-        let entry_products = self.products.clone();
-        let entry_writes = self.products.observe_writes();
+        let entry_products = self.st.products.clone();
+        let entry_writes = self
+            .st
+            .products
+            .observe_writes(&self.st.frame_execution.borrow());
         let mut nodes = Vec::with_capacity(2);
         let mut arm_products = Vec::with_capacity(2);
         for (index, arm) in [consequent, alternate].into_iter().enumerate() {
-            let holds_before = self.holds.len();
+            let holds_before = self.st.holds.len();
             let mark = self.narrowing_snapshot();
             self.apply_guard_scoped(guard, index == 0);
             let outcome = self.eval_expr(arm);
             self.restore_narrowings(mark);
             nodes.push(self.settle_composite_part(outcome, holds_before));
-            arm_products.push(self.products.clone());
+            arm_products.push(self.st.products.clone());
             self.restore_arm_entry(&entry_products);
         }
         self.join_arm_writes(
@@ -17907,6 +18177,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         added: Vec<super::flow_products::EvolvingElement>,
     ) {
         let Some(mut elements) = self
+            .st
             .products
             .reaching_type(subject)
             .and_then(|product| product.evolving_elements())
@@ -17942,7 +18213,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         if changed {
             let product = self.evolving_product(elements);
-            self.products.set_reaching_type(subject, product);
+            self.st.products.set_reaching_type(
+                &mut self.st.frame_execution.borrow_mut(),
+                subject,
+                product,
+            );
         }
     }
 
@@ -17955,7 +18230,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         definition: Option<verter_session_query::flow::flow_graph::FlowNodeId>,
     ) {
         self.record_dead_write(binding);
-        self.products.bind_at(
+        self.st.products.bind_at(
+            &mut self.st.frame_execution.borrow_mut(),
             binding,
             DefiniteAssignmentProduct::assigned()
                 .with_single_path(single_path)
@@ -17963,9 +18239,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             reaching,
             definition,
         );
-        self.narrowing_writes.push(NarrowingLedgerEntry::Cleared {
-            root: self.canonical_runtime_subject(binding),
-        });
+        self.st
+            .narrowing_writes
+            .push(NarrowingLedgerEntry::Cleared {
+                root: self.canonical_runtime_subject(binding),
+            });
         // A write is a mutation, and every mutation inside a `try` is a
         // point its `catch` / `finally` may be entered from, with the
         // written value (the checker's `createFlowMutation` adds each to
@@ -17975,10 +18253,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
 
     /// Whether this frame's body assigns `binding` anywhere.
     fn frame_writes_binding(&self, binding: SkeletonBindingId) -> bool {
-        let canonical = self.bindings.canonical_local(binding);
-        self.skeleton.writes.iter().any(|write| {
+        let canonical = self.st.bindings.canonical_local(binding);
+        self.st.skeleton.writes.iter().any(|write| {
             matches!(write.binding, Some(FlowProductSubject::Local(local))
-                if self.bindings.canonical_local(local) == canonical)
+                if self.st.bindings.canonical_local(local) == canonical)
         })
     }
 
@@ -17995,7 +18273,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             return;
         }
         let subject = self.canonical_runtime_subject(&FlowProductSubject::Local(binding));
-        match self.inferred_declared_locals.entry(subject) {
+        match self.st.inferred_declared_locals.entry(subject) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 if entry.get().0 == binding {
                     entry.insert((binding, node));
@@ -18014,7 +18292,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         declared: Option<SemanticNodeId>,
     ) {
         if kind != verter_session_query::flow::slice::SliceBindingKind::Var || declared.is_some() {
-            self.products.set_declared_type(binding, declared);
+            self.st.products.set_declared_type(
+                &mut self.st.frame_execution.borrow_mut(),
+                binding,
+                declared,
+            );
         }
     }
 
@@ -18036,7 +18318,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         match &target.root {
             verter_session_query::flow::slice::SliceNarrowRoot::Param { ordinal, .. } => {
-                self.params.get(*ordinal as usize).copied()
+                self.st.params.get(*ordinal as usize).copied()
             }
             verter_session_query::flow::slice::SliceNarrowRoot::Local { binding, .. } => {
                 self.local_declared(binding)
@@ -18066,13 +18348,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 if target.path.is_empty() =>
             {
                 let subject = self.canonical_runtime_subject(binding);
-                (!self.auto_typed_locals.contains(&subject) && !self.is_evolving_subject(binding))
-                    .then(|| {
-                        self.inferred_declared_locals
-                            .get(&subject)
-                            .map(|(_, node)| *node)
-                    })
-                    .flatten()
+                (!self.st.auto_typed_locals.contains(&subject)
+                    && !self.is_evolving_subject(binding))
+                .then(|| {
+                    self.st
+                        .inferred_declared_locals
+                        .get(&subject)
+                        .map(|(_, node)| *node)
+                })
+                .flatten()
             }
             _ => None,
         };
@@ -18085,7 +18369,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             let current = match &target.root {
                 verter_session_query::flow::slice::SliceNarrowRoot::Param { ordinal, .. } => self
                     .param_write(*ordinal)
-                    .or_else(|| self.params.get(*ordinal as usize).copied()),
+                    .or_else(|| self.st.params.get(*ordinal as usize).copied()),
                 verter_session_query::flow::slice::SliceNarrowRoot::Local { binding, .. } => {
                     self.local_value(binding)
                 }
@@ -18151,14 +18435,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .into_iter()
                 .map(|part| {
                     if part.fresh {
-                        widen_fresh_read_node(self.dispatch, part.node, self.nullability)
+                        widen_fresh_read_node(self.dispatch, part.node, self.st.nullability)
                     } else {
                         // The arm keeps its own shape, but a fresh value
                         // it CARRIES (a call's kept deposit or authored
                         // fresh arm) still widens at this write position
                         // — unless a sibling arm pinned the same value.
                         let values = self.uncancelled_fresh_values(&part.fresh_values, &pinned);
-                        widen_values_within(self.dispatch, part.node, &values, self.nullability)
+                        widen_values_within(self.dispatch, part.node, &values, self.st.nullability)
                     }
                 })
                 .collect();
@@ -18173,7 +18457,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             verter_session_query::flow::slice::SliceFreshness::Fresh
         );
         Positional::Value(if fresh {
-            widen_fresh_read_node(self.dispatch, node, self.nullability)
+            widen_fresh_read_node(self.dispatch, node, self.st.nullability)
         } else {
             // A non-fresh spelling may still carry read-side widening
             // provenance: a widening-membership local, or a completed
@@ -18248,8 +18532,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                     && union_branches_change_reaching_values(arms);
                                 if forked {
                                     walk.forks.push(ArmFork {
-                                        entry: self.products.clone(),
-                                        entry_writes: self.products.observe_writes(),
+                                        entry: self.st.products.clone(),
+                                        entry_writes: self
+                                            .st
+                                            .products
+                                            .observe_writes(&self.st.frame_execution.borrow()),
                                         arms: Vec::with_capacity(2),
                                     });
                                     walk.steps.push(ArmStep::JoinFork);
@@ -18277,7 +18564,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     let part = ArmPartRun {
                         expr,
                         freshness,
-                        holds_before: self.holds.len(),
+                        holds_before: self.st.holds.len(),
                         run: ExprRun::new(expr),
                     };
                     if let Some(demand) = self.run_arm_part(walk, part, None, suspend) {
@@ -18302,7 +18589,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 ArmStep::Leave(mark) => self.restore_narrowings(mark),
                 ArmStep::EndForkedArm => {
                     let fork = walk.forks.last_mut().expect("the fork the arm is in");
-                    fork.arms.push(self.products.clone());
+                    fork.arms.push(self.st.products.clone());
                     let entry = fork.entry.clone();
                     self.restore_arm_entry(&entry);
                 }
@@ -18414,7 +18701,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         match self
             .dispatch
-            .reduce_arms_to_supertypes(&arms, self.nullability)
+            .reduce_arms_to_supertypes(&arms, self.st.nullability)
         {
             ReunionReduction::Reduced(kept) => parts
                 .into_iter()
@@ -18571,7 +18858,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         subject: &verter_session_query::flow::slice::SliceNarrowSubject,
     ) -> Option<FlowNarrowed> {
         let root = self.resolved_narrow_subject(&subject.root)?;
-        self.products
+        self.st
+            .products
             .narrowing(&root)?
             .facts()
             .iter()
@@ -18669,7 +18957,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             target,
             node,
             degraded,
-            Some(self.flow_graph.expr_site_node(definition)),
+            Some(self.st.flow_graph.expr_site_node(definition)),
             widening_nullish,
             widening,
         );
@@ -18714,17 +19002,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             {
                 if !expression_write_tree(value).is_empty() {
                     self.prescan_statement_value_writes(Some(value));
-                    let holds_before = self.holds.len();
+                    let holds_before = self.st.holds.len();
                     let _ = self.eval_expr(value);
-                    self.holds.truncate(holds_before);
+                    self.st.holds.truncate(holds_before);
                 }
                 (declared, None)
             }
             verter_session_query::flow::slice::SliceMemberWrite::Assign { value, freshness } => {
                 self.prescan_statement_value_writes(Some(value));
-                let holds_before = self.holds.len();
+                let holds_before = self.st.holds.len();
                 let outcome = self.eval_expr(value);
-                self.holds.truncate(holds_before);
+                self.st.holds.truncate(holds_before);
                 match (outcome, declared) {
                     (Positional::Value(value), Some(declared)) => {
                         let reduced = match self.dispatch.union_arms_of(declared) {
@@ -18764,7 +19052,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let Some(root) = self.resolved_narrow_subject(&target.root) else {
             return;
         };
-        if let Some(product) = self.products.narrowing(&root) {
+        if let Some(product) = self.st.products.narrowing(&root) {
             let kept: Vec<FlowNarrowingFact> = product
                 .facts()
                 .iter()
@@ -18774,11 +19062,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .cloned()
                 .collect();
             if kept.len() != product.facts().len() {
-                self.products
-                    .set_narrowing(&root, NarrowingProduct::new(kept));
+                self.st.products.set_narrowing(
+                    &mut self.st.frame_execution.borrow_mut(),
+                    &root,
+                    NarrowingProduct::new(kept),
+                );
             }
         }
-        self.narrowing_writes
+        self.st
+            .narrowing_writes
             .push(NarrowingLedgerEntry::ClearedBelow {
                 root,
                 path: Arc::clone(&target.path),
@@ -18817,17 +19109,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 ..
             } => {
                 let subject = FlowProductSubject::Local(*binding);
-                self.products.bind_at(
+                self.st.products.bind_at(
+                    &mut self.st.frame_execution.borrow_mut(),
                     &subject,
-                    self.products
+                    self.st
+                        .products
                         .assignment(&subject)
                         .with_state(DefiniteAssignment::Assigned),
                     ReachingTypeProduct::of(node).with_widening(widening),
                     definition,
                 );
-                self.narrowing_writes.push(NarrowingLedgerEntry::Cleared {
-                    root: self.canonical_runtime_subject(&subject),
-                });
+                self.st
+                    .narrowing_writes
+                    .push(NarrowingLedgerEntry::Cleared {
+                        root: self.canonical_runtime_subject(&subject),
+                    });
                 if degraded {
                     self.record_degradation(
                         crate::semantic_query::FlowReturnDegradation::UnmodeledPosition,
@@ -18845,13 +19141,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 let single_path = if self.uses_conditional_definition_policy(binding) {
                     false
                 } else {
-                    self.products.assignment(binding).single_path()
+                    self.st.products.assignment(binding).single_path()
                 };
                 // `bind_local` itself clears the narrow facts about the
                 // replaced value (the invalidation cannot be forgotten at
                 // one of the two write sites).
                 let widening_nullish = widening_nullish
                     && self
+                        .st
                         .auto_typed_locals
                         .contains(&self.canonical_runtime_subject(binding));
                 self.bind_local_at(
@@ -18882,16 +19179,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         span: verter_session_query::flow::frame_span::FrameSpan,
     ) -> (Positional<SemanticNodeId>, Option<SemanticNodeId>) {
         let declared = self.target_declared_node(target).is_some();
-        let holds_before = self.holds.len();
+        let holds_before = self.st.holds.len();
         let widening_nullish = self.widening_nullish_value(value, freshness);
-        let memo = self.expression_write_nodes.remove(&span);
+        let memo = self.st.expression_write_nodes.remove(&span);
         let outcome = match memo {
             Some(outcome) => outcome,
             None => self.eval_write_rhs(target, value, freshness),
         };
         match outcome {
             Positional::Value(node) => {
-                self.holds.truncate(holds_before);
+                self.st.holds.truncate(holds_before);
                 let written = self.apply_write(
                     target,
                     node,
@@ -18927,11 +19224,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 (Positional::Value(written), assigned)
             }
             Positional::Hold => {
-                self.holds.truncate(holds_before);
+                self.st.holds.truncate(holds_before);
                 (Positional::Hold, None)
             }
             Positional::Unmodeled => {
-                self.holds.truncate(holds_before);
+                self.st.holds.truncate(holds_before);
                 let marker = super::flow_return_callee::unmodeled_position_marker(self.dispatch);
                 (
                     Positional::Value(
@@ -19017,23 +19314,27 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// or union-typed inferred binding follows it; a declared non-union
     /// type is the flow type whatever is assigned.
     fn loop_write_value_is_evaluated(&mut self, binding: SkeletonBindingId) -> bool {
-        let canonical = self.bindings.canonical_local(binding);
+        let canonical = self.st.bindings.canonical_local(binding);
         let parameter_declared =
-            self.param_names
+            self.st
+                .param_names
                 .iter()
                 .enumerate()
                 .find_map(|(ordinal, param)| {
                     param
                         .binding
-                        .filter(|parameter| self.bindings.canonical_local(*parameter) == canonical)
-                        .and_then(|_| self.params.get(ordinal).copied())
+                        .filter(|parameter| {
+                            self.st.bindings.canonical_local(*parameter) == canonical
+                        })
+                        .and_then(|_| self.st.params.get(ordinal).copied())
                 });
         let subject = FlowProductSubject::Local(binding);
         let declared = parameter_declared.or_else(|| self.local_declared(&subject));
         match declared {
             Some(declared) => self.dispatch.union_arms_of(declared).is_some(),
             None => {
-                self.auto_typed_locals
+                self.st
+                    .auto_typed_locals
                     .contains(&self.canonical_runtime_subject(&subject))
                     || self
                         .local_value(&subject)
@@ -19102,16 +19403,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let canonical = self.canonical_runtime_subject(subject);
         let parameter_declared = match &canonical {
             FlowProductSubject::Local(binding) => {
-                self.param_names
+                self.st
+                    .param_names
                     .iter()
                     .enumerate()
                     .find_map(|(ordinal, param)| {
                         param
                             .binding
                             .filter(|parameter| {
-                                self.bindings.canonical_local(*parameter) == *binding
+                                self.st.bindings.canonical_local(*parameter) == *binding
                             })
-                            .and_then(|_| self.params.get(ordinal).copied())
+                            .and_then(|_| self.st.params.get(ordinal).copied())
                     })
             }
             FlowProductSubject::Captured(_) => None,
@@ -19120,13 +19422,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             return false;
         };
         let narrowed = self
+            .st
             .products
             .narrowing(subject)
             .is_some_and(|narrowing| !narrowing.facts().is_empty());
         if narrowed {
             return false;
         }
-        match self.products.reaching(subject) {
+        match self.st.products.reaching(subject) {
             Some(reaching) => reaching == declared,
             None => parameter_declared.is_some(),
         }
@@ -19209,15 +19512,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// first pass so an unconverged pass can be discarded whole.
     fn loop_pass_mark(&self) -> LoopPassMark {
         LoopPassMark {
-            yields: self.yield_contributions.len(),
-            holds: self.holds.len(),
-            fresh_calls: self.call_fresh_literal_returns.len(),
-            call_evidence: self.call_evidence.len(),
-            heritage_self_roots: self.heritage_self_roots.len(),
-            break_exits: self.break_exits.len(),
-            return_edges: self.return_edges.len(),
-            throw_points: self.throw_points.len(),
-            checker_diagnostics: self.checker_diagnostics.len(),
+            yields: self.st.yield_contributions.len(),
+            holds: self.st.holds.len(),
+            fresh_calls: self.st.call_fresh_literal_returns.len(),
+            call_evidence: self.st.call_evidence.len(),
+            heritage_self_roots: self.st.heritage_self_roots.len(),
+            break_exits: self.st.break_exits.len(),
+            return_edges: self.st.return_edges.len(),
+            throw_points: self.st.throw_points.len(),
+            checker_diagnostics: self.st.checker_diagnostics.len(),
         }
     }
 
@@ -19226,29 +19529,38 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// puts the tail back ([`Self::replay_loop_pass`]).
     fn set_aside_loop_pass(&mut self, mark: &LoopPassMark) -> LoopPassTail {
         LoopPassTail {
-            yields: self.yield_contributions.split_off(mark.yields),
-            holds: self.holds.split_off(mark.holds),
-            fresh_calls: self.call_fresh_literal_returns.split_off(mark.fresh_calls),
-            call_evidence: self.call_evidence.split_off(mark.call_evidence),
-            heritage_self_roots: self.heritage_self_roots.split_off(mark.heritage_self_roots),
-            break_exits: self.break_exits.split_off(mark.break_exits),
-            return_edges: self.return_edges.split_off(mark.return_edges),
-            throw_points: self.throw_points.split_off(mark.throw_points),
-            checker_diagnostics: self.checker_diagnostics.split_off(mark.checker_diagnostics),
+            yields: self.st.yield_contributions.split_off(mark.yields),
+            holds: self.st.holds.split_off(mark.holds),
+            fresh_calls: self
+                .st
+                .call_fresh_literal_returns
+                .split_off(mark.fresh_calls),
+            call_evidence: self.st.call_evidence.split_off(mark.call_evidence),
+            heritage_self_roots: self
+                .st
+                .heritage_self_roots
+                .split_off(mark.heritage_self_roots),
+            break_exits: self.st.break_exits.split_off(mark.break_exits),
+            return_edges: self.st.return_edges.split_off(mark.return_edges),
+            throw_points: self.st.throw_points.split_off(mark.throw_points),
+            checker_diagnostics: self
+                .st
+                .checker_diagnostics
+                .split_off(mark.checker_diagnostics),
         }
     }
 
     /// Put back what a pass set aside ([`Self::set_aside_loop_pass`]).
     fn replay_loop_pass(&mut self, tail: LoopPassTail) {
-        self.yield_contributions.extend(tail.yields);
-        self.holds.extend(tail.holds);
-        self.call_fresh_literal_returns.extend(tail.fresh_calls);
-        self.call_evidence.extend(tail.call_evidence);
-        self.heritage_self_roots.extend(tail.heritage_self_roots);
-        self.break_exits.extend(tail.break_exits);
-        self.return_edges.extend(tail.return_edges);
-        self.throw_points.extend(tail.throw_points);
-        self.checker_diagnostics.extend(tail.checker_diagnostics);
+        self.st.yield_contributions.extend(tail.yields);
+        self.st.holds.extend(tail.holds);
+        self.st.call_fresh_literal_returns.extend(tail.fresh_calls);
+        self.st.call_evidence.extend(tail.call_evidence);
+        self.st.heritage_self_roots.extend(tail.heritage_self_roots);
+        self.st.break_exits.extend(tail.break_exits);
+        self.st.return_edges.extend(tail.return_edges);
+        self.st.throw_points.extend(tail.throw_points);
+        self.st.checker_diagnostics.extend(tail.checker_diagnostics);
     }
 
     /// Merge exactly the paths that continue past a conditional. A missing
@@ -19268,13 +19580,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if consequent_falls {
             incoming.push(FlowLayerState {
                 products: consequent.clone(),
-                write_observation: consequent.observe_writes(),
+                write_observation: consequent.observe_writes(&self.st.frame_execution.borrow()),
             });
         }
         if alternate_falls {
             incoming.push(FlowLayerState {
                 products: alternate.clone(),
-                write_observation: entry.observe_writes(),
+                write_observation: entry.observe_writes(&self.st.frame_execution.borrow()),
             });
         }
         if incoming.is_empty() {
@@ -19282,14 +19594,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
 
         let joined = self.join_continuations(&incoming, entry, observation);
-        let written = joined.products.writes_since(observation);
+        let written = joined
+            .products
+            .writes_since(&mut self.st.frame_execution.borrow_mut(), observation);
         self.restore_layer_state(joined);
         for subject in written {
             if let Some(root) = self.narrow_root_of(&subject) {
                 // The kernel has already killed pre-write facts and joined
                 // each arm's final narrowing. Only stale guard events need
                 // retracting here; a fact re-established after a write survives.
-                self.narrowing_writes
+                self.st
+                    .narrowing_writes
                     .push(NarrowingLedgerEntry::Cleared { root });
             }
         }
@@ -19337,7 +19652,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             for state in incoming.iter() {
                 if state.products.reaching(&subject).is_none() {
                     defined_on_every_path = false;
-                    let declared = state.products.declared_type(&subject);
+                    let declared = state
+                        .products
+                        .declared_type(&self.st.frame_execution.borrow(), &subject);
                     never_assigned_declared = Some(match never_assigned_declared {
                         None => declared,
                         // One authority-less predecessor is enough to keep
@@ -19357,9 +19674,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             Some(reaching) => self.union(&[reaching, declared]),
                             None => declared,
                         };
-                        joined
-                            .products
-                            .set_reaching_type(&subject, ReachingTypeProduct::of(folded));
+                        joined.products.set_reaching_type(
+                            &mut self.st.frame_execution.borrow_mut(),
+                            &subject,
+                            ReachingTypeProduct::of(folded),
+                        );
                         inherited
                     }
                     _ => true,
@@ -19369,7 +19688,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .products
                 .assignment(&subject)
                 .with_single_path(single_path);
-            joined.products.set_assignment(&subject, assignment);
+            joined.products.set_assignment(
+                &mut self.st.frame_execution.borrow_mut(),
+                &subject,
+                assignment,
+            );
         }
         joined
     }
@@ -19389,17 +19712,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ///   tell an arm's write from an untouched binding. Source declaration
     ///   authority remains installed independently of the control path.
     fn restore_arm_entry(&mut self, entry: &FlowProductStore) {
-        let mut subjects: Vec<FlowProductSubject> = self.products.subjects();
+        let mut subjects: Vec<FlowProductSubject> =
+            self.st.products.subjects(&self.st.frame_execution.borrow());
         let mut seen: rustc_hash::FxHashSet<FlowProductSubject> =
             subjects.iter().cloned().collect();
-        for subject in entry.subjects() {
+        for subject in entry.subjects(&self.st.frame_execution.borrow()) {
             if seen.insert(subject.clone()) {
                 subjects.push(subject);
             }
         }
         for subject in subjects {
             let lexical = self.binding_layer(&subject) == FlowBindingLayer::Lexical;
-            let held = self.products.assignment(&subject);
+            let held = self.st.products.assignment(&subject);
             let assignment = if lexical {
                 entry
                     .assignment(&subject)
@@ -19407,8 +19731,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             } else {
                 held
             };
-            self.products
-                .restore_reaching_from(&subject, entry, Some(assignment), false);
+            self.st.products.restore_reaching_from(
+                &mut self.st.frame_execution.borrow_mut(),
+                &subject,
+                entry,
+                Some(assignment),
+                false,
+            );
         }
     }
 
@@ -19420,7 +19749,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn canonical_runtime_subject(&self, subject: &FlowProductSubject) -> FlowProductSubject {
         match subject {
             FlowProductSubject::Local(binding) => {
-                FlowProductSubject::Local(self.bindings.canonical_local(*binding))
+                FlowProductSubject::Local(self.st.bindings.canonical_local(*binding))
             }
             FlowProductSubject::Captured(_) => subject.clone(),
         }
@@ -19429,6 +19758,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn binding_layer(&self, subject: &FlowProductSubject) -> FlowBindingLayer {
         let kind = match subject {
             FlowProductSubject::Local(binding) => self
+                .st
                 .bindings
                 .identity(*binding)
                 .map(|identity| identity.kind),
@@ -19456,23 +19786,30 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let FlowProductSubject::Local(binding) = subject else {
             return false;
         };
-        let declaration = self.skeleton.binding(*binding);
+        let declaration = self.st.skeleton.binding(*binding);
         declaration.kind == verter_session_query::flow::skeleton::SkeletonBindingKind::Let
             && declaration.initializer.is_none()
-            && self.products.runtime_declared_type(subject).is_none()
+            && self
+                .st
+                .products
+                .runtime_declared_type(&self.st.frame_execution.borrow(), subject)
+                .is_none()
     }
 
     /// Snapshot the live binding layers.
     fn layer_state(&self) -> FlowLayerState {
         FlowLayerState {
-            products: self.products.clone(),
-            write_observation: self.products.observe_writes(),
+            products: self.st.products.clone(),
+            write_observation: self
+                .st
+                .products
+                .observe_writes(&self.st.frame_execution.borrow()),
         }
     }
 
     /// Restore a snapshot into the live state.
     fn restore_layer_state(&mut self, state: FlowLayerState) {
-        self.products = state.products;
+        self.st.products = state.products;
     }
 
     /// Close ONE block scope over `state` (a snapshot, or the live layers
@@ -19486,20 +19823,24 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// `shadows` is exactly the scope's own declaration records, sliced
     /// off the evaluator's `scope_shadows` at the scope's boundaries, so
     /// a scope can never drop (or keep) another scope's binding.
-    fn close_lexical_scope(state: &mut FlowLayerState, shadows: &[ScopeShadow]) {
+    fn close_lexical_scope(
+        frame: &mut FlowFrameExecution,
+        state: &mut FlowLayerState,
+        shadows: &[ScopeShadow],
+    ) {
         for shadow in shadows.iter().rev() {
             state
                 .products
-                .restore_reaching_from(&shadow.subject, &shadow.prior, None, true);
+                .restore_reaching_from(frame, &shadow.subject, &shadow.prior, None, true);
         }
     }
 
     /// Record the exact declaration's continuation before its scoped binding
     /// event. Distinct lexical declarations never alias by spelling.
     fn record_scope_shadow(&mut self, binding: &FlowProductSubject) {
-        self.scope_shadows.push(ScopeShadow {
+        self.st.scope_shadows.push(ScopeShadow {
             subject: binding.clone(),
-            prior: self.products.clone(),
+            prior: self.st.products.clone(),
         });
     }
 
@@ -19507,11 +19848,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// `target` (`None` = the switch's anonymous break); exits naming any
     /// other target stay pending for their own construct.
     fn drain_break_exits(&mut self, base: usize, target: Option<&Arc<str>>) -> Vec<FlowLayerState> {
-        let drained: Vec<FlowBreakExit> = self.break_exits.split_off(base);
+        let drained: Vec<FlowBreakExit> = self.st.break_exits.split_off(base);
         let (mine, rest): (Vec<FlowBreakExit>, Vec<FlowBreakExit>) = drained
             .into_iter()
             .partition(|exit| !exit.continues && exit.target.as_ref() == target);
-        self.break_exits.extend(rest);
+        self.st.break_exits.extend(rest);
         mine.into_iter().map(|exit| exit.state).collect()
     }
 
@@ -19519,7 +19860,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// loop named by `labels` (an unlabeled one targets the innermost
     /// loop, which is the one draining); every other exit stays pending.
     fn drain_continue_exits(&mut self, base: usize, labels: &[Arc<str>]) -> Vec<FlowLayerState> {
-        let drained: Vec<FlowBreakExit> = self.break_exits.split_off(base);
+        let drained: Vec<FlowBreakExit> = self.st.break_exits.split_off(base);
         let (mine, rest): (Vec<FlowBreakExit>, Vec<FlowBreakExit>) =
             drained.into_iter().partition(|exit| {
                 exit.continues
@@ -19528,7 +19869,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         .as_ref()
                         .is_none_or(|target| labels.contains(target))
             });
-        self.break_exits.extend(rest);
+        self.st.break_exits.extend(rest);
         mine.into_iter().map(|exit| exit.state).collect()
     }
 
@@ -19545,15 +19886,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         return_base: usize,
         throw_base: usize,
     ) -> Vec<ScopeShadow> {
-        let shadows: Vec<ScopeShadow> = self.scope_shadows.split_off(shadow_base);
-        for exit in &mut self.break_exits[break_base..] {
-            Self::close_lexical_scope(&mut exit.state, &shadows);
+        let shadows: Vec<ScopeShadow> = self.st.scope_shadows.split_off(shadow_base);
+        for exit in &mut self.st.break_exits[break_base..] {
+            Self::close_lexical_scope(
+                &mut self.st.frame_execution.borrow_mut(),
+                &mut exit.state,
+                &shadows,
+            );
         }
-        for state in &mut self.return_edges[return_base..] {
-            Self::close_lexical_scope(state, &shadows);
+        for state in &mut self.st.return_edges[return_base..] {
+            Self::close_lexical_scope(&mut self.st.frame_execution.borrow_mut(), state, &shadows);
         }
-        for state in &mut self.throw_points[throw_base..] {
-            Self::close_lexical_scope(state, &shadows);
+        for state in &mut self.st.throw_points[throw_base..] {
+            Self::close_lexical_scope(&mut self.st.frame_execution.borrow_mut(), state, &shadows);
         }
         shadows
     }
@@ -19563,18 +19908,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// contribution.
     fn capture_return_edge(&mut self) {
         let state = self.layer_state();
-        self.return_edges.push(state);
+        self.st.return_edges.push(state);
     }
 
     /// Snapshot the complete state at a throw point (a call or a
     /// `throw`): a `catch` / `finally` clause is entered from every one
     /// of these, not only from the try's entry.
     fn capture_throw_point(&mut self) {
-        if !self.collect_throw_points {
+        if !self.st.collect_throw_points {
             return;
         }
         let state = self.layer_state();
-        self.throw_points.push(state);
+        self.st.throw_points.push(state);
     }
 
     /// Successful writes on the surviving continuation, including unchanged
@@ -19586,7 +19931,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         after: &FlowLayerState,
     ) -> FlowExecutedClauseWrites {
         let _ = observation;
-        FlowExecutedClauseWrites(after.products.writes_since(observation))
+        FlowExecutedClauseWrites(
+            after
+                .products
+                .writes_since(&mut self.st.frame_execution.borrow_mut(), observation),
+        )
     }
 
     /// A dispatch path with no reaching definition retains the existing
@@ -19603,7 +19952,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .collect();
         for subject in fallthrough_only {
             let flagged = start.products.assignment(&subject).with_single_path(true);
-            start.products.set_assignment(&subject, flagged);
+            start.products.set_assignment(
+                &mut self.st.frame_execution.borrow_mut(),
+                &subject,
+                flagged,
+            );
         }
     }
 
@@ -19628,7 +19981,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .collect();
         for subject in conditionally_defined {
             let flagged = joined.products.assignment(&subject).with_single_path(true);
-            joined.products.set_assignment(&subject, flagged);
+            joined.products.set_assignment(
+                &mut self.st.frame_execution.borrow_mut(),
+                &subject,
+                flagged,
+            );
         }
     }
 
@@ -19741,7 +20098,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         // An optional member's element reads `undefined` for an absent key
         // under `strictNullChecks`; with it off the checker adds nothing.
-        if member.optional && self.nullability.is_strict() {
+        if member.optional && self.st.nullability.is_strict() {
             let undefined = self
                 .dispatch
                 .graph()
@@ -19757,9 +20114,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn seed_destructured_param_element(&mut self, binding: &FlowProductSubject) {
         // Seeding binds a parameter element on its first read; it is not a
         // write of the body, so it is no exception-flow point.
-        let collect = std::mem::replace(&mut self.collect_throw_points, false);
+        let collect = std::mem::replace(&mut self.st.collect_throw_points, false);
         self.seed_destructured_param_element_value(binding);
-        self.collect_throw_points = collect;
+        self.st.collect_throw_points = collect;
     }
 
     /// The parameter ordinal, key and default presence of `binding` when
@@ -19768,7 +20125,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &self,
         binding: &FlowProductSubject,
     ) -> Option<(usize, Arc<str>, bool)> {
-        self.param_names
+        self.st.param_names
             .iter()
             .enumerate()
             .find_map(|(ordinal, param)| {
@@ -19785,6 +20142,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             return;
         };
         let projected = self
+            .st
             .params
             .get(ordinal)
             .copied()
@@ -19819,13 +20177,79 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// stays the honest answer). A projection miss after a resolved root
     /// takes the same fallback: the position degrades exactly as the
     /// owner-scope walk's miss does, never a fabricated member.
+    #[inline(never)]
+    fn eval_type_leaf(
+        &mut self,
+        leaf: &verter_session_query::flow::slice::GatedLeaf,
+    ) -> Positional<SemanticNodeId> {
+        let node = self.lower_body_type(leaf.ty());
+        if self.member_read_missed(Some(node)) {
+            let recovered =
+                self.recovered_typeof_path(leaf.ty(), leaf.frame_root(), leaf.member_spans());
+            if let Some(recovered) = recovered {
+                return Positional::Value(recovered);
+            }
+        }
+        Positional::Value(node)
+    }
+
+    #[inline(never)]
     fn eval_frame_rooted_typeof_path(
         &mut self,
-        ty: &verter_type_expr::TypeExpr,
-        binding: Option<&FlowProductSubject>,
+        leaf: &verter_session_query::flow::slice::GatedLeaf,
     ) -> Option<Positional<SemanticNodeId>> {
-        self.frame_rooted_typeof_path_node(ty, binding)
-            .map(Positional::Value)
+        let read = self.frame_rooted_typeof_path_node(leaf.ty(), leaf.frame_root());
+        if self.member_read_missed(read) {
+            let recovered =
+                self.recovered_typeof_path(leaf.ty(), leaf.frame_root(), leaf.member_spans());
+            if let Some(recovered) = recovered {
+                return Some(Positional::Value(recovered));
+            }
+        }
+        read.map(Positional::Value)
+    }
+
+    /// A missed `typeof` path leaf whose walk stopped at a member its parent
+    /// proves absent, or at an `any` it reads on through: the checker's
+    /// answer for the read. `None` when no hop proves it.
+    fn recovered_typeof_path(
+        &mut self,
+        ty: &verter_type_expr::TypeExpr,
+        frame_root: Option<&FlowProductSubject>,
+        member_spans: &[verter_session_query::flow::frame_span::FrameSpan],
+    ) -> Option<SemanticNodeId> {
+        let verter_type_expr::TypeExpr::TypeOf(value) = ty else {
+            return None;
+        };
+        let (root, segments) = value.path.split_first()?;
+        if !value.type_args.is_empty() {
+            return None;
+        }
+        let mut current = match frame_root {
+            Some(binding) => self.read_local(binding)?,
+            None => {
+                let root = verter_type_expr::ValueRef {
+                    path: vec![root.clone()],
+                    ..value.clone()
+                };
+                self.lower_body_type(&verter_type_expr::TypeExpr::TypeOf(root))
+            }
+        };
+        for (index, segment) in segments.iter().enumerate() {
+            if self.node_is_semantic_any(current) {
+                return Some(current);
+            }
+            let name: Arc<str> = Arc::from(segment.as_str());
+            let read = self.project_segments_navigate(current, std::slice::from_ref(&name));
+            if self.member_read_missed(read) {
+                return self.member_proven_absent(current, &name).then(|| {
+                    let span = member_spans.get(index).copied();
+                    self.absent_member_recovery(current, &name, span, false)
+                });
+            }
+            current = read?;
+        }
+        None
     }
 
     /// The node half of [`Self::eval_frame_rooted_typeof_path`]: resolve
@@ -19880,11 +20304,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 return FlowIndexedArgumentBinding::NonBindingExpression;
             }
             IndexedValueReadRoot::Identifier(root) => self
+                .st
                 .bindings
-                .occurrence(FrameSpan::rebase(self.anchor, root)),
+                .occurrence(FrameSpan::rebase(self.st.anchor, root)),
             IndexedValueReadRoot::SourceTypeQuery(root) => self
+                .st
                 .bindings
-                .source_type_query_occurrence(FrameSpan::rebase(self.anchor, root)),
+                .source_type_query_occurrence(FrameSpan::rebase(self.st.anchor, root)),
         };
         #[cfg(any(test, feature = "test-support"))]
         self.dispatch
@@ -19936,8 +20362,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             reads.push((*root, read));
         }
         self.dispatch.resolve_scoped_argument_literal_provenance(
-            self.canonical,
-            self.owner,
+            self.st.canonical,
+            self.st.owner,
             Some(authored),
             &|_, root| {
                 reads
@@ -19958,8 +20384,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         use super::call_resolve::ArgumentReadLiterals;
         use verter_session_query::flow::{binding::FlowBindingOccurrence, frame_span::FrameSpan};
         let binding = match self
+            .st
             .bindings
-            .occurrence(FrameSpan::rebase(self.anchor, root))
+            .occurrence(FrameSpan::rebase(self.st.anchor, root))
         {
             FlowBindingOccurrence::Resolved(binding) => binding.clone(),
             FlowBindingOccurrence::Free => return ArgumentReadLiterals::OwnerScope,
@@ -19993,7 +20420,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// The value a read of one of this frame's bindings sees: its narrowed
     /// read, else its reaching value.
     fn frame_binding_read(&mut self, binding: &FlowProductSubject) -> Option<SemanticNodeId> {
-        let name = Arc::<str>::from(self.products.identity(binding)?.name);
+        let name = Arc::<str>::from(self.st.products.identity(binding)?.name);
         let subject = verter_session_query::flow::slice::SliceNarrowSubject {
             root: verter_session_query::flow::slice::SliceNarrowRoot::Local {
                 name,
@@ -20298,13 +20725,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// read once per evaluation: every guard of a chain over one subject
     /// asks it again for each arm it passes over.
     fn carrier_unwrap(&self, node: SemanticNodeId) -> super::relation::IdentityCarrierUnwrap {
-        if let Some(unwrap) = self.carrier_unwraps.borrow().get(&node) {
+        if let Some(unwrap) = self.st.carrier_unwraps.borrow().get(&node) {
             return *unwrap;
         }
         let dispatch = self.dispatch;
         let unwrap =
             dispatch.outside_inline_costs(|| dispatch.unwrap_identity_carrier_for_relation(node));
-        self.carrier_unwraps.borrow_mut().insert(node, unwrap);
+        self.st.carrier_unwraps.borrow_mut().insert(node, unwrap);
         unwrap
     }
 
@@ -20371,7 +20798,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             match &subject.root {
                 verter_session_query::flow::slice::SliceNarrowRoot::Param { ordinal, .. } => self
                     .param_write(*ordinal)
-                    .or_else(|| self.params.get(*ordinal as usize).copied())?,
+                    .or_else(|| self.st.params.get(*ordinal as usize).copied())?,
                 verter_session_query::flow::slice::SliceNarrowRoot::Local { binding, .. } => {
                     self.read_local(binding)?
                 }
@@ -20645,7 +21072,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // which rides this guard (see `apparent_type.rs`).
         let _demand_scope = self
             .dispatch
-            .enter_lexical_demand(Arc::from(self.canonical));
+            .enter_lexical_demand(Arc::from(self.st.canonical));
         match self
             .dispatch
             .demand_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
@@ -20669,7 +21096,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> Option<SemanticNodeId> {
         let _demand_scope = self
             .dispatch
-            .enter_lexical_demand(Arc::from(self.canonical));
+            .enter_lexical_demand(Arc::from(self.st.canonical));
         match self
             .dispatch
             .demand_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
@@ -20750,7 +21177,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// `| undefined`) gains no duplicate. With `strictNullChecks` off the
     /// checker adds no `undefined` at all.
     fn fold_optional_read_undefined(&mut self, value: SemanticNodeId) -> SemanticNodeId {
-        if !self.nullability.is_strict() {
+        if !self.st.nullability.is_strict() {
             return value;
         }
         let data = self.dispatch.arena().node_data(value);
@@ -20894,13 +21321,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 match consumption {
                     PredicateNarrowConsumption::NotConsumed => {}
                     PredicateNarrowConsumption::Decided => {
-                        self.call_evidence.push(FlowCallEvidence {
+                        self.st.call_evidence.push(FlowCallEvidence {
                             span: *call,
                             relations_decided: true,
                         });
                     }
                     PredicateNarrowConsumption::Undecided => {
-                        self.call_evidence.push(FlowCallEvidence {
+                        self.st.call_evidence.push(FlowCallEvidence {
                             span: *call,
                             relations_decided: false,
                         });
@@ -20925,7 +21352,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 match consumption {
                     PredicateNarrowConsumption::NotConsumed => {}
                     PredicateNarrowConsumption::Decided | PredicateNarrowConsumption::Undecided => {
-                        self.call_evidence.push(FlowCallEvidence {
+                        self.st.call_evidence.push(FlowCallEvidence {
                             span: site.span(),
                             relations_decided: matches!(
                                 consumption,
@@ -20946,7 +21373,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 call,
             } => match self.callee_control_effect(callee) {
                 CalleeControlEffect::Inert => {
-                    self.call_evidence.push(FlowCallEvidence {
+                    self.st.call_evidence.push(FlowCallEvidence {
                         span: *call,
                         relations_decided: true,
                     });
@@ -20956,7 +21383,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     let Some(Some(subject)) = arguments.get(parameter) else {
                         // The predicate talks about an argument that is
                         // no narrowable reference: nothing narrows.
-                        self.call_evidence.push(FlowCallEvidence {
+                        self.st.call_evidence.push(FlowCallEvidence {
                             span: *call,
                             relations_decided: true,
                         });
@@ -20967,13 +21394,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     match consumption {
                         PredicateNarrowConsumption::NotConsumed => {}
                         PredicateNarrowConsumption::Decided => {
-                            self.call_evidence.push(FlowCallEvidence {
+                            self.st.call_evidence.push(FlowCallEvidence {
                                 span: *call,
                                 relations_decided: true,
                             });
                         }
                         PredicateNarrowConsumption::Undecided => {
-                            self.call_evidence.push(FlowCallEvidence {
+                            self.st.call_evidence.push(FlowCallEvidence {
                                 span: *call,
                                 relations_decided: false,
                             });
@@ -21046,7 +21473,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // holds past the call (`narrowType(…, assumeTrue)`), its
                 // positive reading landing for the rest of the region as a
                 // reference assertion's narrow does.
-                self.call_evidence.push(FlowCallEvidence {
+                self.st.call_evidence.push(FlowCallEvidence {
                     span: call,
                     relations_decided: true,
                 });
@@ -21066,7 +21493,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 match consumption {
                     PredicateNarrowConsumption::NotConsumed => {}
                     PredicateNarrowConsumption::Decided | PredicateNarrowConsumption::Undecided => {
-                        self.call_evidence.push(FlowCallEvidence {
+                        self.st.call_evidence.push(FlowCallEvidence {
                             span: call,
                             relations_decided: matches!(
                                 consumption,
@@ -21078,7 +21505,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 fact
             }
             None => {
-                self.call_evidence.push(FlowCallEvidence {
+                self.st.call_evidence.push(FlowCallEvidence {
                     span: call,
                     relations_decided: true,
                 });
@@ -21179,7 +21606,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             ReturnPredicateTest::Guard { guard, parameters } => (guard, parameters),
         };
         for &ordinal in parameters.iter() {
-            let Some(declared) = self.params.get(ordinal as usize).copied() else {
+            let Some(declared) = self.st.params.get(ordinal as usize).copied() else {
                 continue;
             };
             // Refining a `boolean` parameter to `true` / `false` is not a
@@ -21188,6 +21615,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 continue;
             }
             let Some(binding) = self
+                .st
                 .param_names
                 .get(ordinal as usize)
                 .and_then(|param| param.binding)
@@ -21219,7 +21647,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             if false_edge
                 .is_some_and(|node| is_primitive(self.dispatch, node, PrimitiveKind::Never))
             {
-                self.inferred_predicate = Some(crate::semantic_query::SignaturePredicate {
+                self.st.inferred_predicate = Some(crate::semantic_query::SignaturePredicate {
                     subject: crate::semantic_query::PredicateSubject::Parameter(ordinal),
                     asserts: false,
                     ty: Some(true_edge),
@@ -21395,7 +21823,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // `narrowTypeByTypeFacts` substitutes the implied type):
         // `typeof x === "undefined"` over `x: string` is `undefined`.
         let implied_nullish = match kind {
-            _ if negated || self.nullability.is_strict() => None,
+            _ if negated || self.st.nullability.is_strict() => None,
             verter_session_query::flow::slice::SliceTypeofKind::Undefined => {
                 Some(PrimitiveKind::Undefined)
             }
@@ -21508,8 +21936,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// keeps the arm possible, degraded, never proved off an edge.
     fn lower_global_function_surface(&mut self) -> Option<SemanticNodeId> {
         self.dispatch.lower_lib_global(
-            self.canonical,
-            self.owner,
+            self.st.canonical,
+            self.st.owner,
             &Arc::from("Function"),
             Arc::from(Vec::new().into_boxed_slice()),
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
@@ -21558,7 +21986,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     return Some(TopTypeofEdge::Kept);
                 }
                 return Some(match kind {
-                    SliceTypeofKind::Undefined if self.nullability.is_strict() => {
+                    SliceTypeofKind::Undefined if self.st.nullability.is_strict() => {
                         TopTypeofEdge::Dropped
                     }
                     SliceTypeofKind::Object => {
@@ -21579,7 +22007,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 SliceTypeofKind::Object => PrimitiveKind::Null,
                 _ => return Some(TopTypeofEdge::Kept),
             };
-            if is_any || !self.nullability.is_strict() {
+            if is_any || !self.st.nullability.is_strict() {
                 return Some(TopTypeofEdge::Kept);
             }
             return Some(TopTypeofEdge::Implied(self.unknown_without(&[removed])));
@@ -21762,7 +22190,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // member is comparable to the narrowed member type, so
                     // its arm stays on the truthy edge too.
                     if !negated
-                        && !this.nullability.is_strict()
+                        && !this.st.nullability.is_strict()
                         && matches!(
                             this.dispatch.arena().node_data(*leaf).as_deref(),
                             Some(SemanticNodeData::Primitive(
@@ -21810,7 +22238,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     verter_session_query::flow::policy::FlowGap::GuardNarrowing,
                 ));
             }
-            if is_any || negated || !self.nullability.is_strict() {
+            if is_any || negated || !self.st.nullability.is_strict() {
                 return GuardNarrowing::Unchanged;
             }
             let node = self.unknown_without(&[PrimitiveKind::Null, PrimitiveKind::Undefined]);
@@ -21872,7 +22300,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         for arm in arms {
             // With `strictNullChecks` off `true` carries the `Falsy` fact
             // too (`TrueFacts`), so the falsy edge keeps `boolean` whole.
-            if is_boolean(&arm) && negated && !self.nullability.is_strict() {
+            if is_boolean(&arm) && negated && !self.st.nullability.is_strict() {
                 survivors.push(arm);
                 continue;
             }
@@ -21926,7 +22354,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // checker's `Falsy` fact (`NonEmptyStringFacts`, `TrueFacts`,
         // `ObjectFacts` and the rest all include it), so the falsy edge
         // keeps every arm: `if (!x)` over `x: "a" | ""` reads `"a" | ""`.
-        if negated && !self.nullability.is_strict() {
+        if negated && !self.st.nullability.is_strict() {
             return if matches!(
                 self.dispatch.arena().node_data(settled).as_deref(),
                 Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
@@ -21940,7 +22368,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if negated {
             // With `strictNullChecks` off a type that can be truthy can
             // also be `null` / `undefined`: its falsy bucket is inhabited.
-            if self.nullability.is_strict() {
+            if self.st.nullability.is_strict() {
                 domain.falsy
             } else {
                 domain.falsy.or(domain.truthy)
@@ -21980,7 +22408,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // narrows nothing on either edge (the checker's
         // `narrowTypeByEquality` returns the type unchanged) — the nullable
         // members it would select or remove are erased already.
-        if !self.nullability.is_strict()
+        if !self.st.nullability.is_strict()
             && matches!(
                 literal,
                 verter_session_query::flow::slice::SliceGuardLiteral::Null
@@ -22333,7 +22761,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             _ => None,
         };
         if let Some(kind) = nullish {
-            if !self.nullability.is_strict() {
+            if !self.st.nullability.is_strict() {
                 return Some(ty);
             }
             let mut survivors = Vec::new();
@@ -22712,6 +23140,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         };
         let root = self.resolved_narrow_subject(&root)?;
         let fact = self
+            .st
             .products
             .narrowing(&root)?
             .facts()
@@ -23556,7 +23985,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if !parent.path.is_empty() {
             return false;
         }
-        let Some(declared) = self.params.get(*ordinal as usize).copied() else {
+        let Some(declared) = self.st.params.get(*ordinal as usize).copied() else {
             return false;
         };
         let Some(current) = self.subject_current_node(parent) else {
@@ -23671,7 +24100,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if !parent.path.is_empty() {
             return false;
         }
-        let Some(declared) = self.params.get(*ordinal as usize).copied() else {
+        let Some(declared) = self.st.params.get(*ordinal as usize).copied() else {
             return false;
         };
         let arms = self.enumerated_union_arms_or_self(declared);
@@ -23699,13 +24128,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             return self.project_segments_navigate(arm, member);
         };
         let key = (arm, Arc::clone(name));
-        if let Some(read) = self.discriminant_members.borrow().get(&key) {
+        if let Some(read) = self.st.discriminant_members.borrow().get(&key) {
             return *read;
         }
         let read = self
             .dispatch
             .outside_inline_costs(|| self.project_segments_navigate(arm, member));
-        self.discriminant_members.borrow_mut().insert(key, read);
+        self.st.discriminant_members.borrow_mut().insert(key, read);
         read
     }
 
@@ -23785,6 +24214,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             let root = self.narrow_subject(&subject.root);
             push_narrowing_into(
                 &mut state.products,
+                &mut self.st.frame_execution.borrow_mut(),
                 &root,
                 &subject.path,
                 FlowNarrowed::Node(node),
@@ -23801,6 +24231,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .reaching_type(target)
                 .is_some_and(ReachingTypeProduct::widening_nullish);
             products.set_reaching_type(
+                &mut self.st.frame_execution.borrow_mut(),
                 target,
                 ReachingTypeProduct::of(node)
                     .with_widening(widening)
@@ -23864,7 +24295,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }));
         }
         if changed {
-            products.set_narrowing(root, NarrowingProduct::new(kept));
+            products.set_narrowing(
+                &mut self.st.frame_execution.borrow_mut(),
+                root,
+                NarrowingProduct::new(kept),
+            );
         }
     }
 
@@ -23960,7 +24395,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             match &subject.root {
                 verter_session_query::flow::slice::SliceNarrowRoot::Param { ordinal, .. } => self
                     .param_write(*ordinal)
-                    .or_else(|| self.params.get(*ordinal as usize).copied())?,
+                    .or_else(|| self.st.params.get(*ordinal as usize).copied())?,
                 verter_session_query::flow::slice::SliceNarrowRoot::Local { binding, .. } => {
                     self.local_value(binding)?
                 }
@@ -24165,8 +24600,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             type_arguments: Arc::from(Vec::new().into_boxed_slice()),
         };
         let Some(instance) = self.dispatch.lower_type_expr_in_owner_scope_with_context(
-            self.canonical,
-            self.owner,
+            self.st.canonical,
+            self.st.owner,
             &ctor_ty,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
         ) else {
@@ -24517,8 +24952,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         INSTANCEOF_HERITAGE_READS.with(|reads| reads.set(reads.get() + 1));
         let ancestry = self.dispatch.class_heritage_ancestry(&identity);
         for observation in ancestry.observed.iter() {
-            if !self.heritage_self_roots.contains(observation) {
-                self.heritage_self_roots.push(observation.clone());
+            if !self.st.heritage_self_roots.contains(observation) {
+                self.st.heritage_self_roots.push(observation.clone());
             }
         }
         HeritageReading::Declared(ancestry)
@@ -24698,22 +25133,22 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         key: &str,
     ) -> Option<SemanticNodeId> {
         let key_node = self.dispatch.lower_type_expr_in_owner_scope_with_context(
-            self.canonical,
-            self.owner,
+            self.st.canonical,
+            self.st.owner,
             &verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
                 key.to_string(),
             )),
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
         )?;
         let unknown_node = self.dispatch.lower_type_expr_in_owner_scope_with_context(
-            self.canonical,
-            self.owner,
+            self.st.canonical,
+            self.st.owner,
             &verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Unknown),
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
         )?;
         let utility = self.dispatch.lower_lib_global(
-            self.canonical,
-            self.owner,
+            self.st.canonical,
+            self.st.owner,
             &Arc::from("Record"),
             Arc::from(vec![key_node, unknown_node].into_boxed_slice()),
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
@@ -24803,7 +25238,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             }
                         }
                         crate::semantic_query::SurfaceKeyProjection::AbsentProven
-                            if surface.closed().has_index_signature() =>
+                            if surface.closed().has_index_signature()
+                                || surface.withholds_key(key) =>
                         {
                             any_unknown = true;
                         }
@@ -24932,13 +25368,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // its edges, and a chain of guards asks it again for the arms each
         // guard passes over: the pair is related once per evaluation.
         let pair = (source, target);
-        if let Some(known) = self.guard_relations.borrow().get(&pair) {
+        if let Some(known) = self.st.guard_relations.borrow().get(&pair) {
             return *known;
         }
         let related = self
             .dispatch
             .outside_inline_costs(|| self.assignable(source, target));
-        self.guard_relations.borrow_mut().insert(pair, related);
+        self.st.guard_relations.borrow_mut().insert(pair, related);
         related
     }
 
@@ -25063,7 +25499,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             if let Some(distributed) = self.dispatch.distribute_intersection(
                 &[arms.clone(), vec![candidate]],
                 &[current, candidate],
-                self.nullability,
+                self.st.nullability,
                 false,
             ) {
                 if distributed.undecided {
@@ -25304,8 +25740,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             return None;
         }
         self.dispatch.lower_type_expr_in_owner_scope_with_context(
-            self.canonical,
-            self.owner,
+            self.st.canonical,
+            self.st.owner,
             callee.ty(),
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
         )
@@ -25502,7 +25938,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 function.function_part,
                 verter_type_expr::facts::FunctionPartIdentity::DeclarationBody
             ) && function.anchor.space == verter_type_expr::locators::LocatorSymbolSpace::Value
-                && function.anchor.canonical_id.as_ref() != self.canonical
+                && function.anchor.canonical_id.as_ref() != self.st.canonical
                 && !self.declared_in_a_module(function.anchor.canonical_id.as_ref())
                 && !self
                     .dispatch
@@ -25553,8 +25989,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         occurrence: crate::semantic_query::CheckerDiagnosticOccurrence,
     ) {
-        if !self.checker_diagnostics.contains(&occurrence) {
-            self.checker_diagnostics.push(occurrence);
+        if !self.st.checker_diagnostics.contains(&occurrence) {
+            self.st.checker_diagnostics.push(occurrence);
         }
     }
 
@@ -25598,7 +26034,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         recipe: &crate::semantic_query::CheckerDiagnosticRecipe,
         site: verter_session_query::flow::slice::SliceCallSite,
     ) {
-        let Some(positions) = self.call_diagnostic_sites.get(&site.span()) else {
+        let Some(positions) = self.st.call_diagnostic_sites.get(&site.span()) else {
             return;
         };
         let printer = FlowDiagnosticPrinter(self.dispatch);
@@ -25699,7 +26135,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         argument: Option<&verter_session_query::flow::slice::SliceExpr>,
     ) -> Result<Option<SemanticNodeId>, FlowReturnFailure> {
-        let member_name = match self.member_filter.as_ref() {
+        let member_name = match self.st.member_filter.as_ref() {
             Some(filter) => Arc::clone(&filter.member),
             None => return Err(FlowReturnFailure::UnmodeledDemandPoint),
         };
@@ -25742,24 +26178,24 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         let outcome = self.eval_expr(&member.value);
         if !independent_member_expression(&member.value) {
-            self.independent_members = None;
+            self.st.independent_members = None;
         }
         match self.settle(outcome) {
             Some(node) => {
-                if let Some(count) = &mut self.independent_members {
+                if let Some(count) = &mut self.st.independent_members {
                     *count += 1;
                 }
                 let node = self.widen_value_position_read(&member.value, node);
                 Ok(Some(if member.readonly {
                     node
                 } else {
-                    widen_unique_symbols(self.dispatch, node, self.nullability)
+                    widen_unique_symbols(self.dispatch, node, self.st.nullability)
                 }))
             }
             // A hold inside the demanded member is the same coinductive
             // hold the whole-return object path reports.
             None => {
-                self.independent_members = None;
+                self.st.independent_members = None;
                 Ok(None)
             }
         }
@@ -25779,13 +26215,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &self,
         expr: &verter_session_query::flow::slice::SliceExpr,
     ) -> bool {
-        if self.nullability.is_strict() {
+        if self.st.nullability.is_strict() {
             return false;
         }
         let verter_session_query::flow::slice::SliceExpr::Local { binding, .. } = expr else {
             return false;
         };
-        self.products
+        self.st
+            .products
             .reaching_type(binding)
             .is_some_and(ReachingTypeProduct::widening_nullish)
     }
@@ -25801,7 +26238,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         freshness: &verter_session_query::flow::slice::SliceFreshness,
     ) -> bool {
         use verter_session_query::flow::slice::{SliceExpr, SliceFreshness};
-        if self.nullability.is_strict() {
+        if self.st.nullability.is_strict() {
             return false;
         }
         match (expr, freshness) {
@@ -25867,7 +26304,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             && !self.top_level_literal_nodes(node).is_empty()
             && self
                 .dispatch
-                .value_read_widens(self.canonical, self.owner, &value.path)
+                .value_read_widens(self.st.canonical, self.st.owner, &value.path)
     }
 
     /// Whether a frame-rooted member read (`o.A`) yielded the member of an
@@ -25921,7 +26358,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         match expr {
             verter_session_query::flow::slice::SliceExpr::Call(_, site, _) => {
                 let span = site.span();
-                self.call_fresh_literal_returns
+                self.st
+                    .call_fresh_literal_returns
                     .iter()
                     .rev()
                     .find(|call| call.span == span && call.node == node)
@@ -25930,6 +26368,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 self.fresh_call_return_for(shadowed.inner(), node)
             }
             verter_session_query::flow::slice::SliceExpr::MemberOf { span, .. } => self
+                .st
                 .call_fresh_literal_returns
                 .iter()
                 .rev()
@@ -25963,29 +26402,29 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         if let Some(call) = self.fresh_call_return_for(expr, node) {
             if call.values.contains(&node) {
-                return widen_fresh_read_node(self.dispatch, node, self.nullability);
+                return widen_fresh_read_node(self.dispatch, node, self.st.nullability);
             }
-            return widen_values_within(self.dispatch, node, &call.values, self.nullability);
+            return widen_values_within(self.dispatch, node, &call.values, self.st.nullability);
         }
         if let Some(literal) = self.fresh_narrowed_literal(expr, node) {
             if literal == node {
-                return widen_fresh_read_node(self.dispatch, node, self.nullability);
+                return widen_fresh_read_node(self.dispatch, node, self.st.nullability);
             }
-            return widen_values_within(self.dispatch, node, &[literal], self.nullability);
+            return widen_values_within(self.dispatch, node, &[literal], self.st.nullability);
         }
         if let verter_session_query::flow::slice::SliceExpr::Local { binding, .. } = expr {
             match self.membership_of(binding) {
                 Some(WideningMembership::All) => {
-                    return widen_fresh_read_node(self.dispatch, node, self.nullability);
+                    return widen_fresh_read_node(self.dispatch, node, self.st.nullability);
                 }
                 Some(WideningMembership::Partial(values)) => {
-                    return widen_values_within(self.dispatch, node, &values, self.nullability);
+                    return widen_values_within(self.dispatch, node, &values, self.st.nullability);
                 }
                 None => {}
             }
         }
         if self.reads_widening_declaration(expr, node) {
-            return widen_fresh_read_node(self.dispatch, node, self.nullability);
+            return widen_fresh_read_node(self.dispatch, node, self.st.nullability);
         }
         node
     }
@@ -25999,11 +26438,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let context = crate::semantic_query::ProjectionReductionContext::structural_transit();
         let node = self.dispatch.shallow_lower_type_expr_with_context(
             ty,
-            &self.binder_env.env,
-            &self.binder_env.scope,
-            &self.binder_env.name_resolution,
-            self.binder_env.scope_payload.as_ref(),
-            &self.binder_env.shadowing,
+            &self.st.binder_env.env,
+            &self.st.binder_env.scope,
+            &self.st.binder_env.name_resolution,
+            self.st.binder_env.scope_payload.as_ref(),
+            &self.st.binder_env.shadowing,
             &mut substitutions,
             context,
         );
@@ -26023,7 +26462,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &self,
         name: &verter_session_query::flow::slice::FrameShadowedName,
     ) -> bool {
-        owner_scope_answers_frame_name(self.dispatch, self.binder_env, name)
+        owner_scope_answers_frame_name(self.dispatch, self.st.binder_env, name)
     }
 
     /// Evaluate one region, returning its contributor nodes and whether
@@ -26077,12 +26516,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }
                     match &outcome.0 {
                         Ok(_) => {
-                            self.executed_walk.regions_completed =
-                                self.executed_walk.regions_completed.saturating_add(1);
+                            self.st.executed_walk.regions_completed =
+                                self.st.executed_walk.regions_completed.saturating_add(1);
                         }
                         Err(_) => {
-                            self.executed_walk.aborted = true;
-                            self.executed_walk.local_aborted = true;
+                            self.st.executed_walk.aborted = true;
+                            self.st.executed_walk.local_aborted = true;
                         }
                     }
                     let finished = run.frames.pop().expect("the region evaluated");
@@ -26109,7 +26548,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         region: &'r verter_session_query::flow::slice::SliceRegion,
     ) -> RegionEvalFrame<'r> {
-        self.executed_walk.regions_entered = self.executed_walk.regions_entered.saturating_add(1);
+        self.st.executed_walk.regions_entered =
+            self.st.executed_walk.regions_entered.saturating_add(1);
         RegionEvalFrame {
             region,
             next: 0,
@@ -26158,11 +26598,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     | verter_session_query::flow::slice::SliceBindingKind::Var => {
                         let widened = match &membership {
                             Some(WideningMembership::All) => {
-                                widen_fresh_read_node(self.dispatch, node, self.nullability)
+                                widen_fresh_read_node(self.dispatch, node, self.st.nullability)
                             }
-                            Some(WideningMembership::Partial(values)) => {
-                                widen_values_within(self.dispatch, node, values, self.nullability)
-                            }
+                            Some(WideningMembership::Partial(values)) => widen_values_within(
+                                self.dispatch,
+                                node,
+                                values,
+                                self.st.nullability,
+                            ),
                             None => node,
                         };
                         if !auto_typed {
@@ -26274,7 +26717,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // erased from the initializer's union, so it neither pins nor blocks
         // the surviving arms' freshness (`const y = c ? null : 1` is the
         // fresh `1`).
-        if !self.nullability.is_strict() {
+        if !self.st.nullability.is_strict() {
             let graph = self.dispatch.graph();
             if parts.iter().any(|part| !is_nullable_node(graph, part.node)) {
                 parts.retain(|part| !is_nullable_node(graph, part.node));
@@ -26503,7 +26946,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 return_base,
                 throw_base,
             );
-            Self::close_lexical_scope(&mut end, &shadows);
+            Self::close_lexical_scope(
+                &mut self.st.frame_execution.borrow_mut(),
+                &mut end,
+                &shadows,
+            );
             self.restore_layer_state(end);
             path_alive = block_falls;
         }
@@ -26540,11 +26987,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 let declared_reads = frame.dead_at_never_call;
                 frame.dead_tail = Some(Box::new(self.open_dead_path(declared_reads)));
             }
-            self.executed_walk.statements_executed =
-                self.executed_walk.statements_executed.saturating_add(1);
+            self.st.executed_walk.statements_executed =
+                self.st.executed_walk.statements_executed.saturating_add(1);
             match statement {
                 verter_session_query::flow::slice::SliceStatement::Gap(gap) => {
-                    self.pending_statement_gap.get_or_insert(*gap);
+                    self.st.pending_statement_gap.get_or_insert(*gap);
                 }
                 // A statement-position `yield x` contributes the YIELD
                 // parameter of the generator's return wrap. It evaluates
@@ -26556,7 +27003,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // degrades rather than freezing its first-pass value.
                 //
                 // The yield's own hold obligations are truncated out of
-                // `self.holds` the SAME way `settle_composite_part` drops
+                // `self.st.holds` the SAME way `settle_composite_part` drops
                 // a member value's hold: this position is not the RETURN
                 // equation's own arm, so a coinductive edge met while
                 // evaluating it must never become an obligation the SCC
@@ -26567,7 +27014,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     argument,
                     freshness,
                 } => {
-                    if self.member_filter.is_none() {
+                    if self.st.member_filter.is_none() {
                         match argument {
                             Some(expr) => {
                                 self.prescan_statement_value_writes(Some(expr));
@@ -26577,9 +27024,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 );
                                 let bare_fresh =
                                     bare_literal || self.reads_widening_literal_local(expr);
-                                let holds_before = self.holds.len();
+                                let holds_before = self.st.holds.len();
                                 let outcome = self.eval_expr(expr);
-                                self.holds.truncate(holds_before);
+                                self.st.holds.truncate(holds_before);
                                 match self.settle(outcome) {
                                     Some(node) => {
                                         // A settled call DEPOSITS its fresh
@@ -26598,7 +27045,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                                 .is_some_and(|call| call.values.contains(&node))
                                             || self.fresh_narrowed_literal(expr, node)
                                                 == Some(node);
-                                        self.yield_contributions.push(YieldContribution {
+                                        self.st.yield_contributions.push(YieldContribution {
                                             node,
                                             arm: self.reduction_arm(expr, node),
                                             fresh,
@@ -26620,7 +27067,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 let node = graph.intern_node(SemanticNodeData::Primitive(
                                     PrimitiveKind::Undefined,
                                 ));
-                                self.yield_contributions.push(YieldContribution {
+                                self.st.yield_contributions.push(YieldContribution {
                                     node,
                                     arm: ReductionArm::plain(node),
                                     fresh: false,
@@ -26637,7 +27084,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 } => {
                     path_alive = false;
                     self.prescan_statement_value_writes(argument.as_ref());
-                    if self.member_filter.is_some() {
+                    if self.st.member_filter.is_some() {
                         // Member-projection demand: evaluate ONLY the
                         // demanded member of a structural object return.
                         match self.eval_member_projected_return(argument.as_ref()) {
@@ -26663,6 +27110,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }
                     match argument {
                         Some(expr) => {
+                            self.st.bare_self_return = self.return_of_bare_self_call(expr);
                             let bare_literal = matches!(
                                 freshness,
                                 verter_session_query::flow::slice::SliceFreshness::Fresh
@@ -26683,7 +27131,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             // as non-fresh would make widening depend on
                             // whether the callee was already in flight —
                             // i.e. on demand ORDER.
-                            let holds_before = self.holds.len();
+                            let holds_before = self.st.holds.len();
                             // A TERNARY argument evaluates PER ARM (the
                             // same guard-scoped walk `eval_expr` performs
                             // over the union), so each arm's carried
@@ -26705,7 +27153,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                         parts.iter().map(|part| part.arm.view).collect();
                                     let view = self.union(&views);
                                     if view != node {
-                                        self.unwidened_views.insert(node, view);
+                                        self.st.unwidened_views.insert(node, view);
                                     }
                                     // Pinned wins per literal VALUE: a
                                     // sibling arm's authored pin of the
@@ -26739,7 +27187,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 _ => {
                                     // A returned function value is typed
                                     // under the declared return.
-                                    let contextual = self.declared_return.and_then(|declared| {
+                                    let contextual = self.st.declared_return.and_then(|declared| {
                                         self.eval_function_argument_in_context(expr, declared)
                                     });
                                     let outcome = match contextual {
@@ -26788,7 +27236,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             // Bare `return;` — recorded, never a direct
                             // `undefined` contributor: a bare-only body
                             // joins to `void` (BL12).
-                            self.observations.observe_bare_return();
+                            self.st.observations.observe_bare_return();
                         }
                     }
                     self.capture_return_edge();
@@ -26879,10 +27327,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // stack; this region resumes past the statement with its
                     // outcome, closing the block's scope then.
                     frame.entered = Some(Entered::Block((
-                        self.scope_shadows.len(),
-                        self.break_exits.len(),
-                        self.return_edges.len(),
-                        self.throw_points.len(),
+                        self.st.scope_shadows.len(),
+                        self.st.break_exits.len(),
+                        self.st.return_edges.len(),
+                        self.st.throw_points.len(),
                     )));
                     frame.contributors = contributors;
                     frame.path_alive = path_alive;
@@ -26893,7 +27341,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // capture it complete and end the region's path (the
                     // lowering already proved the target exists).
                     let state = self.layer_state();
-                    self.break_exits.push(FlowBreakExit {
+                    self.st.break_exits.push(FlowBreakExit {
                         target: target.clone(),
                         continues: false,
                         state,
@@ -26905,7 +27353,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // leaves.
                 verter_session_query::flow::slice::SliceStatement::Continue { target } => {
                     let state = self.layer_state();
-                    self.break_exits.push(FlowBreakExit {
+                    self.st.break_exits.push(FlowBreakExit {
                         target: target.clone(),
                         continues: true,
                         state,
@@ -26946,7 +27394,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     Some(current) => {
                         let written = self.base_type_of_literal(current);
                         let definition = match (definition, &target.root) {
-                            (Some(site), _) => Some(self.flow_graph.expr_site_node(*site)),
+                            (Some(site), _) => Some(self.st.flow_graph.expr_site_node(*site)),
                             (
                                 None,
                                 verter_session_query::flow::slice::SliceNarrowRoot::Param {
@@ -26960,7 +27408,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                     binding: FlowProductSubject::Local(binding),
                                     ..
                                 },
-                            ) => Some(self.flow_graph.binding_node(*binding)),
+                            ) => Some(self.st.flow_graph.binding_node(*binding)),
                             (None, _) => None,
                         };
                         self.bind_written(target, written, false, definition, false);
@@ -27020,9 +27468,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     path_alive = false;
                 }
                 verter_session_query::flow::slice::SliceStatement::EvolvingArray(operation) => {
-                    let holds_before = self.holds.len();
+                    let holds_before = self.st.holds.len();
                     let _ = self.eval_evolving_operation(operation);
-                    self.holds.truncate(holds_before);
+                    self.st.holds.truncate(holds_before);
                 }
                 verter_session_query::flow::slice::SliceStatement::ThrowPoint => {
                     // A bare call statement: value-neutral, but a throw
@@ -27058,16 +27506,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // it is the ordinary `[]` below.
                     let evolving_subject =
                         self.canonical_runtime_subject(&FlowProductSubject::Local(*binding));
-                    if *evolving_array && self.no_implicit_any {
+                    if *evolving_array && self.st.no_implicit_any {
                         let subject = FlowProductSubject::Local(*binding);
                         self.set_declared_local(&subject, *kind, None);
-                        self.auto_typed_locals.remove(&evolving_subject);
-                        self.evolving_locals.insert(evolving_subject);
+                        self.st.auto_typed_locals.remove(&evolving_subject);
+                        self.st.evolving_locals.insert(evolving_subject);
                         let product = self.evolving_product(Vec::new());
                         self.bind_local_reaching(&subject, *kind, product, false);
                         continue;
                     }
-                    self.evolving_locals.remove(&evolving_subject);
+                    self.st.evolving_locals.remove(&evolving_subject);
                     // Without `noImplicitAny` the binding is DECLARED as the
                     // empty literal's widened type, which no write retypes
                     // (tsc 7.0.2: `let a = []; a = [1]; return a` is
@@ -27105,13 +27553,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             && (self
                                 .local_value(&FlowProductSubject::Local(*binding))
                                 .is_some()
-                                || self.param_names.iter().enumerate().any(|(ordinal, param)| {
-                                    param.binding.is_some_and(|parameter| {
-                                        self.bindings.canonical_local(parameter)
-                                            == self.bindings.canonical_local(*binding)
-                                    }) && (self.param_write(ordinal as u32).is_some()
-                                        || self.params.get(ordinal).is_some())
-                                }));
+                                || self.st.param_names.iter().enumerate().any(
+                                    |(ordinal, param)| {
+                                        param.binding.is_some_and(|parameter| {
+                                            self.st.bindings.canonical_local(parameter)
+                                                == self.st.bindings.canonical_local(*binding)
+                                        }) && (self.param_write(ordinal as u32).is_some()
+                                            || self.st.params.get(ordinal).is_some())
+                                    },
+                                ));
                         // THE root-identifier gate at the declarator
                         // annotation. `const v: Info` in a frame that
                         // declares its own `Info` names the LOCAL one;
@@ -27174,12 +27624,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 // nothing the binding holds; an initializer
                                 // that writes keeps whatever it recorded,
                                 // since its writes reach later reads.
-                                let before = self.degradation.take();
-                                let holds_before = self.holds.len();
+                                let before = self.st.degradation.take();
+                                let holds_before = self.st.holds.len();
                                 let _ = self.eval_expr(init);
-                                self.holds.truncate(holds_before);
-                                let recorded = self.degradation.take();
-                                self.degradation = before;
+                                self.st.holds.truncate(holds_before);
+                                let recorded = self.st.degradation.take();
+                                self.st.degradation = before;
                                 if let Some(recorded) = recorded {
                                     if expression_changes_reaching_values(init) {
                                         self.record_degradation(recorded);
@@ -27255,13 +27705,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // the checker, which uses `any` (TS7022 under
                     // `noImplicitAny`). Its initializer still runs.
                     if self
+                        .st
                         .circular_inferred
-                        .contains(&self.bindings.canonical_local(*binding))
+                        .contains(&self.st.bindings.canonical_local(*binding))
                     {
                         if let Some(init) = init {
-                            let holds_before = self.holds.len();
+                            let holds_before = self.st.holds.len();
                             let _ = self.eval_expr(init);
-                            self.holds.truncate(holds_before);
+                            self.st.holds.truncate(holds_before);
                         }
                         let any = self
                             .dispatch
@@ -27282,11 +27733,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // no initializer or a bare `null` / `undefined` one. Its
                     // type follows its assignments: it holds `undefined` or
                     // its initializer's value until a write retypes it.
-                    let auto_typed = mutable && *auto_typed_form && self.no_implicit_any;
+                    let auto_typed = mutable && *auto_typed_form && self.st.no_implicit_any;
                     if auto_typed {
-                        self.auto_typed_locals.insert(canonical_subject);
+                        self.st.auto_typed_locals.insert(canonical_subject);
                     } else {
-                        self.auto_typed_locals.remove(&canonical_subject);
+                        self.st.auto_typed_locals.remove(&canonical_subject);
                     }
                     let any = self
                         .dispatch
@@ -27316,11 +27767,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         && (init.is_none() || freshness.all_widening_nullish())
                     {
                         let declared = match init {
-                            Some(init) if self.nullability.is_strict() => {
+                            Some(init) if self.st.nullability.is_strict() => {
                                 self.prescan_statement_value_writes(Some(init));
-                                let holds_before = self.holds.len();
+                                let holds_before = self.st.holds.len();
                                 let outcome = self.eval_expr(init);
-                                self.holds.truncate(holds_before);
+                                self.st.holds.truncate(holds_before);
                                 match outcome {
                                     Positional::Value(node) => Some(node),
                                     Positional::Hold => None,
@@ -27365,9 +27816,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             // The checker binds no assignment for this
                             // declaration: a path reaching a read only
                             // through it reads the variable's initial type.
-                            if let Some(reaching) = self.products.reaching_type(&subject).cloned() {
-                                self.products
-                                    .set_reaching_type(&subject, reaching.declaration_only());
+                            if let Some(reaching) =
+                                self.st.products.reaching_type(&subject).cloned()
+                            {
+                                self.st.products.set_reaching_type(
+                                    &mut self.st.frame_execution.borrow_mut(),
+                                    &subject,
+                                    reaching.declaration_only(),
+                                );
                             }
                         }
                         continue;
@@ -27465,12 +27921,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // (the declared type wins), and an EVOLVING target
                     // takes the freshness-directed widening.
                     self.prescan_statement_value_writes(Some(value));
-                    let holds_before = self.holds.len();
+                    let holds_before = self.st.holds.len();
                     let widening_nullish = self.widening_nullish_value(value, freshness);
                     let outcome = self.eval_write_rhs(target, value, freshness);
                     match outcome {
                         Positional::Value(node) => {
-                            self.holds.truncate(holds_before);
+                            self.st.holds.truncate(holds_before);
                             self.apply_write(
                                 target,
                                 node,
@@ -27484,10 +27940,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             );
                         }
                         Positional::Hold => {
-                            self.holds.truncate(holds_before);
+                            self.st.holds.truncate(holds_before);
                         }
                         Positional::Unmodeled => {
-                            self.holds.truncate(holds_before);
+                            self.st.holds.truncate(holds_before);
                             let marker =
                                 super::flow_return_callee::unmodeled_position_marker(self.dispatch);
                             self.apply_write(target, marker, true, *definition, false, false);
@@ -27627,11 +28083,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         holds_before: usize,
     ) -> Option<FlowContribution> {
         if independent_return_expression(expr) {
-            if let Some(count) = &mut self.independent_returns {
+            if let Some(count) = &mut self.st.independent_returns {
                 *count += 1;
             }
         } else {
-            self.independent_returns = None;
+            self.st.independent_returns = None;
         }
         let (node, fresh_values) = evaluated?;
         let node = if matches!(expr, verter_session_query::flow::slice::SliceExpr::Type(leaf)
@@ -27641,7 +28097,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         } else {
             node
         };
-        fresh_literal |= self.holds.len() > holds_before;
+        fresh_literal |= self.st.holds.len() > holds_before;
         fresh_literal |= self.reads_widening_declaration(expr, node);
         // A COMPLETED call that closed on a
         // WHOLE-return fresh literal feeds the
@@ -27747,6 +28203,50 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// `signature` with its return (and any predicate beside it) replaced by
     /// `any` — a nested function whose return was read while it was being
     /// resolved.
+    /// A method's `value` once this round is over. Siblings stopped making
+    /// progress with it still reading one not evaluated: their returns
+    /// require each other, so it returns the checker's error type.
+    #[inline(never)]
+    fn settle_method_cycle(
+        &mut self,
+        receiver: &class_expression::ClassReceiver,
+        member: &verter_session_query::flow::slice::SliceObjectMember,
+        value: SemanticNodeId,
+        stalled: bool,
+        degradation: Option<FlowReturnDegradation>,
+    ) -> SemanticNodeId {
+        let value = if stalled && receiver.forward_read.get() && !member_declares_return(member) {
+            self.st.degradation = degradation;
+            self.signature_returning_any(value)
+        } else {
+            value
+        };
+        if self.returns_circularly(value) {
+            self.report_circular_member(receiver, member);
+        }
+        value
+    }
+
+    fn report_circular_member(
+        &mut self,
+        receiver: &class_expression::ClassReceiver,
+        member: &verter_session_query::flow::slice::SliceObjectMember,
+    ) {
+        let verter_session_query::flow::slice::SliceObjectKey::Static(key) = &member.key else {
+            return;
+        };
+        receiver
+            .circular_members
+            .borrow_mut()
+            .insert(Arc::clone(key));
+        let Some(span) = member.spans.name else {
+            return;
+        };
+        if let Some(occurrence) = self.circular_return_occurrence(&(span, Arc::clone(key))) {
+            self.record_checker_diagnostic(occurrence);
+        }
+    }
+
     fn signature_returning_any(&self, signature: SemanticNodeId) -> SemanticNodeId {
         let graph = self.dispatch.graph();
         let Some(SemanticNodeData::Signature {
@@ -27761,7 +28261,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         else {
             return signature;
         };
-        let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        let any = self.circular_return_recovery();
         graph.intern_node(SemanticNodeData::Signature {
             kind,
             params,
@@ -27780,29 +28280,39 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// recordings of the evaluations it sits in
     /// ([`nested::NestedResolution::note_frame_read`]).
     fn note_enclosing_frame_read(&self, frame: &EnclosingFrame<'_>) {
-        self.resolving_functions
+        self.st
+            .resolving_functions
             .borrow_mut()
-            .note_frame_read(self.enclosing_frames.len(), frame.outside);
+            .note_frame_read(self.st.enclosing_frames.len(), frame.outside);
     }
 
+    /// The declaring frame's products for a capture authority's locator,
+    /// with the product authority they advance under and the subject.
     fn capture_source_products(
         &self,
         locator: &verter_session_query::flow::slice::SliceCaptureAuthorityLocator,
-    ) -> Option<(FlowProductStore, FlowProductSubject)> {
-        let products = if &locator.declaration().defining_function == self.bindings.function() {
-            self.products.clone()
-        } else {
-            self.enclosing_frames.iter().find_map(|frame| {
-                (frame.function == locator.declaration().defining_function).then(|| {
-                    self.note_enclosing_frame_read(frame);
-                    frame.products.clone()
-                })
-            })?
-        };
+    ) -> Option<(FlowProductStore, SharedFlowExecution, FlowProductSubject)> {
+        let (products, frame_execution) =
+            if &locator.declaration().defining_function == self.st.bindings.function() {
+                (
+                    self.st.products.clone(),
+                    std::rc::Rc::clone(&self.st.frame_execution),
+                )
+            } else {
+                self.st.enclosing_frames.iter().find_map(|frame| {
+                    (frame.function == locator.declaration().defining_function).then(|| {
+                        self.note_enclosing_frame_read(frame);
+                        (
+                            frame.products.clone(),
+                            std::rc::Rc::clone(&frame.frame_execution),
+                        )
+                    })
+                })?
+            };
         let subject = FlowProductSubject::Local(locator.local_declaration()?);
         products
             .contains_subject(&subject)
-            .then_some((products, subject))
+            .then_some((products, frame_execution, subject))
     }
 
     fn lower_capture_authority(
@@ -27810,10 +28320,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         locator: &verter_session_query::flow::slice::SliceCaptureAuthorityLocator,
         authority: verter_session_query::flow::slice::SliceCaptureAuthority,
     ) -> Option<SemanticNodeId> {
-        let binder_env = if &locator.declaration().defining_function == self.bindings.function() {
-            Some(self.binder_env)
+        let binder_env = if &locator.declaration().defining_function == self.st.bindings.function()
+        {
+            Some(self.st.binder_env)
         } else {
-            self.enclosing_frames.iter().find_map(|frame| {
+            self.st.enclosing_frames.iter().find_map(|frame| {
                 (frame.function == locator.declaration().defining_function).then(|| {
                     self.note_enclosing_frame_read(frame);
                     frame.binder_env
@@ -27888,8 +28399,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // nested signature sits inside that scope, so every binder in scope
         // there is in scope here too.
         let binder_env = self.dispatch.flow_binder_env(
-            self.canonical,
-            self.owner,
+            self.st.canonical,
+            self.st.owner,
             type_parameters,
             Some(outer_env),
             Some(anchor),
@@ -27960,7 +28471,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 &mut substitutions,
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             );
-            let node = self.dispatch.erase_nullable_members(node, self.nullability);
+            let node = self
+                .dispatch
+                .erase_nullable_members(node, self.st.nullability);
             // A parameter with neither an annotation nor a default takes the
             // contextual signature's type at its position.
             let node = match contextual {
@@ -28114,11 +28627,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             query: SemanticQueryKey::FlowReturn(Box::new(key.clone())),
             input_basis,
             ancestry: self
+                .st
                 .execution_selection
                 .basis()
                 .ancestry
-                .with(self.execution_selection.basis().input_basis.clone()),
-            resources: self.execution_selection.resources(),
+                .with(self.st.execution_selection.basis().input_basis.clone()),
+            resources: self.st.execution_selection.resources(),
             additional_requirements: Arc::from([]),
         };
         let Ok(execution_selection) =
@@ -28148,7 +28662,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
             return NestedSignatureStep::Done(self.unmodeled_position());
         };
-        let Ok(mut captured_products) = FlowProductStore::new(execution, &bound) else {
+        let Ok((mut captured_products, mut captured_execution)) =
+            FlowProductStore::new(execution, &bound)
+        else {
             self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
             return NestedSignatureStep::Done(self.unmodeled_position());
         };
@@ -28171,6 +28687,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 declared_capture_types.insert(identity.clone(), node);
             }
             captured_products.import_capture_input(
+                &mut captured_execution,
                 &input.subject,
                 input.assignment,
                 input.reaching,
@@ -28179,6 +28696,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         seed_selected_parameters(
             &mut captured_products,
+            &mut captured_execution,
             nested_params,
             &params,
             bindings,
@@ -28191,6 +28709,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             type_param_decls,
             binder_env,
             captured_products,
+            captured_execution,
             declared_capture_types,
             extended_capture_identities,
             execution_selection,
@@ -28210,7 +28729,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         contextual: Option<&ContextualSignature>,
     ) -> verter_identity::identity::InputBasisId {
         verter_identity::identity::InputBasisId::from_canonical(&NestedFlowInputs {
-            parent: self.execution_selection.basis().input_basis.digest(),
+            parent: self.st.execution_selection.basis().input_basis.digest(),
             captures,
             binders: outer_env,
             contextual,
@@ -28231,7 +28750,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     | verter_session_query::flow::slice::SliceThis::Explicit
             )
         )
-        .then(|| self.receiver.clone())
+        .then(|| self.st.receiver.clone())
         .flatten()
     }
 
@@ -28256,21 +28775,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let mut capture_inputs: Vec<_> = inputs
             .selected_captures(planned.selection())
             .map(|(identity, value_demanded)| {
-                let local = self.bindings.local(identity);
+                let local = self.st.bindings.local(identity);
                 // A capture past its last assignment enters the body at its
                 // narrowed type where the function is created.
                 // A capture of this frame's own that entered it extended is
                 // extended for the functions this frame creates too.
                 let extended = match local {
                     Some(binding) => extended_captures.contains(&binding),
-                    None => self.extended_capture_identities.contains(identity),
+                    None => self.st.extended_capture_identities.contains(identity),
                 };
                 let parent = local
                     .map(FlowProductSubject::Local)
                     .unwrap_or_else(|| FlowProductSubject::Captured(identity.clone()));
                 let narrowed = extended
                     .then(|| {
-                        self.products.narrowing(&parent).and_then(|narrowing| {
+                        self.st.products.narrowing(&parent).and_then(|narrowing| {
                             narrowing
                                 .facts()
                                 .iter()
@@ -28280,8 +28799,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     })
                     .flatten();
                 if value_demanded
-                    && self.products.contains_subject(&parent)
-                    && self.products.reaching(&parent).is_none()
+                    && self.st.products.contains_subject(&parent)
+                    && self.st.products.reaching(&parent).is_none()
                     && self.destructured_param_element(&parent).is_some()
                 {
                     if peek {
@@ -28305,7 +28824,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         subject: FlowProductSubject::Captured(identity.clone()),
                         value_demanded,
                         extended: false,
-                        assignment: self.products.assignment(&parent).with_single_path(false),
+                        assignment: self.st.products.assignment(&parent).with_single_path(false),
                         deferred_write: None,
                         reaching: Some(ReachingTypeProduct::of(declared)),
                         declared: None,
@@ -28329,7 +28848,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         subject: FlowProductSubject::Captured(identity.clone()),
                         value_demanded,
                         extended: false,
-                        assignment: self.products.assignment(&parent).with_single_path(false),
+                        assignment: self.st.products.assignment(&parent).with_single_path(false),
                         deferred_write: None,
                         reaching: Some(ReachingTypeProduct::of(any)),
                         declared: Some(any),
@@ -28346,11 +28865,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .then(|| {
                         let Some(binding) = local else {
                             return self
+                                .st
                                 .declared_capture_types
                                 .get(identity)
                                 .map(|node| Some(*node));
                         };
-                        let fact = self.skeleton.binding(binding);
+                        let fact = self.st.skeleton.binding(binding);
                         let unannotated_whole = matches!(
                             fact.kind,
                             verter_session_query::flow::skeleton::SkeletonBindingKind::Let
@@ -28358,7 +28878,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         ) && !fact.destructured
                             && fact.annotation_span.is_none();
                         unannotated_whole.then(|| {
-                            self.inferred_declared_locals
+                            self.st
+                                .inferred_declared_locals
                                 .get(&self.canonical_runtime_subject(&parent))
                                 .map(|(_, node)| *node)
                         })
@@ -28383,7 +28904,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     value_demanded,
                     extended,
                     assignment: if value_demanded {
-                        self.products.assignment(&parent).with_single_path(false)
+                        self.st.products.assignment(&parent).with_single_path(false)
                     } else {
                         DefiniteAssignmentProduct::default()
                     },
@@ -28400,7 +28921,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // reaching and its narrowing are the answer.
                     deferred_write: value_demanded
                         .then(|| {
-                            self.capture_write_lookahead
+                            self.st
+                                .capture_write_lookahead
                                 .get(&self.canonical_runtime_subject(&parent))
                                 .copied()
                         })
@@ -28410,7 +28932,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             if extended {
                                 narrowed
                                     .map(ReachingTypeProduct::of)
-                                    .or_else(|| self.products.reaching_type(&parent).cloned())
+                                    .or_else(|| self.st.products.reaching_type(&parent).cloned())
                                     .map(|reaching| {
                                         // A capture is assumed initialized: a path
                                         // reaching the creation only through an
@@ -28433,16 +28955,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                         }
                                     })
                             } else {
-                                self.capture_write_lookahead
+                                self.st
+                                    .capture_write_lookahead
                                     .get(&self.canonical_runtime_subject(&parent))
                                     .map(|node| ReachingTypeProduct::of(*node))
                                     .or_else(|| inferred_declared.map(ReachingTypeProduct::of))
-                                    .or_else(|| self.products.reaching_type(&parent).cloned())
+                                    .or_else(|| self.st.products.reaching_type(&parent).cloned())
                             }
                         })
                         .flatten(),
                     declared: value_demanded
-                        .then(|| self.products.declared_type(&parent))
+                        .then(|| {
+                            self.st
+                                .products
+                                .declared_type(&self.st.frame_execution.borrow(), &parent)
+                        })
                         .flatten(),
                     inferred_declared,
                 }
@@ -28470,9 +28997,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     continue;
                 };
                 let source = self.capture_source_products(&locator);
-                if let Some(node) = source
-                    .as_ref()
-                    .and_then(|(products, subject)| products.declared_type(subject))
+                if let Some(node) =
+                    source
+                        .as_ref()
+                        .and_then(|(products, frame_execution, subject)| {
+                            products.declared_type(&frame_execution.borrow(), subject)
+                        })
                 {
                     capture_inputs[index].apply_authority(node, locator.source());
                 } else {
@@ -28489,7 +29019,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             let authorities = self
                 .dispatch
                 .source
-                .indexed_flow_source(self.canonical)
+                .indexed_flow_source(self.st.canonical)
                 .and_then(|(_, demand)| demand?.flow_capture_authorities(&locators));
             let Some(authorities) = authorities else {
                 if peek {
@@ -28517,8 +29047,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     Some(None) => unresolved.push(index),
                     Some(Some(authority)) => {
                         if let Some(node) = self.lower_capture_authority(&locator, authority) {
-                            if let Some((mut products, subject)) = source {
-                                products.set_declared_type(&subject, Some(node));
+                            if let Some((mut products, frame_execution, subject)) = source {
+                                products.set_declared_type(
+                                    &mut frame_execution.borrow_mut(),
+                                    &subject,
+                                    Some(node),
+                                );
                             }
                             capture_inputs[index].apply_authority(node, locator.source());
                         }
@@ -28569,7 +29103,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let Some((_serve, source_demand)) = self
             .dispatch
             .source
-            .indexed_expression_source(self.canonical)
+            .indexed_expression_source(self.st.canonical)
         else {
             return CalleeClauseLookup::Unavailable;
         };
@@ -28601,7 +29135,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }
             slice.default.as_ref().and_then(|gated| {
                 self.dispatch.lower_type_expr_in_owner_scope_with_context(
-                    self.canonical,
+                    self.st.canonical,
                     target.declaration.owner,
                     gated.ty(),
                     crate::semantic_query::ProjectionReductionContext::structural_transit(),
@@ -28713,7 +29247,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         site: verter_session_query::flow::slice::SliceCallSite,
         arguments: &verter_session_query::flow::slice::SliceCallArguments,
     ) -> Positional<CallValue> {
-        self.call_receivers.insert(site.span(), object);
+        self.st.call_receivers.insert(site.span(), object);
         let Some(callee) = self
             .project_path_navigate(object, std::slice::from_ref(member))
             .filter(|callee| {
@@ -28790,7 +29324,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     Some(SemanticNodeData::Literal(_))
                 ) && self.dispatch.instance_member_read_widens(object, member)
                 {
-                    self.call_fresh_literal_returns.push(FreshCallReturn {
+                    self.st.call_fresh_literal_returns.push(FreshCallReturn {
                         span,
                         node,
                         values: Arc::from([node]),
@@ -28898,7 +29432,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     SliceExpr::Union { arms, guard }
                         if !arms.is_empty() && !union_branches_change_reaching_values(arms) =>
                     {
-                        let holds_before = self.holds.len();
+                        let holds_before = self.st.holds.len();
                         let mark = self.narrowing_snapshot();
                         self.apply_guard_scoped(guard, true);
                         run.waiting.push(Waiting::Union {
@@ -28996,7 +29530,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         if let Positional::Value(node) = value {
                             let node = self.declared_positional_read(node);
                             value = Positional::Value(
-                                self.dispatch.erase_nullable_members(node, self.nullability),
+                                self.dispatch
+                                    .erase_nullable_members(node, self.st.nullability),
                             );
                         }
                     }
@@ -29082,7 +29617,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         let node = self.settle_composite_part(value, holds_before);
                         reduction_arms.push(self.reduction_arm(&arms[index], node));
                         if let Some(next) = arms.get(index + 1) {
-                            let holds_before = self.holds.len();
+                            let holds_before = self.st.holds.len();
                             let mark = self.narrowing_snapshot();
                             self.apply_guard_scoped(guard, false);
                             run.waiting.push(Waiting::Union {
@@ -29098,7 +29633,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         }
                         let (node, view) = self.reduced_union(reduction_arms);
                         if view != node {
-                            self.unwidened_views.insert(node, view);
+                            self.st.unwidened_views.insert(node, view);
                         }
                         value = Positional::Value(node);
                     }
@@ -29222,9 +29757,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> Positional<SemanticNodeId> {
         let graph = self.dispatch.graph();
         match expr {
-            verter_session_query::flow::slice::SliceExpr::Type(leaf) => {
-                Positional::Value(self.lower_body_type(leaf.ty()))
-            }
+            verter_session_query::flow::slice::SliceExpr::Type(leaf) => self.eval_type_leaf(leaf),
             verter_session_query::flow::slice::SliceExpr::FrameShadowed(wrapped) => {
                 let (inner, shadowed) = (wrapped.inner(), wrapped.shadowed());
                 // The root-identifier gate's decision point. The content
@@ -29253,9 +29786,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // owner scope answers for the same name, the frame's read
                 // is the answer.
                 if let verter_session_query::flow::slice::SliceExpr::Type(leaf) = inner {
-                    if let Some(node) =
-                        self.eval_frame_rooted_typeof_path(leaf.ty(), leaf.frame_root())
-                    {
+                    if let Some(node) = self.eval_frame_rooted_typeof_path(leaf) {
                         return node;
                     }
                 }
@@ -29296,7 +29827,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // about the body around it.
             verter_session_query::flow::slice::SliceExpr::Param { ordinal, binding } => {
                 if self.reads_declared(&FlowProductSubject::Local(*binding)) {
-                    return match self.params.get(*ordinal as usize).copied() {
+                    return match self.st.params.get(*ordinal as usize).copied() {
                         Some(node) => Positional::Value(node),
                         None => Positional::Unmodeled,
                     };
@@ -29317,6 +29848,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // past a possible throw point: the value is one path's,
                 // not the join's — fail closed at the read.
                 if self
+                    .st
                     .products
                     .assignment(&FlowProductSubject::Local(*binding))
                     .single_path()
@@ -29328,7 +29860,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 if let Some(node) = self.param_write(*ordinal) {
                     return Positional::Value(node);
                 }
-                match self.params.get(*ordinal as usize).copied() {
+                match self.st.params.get(*ordinal as usize).copied() {
                     Some(node) => Positional::Value(node),
                     None => Positional::Unmodeled,
                 }
@@ -29358,12 +29890,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // the chain unions `undefined` once if any strip removed arms —
             // a non-nullable base publishes the plain member type, exactly
             // as the checker does.
-            verter_session_query::flow::slice::SliceExpr::OptionalMember { root, links } => {
+            verter_session_query::flow::slice::SliceExpr::OptionalMember {
+                root,
+                links,
+                name_spans,
+                first_link_undeclared,
+            } => {
                 let node = match self.eval_expr(root) {
                     Positional::Value(node) => node,
                     Positional::Hold => return Positional::Hold,
                     Positional::Unmodeled => return Positional::Unmodeled,
                 };
+                if *first_link_undeclared {
+                    if let Some(recovered) = self.undeclared_literal_member(node, links, name_spans)
+                    {
+                        return Positional::Value(recovered);
+                    }
+                }
                 // An `any` root keeps the authored `any`: every member
                 // read off `any` is `any`, optionality included.
                 if self.node_is_semantic_any(node) {
@@ -29390,13 +29933,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }),
                     _ => None,
                 };
+                let reads_own_literal = self.reads_own_literal(root, node);
                 let mut current = node;
                 let mut adds_undefined = false;
                 for index in 0..links.len() {
+                    if self.node_is_semantic_any(current) {
+                        break;
+                    }
                     match self.optional_chain_link(
                         current,
                         links,
-                        index,
+                        OptionalLinkSite {
+                            index,
+                            name_span: name_spans.get(index).copied(),
+                            reads_own_literal: index == 0 && reads_own_literal,
+                        },
                         narrow_root.as_ref(),
                         &mut adds_undefined,
                     ) {
@@ -29413,7 +29964,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 // The short-circuit's `undefined` is a strict-null fact: with
                 // `strictNullChecks` off the chain reads the member type.
-                if adds_undefined && self.nullability.is_strict() {
+                if adds_undefined && self.st.nullability.is_strict() {
                     current = self.union(&[
                         current,
                         graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
@@ -29459,7 +30010,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // the POSITION carries the marker.
                     None if *captured => Positional::Unmodeled,
                     None => {
-                        match param.and_then(|ordinal| self.params.get(ordinal as usize).copied()) {
+                        match param
+                            .and_then(|ordinal| self.st.params.get(ordinal as usize).copied())
+                        {
                             Some(node) => Positional::Value(node),
                             None => {
                                 self.record_degradation(FlowReturnDegradation::FlowGap(
@@ -29494,11 +30047,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 let mut substitutions = Vec::new();
                 let contextual = self.dispatch.shallow_lower_type_expr_with_context(
                     target.ty(),
-                    &self.binder_env.env,
-                    &self.binder_env.scope,
-                    &self.binder_env.name_resolution,
-                    self.binder_env.scope_payload.as_ref(),
-                    &self.binder_env.shadowing,
+                    &self.st.binder_env.env,
+                    &self.st.binder_env.scope,
+                    &self.st.binder_env.name_resolution,
+                    self.st.binder_env.scope_payload.as_ref(),
+                    &self.st.binder_env.shadowing,
                     &mut substitutions,
                     crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         crate::semantic_query::ProjectionMode::Skeleton,
@@ -29533,7 +30086,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             self.dispatch,
                             node,
                             &fresh,
-                            self.nullability,
+                            self.st.nullability,
                         ))
                     }
                     other => other,
@@ -29620,7 +30173,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 other => other,
             },
             verter_session_query::flow::slice::SliceExpr::ParamValue { ordinal } => {
-                match self.params.get(*ordinal as usize).copied() {
+                match self.st.params.get(*ordinal as usize).copied() {
                     Some(node) => Positional::Value(node),
                     None => Positional::Unmodeled,
                 }
@@ -29640,7 +30193,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         self.dispatch,
                         node,
                         &fresh,
-                        self.nullability,
+                        self.st.nullability,
                     ))
                 }
                 other => other,
@@ -29714,7 +30267,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // discharge joins whole contributions, not fragments
                     // of one. The ARM is the unmodelled position; the rest
                     // of the union survives, degraded.
-                    let holds_before = self.holds.len();
+                    let holds_before = self.st.holds.len();
                     let mark = self.narrowing_snapshot();
                     self.apply_guard_scoped(guard, index == 0);
                     let outcome = self.eval_expr(arm);
@@ -29729,7 +30282,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // string }`.
                 let (node, view) = self.reduced_union(reduction_arms);
                 if view != node {
-                    self.unwidened_views.insert(node, view);
+                    self.st.unwidened_views.insert(node, view);
                 }
                 Positional::Value(node)
             }
@@ -29762,10 +30315,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         mut current: SemanticNodeId,
         links: &[(Arc<str>, bool)],
-        index: usize,
+        site: OptionalLinkSite,
         narrow_root: Option<&verter_session_query::flow::slice::SliceNarrowRoot>,
         stripped: &mut bool,
     ) -> OptionalLink {
+        let index = site.index;
         let (name, optional) = &links[index];
         if *optional {
             match self.strip_nullish_arms_for_optional_read(current) {
@@ -29796,28 +30350,29 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // `this` to the receiver.
         let this_source = self.this_member_source(current, name);
         let read_base = this_source.unwrap_or(current);
-        let Some(member) = this_source
+        let member = this_source
             .and_then(|source| self.receiver_non_public_member(source, name))
-            .or_else(|| self.project_path_navigate(read_base, std::slice::from_ref(name)))
-        else {
+            .or_else(|| self.project_path_navigate(read_base, std::slice::from_ref(name)));
+        // A member the receiver proves absent: the checker's TS2339, and
+        // its error type is the read. A name-less link (an element read) is
+        // no property read.
+        if self.member_read_missed(member)
+            && site.name_span.is_some()
+            && (self.receiver_lacks_member(current, name)
+                || self.member_proven_absent(read_base, name))
+        {
+            let own_method = site.reads_own_literal && !self.st.frame_declares_return;
+            return OptionalLink::Read {
+                base: current,
+                read: self.absent_member_recovery(current, name, site.name_span, own_method),
+            };
+        }
+        let Some(member) = member else {
             self.record_degradation(FlowReturnDegradation::FlowGap(
                 verter_session_query::flow::policy::FlowGap::UnmodeledExpression,
             ));
             return OptionalLink::Unmodeled;
         };
-        // A member the receiver does not declare: the checker's TS2339,
-        // whose error type this rail does not model, named as its cause.
-        if this_source.is_some()
-            && matches!(
-                self.dispatch.arena().node_data(member).as_deref(),
-                Some(SemanticNodeData::Opaque(
-                    crate::semantic_query::QueryError::Miss
-                ))
-            )
-            && self.receiver_lacks_member(current, name)
-        {
-            self.record_degradation(FlowReturnDegradation::AbsentReceiverMember);
-        }
         // An element read (`a[0]`) the walk misses is a position
         // this lane does not model, never a published miss.
         let element_read = name.parse::<u64>().is_ok();
@@ -29908,6 +30463,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             seen.push(node);
             match graph.node_data(node).as_deref() {
                 Some(SemanticNodeData::Primitive(PrimitiveKind::Any)) => return true,
+                Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                    diagnostic, ..
+                })) if diagnostic.recovery().is_some() => return true,
                 Some(SemanticNodeData::Alias(target)) => pending.push(*target),
                 Some(
                     composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
@@ -29993,18 +30551,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         {
             return None;
         }
-        let holds_before = self.holds.len();
-        let degradation_before = self.degradation;
+        let holds_before = self.st.holds.len();
+        let degradation_before = self.st.degradation;
         let dispatch = self.dispatch;
         dispatch.probe_optional(|| {
             let outcome = self.eval_expr(expr);
-            self.holds.truncate(holds_before);
+            self.st.holds.truncate(holds_before);
             match outcome {
                 Positional::Value(node) => Some(node),
                 // The indexed argument answers instead, so an attempt this
                 // frame could not finish leaves no degradation of its own.
                 Positional::Hold | Positional::Unmodeled => {
-                    self.degradation = degradation_before;
+                    self.st.degradation = degradation_before;
                     None
                 }
             }
@@ -30029,6 +30587,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let literals = self.top_level_literal_nodes(node);
         !literals.is_empty()
             && self
+                .st
                 .call_fresh_literal_returns
                 .iter()
                 .rev()
@@ -30064,7 +30623,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .map(|node| IndexedValue { node, fresh: false });
         }
         self.dispatch
-            .evaluate_indexed_value(self.canonical, self.owner, expression, false)
+            .evaluate_indexed_value(self.st.canonical, self.st.owner, expression, false)
     }
 
     /// The direct-call target's callee VALUE TYPE through the same
@@ -30084,8 +30643,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             type_args: Vec::new(),
         });
         self.dispatch.lower_type_expr_in_owner_scope_with_context(
-            self.canonical,
-            self.owner,
+            self.st.canonical,
+            self.st.owner,
             &callee_expr,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
         )
@@ -30100,7 +30659,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> bool {
         let exported = self
             .dispatch
-            .transaction_indexed_record(self.canonical)
+            .transaction_indexed_record(self.st.canonical)
             .is_some_and(|indexed| {
                 indexed
                     .shallow_state
@@ -30114,7 +30673,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             && self
                 .dispatch
                 .function_augmentations(
-                    &Arc::from(self.canonical),
+                    &Arc::from(self.st.canonical),
                     target.declaration.name.as_ref(),
                     crate::semantic_query::ProjectionReductionContext::structural_transit(),
                 )
@@ -30477,7 +31036,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 } = &result
                 {
                     if !fresh_literal_returns.is_empty() {
-                        self.call_fresh_literal_returns.push(FreshCallReturn {
+                        self.st.call_fresh_literal_returns.push(FreshCallReturn {
                             span: site.span(),
                             node: *return_type,
                             values: Arc::from(&fresh_literal_returns[..]),
@@ -30508,10 +31067,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         // message arguments and authored report location are
                         // read off the carrier at this call, never kept from
                         // another caller's bind.
-                        if let Some(occurrence) =
-                            self.dispatch
-                                .bind_checker_recovery(node, self.canonical, site.span())
-                        {
+                        if let Some(occurrence) = self.dispatch.bind_checker_recovery(
+                            node,
+                            self.st.canonical,
+                            site.span(),
+                        ) {
                             self.record_checker_diagnostic(occurrence);
                         }
                         if budget || recovers {
@@ -30524,9 +31084,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     returned,
                 )))
             }
-            // An SCC back-edge through the executor: the close discharges
-            // it on the component's admitted results.
-            super::call_resolve::ResolveCallStep::Hold(_) => Some(Positional::Hold),
+            // A back-edge through the executor re-enters a return in flight.
+            super::call_resolve::ResolveCallStep::Hold(_) => {
+                let recovery = self.circular_return_recovery();
+                Some(Positional::Value(CallValue::of_resolved_call(
+                    self.dispatch,
+                    recovery,
+                )))
+            }
             super::call_resolve::ResolveCallStep::Degraded(
                 crate::semantic_query::ResolveCallFailure::Diagnosed(recipe),
             ) => {
@@ -30722,7 +31287,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 let prepared = match &target.part {
                     verter_type_expr::facts::FunctionPartIdentity::Member { .. } => None,
                     _ => self.dispatch.source.prepared_value_decl_return_only(
-                        self.canonical,
+                        self.st.canonical,
                         target.declaration.owner,
                         target.declaration.name.as_ref(),
                     ),
@@ -30758,8 +31323,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     });
                     let Some(callee_node) =
                         self.dispatch.lower_type_expr_in_owner_scope_with_context(
-                            self.canonical,
-                            self.owner,
+                            self.st.canonical,
+                            self.st.owner,
                             &callee,
                             crate::semantic_query::ProjectionReductionContext::structural_transit(),
                         )
@@ -30921,7 +31486,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     verter_type_expr::facts::FunctionReturnSource::Flow(
                         verter_type_expr::facts::FlowFunctionReturnIdentity {
                             anchor: verter_type_expr::locators::AuthoredAnchor {
-                                canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
+                                canonical_id: verter_type_expr::OwnedStr::from(self.st.canonical),
                                 owner: target.declaration.owner,
                                 symbol: target.declaration.name.clone(),
                                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
@@ -30939,12 +31504,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             .dispatch
                             .observe_read(|| self.dispatch.execute_flow_return(key.clone()));
                         let provisional = self.dispatch.pending_obligation_count() > pending_before;
-                        let declined = provisional
-                            || matches!(
-                                read.value(),
-                                FlowReturnStep::Hold(_)
-                                    | FlowReturnStep::NoValue(FlowReturnFailure::EmptyCycle)
-                            );
+                        let declined =
+                            provisional || matches!(read.value(), FlowReturnStep::Hold(_));
                         let step = if declined {
                             read.discard()
                         } else {
@@ -30970,7 +31531,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                     // arm just applied: the fixed point
                                     // repeats this transfer, so it owes the
                                     // same obligation.
-                                    self.holds
+                                    self.st
+                                        .holds
                                         .push(HeldCallee::foreign(key, callee_clause.clone()));
                                 }
                                 let value = CallValue::of_served_return(
@@ -30987,7 +31549,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 // join keeps them, and a `const` binding
                                 // records its widening membership.
                                 if !result.fresh_literal_arms().is_empty() {
-                                    self.call_fresh_literal_returns.push(FreshCallReturn {
+                                    self.st.call_fresh_literal_returns.push(FreshCallReturn {
                                         span: site.span(),
                                         node: value.node(),
                                         values: Arc::from(&result.fresh_literal_arms()[..]),
@@ -30995,18 +31557,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 }
                                 Positional::Value(value)
                             }
-                            FlowReturnStep::Hold(key) => {
-                                self.holds
-                                    .push(HeldCallee::foreign((*key).clone(), callee_clause));
-                                Positional::Hold
-                            }
-                            FlowReturnStep::NoValue(FlowReturnFailure::EmptyCycle) => {
-                                // An empty-cycle callee IS a hold — the SCC
-                                // close discharges it (and its callers) on
-                                // the component's admitted returns.
-                                self.holds.push(HeldCallee::foreign(key, callee_clause));
-                                Positional::Hold
-                            }
+                            FlowReturnStep::Hold(key) => self.circular_call(&key),
                             // The CALLEE's frame failed. That is a fact
                             // about the callee's body, and it reaches this
                             // frame at exactly one place: the call.
@@ -31020,7 +31571,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }
                     source => match self
                         .dispatch
-                        .execute_function_return_source(source, self.canonical)
+                        .execute_function_return_source(source, self.st.canonical)
                     {
                         // The callee's DECLARED return locator, lowered in
                         // file owner scope where its own clause is not in
@@ -31071,7 +31622,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .frame_binding_read(binding)
                     .or_else(|| self.read_local(binding))
                     .or_else(|| {
-                        param.and_then(|ordinal| self.params.get(ordinal as usize).copied())
+                        param.and_then(|ordinal| self.st.params.get(ordinal as usize).copied())
                     });
                 let Some(node) = node else {
                     // A CAPTURED callee the seeded snapshot does not carry
@@ -31176,17 +31727,20 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }
             verter_session_query::flow::slice::SliceCall::DirectSelf => {
                 // Only the frame that OWNS a flow slot can hold on it.
-                let Some(self_slot) = self.self_slot else {
+                let Some(self_slot) = self.st.self_slot else {
                     return Positional::Unmodeled;
                 };
                 match self.dispatch.execute_flow_return(self_slot.clone()) {
-                    FlowReturnStep::Hold(_) => {
+                    // A `return` of the bare self-call contributes nothing:
+                    // its return is the function's other returns.
+                    FlowReturnStep::Hold(_) if self.st.bare_self_return == Some(site.span()) => {
                         // The one hold whose target's binders are THIS
                         // frame's own: a self-call's callee IS the caller,
                         // so the fixed point must leave them alone.
-                        self.holds.push(HeldCallee::own_frame(self_slot.clone()));
+                        self.st.holds.push(HeldCallee::own_frame(self_slot.clone()));
                         Positional::Hold
                     }
+                    FlowReturnStep::Hold(key) => self.circular_call(&key),
                     FlowReturnStep::Complete(_) => {
                         unreachable!("a same-slot recursive edge is always a hold in flight")
                     }
@@ -31239,7 +31793,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 self.call_return_of_callee_node(callee, site)
             }
             verter_session_query::flow::slice::SliceCall::Symbolic(callee) => {
-                let (ty, binding) = (callee.ty(), callee.frame_root());
+                let (ty, binding, member_spans) =
+                    (callee.ty(), callee.frame_root(), callee.member_spans());
                 // The symbolic `ReturnType<typeof …>` carrier: lower the
                 // callee, resolve its signature through the same builtin
                 // `ReturnType` reduction every consumer uses, and take the
@@ -31266,20 +31821,29 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // `typeof` leaf does. Everything else lowers in owner
                 // scope as before.
                 let mut frame_rooted = false;
-                let Some(callee_node) =
-                    (match self.frame_rooted_typeof_path_node(&type_arguments[0], binding) {
+                let callee_node =
+                    match self.frame_rooted_typeof_path_node(&type_arguments[0], binding) {
                         Some(node) => {
                             frame_rooted = true;
                             Some(node)
                         }
                         None => self.dispatch.lower_type_expr_in_owner_scope_with_context(
-                            self.canonical,
-                            self.owner,
+                            self.st.canonical,
+                            self.st.owner,
                             &type_arguments[0],
                             crate::semantic_query::ProjectionReductionContext::structural_transit(),
                         ),
-                    })
-                else {
+                    };
+                // A callee its object proves absent is the checker's TS2339,
+                // and a call of its error type is untyped.
+                if self.member_read_missed(callee_node) {
+                    let recovered =
+                        self.recovered_member_callee(&type_arguments[0], binding, member_spans);
+                    if let Some(recovered) = recovered {
+                        return recovered;
+                    }
+                }
+                let Some(callee_node) = callee_node else {
                     return self.degraded_unrepresentable_callee();
                 };
                 // A FRAME-ROOTED member callee carries receiver semantics
@@ -31365,7 +31929,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 if is_any(callee_node) {
                     return Positional::Value(CallValue::modeled_any(self.dispatch));
                 }
-                self.call_receivers.insert(site.span(), object);
+                self.st.call_receivers.insert(site.span(), object);
                 if let Some(value) = self.eval_call_via_resolve_call(callee_node, site, arguments) {
                     return value;
                 }
@@ -31374,8 +31938,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             verter_session_query::flow::slice::SliceCall::OptionalChain {
                 root,
                 links,
+                name_spans,
                 optional_call,
                 after,
+                after_spans,
             } => {
                 // The checker's optional chain: each `?.` edge strips its
                 // base's nullish arms (short-circuiting to `undefined`
@@ -31418,6 +31984,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 let mut stripped = false;
                 let mut callee = node;
                 let mut receiver = None;
+                // A callee link the receiver proves absent is the checker's
+                // TS2339 at its name, and the call of its error type is
+                // `any`, exactly as a member-valued chain reads it.
+                let reads_own_literal = self.reads_own_literal(root, node);
                 for index in 0..links.len() {
                     if self.node_is_semantic_any(callee) {
                         return Positional::Value(CallValue::modeled_any(self.dispatch));
@@ -31425,7 +31995,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     match self.optional_chain_link(
                         callee,
                         links,
-                        index,
+                        OptionalLinkSite {
+                            index,
+                            name_span: name_spans.get(index).copied(),
+                            reads_own_literal: index == 0 && reads_own_literal,
+                        },
                         narrow_root.as_ref(),
                         &mut stripped,
                     ) {
@@ -31464,7 +32038,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // receiver: the executor reads it where it would evaluate
                 // the authored (unstripped) one.
                 if let Some(receiver) = receiver {
-                    self.call_receivers.insert(site.span(), receiver);
+                    self.st.call_receivers.insert(site.span(), receiver);
                 }
                 let value = match self.eval_call_via_resolve_call(callee, site, arguments) {
                     Some(value) => value,
@@ -31474,7 +32048,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     Positional::Value(value) => value,
                     other => return other,
                 };
-                if after.is_empty() && !(stripped && self.nullability.is_strict()) {
+                if after.is_empty() && !(stripped && self.st.nullability.is_strict()) {
                     return Positional::Value(value);
                 }
                 let mut current = value.into_node();
@@ -31482,7 +32056,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     if self.node_is_semantic_any(current) {
                         break;
                     }
-                    match self.optional_chain_link(current, after, index, None, &mut stripped) {
+                    let site = OptionalLinkSite {
+                        index,
+                        name_span: after_spans.get(index).copied(),
+                        reads_own_literal: false,
+                    };
+                    match self.optional_chain_link(current, after, site, None, &mut stripped) {
                         OptionalLink::Read { read, .. } => current = read,
                         OptionalLink::ShortCircuit => {
                             return Positional::Value(CallValue::of_resolved_call(
@@ -31495,7 +32074,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 // The short-circuit's `undefined` is a strict-null fact,
                 // exactly as for a member-valued chain.
-                if stripped && self.nullability.is_strict() {
+                if stripped && self.st.nullability.is_strict() {
                     current = self.union(&[current, undefined]);
                 }
                 Positional::Value(CallValue::of_resolved_call(self.dispatch, current))

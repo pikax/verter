@@ -72,6 +72,7 @@
 //! polarity, and fixture ledger live in `/type-resolution` under
 //! "Reverse-homomorphic mapped recovery".
 
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use verter_session_query::source::demand::ExpressionSourceDemand as _;
 use verter_type_expr::OwnedStr;
@@ -595,14 +596,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             source: SemanticNodeId,
             target: SemanticNodeId,
         ) -> RelationStep {
-            if let Some(step) = self
-                .literal_pair_relation_of(source, target, RelationKind::Assignable)
-                .or_else(|| self.literal_union_membership_of(source, target))
-            {
-                self.graph().record_relation_check();
-                return step;
-            }
-            self.execute_relate_without_binding(self.relate_key_for(source, target))
+            // The pair computation a non-blocking consumer advances, driven
+            // in place.
+            self.drive_relation_in_place(super::helper_continuation::RelationRead::assignable(
+                source, target,
+            ))
         }
     }
 
@@ -615,11 +613,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             target: SemanticNodeId,
             relation: RelationKind,
         ) -> RelationStep {
-            if let Some(step) = self.literal_pair_relation_of(source, target, relation) {
-                self.graph().record_relation_check();
-                return step;
-            }
-            self.execute_relate_without_binding(self.relate_key_for_kind(source, target, relation))
+            self.drive_relation_in_place(super::helper_continuation::RelationRead::pair(
+                source, target, relation,
+            ))
         }
     }
 
@@ -1294,14 +1290,55 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(step) = self.relation_answer_before_compute(&mut key, occurrence) {
             return step;
         }
-        // (3) Cold compute. Root versus inline is decided by the generic
-        // obligation transaction: any open frame — of any domain — makes
-        // this judgement inline.
+        self.relation_cold_compute(key, occurrence)
+    }
+
+    /// Step (3) of [`Self::execute_relate_with_occurrence`]: the cold
+    /// compute of a relation no earlier step answered. Root versus inline is
+    /// decided by the generic obligation transaction: any open frame — of
+    /// any domain — makes this judgement inline.
+    pub(super) fn relation_cold_compute(
+        &self,
+        key: RelateMemoKey,
+        occurrence: InferenceOccurrence,
+    ) -> RelationStep {
         if self.dispatch_txn.borrow().obligations.decides_root() {
             self.execute_relate_root(key)
         } else {
             self.execute_relate_inline(key, occurrence)
         }
+    }
+
+    /// The answer a pair question has before any relation key is built: two
+    /// literal types, and with `union_membership` a literal's membership in
+    /// a literal union — exactly the fast paths of
+    /// [`Self::execute_relate_pair_kind`] and, with membership, of
+    /// [`Self::execute_relate_pair`].
+    pub(super) fn relation_pair_literal_answer(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        relation: RelationKind,
+        union_membership: bool,
+    ) -> Option<RelationStep> {
+        let step = self
+            .literal_pair_relation_of(source, target, relation)
+            .or_else(|| {
+                union_membership
+                    .then(|| self.literal_union_membership_of(source, target))
+                    .flatten()
+            })?;
+        self.graph().record_relation_check();
+        Some(step)
+    }
+
+    /// Run `body` behind a binding barrier: no session open before it
+    /// accepts a deposit while it runs.
+    pub(super) fn with_binding_disabled<R>(&self, body: impl FnOnce() -> R) -> R {
+        self.dispatch_txn.borrow_mut().begin_binding_disabled();
+        let out = body();
+        self.dispatch_txn.borrow_mut().end_binding_disabled();
+        out
     }
 
     /// Steps (0)–(2) of [`Self::execute_relate_with_occurrence`]: the answer
@@ -1310,7 +1347,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// (with its inference upgrade) to compute. Outlined, so its reads do
     /// not stay on the stack every nested relation pays for.
     #[inline(never)]
-    fn relation_answer_before_compute(
+    pub(super) fn relation_answer_before_compute(
         &self,
         key: &mut RelateMemoKey,
         occurrence: InferenceOccurrence,
@@ -2904,6 +2941,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// SCC-closed member batch onto the root's SCC-union carrier (design
     /// §2.3 step 4 R-a batched admission).
     fn execute_relate_root(&self, key: RelateMemoKey) -> RelationStep {
+        // The relation authority's own root reads its family in place, its
+        // root computation driven where it stands: relations are this
+        // engine's hottest root, and a drive per root would cost more than
+        // the reads it could suspend at. A relation root polled or read
+        // through the query entry outside any drive is a frame instead.
         let mut publication = None;
         let read = self.execute_via_cold_build_helper_capturing_publication(
             key.to_query_key(),
@@ -2963,6 +3005,30 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &RelateMemoKey,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
+        // The root computation a frame of the continuation runtime drives,
+        // driven in place.
+        use super::helper_continuation::{HelperDrive, HelperStep, RelationRead};
+        let mut read = RelationRead::root(key.clone());
+        match self.advance_relation_root(&mut read, None, HelperDrive::InPlace) {
+            HelperStep::Done(output) => *output,
+            HelperStep::Request(_) => unreachable!("an in-place relation root makes no request"),
+        }
+    }
+
+    /// The first stage of the machinery root's build: the key validated and
+    /// its root obligation frame opened. The frame stays open, owned by the
+    /// returned build, until [`Self::finish_relate_build`] closes it or
+    /// [`Self::abandon_relate_build`] releases it, so a root frame of the
+    /// continuation runtime holds the relation's obligation across the reads
+    /// it waits on before it reduces. `Err` is the refusal of a raw key whose
+    /// inference context is not the target pattern's.
+    pub(super) fn begin_relate_build(
+        &self,
+        key: &RelateMemoKey,
+    ) -> Result<
+        RelateRootBuild,
+        Box<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>,
+    > {
         verter_audit::attribute_scope!(RelationDecide);
         let fence = self.project_generation_signature();
         // A raw `SemanticQueryKey::Relate` can enter the family dispatcher
@@ -2975,11 +3041,69 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SemanticQueryValue,
             > = (QueryResult::Error(QueryError::Miss), fence).into();
             output.cache_suppress = true;
-            return output;
+            return Err(Box::new(output));
         }
         let idx = self.relation_frame_open(key, InferenceOccurrence::ARGUMENT_COVARIANT);
-        let mut bindings: Vec<InferBinding> = Vec::new();
-        let verdict = self.reduce_relation(key, &mut bindings);
+        self.graph().record_relation_root_opened();
+        Ok(RelateRootBuild {
+            key: key.clone(),
+            idx,
+            fence,
+            bindings: Vec::new(),
+            reduced: None,
+            at_dispatch: false,
+        })
+    }
+
+    /// The reduction of a machinery root's pair up to its structural
+    /// dispatch, under the root frame its first stage opened: `true` when
+    /// the pair is left to the dispatch, whose first reads unwrap both
+    /// operands; `false` when an earlier step decided it.
+    pub(super) fn reduce_relate_build_before_dispatch(&self, build: &mut RelateRootBuild) -> bool {
+        verter_audit::attribute_scope!(RelationDecide);
+        match self.reduce_relation_before_dispatch(&build.key, &mut build.bindings) {
+            ControlFlow::Break(verdict) => {
+                build.reduced = Some(verdict);
+                false
+            }
+            ControlFlow::Continue(()) => {
+                build.reduced = None;
+                build.at_dispatch = true;
+                true
+            }
+        }
+    }
+
+    /// Release a machinery root's build abandoned before it reduced: its
+    /// root obligation frame closes undecided, publishing nothing, and the
+    /// members no publication will drain are aborted.
+    pub(super) fn abandon_relate_build(&self, build: RelateRootBuild) {
+        let _ = self.relation_frame_close_root(build.idx, RelationResult::Unknown, Vec::new());
+        self.relation_abort_completed_members();
+    }
+
+    /// The reduction stage of the machinery root's build: the pair reduced
+    /// under the root frame the first stage opened, the frame closed, and the
+    /// close mapped onto the admission boundary.
+    pub(super) fn finish_relate_build(
+        &self,
+        build: RelateRootBuild,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
+        verter_audit::attribute_scope!(RelationDecide);
+        let RelateRootBuild {
+            key,
+            idx,
+            fence,
+            mut bindings,
+            reduced,
+            at_dispatch,
+        } = build;
+        let key = &key;
+        let verdict = match (reduced, at_dispatch) {
+            (Some(verdict), _) => verdict,
+            (None, true) => self.reduce_relation_with_dispatch(key, &mut bindings),
+            (None, false) => self.reduce_relation(key, &mut bindings),
+        };
         #[cfg(any(test, feature = "test-support"))]
         self.inject_unproven_flow_member_for_tests(idx);
         let root_refused = self
@@ -4800,7 +4924,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Every member here is independently fenced backfill: it revalidates
     /// at its own publish, and one the fence refuses stays cold and
     /// recomputes on demand rather than weakening the committed root.
-    fn relation_drain_completed_members(
+    pub(super) fn relation_drain_completed_members(
         &self,
         root_key: &RelateMemoKey,
         carrier: &crate::semantic_query_memo::PublishedMemoCandidate,
@@ -5302,7 +5426,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     stack.extend(expressions.iter().copied());
                 }
                 SemanticNodeData::KeyOf { base } => stack.push(*base),
-                SemanticNodeData::IndexedAccess { object, index } => {
+                SemanticNodeData::IndexedAccess { object, index, .. } => {
                     stack.push(*object);
                     if let IndexKey::Computed(index) = index {
                         stack.push(*index);
@@ -6451,6 +6575,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let projection_probe = self.graph().intern_node(SemanticNodeData::IndexedAccess {
             object: spec.base_infer,
             index: IndexKey::Computed(spec.mapper_parameter),
+            origin: crate::semantic_query::IndexedAccessOrigin::Composed,
         });
         let projection_probe =
             self.substitute_semantic_type_param(projection_probe, spec.mapper_parameter, key);
@@ -6602,7 +6727,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 continue;
             };
             match data.as_ref() {
-                SemanticNodeData::IndexedAccess { object, index } => {
+                SemanticNodeData::IndexedAccess { object, index, .. } => {
                     if !shadowed
                         && index == expected_index
                         && self.reverse_projection_object_matches(
@@ -8130,8 +8255,40 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: &RelateMemoKey,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
+        match self.reduce_relation_before_dispatch(key, bindings) {
+            ControlFlow::Break(result) => result,
+            ControlFlow::Continue(()) => self.reduce_relation_with_dispatch(key, bindings),
+        }
+    }
+
+    /// The judgement's structural dispatch over its operands — what
+    /// [`Self::reduce_relation`] runs once every earlier step left the pair
+    /// undecided. Its first reads unwrap both operands' identity carriers.
+    pub(super) fn reduce_relation_with_dispatch(
+        &self,
+        key: &RelateMemoKey,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        self.decide_relation_with_dispatch(
+            key.source,
+            key.target,
+            bindings,
+            key.policy.intersection_target_arm,
+        )
+    }
+
+    /// [`Self::reduce_relation`] up to its structural dispatch: the axis
+    /// refusal, prefilters, projections, conditional readings, excess
+    /// prepass, spread programs and shallow checks. `Break` is the verdict
+    /// one of them decided; `Continue` leaves the pair to the dispatch.
+    pub(super) fn reduce_relation_before_dispatch(
+        &self,
+        key: &RelateMemoKey,
+        bindings: &mut Vec<InferBinding>,
+    ) -> ControlFlow<RelationResult> {
         #[cfg(any(test, feature = "test-support"))]
         RELATION_REDUCTIONS.with(|count| count.set(count.get() + 1));
+        self.graph().record_relation_reduction();
         // Axis refusal: a key on a not-yet-implemented axis (`Subtype` /
         // `StrictSubtype`, a non-default overload-selection policy) must
         // REFUSE — undecided, ReturnOnly, zero admission — never route the
@@ -8140,7 +8297,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // would publish a false verdict). Both strict variance regimes ARE
         // implemented (RI-10).
         if key.policy.overload_selection != crate::semantic_query::OverloadSelectionPolicy::All {
-            return RelationResult::Unknown;
+            return ControlFlow::Break(RelationResult::Unknown);
         }
         // Test-only forced budget knob (D6): trips the work budget on the
         // first driver pass so the typed `BudgetExceeded` outcome and its
@@ -8161,36 +8318,46 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(depth) = txn.reentry().depth().checked_sub(1) {
                 txn.reentry_mut().note_budget_edge(depth, cap);
             }
-            return RelationResult::Unknown;
+            return ControlFlow::Break(RelationResult::Unknown);
         }
         match key.relation {
             RelationKind::Assignable => {}
-            RelationKind::Identity => return self.reduce_identity(key),
-            RelationKind::Comparable => return self.reduce_comparable(key),
+            RelationKind::Identity => return ControlFlow::Break(self.reduce_identity(key)),
+            RelationKind::Comparable => return ControlFlow::Break(self.reduce_comparable(key)),
             RelationKind::Subtype | RelationKind::StrictSubtype => {}
         }
         let occurrence = self.relation_current_occurrence();
         if let Some(result) =
             self.try_relation_projection(key.source, key.target, bindings, occurrence)
         {
-            return result;
+            return ControlFlow::Break(result);
         }
         if let Some(spec) = self.reverse_mapping_target(key.target) {
-            return self.relate_reverse_mapping(key.source, spec, bindings);
+            return ControlFlow::Break(self.relate_reverse_mapping(key.source, spec, bindings));
         }
         // An unfinished or aborted conditional reading on either side
         // leaves the relation undecided; only complete readings relate.
         let source_conditional = exact_reading(self.conditional_outcome(key.source));
         if let Some(ConditionalReading::Reduced(reduced)) = source_conditional {
-            return self.relate_member(reduced, key.target, bindings, InferPosition::Covariant);
+            return ControlFlow::Break(self.relate_member(
+                reduced,
+                key.target,
+                bindings,
+                InferPosition::Covariant,
+            ));
         }
         let target_conditional = exact_reading(self.conditional_outcome(key.target));
         if let Some(ConditionalReading::Reduced(reduced)) = target_conditional {
-            return self.relate_member(key.source, reduced, bindings, InferPosition::Covariant);
+            return ControlFlow::Break(self.relate_member(
+                key.source,
+                reduced,
+                bindings,
+                InferPosition::Covariant,
+            ));
         }
         let (source_deferred, target_deferred) = match (source_conditional, target_conditional) {
             (Some(source), Some(target)) => (source.into_deferred(), target.into_deferred()),
-            (None, _) | (_, None) => return RelationResult::Unknown,
+            (None, _) | (_, None) => return ControlFlow::Break(RelationResult::Unknown),
         };
         if let Some(result) = self.relate_deferred_conditionals(
             key.source,
@@ -8199,7 +8366,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             target_deferred.as_ref(),
             bindings,
         ) {
-            return result;
+            return ControlFlow::Break(result);
         }
         // The binding root's bare-`Infer` arm: `check extends infer X`
         // binds `X := check` for any check through the active session.
@@ -8210,9 +8377,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         self.graph().node_data(key.target).as_deref()
                     {
                         if !self.relation_deposit(key.target, key.source, occurrence) {
-                            return RelationResult::Unknown;
+                            return ControlFlow::Break(RelationResult::Unknown);
                         }
-                        return assignable(bindings);
+                        return ControlFlow::Break(assignable(bindings));
                     }
                 }
                 VariancePhase::Contravariant => {
@@ -8220,9 +8387,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         self.graph().node_data(key.source).as_deref()
                     {
                         if !self.relation_deposit(key.source, key.target, occurrence) {
-                            return RelationResult::Unknown;
+                            return ControlFlow::Break(RelationResult::Unknown);
                         }
-                        return assignable(bindings);
+                        return ControlFlow::Break(assignable(bindings));
                     }
                 }
             }
@@ -8236,10 +8403,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             match self.excess_property_prepass(key, bindings) {
                 super::relation_excess::ExcessPrepassOutcome::Reject => {
-                    return RelationResult::NotAssignable;
+                    return ControlFlow::Break(RelationResult::NotAssignable);
                 }
                 super::relation_excess::ExcessPrepassOutcome::Undecided => {
-                    return RelationResult::Unknown;
+                    return ControlFlow::Break(RelationResult::Unknown);
                 }
                 super::relation_excess::ExcessPrepassOutcome::Pass => {}
             }
@@ -8251,25 +8418,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(result) =
             self.try_object_spread_program_relation(key.source, key.target, bindings)
         {
-            return result;
+            return ControlFlow::Break(result);
         }
         // A source with no inferable index — a declared interface or class
         // instance among them — takes an index signature only through an
         // index signature of its own.
         if self.implicit_index_rejects(key.source, key.target) {
-            return RelationResult::NotAssignable;
+            return ControlFlow::Break(RelationResult::NotAssignable);
         }
         match self.shallow_relation_check(key.source, key.target) {
-            ShallowRelation::Assignable => return assignable(bindings),
-            ShallowRelation::NotAssignable => return RelationResult::NotAssignable,
+            ShallowRelation::Assignable => return ControlFlow::Break(assignable(bindings)),
+            ShallowRelation::NotAssignable => {
+                return ControlFlow::Break(RelationResult::NotAssignable)
+            }
             ShallowRelation::Unknown => {}
         }
-        self.decide_relation_with_dispatch(
-            key.source,
-            key.target,
-            bindings,
-            key.policy.intersection_target_arm,
-        )
+        ControlFlow::Continue(())
     }
 
     /// Relate one arm of a union source or an intersection target through
@@ -12071,6 +12235,109 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The instantiation an identity-carrier walk from `operand` reads first
+    /// ([`Self::unwrap_identity_carrier_walk`]), when the walk reaches it
+    /// through graph-only steps (aliases, merged declarations): the
+    /// declaration a `DeclRef`, an `InstantiationRef`, a declaration
+    /// placeholder or a scoped self-reference names, at depth one. `None`
+    /// when the walk's first read is anything else — a carrier subject's
+    /// resolution, a deferred evaluation, a key set — or it reads nothing.
+    /// Computes the key the walk would read without reading it.
+    pub(super) fn relation_operand_first_instantiation(
+        &self,
+        operand: SemanticNodeId,
+    ) -> Option<SemanticQueryKey> {
+        let graph = self.graph();
+        let mut current = operand;
+        let mut seen = crate::semantic_query::small_node_set::SmallNodeSet::default();
+        let (identity, args) = loop {
+            if !seen.insert(current) {
+                return None;
+            }
+            let data = graph.node_data(current)?;
+            match &*data {
+                SemanticNodeData::Alias(inner) => current = *inner,
+                SemanticNodeData::MergedDecl { contributors } => {
+                    let contributors = Arc::clone(contributors.as_arc());
+                    drop(data);
+                    current = super::walk::reduce_merged_decl_with_graph(graph, &contributors);
+                }
+                SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+                    canonical_id,
+                    owner,
+                    name,
+                    whole_hash,
+                }) => {
+                    break (
+                        DeclIdentity {
+                            canonical_id: canonical_id.clone(),
+                            owner: *owner,
+                            whole_hash: *whole_hash,
+                            decl_name: name.clone(),
+                        },
+                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    )
+                }
+                SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args }) => {
+                    let Some(crate::semantic_query::NodeScopeId::File {
+                        canonical_id,
+                        owner,
+                        whole_hash,
+                        ..
+                    }) = graph.node_scope(current)
+                    else {
+                        return None;
+                    };
+                    break (
+                        DeclIdentity {
+                            canonical_id,
+                            owner,
+                            whole_hash,
+                            decl_name: name.clone(),
+                        },
+                        Arc::from(args.operands()),
+                    );
+                }
+                SemanticNodeData::DeclRef { identity } => {
+                    break (
+                        identity.clone(),
+                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                    )
+                }
+                SemanticNodeData::InstantiationRef { base, args } => {
+                    break (base.clone(), Arc::clone(args.as_arc()))
+                }
+                _ => return None,
+            }
+        };
+        let identity = self.relation_declaration_identity(identity, current);
+        if self.runtime_nominal_identity(&identity)
+            == Some(crate::intrinsic_registry::RuntimeNominal::Function)
+            || self.string_mapping_of(current).is_some()
+            || self.cancellation.is_cancelled()
+            || crate::semantic_query::checker_policy::instantiation_budget(
+                self.connected_demand.instantiation_within_budget(1),
+            )
+            .is_err()
+        {
+            return None;
+        }
+        Some(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                self.type_slot_for(
+                    identity.canonical_id.clone(),
+                    identity.owner,
+                    identity.decl_name.clone(),
+                ),
+                args,
+                self.instantiate_context_for(
+                    &identity.canonical_id,
+                    ProjectionReductionContext::structural_transit(),
+                ),
+            ),
+        ))
+    }
+
     /// [`Self::unwrap_identity_carrier_for_relation`] from `start`, reporting
     /// each point the walk reaches to `on_step` before it reads anything for
     /// that node: a reached point is where a walk that stopped there resumes.
@@ -12601,7 +12868,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .into_active_query_build_node(self);
             if matches!(
                 graph.node_data(value).as_deref(),
-                Some(SemanticNodeData::Opaque(_))
+                Some(SemanticNodeData::Opaque(error)) if !super::build::is_certified_recovery(error)
             ) {
                 return None;
             }
@@ -12688,7 +12955,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if read.iter().any(|&arm| {
             matches!(
                 self.graph().node_data(arm).as_deref(),
-                Some(SemanticNodeData::Opaque(_))
+                Some(SemanticNodeData::Opaque(error)) if !super::build::is_certified_recovery(error)
             )
         }) {
             return None;
@@ -12790,7 +13057,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .into_active_query_build_node(self);
             (!matches!(
                 graph.node_data(value).as_deref(),
-                Some(SemanticNodeData::Opaque(_))
+                Some(SemanticNodeData::Opaque(error)) if !super::build::is_certified_recovery(error)
             ))
             .then_some(value)
         };
@@ -14670,6 +14937,34 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 }
 
+/// A machinery relation root between its first stage and its reduction:
+/// the validated key, the root obligation frame it opened on the
+/// transaction — which stays open, owned by this build, until the build
+/// reduces or is abandoned — and the generation fence it pinned. Owned and
+/// `Send`, so a root frame of the continuation runtime carries it across
+/// the reads it waits on, to whichever thread resumes it.
+pub(super) struct RelateRootBuild {
+    key: RelateMemoKey,
+    idx: usize,
+    fence: crate::semantic_query::DepSignature,
+    /// The bindings its reduction accumulated so far.
+    bindings: Vec<InferBinding>,
+    /// The verdict a step before the structural dispatch decided.
+    reduced: Option<RelationResult>,
+    /// Whether the steps before the dispatch ran and left the pair to it.
+    at_dispatch: bool,
+}
+
+impl RelateRootBuild {
+    /// The pair the root relates.
+    pub(super) fn key(&self) -> &RelateMemoKey {
+        &self.key
+    }
+}
+
+static_assertions::assert_impl_all!(RelateRootBuild: Send);
+static_assertions::assert_not_impl_any!(RelateRootBuild: Clone, Copy);
+
 /// The pop result of a relation frame.
 enum FramePop {
     /// A provisional member's caller-return step (never the published
@@ -16244,7 +16539,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     /// operand, and for a computed index of a constrained parameter, whose
     /// constraint reads the index's own first.
     fn rigid_indexed_access_constraint(&self, data: &SemanticNodeData) -> Option<SemanticNodeId> {
-        let SemanticNodeData::IndexedAccess { object, index } = data else {
+        let SemanticNodeData::IndexedAccess { object, index, .. } = data else {
             return None;
         };
         let graph = self.graph();
@@ -16267,6 +16562,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             (Some(constraint), index) => graph.intern_node(SemanticNodeData::IndexedAccess {
                 object: constraint,
                 index: index.clone(),
+                origin: crate::semantic_query::IndexedAccessOrigin::Composed,
             }),
         })
     }
@@ -18143,6 +18439,24 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             }
             results.push(self.relate_to_union_target(source, &members, bindings));
             return;
+        }
+        // A written intersection holding the checker's error type IS that
+        // error type (`getIntersectionType`): no other arm is compared, and
+        // none of its type variables is inferred.
+        if let SemanticNodeData::Intersection(members) = &*target_data {
+            let error_arm = members.iter().copied().find(|arm| {
+                matches!(
+                    graph.node_data(*arm).as_deref(),
+                    Some(SemanticNodeData::Opaque(error))
+                        if super::build::is_certified_recovery(error)
+                )
+            });
+            if let Some(error_arm) = error_arm {
+                drop(source_data);
+                drop(target_data);
+                work.push(same_pair(source, error_arm));
+                return;
+            }
         }
         // A weak target — every property optional — takes no source that
         // has members but shares none of its properties, checked on the

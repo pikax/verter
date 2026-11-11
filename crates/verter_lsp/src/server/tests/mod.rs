@@ -4305,6 +4305,8 @@ mod general;
 mod hover;
 mod navigation;
 mod nextest_policy;
+mod participation;
 mod synchronization;
 mod transport;
 mod workspace;
+mod workspace_index_routes;

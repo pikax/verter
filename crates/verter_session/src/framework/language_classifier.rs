@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use verter_language::{CapabilityId, FileLanguage, LanguageRegistry, StaticClassification};
+use verter_language::{FileLanguage, LanguageRegistry, ProjectCapabilityId, StaticClassification};
 
 use super::options::FrameworkOptions;
 use super::project_capabilities::ProjectCapabilitySnapshot;
@@ -191,7 +191,7 @@ impl HostLanguageClassifier {
     /// Whether a derived capability bit is ON. The resolved-validation half of
     /// the framework script-fact seam consults this to gate a provider's
     /// resolved facts on a derived capability.
-    pub fn capability_is_enabled(&self, capability: &CapabilityId) -> bool {
+    pub fn capability_is_enabled(&self, capability: &ProjectCapabilityId) -> bool {
         self.capabilities.is_enabled(capability)
     }
 
@@ -265,7 +265,7 @@ impl Default for HostLanguageClassifier {
 #[cfg(test)]
 mod tests {
     use verter_language::{
-        CapabilityId, FrameworkAdapterId, GatedCandidate, LanguageRow, ScriptSourceType,
+        FrameworkAdapterId, GatedCandidate, LanguageRow, ProjectCapabilityId, ScriptSourceType,
     };
 
     use super::*;
@@ -291,8 +291,8 @@ mod tests {
         }
     }
 
-    fn gated_registry() -> (Arc<LanguageRegistry>, CapabilityId, FileLanguage) {
-        let capability = CapabilityId::new("fixture-capability");
+    fn gated_registry() -> (Arc<LanguageRegistry>, ProjectCapabilityId, FileLanguage) {
+        let capability = ProjectCapabilityId::new("fixture-capability");
         let candidate_language = FileLanguage::FrameworkTemplate {
             adapter_id: FrameworkAdapterId::new("fixture-framework"),
             owner_hint: None,

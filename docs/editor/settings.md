@@ -8,10 +8,25 @@ All VS Code extension settings for Verter, configurable via `settings.json` or t
 
 ## General
 
-| Setting                | Type      | Default | Description                                                                                      |
-| ---------------------- | --------- | ------- | ------------------------------------------------------------------------------------------------ |
-| `verter.enable`        | `boolean` | `true`  | Enable or disable the Verter extension entirely                                                  |
-| `verter.lspBinaryPath` | `string`  | `""`    | Absolute path to the `verter-lsp` binary. Leave empty to auto-detect (bundled binary or `PATH`). |
+| Setting                | Type     | Default  | Description                                                                                       |
+| ---------------------- | -------- | -------- | ------------------------------------------------------------------------------------------------- |
+| `verter.participation` | `string` | `"auto"` | How Verter participates alongside other tools: `auto`, `disabled`, `workspace` or `full` (below). |
+| `verter.lspBinaryPath` | `string` | `""`     | Absolute path to the `verter-lsp` binary. Leave empty to auto-detect (bundled binary or `PATH`).  |
+
+### Participation
+
+`verter.participation` decides, feature by feature, whether Verter serves a framework file:
+
+- `auto` (default): Verter serves every feature, except where an enabled extension declares that it
+  serves the same feature for the same framework (for example the official Vue or Svelte
+  extension). Only those features stand down; everything else keeps working.
+- `full`: Verter serves every supported feature even where another extension also serves it.
+- `workspace`: Verter serves no editor features, diagnostics or edits, only explicitly requested
+  workspace facts.
+- `disabled`: Verter serves nothing.
+
+The setting applies immediately, without restarting the language server. Turning a decoration
+layer off (`verter.decorations.*`) withdraws only that layer.
 
 ## Statistics
 
@@ -164,7 +179,7 @@ A recommended configuration for development:
 
 ```json
 {
-  "verter.enable": true,
+  "verter.participation": "auto",
   "verter.decorations.vueApiCalls": true,
   "verter.decorations.bindingColors": true,
   "verter.decorations.bindingColorsScope": "template",
@@ -177,7 +192,7 @@ For debugging or extension development:
 
 ```json
 {
-  "verter.enable": true,
+  "verter.participation": "full",
   "verter.analysis.enabled": true,
   "verter.statistics.enabled": true,
   "verter.trace.server": "verbose",

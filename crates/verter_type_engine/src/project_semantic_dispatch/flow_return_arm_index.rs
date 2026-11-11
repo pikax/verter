@@ -227,10 +227,10 @@ pub(super) fn string_literal_text<M: verter_audit::observe::ObserveExec>(
     }
 }
 
-impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// The index of `node`'s union arms, enumerated once per evaluation.
     fn arm_index(&self, node: SemanticNodeId) -> Rc<ArmIndex> {
-        if let Some(index) = self.arm_indexes.borrow().get(&node) {
+        if let Some(index) = self.st.arm_indexes.borrow().get(&node) {
             return Rc::clone(index);
         }
         let mut arms = Vec::new();
@@ -255,7 +255,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             tags: RefCell::new(FxHashMap::default()),
             literals: OnceCell::new(),
         });
-        self.arm_indexes
+        self.st
+            .arm_indexes
             .borrow_mut()
             .insert(node, Rc::clone(&index));
         index
@@ -413,8 +414,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             }),
         };
         for observation in &heritage.observed {
-            if !self.heritage_self_roots.contains(observation) {
-                self.heritage_self_roots.push(observation.clone());
+            if !self.st.heritage_self_roots.contains(observation) {
+                self.st.heritage_self_roots.push(observation.clone());
             }
         }
         heritage
@@ -629,7 +630,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     ) -> Option<(GuardNarrowing, PredicateNarrowConsumption)> {
         let refuting = self
             .dispatch
-            .assignability_refuting_keys(target, self.canonical)?;
+            .assignability_refuting_keys(target, self.st.canonical)?;
         let own = self.own_key_arms(&arms.index);
         let holders = |key: &Arc<str>| own.by_key.get(key).map_or(&[][..], Vec::as_slice);
         let rarest = refuting.iter().min_by_key(|key| holders(key).len())?;

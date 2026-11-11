@@ -22,6 +22,7 @@ fn raise_node_to_type_expr_preserves_number_index_key_values() {
             verter_type_engine::semantic_query::CanonicalIndexInt::from_canonical_i64(7)
                 .expect("canonical"),
         ),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
 
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -449,6 +450,7 @@ fn raise_node_to_type_expr_round_trips_indexed_access_string_key() {
     let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
         index: IndexKey::String(verter_type_expr::OwnedStr::from("key")),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
 
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -693,6 +695,7 @@ fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
     let indexed_open_key = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: concrete_object,
         index: IndexKey::Computed(open_key),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     assert!(
         verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -708,6 +711,7 @@ fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
     let indexed_closed_key = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: concrete_object,
         index: IndexKey::String(verter_type_expr::OwnedStr::from("a")),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     assert!(
         !verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(

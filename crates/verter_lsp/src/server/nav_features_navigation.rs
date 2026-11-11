@@ -460,12 +460,12 @@ async fn handle_goto_definition_attempt(
         if !server.workspace_inventory_ready().await {
             return Err(VerterLanguageServer::workspace_inventory_pending_error());
         }
-        return Ok(super::nav_features_css::merge_global_class_definitions(
+        return super::nav_features_css::merge_global_class_definitions(
             server,
             uri,
             &class_name,
             verter_result,
-        ));
+        );
     }
 
     // If verter already resolved a cross-file definition, return it directly.
@@ -1089,7 +1089,7 @@ pub(super) async fn handle_references(
             uri,
             &class_name,
             verter_result.unwrap_or_default(),
-        );
+        )?;
         return Ok((!locations.is_empty()).then_some(locations));
     }
 

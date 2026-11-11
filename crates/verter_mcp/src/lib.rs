@@ -1,6 +1,7 @@
 pub mod baseline;
 pub mod config;
 pub mod helpers;
+pub mod index_tools;
 pub mod readiness;
 pub mod run;
 pub mod scanner;

@@ -1017,8 +1017,8 @@ pub fn semantic_query_key_specs() -> Vec<SemanticQueryKeySpec> {
         // domain is `FlowReturn` (NOT
         // `TypeNode` — the canonical whole-return carrier + fallthrough
         // bit; consumers project afterward under their own mode). Every
-        // degraded shape (Unsupported / Missing / Budget / EmptyCycle /
-        // Unresolved) is ReturnOnly and never admits.
+        // degraded shape (Unsupported / Missing / Budget / Unresolved) is
+        // ReturnOnly and never admits.
         SemanticQueryKeySpec {
             variant: SemanticQueryKeyTag::FlowReturn,
             lifecycle: KeyLifecycle::Live,

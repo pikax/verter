@@ -786,12 +786,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     )
                     .into_complete_active_query_build_node(self)
                     // An access the evaluation could not read (an open
-                    // generic's element, an absent key) keeps the authored,
-                    // deferred access rather than relating a miss sentinel.
+                    // generic's element) keeps the authored, deferred access
+                    // rather than relating a miss sentinel. The checker's
+                    // error type for an absent key is the access's answer.
                     .filter(|node| {
                         !matches!(
                             self.graph().node_data(*node).as_deref(),
-                            Some(SemanticNodeData::Opaque(_))
+                            Some(SemanticNodeData::Opaque(error))
+                                if !super::build::is_certified_recovery(error)
                         )
                     })
                     .unwrap_or(check);
@@ -2886,7 +2888,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 // A shell the lane keeps where it is written (`Rec["a"]`,
                 // `keyof O`) is generic only over a generic operand; the
                 // checker resolved it.
-                SemanticNodeData::IndexedAccess { object, index } => {
+                SemanticNodeData::IndexedAccess { object, index, .. } => {
                     pending.push((*object, infer_operand));
                     if let crate::semantic_query::IndexKey::Computed(index) = index {
                         pending.push((*index, infer_operand));

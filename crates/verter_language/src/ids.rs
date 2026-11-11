@@ -122,9 +122,9 @@ impl fmt::Display for LanguageId {
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
 )]
-pub struct CapabilityId(Arc<str>);
+pub struct ProjectCapabilityId(Arc<str>);
 
-impl CapabilityId {
+impl ProjectCapabilityId {
     /// Intern a capability id.
     pub fn new(id: &str) -> Self {
         Self(intern(id))
@@ -136,7 +136,7 @@ impl CapabilityId {
     }
 }
 
-impl fmt::Display for CapabilityId {
+impl fmt::Display for ProjectCapabilityId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
@@ -161,6 +161,6 @@ mod tests {
     fn distinct_ids_are_distinct() {
         assert_ne!(FrameworkAdapterId::vue(), FrameworkAdapterId::svelte());
         assert_ne!(LanguageId::new("vue"), LanguageId::new("svelte"));
-        assert_ne!(CapabilityId::new("a"), CapabilityId::new("b"));
+        assert_ne!(ProjectCapabilityId::new("a"), ProjectCapabilityId::new("b"));
     }
 }

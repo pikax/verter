@@ -1281,7 +1281,12 @@ pub(super) async fn handle_symbol(
     if !server.workspace_inventory_ready().await {
         return Err(VerterLanguageServer::workspace_inventory_pending_error());
     }
-    let symbols = workspace_symbols(server.documents.host(), &params.query);
+    let answer = workspace_symbols(server.documents.host(), &params.query);
+    // The same holds for an index walk that could not certify its population.
+    if let Some(shortfall) = &answer.shortfall {
+        return Err(index_partial_error(shortfall));
+    }
+    let symbols = answer.value;
     Ok(if symbols.is_empty() {
         None
     } else {

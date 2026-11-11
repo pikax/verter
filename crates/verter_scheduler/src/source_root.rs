@@ -31,6 +31,11 @@
 //!   retains only versions selected by the current root or by a live
 //!   captured root — the same reachability discipline
 //!   `FileArtifactStore` applies to artifact versions.
+//! - **Journal** ([`SchedulerSourceDirectory::changes_since`]) answers
+//!   which canonicals a consumer's view is missing in O(publications since
+//!   its epoch), from a bounded log appended under the same publication
+//!   lock. A consumer that keeps a derived view of the directory maintains
+//!   it from this, never by enumerating the directory per request.
 //!
 //! The epoch ADDRESSES a snapshot. It is NOT a cache-validity oracle and
 //! must never become one: validity stays with the by-value token
@@ -55,7 +60,7 @@
 //! DashMap shard; nothing takes the publication lock while holding one,
 //! and nothing takes the DAG lock while holding the publication lock.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -72,6 +77,11 @@ use smallvec::SmallVec;
 /// keystroke forever, so the directory reclaims on its own schedule
 /// rather than waiting for an external request that may never arrive.
 const RECLAIM_TRIGGER_SUPERSESSIONS: u64 = 64;
+
+/// Entries the change journal retains. A consumer whose cursor fell further
+/// behind than this re-reads the whole directory once, so the bound trades
+/// memory for how long an idle consumer may stay incremental.
+const JOURNAL_CAPACITY: usize = 16_384;
 
 /// The terminal publication epoch.
 ///
@@ -187,6 +197,25 @@ struct PublishState {
     /// `BTreeMap` so the retention floor is the first key (O(log n)),
     /// never a scan.
     live_roots: BTreeMap<u64, usize>,
+    /// The canonicals each publication touched, oldest first, bounded by
+    /// [`JOURNAL_CAPACITY`]. A consumer that remembers the epoch it last
+    /// read to learns what changed since in O(changes), never by
+    /// enumerating the directory. See [`SchedulerSourceDirectory::changes_since`].
+    journal: VecDeque<(u64, Arc<str>)>,
+    /// Every publication with an epoch above this is still in the journal.
+    /// Advances when the journal drops its oldest entries.
+    journal_complete_above: u64,
+}
+
+/// What changed since a consumer's last read of the directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceChanges {
+    /// The canonicals published between the consumer's epoch (exclusive) and
+    /// the returned epoch (inclusive), each once, in canonical order.
+    Changed(Vec<Arc<str>>),
+    /// The journal no longer reaches back to the consumer's epoch: the
+    /// consumer re-reads the whole directory.
+    Truncated,
 }
 
 /// A version append staged by a [`SourcePublication`].
@@ -316,6 +345,37 @@ impl SchedulerSourceDirectory {
         self.publish.lock().epoch
     }
 
+    /// The canonicals published since `epoch`, with the epoch the answer is
+    /// current at. A consumer stores that epoch and asks again later.
+    ///
+    /// One lock hold and O(publications since `epoch`): the journal is read
+    /// from its newest entry back to `epoch`, so a current consumer pays for
+    /// what changed, never for what the directory tracks. Epoch 0 names the
+    /// empty directory, so a first read with `0` answers `Truncated` once the
+    /// journal has dropped anything, exactly as a stale consumer does.
+    #[must_use]
+    pub fn changes_since(&self, epoch: u64) -> (u64, SourceChanges) {
+        let publish = self.publish.lock();
+        let current = publish.epoch;
+        if epoch >= current {
+            return (current, SourceChanges::Changed(Vec::new()));
+        }
+        if epoch < publish.journal_complete_above {
+            return (current, SourceChanges::Truncated);
+        }
+        let changed: BTreeSet<Arc<str>> = publish
+            .journal
+            .iter()
+            .rev()
+            .take_while(|(birth, _)| *birth > epoch)
+            .map(|(_, canonical)| Arc::clone(canonical))
+            .collect();
+        (
+            current,
+            SourceChanges::Changed(changed.into_iter().collect()),
+        )
+    }
+
     /// Capture an immutable, LEASED root of the directory's current
     /// membership.
     ///
@@ -385,6 +445,15 @@ impl SchedulerSourceDirectory {
                 publish.epoch = publish.epoch.checked_add(1).unwrap_or(EXHAUSTED_EPOCH);
                 let epoch = publish.epoch;
                 for (canonical, incarnation, generation, state) in publication.entries.drain(..) {
+                    publish.journal.push_back((epoch, Arc::clone(&canonical)));
+                    while publish.journal.len() > JOURNAL_CAPACITY {
+                        if let Some((dropped, _)) = publish.journal.pop_front() {
+                            // Entries of `dropped` may remain, so only
+                            // publications strictly above it stay complete.
+                            publish.journal_complete_above =
+                                publish.journal_complete_above.max(dropped);
+                        }
+                    }
                     let mut chain = self.versions.entry(Arc::clone(&canonical)).or_default();
                     let had_predecessor = !chain.is_empty();
                     chain.push(SourceVersion {

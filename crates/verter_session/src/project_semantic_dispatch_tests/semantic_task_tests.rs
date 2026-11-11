@@ -300,6 +300,7 @@ const NOTHING_OPEN: OpenRequestStateForTests = OpenRequestStateForTests {
     request_local_open: 0,
     open_obligation_frames: 0,
     collecting_sessions: 0,
+    normalizing_carriers: 0,
 };
 
 /// A task whose chain reaches a `typeof` another task is producing waits on
@@ -2471,6 +2472,8 @@ mod semantic_poll_contract {
     /// The frame's run that met the producer is run again once the producer
     /// answers, and each entry that run makes again is charged again, so the
     /// work is compared on its own: never below the synchronous entry's.
+    /// (Exact equality is asserted by the body-once control until the flow
+    /// frame retains its evaluation.)
     fn joined_evidence(
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         read: &verter_type_engine::semantic_query::CacheRead<QueryResult<SemanticQueryValue>>,
@@ -2761,7 +2764,7 @@ mod semantic_poll_contract {
     /// the body is evaluated once in all, and the root delivers exactly the
     /// synchronous entry's evidence, logical work included.
     #[test]
-    #[ignore = "a flow frame drops its evaluation at an unanswered read and evaluates the body again after the delivery: its evaluator positions are not yet retained across a suspension"]
+    #[ignore = "a flow frame still drops its run at an unanswered read and evaluates the body again after the delivery (5 evaluations and 71 work against 4 and 68): the retained owned evaluator lands in the later SKR-ROOT-DISPATCH-FLOW conversions"]
     fn a_flow_suspended_at_a_held_read_evaluates_its_body_once() {
         use verter_type_engine::project_semantic_dispatch::flow_return::flow_evaluations_for_tests;
         let (synchronous, synchronous_evaluations) = {
@@ -2808,6 +2811,221 @@ mod semantic_poll_contract {
         );
         assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
         drop(tasks);
+    }
+
+    /// Hold every producer of the callee signature reads `f`'s body makes,
+    /// in both capture modes.
+    fn hold_callee_signatures<'g>(
+        host: &crate::VerterHost,
+        graph: &'g verter_type_engine::semantic_query_memo::SemanticGraphStore,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> (
+        Vec<verter_execution::tasks::ExecutionTask>,
+        Vec<verter_type_engine::semantic_query_memo::ProducerLease<'g>>,
+    ) {
+        let mut keys = callee_signature_reads(dispatch);
+        keys.dedup();
+        keys.into_iter()
+            .flat_map(|key| {
+                [
+                    hold_producer(host, graph, key.clone()),
+                    hold_producer_with(host, graph, key, ReadCapture::expression_for_tests()),
+                ]
+            })
+            .unzip()
+    }
+
+    /// A flow frame held at its body's own read is owned `Send` state: its
+    /// task stays pending on another thread while the producer holds, and
+    /// once the producer goes away it is advanced to readiness on that
+    /// thread, the body continuing where it stopped. The entry then delivers
+    /// exactly the synchronous entry's evidence, logical work included, the
+    /// body evaluated once across both threads.
+    #[test]
+    #[ignore = "a flow frame still drops its run at an unanswered read and evaluates the body again after the delivery: the retained owned evaluator lands in the later SKR-ROOT-DISPATCH-FLOW conversions"]
+    fn a_flow_held_at_its_bodys_read_resumes_on_another_thread_to_the_synchronous_read() {
+        use verter_type_engine::project_semantic_dispatch::flow_return::flow_evaluations_for_tests;
+        let (synchronous, synchronous_evaluations) = {
+            let host = contextual_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let before = flow_evaluations_for_tests();
+            let read = dispatch.execute_via_cold_build_helper(contextual_return_key(&dispatch));
+            (
+                joined_evidence(&dispatch, &read, |answer| display_return(&host, answer)),
+                flow_evaluations_for_tests() - before,
+            )
+        };
+        let host = contextual_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let (tasks, leases) = hold_callee_signatures(&host, graph, &dispatch);
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let before = flow_evaluations_for_tests();
+        let mut entry = dispatch.poll_query(contextual_return_key(&dispatch));
+        let (first, elsewhere) = while_held(leases, || {
+            let first = entry.poll(&waker).is_pending();
+            let elsewhere = entry.task().map(|task| {
+                assert_send(task);
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            let before = flow_evaluations_for_tests();
+                            let pending = task.poll(&waker).is_pending();
+                            (pending, flow_evaluations_for_tests() - before)
+                        })
+                        .join()
+                        .expect("the pending poll returns")
+                })
+            });
+            (first, elsewhere)
+        });
+        assert!(first, "the flow yields while its body's read is held");
+        let Some((still_pending, held_evaluations)) = elsewhere else {
+            panic!("the held flow runs as a task");
+        };
+        assert!(
+            still_pending,
+            "its task stays pending on another thread while the producer holds"
+        );
+        assert!(
+            counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the producer going away wakes the root"
+        );
+        let (ready, resumed_evaluations) = {
+            let task = entry.task().expect("the woken flow still runs as a task");
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let before = flow_evaluations_for_tests();
+                        let ready = task.poll(&waker).is_ready();
+                        (ready, flow_evaluations_for_tests() - before)
+                    })
+                    .join()
+                    .expect("the resumed poll returns")
+            })
+        };
+        assert!(ready, "the woken flow completes on the other thread");
+        let here = flow_evaluations_for_tests() - before;
+        let read = match entry.poll(&waker) {
+            Poll::Ready(read) => read,
+            Poll::Pending => panic!("the entry delivers what its task completed"),
+        };
+        drop(entry);
+        assert_eq!(
+            (
+                joined_evidence(&dispatch, &read, |answer| display_return(&host, answer)),
+                here + held_evaluations + resumed_evaluations,
+            ),
+            (synchronous, synchronous_evaluations),
+            "the flow resumed elsewhere evaluates its body once and reads exactly what the synchronous entry reads"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+        drop(tasks);
+    }
+
+    /// A flow frame held at its body's own read and released — dropped by
+    /// its consumer, or stopped by its request's cancellation, which wakes it
+    /// with the producer still held — drops the evaluation it retained: no
+    /// contextual call stays held, nothing is left open but the holders'
+    /// flights, and the dispatcher then reads the flow as the synchronous
+    /// entry does.
+    #[test]
+    fn a_flow_released_or_cancelled_while_its_bodys_read_is_held_leaves_nothing_open() {
+        use verter_type_engine::project_semantic_dispatch::ContextualRouteEventForTests as Event;
+        // What a read answers, apart from its receipt: a read after the
+        // release finds what the released flow already produced warm.
+        let answered =
+            |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+             host: &crate::VerterHost| {
+                let read = dispatch.execute_via_cold_build_helper(contextual_return_key(dispatch));
+                let ((answer, facts, suppress, partial, diagnostics, _), _) =
+                    joined_evidence(dispatch, &read, |answer| display_return(host, answer));
+                (answer, facts, suppress, partial, diagnostics)
+            };
+        let synchronous = {
+            let host = contextual_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            answered(&dispatch, &host)
+        };
+        for cancelled in [false, true] {
+            let host = contextual_host();
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let graph = host.project_type_store().semantic_graph();
+            let (tasks, leases) = hold_callee_signatures(&host, graph, &dispatch);
+            let holders = graph.resident_flight_keys_for_tests().len();
+            let counter = Arc::new(CountingWaker::default());
+            let waker = Waker::from(Arc::clone(&counter));
+            let _ = contextual_routes(&host);
+            let (pending, stopped, flights) = while_held(leases, || {
+                if cancelled {
+                    let request = budgeted_request(1);
+                    let _request =
+                        verter_type_engine::request_context::RequestContextGuard::install(
+                            Arc::clone(&request),
+                        );
+                    dispatch
+                        .with_semantic_task_for_tests(contextual_return_key(&dispatch), |slot| {
+                            let task = slot.as_mut().expect("the task is lent");
+                            let pending = task.poll_for_tests(&waker).is_pending();
+                            let before = counter.0.load(std::sync::atomic::Ordering::SeqCst);
+                            request.cancel();
+                            let woken =
+                                counter.0.load(std::sync::atomic::Ordering::SeqCst) > before;
+                            let stopped = woken
+                                && matches!(
+                                    task.poll_for_tests(&waker),
+                                    Poll::Ready(TaskOutcomeForTests::Stopped)
+                                )
+                                && task.live_frames_for_tests() == 0;
+                            (
+                                pending,
+                                stopped,
+                                graph.resident_flight_keys_for_tests().len(),
+                            )
+                        })
+                        .expect("the flow root runs as a task")
+                } else {
+                    let mut entry = dispatch.poll_query(contextual_return_key(&dispatch));
+                    let pending = entry.poll(&waker).is_pending();
+                    drop(entry);
+                    (pending, true, graph.resident_flight_keys_for_tests().len())
+                }
+            });
+            let label = format!("cancelled={cancelled}");
+            assert!(pending, "{label}: the flow yields at its body's read");
+            assert!(
+                stopped,
+                "{label}: the cancellation wakes the waiting flow, which stops"
+            );
+            assert_eq!(
+                flights, holders,
+                "{label}: only the holders' flights of the held reads remain"
+            );
+            let routes = contextual_routes(&host);
+            let held_routes = routes
+                .iter()
+                .filter(|event| matches!(event, Event::Held { .. }))
+                .count();
+            let ended_routes = routes
+                .iter()
+                .filter(|event| matches!(event, Event::Released { .. } | Event::Resumed { .. }))
+                .count();
+            assert_eq!(
+                held_routes, ended_routes,
+                "{label}: every contextual call the flow held is released: {routes:?}"
+            );
+            assert_eq!(
+                dispatch.open_request_state_for_tests(),
+                NOTHING_OPEN,
+                "{label}"
+            );
+            assert_eq!(graph.wait_graph_counts_for_tests().1, 0, "{label}");
+            drop(tasks);
+            assert_eq!(answered(&dispatch, &host), synchronous, "{label}");
+        }
     }
 
     /// The overload set of `both`'s call signatures — a family built in one
@@ -6939,6 +7157,1693 @@ mod semantic_poll_contract {
         drop(other);
         let read = dispatch.execute_via_cold_build_helper(path);
         assert_eq!(read_summary(&dispatch, &read).0, synchronous.0);
+    }
+
+    /// The admission steps query entries computed on `host`, wherever they
+    /// ran: one per stage of an entry's sugar, carrier, apparent-wrapper and
+    /// signature-subject normalization.
+    fn admission_stages(host: &crate::VerterHost) -> u64 {
+        host.project_type_store()
+            .semantic_graph()
+            .stats_snapshot()
+            .admission_stages_walked
+    }
+
+    /// The steps deferred evaluations computed on `host`, wherever they
+    /// ran: one per evaluator step, counted where the step runs, outside
+    /// every charge and its rollback.
+    fn deferred_steps(host: &crate::VerterHost) -> u64 {
+        host.project_type_store()
+            .semantic_graph()
+            .stats_snapshot()
+            .deferred_steps_evaluated
+    }
+
+    /// The physical work a held read is measured by.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Work {
+        hops: u64,
+        admission: u64,
+        deferred: u64,
+    }
+
+    fn work(host: &crate::VerterHost) -> Work {
+        Work {
+            hops: projection_hops(host),
+            admission: admission_stages(host),
+            deferred: deferred_steps(host),
+        }
+    }
+
+    fn work_since(host: &crate::VerterHost, before: Work) -> Work {
+        let now = work(host);
+        Work {
+            hops: now.hops - before.hops,
+            admission: now.admission - before.admission,
+            deferred: now.deferred - before.deferred,
+        }
+    }
+
+    const NO_WORK: Work = Work {
+        hops: 0,
+        admission: 0,
+        deferred: 0,
+    };
+
+    /// What a polled root did while one of its dependencies was held.
+    struct HeldRead {
+        /// The first poll returned `Pending` instead of waiting the
+        /// producer out.
+        yielded: bool,
+        /// Work computed by the first poll.
+        at_hold: Work,
+        /// A second poll here while still held — under a probe that
+        /// forbids every wait — stayed pending, and so did its task polled
+        /// on another thread when it has one.
+        repolled_pending: bool,
+        pending_elsewhere: Option<bool>,
+        /// Work computed by those repolls.
+        repoll: Work,
+        /// The producer going away woke the root.
+        woken: bool,
+        /// Work computed over the whole polled read.
+        total: Work,
+        read: ValueRead,
+    }
+
+    /// `root` polled at the production entry on a fresh projection host
+    /// while another task produces `held`; released, a task still pending
+    /// is resumed on another thread and the answer delivered here. Nothing
+    /// the read held stays open.
+    fn poll_root_holding(
+        keys: impl FnOnce(&crate::VerterHost, &HostDispatch<'_>) -> (SemanticQueryKey, SemanticQueryKey),
+    ) -> (Arc<crate::VerterHost>, HeldRead) {
+        let host = projection_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let (root, held) = keys(&host, &dispatch);
+        let (other, lease) = hold_producer(&host, graph, held);
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let before = work(&host);
+        let mut entry = dispatch.poll_query(root);
+        let (first, at_hold, repolled_pending, pending_elsewhere, repoll) =
+            while_held(lease, || {
+                let first = entry.poll(&waker);
+                let at_hold = work_since(&host, before);
+                if first.is_ready() {
+                    return (first, at_hold, false, None, NO_WORK);
+                }
+                let repolled_pending = {
+                    let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                    entry.poll(&waker).is_pending()
+                };
+                let pending_elsewhere = entry.task().map(|task| {
+                    assert_send(task);
+                    std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| task.poll(&waker).is_pending())
+                            .join()
+                            .expect("the pending poll returns")
+                    })
+                });
+                let total = work_since(&host, before);
+                let repoll = Work {
+                    hops: total.hops - at_hold.hops,
+                    admission: total.admission - at_hold.admission,
+                    deferred: total.deferred - at_hold.deferred,
+                };
+                (first, at_hold, repolled_pending, pending_elsewhere, repoll)
+            });
+        let woken = counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1;
+        let yielded = first.is_pending();
+        let read = match first {
+            Poll::Ready(read) => read,
+            Poll::Pending => match entry.task() {
+                Some(_) => resume_elsewhere(&mut entry),
+                None => poll_until_ready(|waker| entry.poll(waker)),
+            },
+        };
+        drop(entry);
+        let run = HeldRead {
+            yielded,
+            at_hold,
+            repolled_pending,
+            pending_elsewhere,
+            repoll,
+            woken,
+            total: work_since(&host, before),
+            read,
+        };
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+        drop(other);
+        drop(scope);
+        drop(dispatch);
+        (host, run)
+    }
+
+    /// `root` read through the synchronous entry on a fresh projection
+    /// host: its summary and the work it computed.
+    fn synchronous_root(
+        keys: impl FnOnce(&crate::VerterHost, &HostDispatch<'_>) -> SemanticQueryKey,
+    ) -> (ReadSummary, Work) {
+        let host = projection_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let root = keys(&host, &dispatch);
+        let before = work(&host);
+        let read = dispatch.execute_via_cold_build_helper(root);
+        (read_summary(&dispatch, &read), work_since(&host, before))
+    }
+
+    /// `Pair<"deep">` as its deferred `["inner"]` access: a node the path
+    /// walker resolves by reading the `IndexedAccess` sugar of its object.
+    fn deferred_inner_access(
+        dispatch: &HostDispatch<'_>,
+        object: verter_type_engine::semantic_query::SemanticNodeId,
+    ) -> verter_type_engine::semantic_query::SemanticNodeId {
+        dispatch
+            .graph_arc()
+            .intern_node(SemanticNodeData::IndexedAccess {
+                object,
+                index: verter_type_engine::semantic_query::IndexKey::from("inner"),
+                origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
+            })
+    }
+
+    /// `Pair<"deep">["inner"]["value"]` with its first access deferred:
+    /// the path `["value"]` over `Pair<"deep">["inner"]`, whose walk reads
+    /// the `IndexedAccess` sugar `Pair<"deep">["inner"]` before its own hop.
+    fn sugar_path(host: &crate::VerterHost, dispatch: &HostDispatch<'_>) -> SemanticQueryKey {
+        let (path, _) = projection_keys(host, dispatch);
+        let SemanticQueryKey::ProjectPath { base, context, .. } = path else {
+            unreachable!("the projection is a path")
+        };
+        SemanticQueryKey::ProjectPath {
+            base: deferred_inner_access(dispatch, base),
+            path: verter_type_expr::OwnedSlice::from(
+                vec![verter_type_engine::semantic_query::PathSegment::Member(
+                    verter_type_engine::semantic_query::PropertyKey::identifier("value"),
+                )]
+                .into_boxed_slice(),
+            ),
+            context,
+        }
+    }
+
+    /// The hops `Pair<"deep">["inner"]["value"]` walks with its first
+    /// access deferred: the deferred access the outer walk stands at, the
+    /// sugar's own walk of `Pair<"deep">` and its `inner` member, then the
+    /// outer walk's `Box<"deep">` and its `value` member.
+    const SUGAR_WALK_HOPS: u64 = 5;
+
+    /// A path whose walk reads the `IndexedAccess` sugar of a deferred
+    /// access — a projection read whose entry canonicalizes its key — while
+    /// another task instantiates the sugar's object returns `Pending` at the
+    /// polled entry: the sugar is admitted as the canonical path in the
+    /// needing frame and becomes that frame's need, instead of being read in
+    /// place, where its walk would wait the producer out. Repolled while
+    /// held it computes nothing; released, it resumes on another thread and
+    /// delivers exactly what the synchronous entry reads, receipt tree
+    /// included, having walked each hop once.
+    #[test]
+    fn a_hop_reading_index_sugar_whose_instantiation_is_held_yields_and_resumes_to_the_synchronous_read(
+    ) {
+        let (synchronous, synchronous_work) = synchronous_root(sugar_path);
+        assert_eq!(synchronous.0, "\"deep\"", "{synchronous:?}");
+        assert!(
+            !synchronous.3 && synchronous.5.is_some(),
+            "premise: a complete, priced answer: {synchronous:?}"
+        );
+        assert_eq!(synchronous_work.hops, SUGAR_WALK_HOPS);
+
+        let (host, run) = poll_root_holding(|host, dispatch| {
+            let (_, hops) = projection_keys(host, dispatch);
+            (sugar_path(host, dispatch), hops[0].clone())
+        });
+        assert!(
+            run.yielded,
+            "the path yields while another task instantiates its sugar's object"
+        );
+        assert_eq!(
+            run.at_hold.hops, 2,
+            "the outer hop at the deferred access and the sugar's hop at its object ran before the wait"
+        );
+        assert!(run.repolled_pending, "a repoll while held enters no wait");
+        assert_eq!(run.pending_elsewhere, Some(true));
+        assert_eq!(run.repoll, NO_WORK, "a pending repoll computes nothing");
+        assert!(run.woken, "the producer going away wakes the path");
+        assert_eq!(
+            run.total.hops, SUGAR_WALK_HOPS,
+            "no hop is walked again: the sugar's walk resumes at its held hop"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+    }
+
+    /// `Pair` named by an unresolved authored reference: a `BareRef`
+    /// carrier over `"deep"`, scoped to the aliases' file.
+    fn pair_carrier(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> verter_type_engine::semantic_query::SemanticNodeId {
+        let graph = dispatch.graph_arc();
+        let deep = graph.intern_node(SemanticNodeData::Literal(
+            verter_type_engine::semantic_query::LiteralValue::String("deep".into()),
+        ));
+        let scope = verter_type_engine::semantic_query::NodeScopeId::File {
+            canonical_id: PROJECTION_FILE.into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: host
+                .shallow_file_state(PROJECTION_FILE)
+                .expect("the aliases are indexed")
+                .whole_hash,
+            local_scope: None,
+        };
+        graph.intern_node_with_scope(
+            SemanticNodeData::new_bare_ref(Arc::from("Pair"), scope.clone(), Arc::from([deep])),
+            scope,
+        )
+    }
+
+    /// The path `Pair<"deep">["inner"]["value"]` over the carrier, read in
+    /// `mode`, and the reads its entry's carrier normalization makes in
+    /// `Expanded`, in order: the anchor declaration `Pair`, then its
+    /// instantiation over `"deep"` under the path's own context.
+    fn carrier_path(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+        mode: ProjectionMode,
+    ) -> (SemanticQueryKey, [SemanticQueryKey; 2]) {
+        use verter_type_engine::semantic_query::{
+            InstantiateKey, LiteralValue, PathSegment, PropertyKey, ResolveDeclKey,
+        };
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let context = ProjectionReductionContext::published(mode);
+        let path = SemanticQueryKey::ProjectPath {
+            base: pair_carrier(host, dispatch),
+            path: verter_type_expr::OwnedSlice::from(
+                vec![
+                    PathSegment::Member(PropertyKey::identifier("inner")),
+                    PathSegment::Member(PropertyKey::identifier("value")),
+                ]
+                .into_boxed_slice(),
+            ),
+            context,
+        };
+        let deep =
+            dispatch
+                .graph_arc()
+                .intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                    "deep".into(),
+                )));
+        let anchor = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: ScopeId::file(PROJECTION_FILE, owner),
+            name: "Pair".into(),
+        });
+        let instantiation = SemanticQueryKey::Instantiate(InstantiateKey::new(
+            dispatch.type_slot_for(PROJECTION_FILE, owner, "Pair"),
+            Arc::from([deep]),
+            dispatch.instantiate_context_for(PROJECTION_FILE, context),
+        ));
+        (path, [anchor, instantiation])
+    }
+
+    /// The stages an `Expanded` carrier-rooted path's entry computes before
+    /// its claim: the carrier planned up to its anchor read, the anchor's
+    /// answer taken up to the instantiation read, the instantiation's answer
+    /// finishing the admission.
+    const CARRIER_ADMISSION_STAGES: u64 = 3;
+
+    fn expanded_carrier_path(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> SemanticQueryKey {
+        carrier_path(host, dispatch, ProjectionMode::Expanded).0
+    }
+
+    /// A path whose subject is an unresolved reference normalizes that
+    /// carrier at its entry, before its claim. Polled while another task
+    /// produces the carrier's anchor declaration, the entry returns
+    /// `Pending` at that read — its admission retained, not blocked on the
+    /// producer — computes nothing when repolled, and released, completes
+    /// its admission and its walk, delivering exactly what the synchronous
+    /// entry reads, receipt tree included, with each admission stage
+    /// computed once.
+    #[test]
+    fn a_carrier_rooted_path_whose_anchor_declaration_is_held_yields_at_its_admission() {
+        let (synchronous, synchronous_work) = synchronous_root(expanded_carrier_path);
+        assert_eq!(synchronous.0, "\"deep\"", "{synchronous:?}");
+        assert!(
+            !synchronous.3 && synchronous.5.is_some(),
+            "premise: a complete, priced answer: {synchronous:?}"
+        );
+        assert_eq!(synchronous_work.admission, CARRIER_ADMISSION_STAGES);
+
+        let (host, run) = poll_root_holding(|host, dispatch| {
+            let (path, reads) = carrier_path(host, dispatch, ProjectionMode::Expanded);
+            (path, reads[0].clone())
+        });
+        assert!(run.yielded, "the entry yields at its held anchor read");
+        assert_eq!(
+            run.at_hold.admission, 1,
+            "the carrier was planned up to its anchor"
+        );
+        assert_eq!(run.at_hold.hops, 0, "no hop is walked before admission");
+        assert!(run.repolled_pending, "a repoll while held enters no wait");
+        assert_eq!(run.repoll, NO_WORK, "a pending repoll computes nothing");
+        assert!(run.woken, "the producer going away wakes the entry");
+        assert_eq!(
+            run.total, synchronous_work,
+            "each stage and hop is computed once"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+    }
+
+    /// Sequential reads inside one helper: the carrier's admission already
+    /// read its anchor declaration and now reads the instantiation that
+    /// anchor routes through, which another task is producing. The entry
+    /// returns `Pending` holding the anchor's answer; resumed, it continues
+    /// at the held instantiation — the anchor stage is not computed again,
+    /// counted where it runs, outside every charge and its rollback — and
+    /// delivers exactly what the synchronous entry reads.
+    #[test]
+    fn a_carrier_admission_waiting_on_its_instantiation_resumes_without_reading_its_anchor_again() {
+        let (synchronous, synchronous_work) = synchronous_root(expanded_carrier_path);
+        assert_eq!(synchronous_work.admission, CARRIER_ADMISSION_STAGES);
+
+        let (host, run) = poll_root_holding(|host, dispatch| {
+            let (path, reads) = carrier_path(host, dispatch, ProjectionMode::Expanded);
+            (path, reads[1].clone())
+        });
+        assert!(
+            run.yielded,
+            "the entry yields at its held instantiation read"
+        );
+        assert_eq!(
+            run.at_hold.admission, 2,
+            "the carrier was planned and its anchor read before the wait"
+        );
+        assert!(run.repolled_pending);
+        assert_eq!(run.repoll, NO_WORK, "a pending repoll computes nothing");
+        assert!(run.woken);
+        assert_eq!(
+            run.total, synchronous_work,
+            "the completed admission stages are not computed again"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+    }
+
+    /// An entry released while its admission waits withdraws its wait and
+    /// leaves nothing open — its carrier's cycle guard included — and the
+    /// dispatcher reads the path afterwards as the synchronous entry does.
+    #[test]
+    fn a_carrier_admission_released_while_its_read_is_held_leaves_nothing_open() {
+        let (synchronous, _) = synchronous_root(expanded_carrier_path);
+        let host = projection_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let (path, reads) = carrier_path(&host, &dispatch, ProjectionMode::Expanded);
+        let (other, lease) = hold_producer(&host, graph, reads[1].clone());
+        let mut entry = dispatch.poll_query(path.clone());
+        let pending = while_held(lease, || {
+            let pending = entry.poll(Waker::noop()).is_pending();
+            drop(entry);
+            pending
+        });
+        assert!(pending, "the entry yields while its admission read is held");
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        drop(other);
+        let read = dispatch.execute_via_cold_build_helper(path);
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+    }
+
+    /// `Pair<"deep">["inner"]["value"]` with the deferred access over the
+    /// carrier: the walk reads `IndexedAccess` sugar whose subject is the
+    /// unresolved reference, so the needing frame admits a carrier.
+    fn carrier_sugar_path(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> SemanticQueryKey {
+        let SemanticQueryKey::ProjectPath { path, context, .. } = sugar_path(host, dispatch) else {
+            unreachable!("the projection is a path")
+        };
+        SemanticQueryKey::ProjectPath {
+            base: deferred_inner_access(dispatch, pair_carrier(host, dispatch)),
+            path,
+            context,
+        }
+    }
+
+    /// A hop reading sugar over a carrier subject admits it in the needing
+    /// frame: the carrier normalized, its prelude carried to the canonical
+    /// path it needs. While another task instantiates the resolved object,
+    /// the path returns `Pending`; released, it delivers exactly what the
+    /// synchronous entry reads — answer, facts and the receipt tree the
+    /// prelude's publication shapes — with each stage computed once.
+    #[test]
+    fn a_hop_reading_carrier_sugar_admits_it_in_the_frame_and_reads_what_the_synchronous_entry_reads(
+    ) {
+        let (synchronous, synchronous_work) = synchronous_root(carrier_sugar_path);
+        assert_eq!(synchronous.0, "\"deep\"", "{synchronous:?}");
+        assert!(
+            !synchronous.3 && synchronous.5.is_some(),
+            "premise: a complete, priced answer: {synchronous:?}"
+        );
+        assert!(
+            synchronous_work.admission > 0,
+            "premise: the sugar's entry normalizes its carrier"
+        );
+
+        let (host, run) = poll_root_holding(|host, dispatch| {
+            let (_, hops) = projection_keys(host, dispatch);
+            (carrier_sugar_path(host, dispatch), hops[0].clone())
+        });
+        assert!(
+            run.yielded,
+            "the path yields while the carrier's object is held"
+        );
+        assert!(run.repolled_pending);
+        assert_eq!(run.repoll, NO_WORK, "a pending repoll computes nothing");
+        assert!(run.woken);
+        assert_eq!(
+            run.total, synchronous_work,
+            "each stage and hop is computed once"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+    }
+
+    /// A module contributing a member to the global `String` interface.
+    const STRING_CONTRIBUTOR: &str = "/semantic-task/string-global.ts";
+
+    /// A host whose `String` contributor was indexed and then edited: its
+    /// source is current, its index cold and the contributor pending
+    /// ingestion again, so the next global lookup of `String` reads it as a
+    /// load.
+    fn edited_string_contributor_host() -> Arc<crate::VerterHost> {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            STRING_CONTRIBUTOR,
+            &crate::u6_flow_shape_corpus_tests::module_script(
+                "declare global { interface String { readonly marker: \"str\"; } }\n",
+            ),
+            crate::FileLanguage::script_ts(),
+        );
+        host.ensure_indexed_ready(STRING_CONTRIBUTOR)
+            .expect("the contributor has indexed input");
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            STRING_CONTRIBUTOR,
+            &crate::u6_flow_shape_corpus_tests::module_script(
+                "// edited\ndeclare global { interface String { readonly marker: \"str\"; } }\n",
+            ),
+            crate::FileLanguage::script_ts(),
+        );
+        host
+    }
+
+    /// `string["marker"]` read in `Navigate`: a path whose first step reads
+    /// the scope-less subject's apparent wrapper, which its entry admits
+    /// through the demanding project's `String`.
+    fn string_marker_path(dispatch: &HostDispatch<'_>) -> SemanticQueryKey {
+        SemanticQueryKey::ProjectPath {
+            base: dispatch
+                .graph_arc()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
+            path: verter_type_expr::OwnedSlice::from(
+                vec![verter_type_engine::semantic_query::PathSegment::Member(
+                    verter_type_engine::semantic_query::PropertyKey::identifier("marker"),
+                )]
+                .into_boxed_slice(),
+            ),
+            context: ProjectionReductionContext::published(ProjectionMode::Navigate),
+        }
+    }
+
+    /// A polled root whose entry admits its key through an apparent wrapper
+    /// reads the wrapper's global lookup files as a frame does: with the
+    /// `String` contributor's index cold after an edit and its shard held,
+    /// the entry returns `Pending` at the contributor's load — under a probe
+    /// that forbids every wait, so it neither loads nor waits in place —
+    /// with only the admission stages before it computed and no hop walked.
+    /// Released, it resumes at that load and delivers exactly what the
+    /// synchronous entry reads on an equally edited host, each stage
+    /// computed once.
+    #[test]
+    fn a_wrapper_admission_whose_global_contributor_is_indexing_yields_at_its_load() {
+        let (synchronous, synchronous_work) = {
+            let host = edited_string_contributor_host();
+            let _request =
+                verter_type_engine::request_context::install_test_request_for(STRING_CONTRIBUTOR);
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let before = work(&host);
+            let read = dispatch.execute_via_cold_build_helper(string_marker_path(&dispatch));
+            (read_summary(&dispatch, &read), work_since(&host, before))
+        };
+        assert!(
+            synchronous.0.contains("str") && !synchronous.3,
+            "premise: the contributed member, complete: {synchronous:?}"
+        );
+        assert!(
+            synchronous_work.admission > 1,
+            "premise: the entry admits through the wrapper's lookup: {synchronous_work:?}"
+        );
+
+        let host = edited_string_contributor_host();
+        let _request =
+            verter_type_engine::request_context::install_test_request_for(STRING_CONTRIBUTOR);
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let path = string_marker_path(&dispatch);
+        let mut held = host.decl_lowering.hold_workers_for_tests();
+        let before = work(&host);
+        let mut entry = dispatch.poll_query(path);
+        let counter = CountingThreadWaker::for_current_thread();
+        let waker = Waker::from(Arc::clone(&counter));
+        let first = {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            entry.poll(&waker).is_pending()
+        };
+        let at_hold = work_since(&host, before);
+        let repolled = {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            entry.poll(&waker).is_pending()
+        };
+        let repoll = work_since(&host, before);
+        held.release();
+        assert!(
+            first,
+            "the entry yields while its wrapper's contributor indexes"
+        );
+        assert!(repolled, "a repoll while held enters no wait");
+        assert_eq!(repoll, at_hold, "a pending repoll computes nothing");
+        assert_eq!(at_hold.hops, 0, "no hop is walked before admission");
+        assert!(
+            at_hold.admission >= 1 && at_hold.admission < synchronous_work.admission,
+            "the admission waits inside its lookup: {at_hold:?} of {synchronous_work:?}"
+        );
+        counter.wait_for_wake("the completed index wakes the waiting admission");
+        let read = poll_until_ready(|waker| entry.poll(waker));
+        drop(entry);
+        assert_eq!(
+            work_since(&host, before),
+            synchronous_work,
+            "no stage runs again: the admission resumes at its load"
+        );
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+    }
+
+    /// A polled root whose admission waits on its wrapper lookup's load is
+    /// woken by its request's cancellation with the load still held — no
+    /// timer, no release — and its next poll delivers the terminal
+    /// cancelled read, releasing the admission and leaving nothing open.
+    #[test]
+    fn a_wrapper_admission_waiting_on_its_load_is_woken_and_stopped_by_its_cancellation() {
+        let host = edited_string_contributor_host();
+        let request =
+            verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
+                1,
+                Arc::from(STRING_CONTRIBUTOR),
+                verter_audit::RequestKind::ComponentMeta,
+                false,
+                false,
+                None,
+                1_000_000,
+            );
+        let _request =
+            verter_type_engine::request_context::RequestContextGuard::install(Arc::clone(&request));
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let graph = host.project_type_store().semantic_graph();
+        let path = string_marker_path(&dispatch);
+        let mut held = host.decl_lowering.hold_workers_for_tests();
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let wakes = || counter.0.load(std::sync::atomic::Ordering::SeqCst);
+        let mut entry = dispatch.poll_query(path);
+        // Each poll runs under a probe that forbids every wait, so an
+        // in-place wait fails at once instead of waiting the held shards out.
+        let first = {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            entry.poll(&waker).is_pending()
+        };
+        let before = wakes();
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| request.cancel())
+                .join()
+                .expect("the request is cancelled on another thread");
+        });
+        let woken = wakes() > before;
+        let next = {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            match entry.poll(&waker) {
+                Poll::Ready(read) => Some(read),
+                Poll::Pending => None,
+            }
+        };
+        drop(entry);
+        held.release();
+        assert!(
+            first,
+            "the entry yields while its wrapper's contributor indexes"
+        );
+        assert!(
+            woken,
+            "the request's cancellation wakes the waiting admission"
+        );
+        let read = next.expect("the woken admission reads its cancellation with the load held");
+        assert!(
+            matches!(
+                read.value(),
+                QueryResult::Error(verter_type_engine::semantic_query::QueryError::Cancelled)
+            ),
+            "the stopped admission reads a terminal cancellation: {read:?}"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+    }
+
+    const RELATION_FILE: &str = "/semantic-task/relation.ts";
+
+    /// An alias whose body applies another: relating two of its
+    /// applications instantiates each operand before the pair relates.
+    const RELATION: &str = "type Box<T> = { v: T };\n\
+                            type Wrap<T> = { w: Box<T> };\n";
+
+    fn relation_host() -> Arc<crate::VerterHost> {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            RELATION_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(RELATION),
+            crate::FileLanguage::script_ts(),
+        );
+        host.ensure_indexed_ready(RELATION_FILE)
+            .expect("the aliases have indexed input before an operand is held");
+        host
+    }
+
+    /// Aliases of `Wrap<"a">` and `Wrap<string>` related as a machinery
+    /// root, and the instantiations its operands' carrier walks read, in
+    /// the order they read them: the source's `Wrap<"a">`, then the
+    /// target's `Wrap<string>`, each in structural transit.
+    fn relation_keys(
+        host: &crate::VerterHost,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> (SemanticQueryKey, [SemanticQueryKey; 2]) {
+        use verter_type_engine::semantic_query::{
+            DeclIdentity, InstantiateKey, LiteralValue, PayloadArray,
+        };
+        let graph = dispatch.graph_arc();
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("a".into())));
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let whole_hash = host
+            .shallow_file_state(RELATION_FILE)
+            .expect("the aliases are indexed")
+            .whole_hash;
+        let wrap = |arg: verter_type_engine::semantic_query::SemanticNodeId| {
+            graph.intern_node(SemanticNodeData::InstantiationRef {
+                base: DeclIdentity {
+                    canonical_id: RELATION_FILE.into(),
+                    owner,
+                    whole_hash,
+                    decl_name: "Wrap".into(),
+                },
+                args: PayloadArray::from(vec![arg]),
+            })
+        };
+        // Aliases of the applications: nothing before the relation's
+        // structural dispatch reads through them, so the dispatch's operand
+        // unwraps are the relation's first reads.
+        let alias = |node| graph.intern_node(SemanticNodeData::Alias(node));
+        let relate = dispatch
+            .relate_key_for(alias(wrap(a)), alias(wrap(string)))
+            .to_query_key();
+        let operand = |arg: verter_type_engine::semantic_query::SemanticNodeId| {
+            SemanticQueryKey::Instantiate(InstantiateKey::new(
+                dispatch.type_slot_for(RELATION_FILE, owner, "Wrap"),
+                Arc::from([arg]),
+                dispatch.instantiate_context_for(
+                    RELATION_FILE,
+                    ProjectionReductionContext::structural_transit(),
+                ),
+            ))
+        };
+        (relate, [operand(a), operand(string)])
+    }
+
+    /// The physical work relations on `host` did, wherever they ran: the
+    /// machinery roots whose root obligation frame opened, the structural
+    /// reductions, and the instantiations built. Each is counted where the
+    /// work is done, outside every charge and its rollback.
+    fn relation_work(host: &crate::VerterHost) -> [u64; 3] {
+        let stats = host.project_type_store().semantic_graph().stats_snapshot();
+        [
+            stats.relation_roots_opened,
+            stats.relation_reductions,
+            stats.instantiate_count,
+        ]
+    }
+
+    fn relation_work_since(after: [u64; 3], before: [u64; 3]) -> [u64; 3] {
+        [
+            after[0] - before[0],
+            after[1] - before[1],
+            after[2] - before[2],
+        ]
+    }
+
+    /// The relation read through the synchronous entry on a fresh host: its
+    /// summary and the work it did.
+    fn synchronous_relation() -> (ReadSummary, [u64; 3]) {
+        let host = relation_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let (relate, _) = relation_keys(&host, &dispatch);
+        let before = relation_work(&host);
+        let read = dispatch.execute_via_cold_build_helper(relate);
+        (
+            read_summary(&dispatch, &read),
+            relation_work_since(relation_work(&host), before),
+        )
+    }
+
+    /// What a polled relation root did while one of its operands'
+    /// instantiations was held.
+    struct HeldRelation {
+        /// The first poll returned `Pending` instead of waiting the
+        /// producer out.
+        yielded: bool,
+        /// Work done by the first poll.
+        at_hold: [u64; 3],
+        /// A second poll here while still held — under a probe that
+        /// forbids every wait — and then its task polled on another thread
+        /// stayed pending.
+        repolled_pending: bool,
+        pending_elsewhere: Option<bool>,
+        /// Work done by those repolls.
+        repoll_work: [u64; 3],
+        /// The producer going away woke the root.
+        woken: bool,
+        /// Work done over the whole polled read.
+        work: [u64; 3],
+        read: ValueRead,
+    }
+
+    /// The relation polled at the production entry on a fresh host while
+    /// another task produces `relation_keys(..).1[held]`; released, its task
+    /// is resumed on another thread and the answer delivered here.
+    fn poll_relation_holding(held: usize) -> (Arc<crate::VerterHost>, HeldRelation) {
+        let host = relation_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let (relate, operands) = relation_keys(&host, &dispatch);
+        let (other, lease) = hold_producer(&host, graph, operands[held].clone());
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let before = relation_work(&host);
+        let mut entry = dispatch.poll_query(relate);
+        let (first, at_hold, repolled_pending, pending_elsewhere, repoll_work) =
+            while_held(lease, || {
+                let first = entry.poll(&waker);
+                let at_hold = relation_work_since(relation_work(&host), before);
+                if first.is_ready() {
+                    return (first, at_hold, false, None, [0; 3]);
+                }
+                let repolled_pending = {
+                    let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                    entry.poll(&waker).is_pending()
+                };
+                let pending_elsewhere = entry.task().map(|task| {
+                    assert_send(task);
+                    std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| task.poll(&waker).is_pending())
+                            .join()
+                            .expect("the pending poll returns")
+                    })
+                });
+                let repoll_work =
+                    relation_work_since(relation_work_since(relation_work(&host), before), at_hold);
+                (
+                    first,
+                    at_hold,
+                    repolled_pending,
+                    pending_elsewhere,
+                    repoll_work,
+                )
+            });
+        let woken = counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1;
+        let yielded = first.is_pending();
+        let read = match first {
+            Poll::Ready(read) => read,
+            Poll::Pending => resume_elsewhere(&mut entry),
+        };
+        drop(entry);
+        let run = HeldRelation {
+            yielded,
+            at_hold,
+            repolled_pending,
+            pending_elsewhere,
+            repoll_work,
+            woken,
+            work: relation_work_since(relation_work(&host), before),
+            read,
+        };
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+        drop(other);
+        drop(scope);
+        drop(dispatch);
+        (host, run)
+    }
+
+    /// The synchronous premise of the relation rows: `Wrap<"a">` is
+    /// assignable to `Wrap<string>` — a complete, priced answer — and the
+    /// relation runs as one root whose reduction relates the instantiated
+    /// operands.
+    fn relation_premise() -> (ReadSummary, [u64; 3]) {
+        let (synchronous, work) = synchronous_relation();
+        assert!(
+            synchronous.0.contains("Assignable"),
+            "premise: the pair is assignable: {synchronous:?}"
+        );
+        assert!(
+            !synchronous.3 && synchronous.5.is_some(),
+            "premise: a complete, priced answer: {synchronous:?}"
+        );
+        assert_eq!(work[0], 1, "premise: one machinery root: {work:?}");
+        assert!(
+            work[1] >= 1 && work[2] >= 2,
+            "premise: the root reduces over both instantiated operands: {work:?}"
+        );
+        (synchronous, work)
+    }
+
+    /// A relation root whose source operand's instantiation another task is
+    /// producing returns `Pending` at the polled entry with its root
+    /// obligation frame open and its reduction standing at its structural
+    /// dispatch, whose first reads unwrap the operands, instead of waiting
+    /// the producer out. Polled again while held, under a probe that forbids
+    /// every wait, and on another thread, it stays pending and does no work.
+    /// Released, it resumes on another thread at its operand demand —
+    /// opening no second root and reducing once — and delivers exactly what
+    /// the synchronous entry reads, receipt tree included, with the same
+    /// absolute work.
+    #[test]
+    fn a_relation_root_whose_source_operand_is_held_yields_with_its_root_frame_open() {
+        let (synchronous, synchronous_work) = relation_premise();
+        let (host, run) = poll_relation_holding(0);
+        assert!(
+            run.yielded,
+            "the root yields while another task instantiates its source"
+        );
+        assert_eq!(
+            run.at_hold,
+            [1, 1, 0],
+            "the root's frame is open, its reduction waits at its structural dispatch, nothing is built"
+        );
+        assert!(run.repolled_pending);
+        assert_eq!(run.pending_elsewhere, Some(true));
+        assert_eq!(run.repoll_work, [0; 3], "a pending repoll does no work");
+        assert!(run.woken, "the producer going away wakes the root");
+        assert_eq!(
+            run.work, synchronous_work,
+            "no root opens again and no reduction runs twice"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+    }
+
+    /// Sequential reads: a relation root that already instantiated its
+    /// source operand, and now waits on its target's instantiation while
+    /// another task produces it, returns `Pending` holding its open root
+    /// frame and the completed source operand. Resumed on another thread,
+    /// it continues at the target — the source is not instantiated again,
+    /// no root opens again, the pair reduces once — and delivers exactly
+    /// what the synchronous entry reads, receipt tree included. Warm, both
+    /// entries answer alike doing no work.
+    #[test]
+    fn a_relation_root_waiting_on_its_target_operand_resumes_without_repeating_its_source() {
+        let (synchronous, synchronous_work) = relation_premise();
+        let (host, run) = poll_relation_holding(1);
+        assert!(
+            run.yielded,
+            "the root yields while another task instantiates its target"
+        );
+        assert_eq!(
+            run.at_hold[..2],
+            [1, 1],
+            "the root's frame is open and its reduction waits at its dispatch while the target is held"
+        );
+        assert!(
+            run.at_hold[2] >= 1,
+            "the source operand was instantiated before the wait: {:?}",
+            run.at_hold
+        );
+        assert!(run.repolled_pending);
+        assert_eq!(run.pending_elsewhere, Some(true));
+        assert_eq!(run.repoll_work, [0; 3], "a pending repoll does no work");
+        assert!(run.woken);
+        assert_eq!(
+            run.work, synchronous_work,
+            "the completed source operand and the open root are not repeated"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+
+        let (relate, _) = relation_keys(&host, &dispatch);
+        let before = relation_work(&host);
+        let mut dispatch = dispatch;
+        let mut warm = dispatch.poll_query(relate.clone());
+        let Poll::Ready(warm_read) = warm.poll(Waker::noop()) else {
+            panic!("a warm relation answers on its first poll");
+        };
+        drop(warm);
+        let warm_sync = dispatch.execute_via_cold_build_helper(relate);
+        assert_eq!(relation_work(&host), before, "a warm relation does no work");
+        assert_eq!(
+            read_summary(&dispatch, &warm_read),
+            read_summary(&dispatch, &warm_sync)
+        );
+    }
+
+    /// A relation root released while it waits on its held target operand
+    /// closes its root obligation frame and withdraws its wait, leaving
+    /// nothing open; the producer it waited on is left alone, and the
+    /// dispatcher reads the relation afterwards as the synchronous entry
+    /// does.
+    #[test]
+    fn a_relation_root_released_while_its_operand_is_held_leaves_nothing_open() {
+        let (synchronous, _) = relation_premise();
+        let host = relation_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let (relate, operands) = relation_keys(&host, &dispatch);
+        let (other, lease) = hold_producer(&host, graph, operands[1].clone());
+        let mut entry = dispatch.poll_query(relate.clone());
+        let pending = while_held(lease, || {
+            let pending = entry.poll(Waker::noop()).is_pending();
+            drop(entry);
+            pending
+        });
+        assert!(pending, "the root yields while its operand is held");
+        assert_eq!(
+            dispatch.open_request_state_for_tests(),
+            NOTHING_OPEN,
+            "the released root closes its obligation frame"
+        );
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        drop(other);
+        let read = dispatch.execute_via_cold_build_helper(relate);
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+    }
+
+    /// A relation root waiting on its held target operand is woken by its
+    /// request's cancellation with the producer still held, and its next
+    /// poll delivers the terminal cancelled read, its root frame closed and
+    /// its wait withdrawn while the producer it waited on is left alone.
+    #[test]
+    fn a_relation_root_is_woken_by_its_requests_cancellation_while_its_operand_is_held() {
+        let host = relation_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let (relate, operands) = relation_keys(&host, &dispatch);
+        let (other, lease) = hold_producer(&host, graph, operands[1].clone());
+        let request = budgeted_request(1);
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let wakes = || counter.0.load(std::sync::atomic::Ordering::SeqCst);
+        let (first, woken, next) = {
+            let _request = verter_type_engine::request_context::RequestContextGuard::install(
+                Arc::clone(&request),
+            );
+            let mut entry = dispatch.poll_query(relate.clone());
+            let observed = while_held(lease, || {
+                let first = entry.poll(&waker).is_pending();
+                let before = wakes();
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| request.cancel())
+                        .join()
+                        .expect("the request is cancelled on another thread");
+                });
+                let woken = wakes() > before;
+                let next = match entry.poll(&waker) {
+                    Poll::Ready(read) => Some(read),
+                    Poll::Pending => None,
+                };
+                (first, woken, next)
+            });
+            drop(entry);
+            observed
+        };
+        assert!(first, "the root yields while its operand is held");
+        assert!(
+            woken,
+            "the request's cancellation wakes the root with the producer still held"
+        );
+        let read = next.expect("the woken root reads its cancellation without the producer");
+        assert!(
+            matches!(
+                read.value(),
+                QueryResult::Error(verter_type_engine::semantic_query::QueryError::Cancelled)
+            ),
+            "the cancelled root reads a terminal cancellation: {read:?}"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        drop(other);
+    }
+
+    /// The physical work call resolutions on `host` did, wherever they ran:
+    /// the candidates whose applicability check began, and the argument
+    /// relations their first inference pass ran. Each is counted where the
+    /// work is done, outside every charge and its rollback.
+    fn call_work(host: &crate::VerterHost) -> [u64; 2] {
+        let stats = host.project_type_store().semantic_graph().stats_snapshot();
+        [stats.call_candidates_begun, stats.call_arguments_related]
+    }
+
+    fn call_work_since(after: [u64; 2], before: [u64; 2]) -> [u64; 2] {
+        [after[0] - before[0], after[1] - before[1]]
+    }
+
+    /// `pick(1, box)`'s result read through the synchronous entry on a
+    /// fresh host, and the call work it did. Its premise: `T` infers from
+    /// both arguments, the call's one candidate begun once and each of its
+    /// two arguments related once.
+    fn synchronous_call() -> (ReadSummary, [u64; 2]) {
+        let host = call_host();
+        let _request = verter_type_engine::request_context::install_test_request_for(CALL_FILE);
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let before = call_work(&host);
+        let read = dispatch.execute_via_cold_build_helper(call_result_key(&dispatch));
+        let summary = read_summary(&dispatch, &read);
+        let work = call_work_since(call_work(&host), before);
+        assert_eq!(
+            summary.0, "Union(2 | 1)",
+            "premise: what the first argument deposited survives the second: {summary:?}"
+        );
+        assert_eq!(
+            work,
+            [1, 2],
+            "premise: one candidate begun, both arguments related"
+        );
+        (summary, work)
+    }
+
+    /// What a polled call root did while the reads `held` selects were
+    /// produced by another task.
+    struct HeldCall {
+        /// The first poll returned `Pending` instead of waiting the
+        /// producer out.
+        yielded: bool,
+        /// How many reads another task held for the call's frame.
+        held: usize,
+        /// The suspensions the call's walk made inside its candidate.
+        suspensions: Vec<verter_type_engine::project_semantic_dispatch::CallSuspensionForTests>,
+        /// Work done by the first poll.
+        at_hold: [u64; 2],
+        /// A second poll here while still held — under a probe that
+        /// forbids every wait — and then its task polled on another thread
+        /// stayed pending.
+        repolled_pending: bool,
+        pending_elsewhere: Option<bool>,
+        /// Work done by those repolls.
+        repoll_work: [u64; 2],
+        /// The producers going away woke the root.
+        woken: bool,
+        /// Work done over the whole polled read.
+        work: [u64; 2],
+        read: ValueRead,
+    }
+
+    /// `pick(1, box)`'s result polled at the production entry on a fresh
+    /// host while another task produces each read its call frame needs that
+    /// `held` selects; released, its task resumes on another thread and the
+    /// answer is delivered here.
+    fn poll_call_holding(
+        held: fn(&SemanticQueryKey) -> bool,
+    ) -> (Arc<crate::VerterHost>, HeldCall) {
+        let host = call_host();
+        // The call is demanded by a request on its own file, as a root a
+        // request reads from its file is.
+        let _request = verter_type_engine::request_context::install_test_request_for(CALL_FILE);
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let key = call_result_key(&dispatch);
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let _ = verter_type_engine::project_semantic_dispatch::take_call_suspensions_for_tests();
+        let before = call_work(&host);
+        let mut entry = dispatch.poll_query(key);
+        verter_type_engine::project_semantic_dispatch::hold_call_needs_here_for_tests(Some(held));
+        let first = entry.poll(&waker);
+        verter_type_engine::project_semantic_dispatch::hold_call_needs_here_for_tests(None);
+        let at_hold = call_work_since(call_work(&host), before);
+        let suspensions =
+            verter_type_engine::project_semantic_dispatch::take_call_suspensions_for_tests();
+        let (yielded, held, repolled_pending, pending_elsewhere, repoll_work, read) = match first {
+            Poll::Ready(read) => (false, 0, false, None, [0; 2], read),
+            Poll::Pending => {
+                let repolled_pending = {
+                    let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                    entry.poll(&waker).is_pending()
+                };
+                let pending_elsewhere = entry.task().map(|task| {
+                    assert_send(task);
+                    std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| task.poll(&waker).is_pending())
+                            .join()
+                            .expect("the pending poll returns")
+                    })
+                });
+                let repoll_work =
+                    call_work_since(call_work_since(call_work(&host), before), at_hold);
+                let held = entry
+                    .task()
+                    .map_or(0, |task| task.release_held_call_needs_for_tests());
+                let read = resume_elsewhere(&mut entry);
+                (
+                    true,
+                    held,
+                    repolled_pending,
+                    pending_elsewhere,
+                    repoll_work,
+                    read,
+                )
+            }
+        };
+        let woken = counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1;
+        drop(entry);
+        let run = HeldCall {
+            yielded,
+            held,
+            suspensions,
+            at_hold,
+            repolled_pending,
+            pending_elsewhere,
+            repoll_work,
+            woken,
+            work: call_work_since(call_work(&host), before),
+            read,
+        };
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+        drop(scope);
+        drop(dispatch);
+        (host, run)
+    }
+
+    fn instantiation_reads(key: &SemanticQueryKey) -> bool {
+        matches!(key, SemanticQueryKey::Instantiate(_))
+    }
+
+    fn candidate_list_reads(key: &SemanticQueryKey) -> bool {
+        matches!(key, SemanticQueryKey::ResolveOverloadSet { .. })
+    }
+
+    /// Sequential reads inside a candidate: a call root whose candidate
+    /// already related its first argument — its collector holding what `1`
+    /// inferred for `T` — and now waits on an instantiation its second
+    /// argument's relation names returns `Pending` with the candidate
+    /// retained at that argument. Polled again while held, under a probe
+    /// that forbids every wait, and on another thread, it stays pending and
+    /// does no work. Released, it resumes on another thread at the second
+    /// argument — the candidate is not begun again and the first argument
+    /// is not related again — and delivers exactly what the synchronous
+    /// entry reads, receipt tree included, with the same absolute work.
+    #[test]
+    fn a_call_root_waiting_on_its_second_argument_resumes_without_beginning_its_candidate_again() {
+        let (synchronous, synchronous_work) = synchronous_call();
+        let (host, run) = poll_call_holding(instantiation_reads);
+        assert!(
+            run.yielded,
+            "the call yields while another task instantiates its second argument's operand"
+        );
+        assert!(run.held > 0);
+        let [suspension] = run.suspensions.as_slice() else {
+            panic!(
+                "the walk stops once inside its candidate: {:?}",
+                run.suspensions
+            );
+        };
+        assert!(
+            suspension
+                .needs
+                .iter()
+                .all(|need| matches!(need, SemanticQueryKey::Instantiate(_))),
+            "it waits on an instantiation `box` against `Box<T>` names: {suspension:?}"
+        );
+        assert_eq!(
+            suspension.collected_candidates, 1,
+            "its collector holds what the first argument inferred"
+        );
+        assert_eq!(
+            run.at_hold,
+            [1, 1],
+            "the candidate began and related its first argument before the wait"
+        );
+        assert!(run.repolled_pending);
+        assert_eq!(run.pending_elsewhere, Some(true));
+        assert_eq!(run.repoll_work, [0; 2], "a pending repoll does no work");
+        assert!(run.woken, "the producers going away wake the call");
+        assert_eq!(
+            run.work, synchronous_work,
+            "no candidate begins again and no argument relates twice"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+    }
+
+    /// A call root whose candidate list another task is producing returns
+    /// `Pending` before any candidate begins, the list its frame's need.
+    /// Polled again while held and on another thread, it stays pending and
+    /// does no work. Released, it resumes on another thread with the
+    /// delivered list — read once — and delivers exactly what the
+    /// synchronous entry reads, receipt tree included, with the same
+    /// absolute work.
+    #[test]
+    fn a_call_root_waiting_on_its_candidate_list_resumes_to_the_synchronous_read() {
+        let (synchronous, synchronous_work) = synchronous_call();
+        let (host, run) = poll_call_holding(candidate_list_reads);
+        assert!(
+            run.yielded,
+            "the call yields while another task produces its candidate list"
+        );
+        assert!(run.held > 0);
+        assert!(
+            run.suspensions.is_empty(),
+            "no candidate began: {:?}",
+            run.suspensions
+        );
+        assert_eq!(run.at_hold, [0; 2], "no candidate begins before its list");
+        assert!(run.repolled_pending);
+        assert_eq!(run.pending_elsewhere, Some(true));
+        assert_eq!(run.repoll_work, [0; 2], "a pending repoll does no work");
+        assert!(run.woken, "the producer going away wakes the call");
+        assert_eq!(run.work, synchronous_work);
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+    }
+
+    /// A call root waiting inside its candidate on a held instantiation is
+    /// woken by its request's cancellation with the producer still held,
+    /// and its next poll delivers the terminal cancelled read: its
+    /// candidate's collector released, its executor frame closed and its
+    /// wait withdrawn, nothing left open.
+    #[test]
+    fn a_call_root_is_woken_by_its_requests_cancellation_while_its_operand_is_held() {
+        let host = call_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let key = call_result_key(&dispatch);
+        let request = budgeted_request(1);
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let wakes = || counter.0.load(std::sync::atomic::Ordering::SeqCst);
+        let (first, woken, next) = {
+            let _request = verter_type_engine::request_context::RequestContextGuard::install(
+                Arc::clone(&request),
+            );
+            let mut entry = dispatch.poll_query(key);
+            verter_type_engine::project_semantic_dispatch::hold_call_needs_here_for_tests(Some(
+                instantiation_reads,
+            ));
+            let first = entry.poll(&waker).is_pending();
+            verter_type_engine::project_semantic_dispatch::hold_call_needs_here_for_tests(None);
+            let before = wakes();
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| request.cancel())
+                    .join()
+                    .expect("the request is cancelled on another thread");
+            });
+            let woken = wakes() > before;
+            let next = match entry.poll(&waker) {
+                Poll::Ready(read) => Some(read),
+                Poll::Pending => None,
+            };
+            drop(entry);
+            (first, woken, next)
+        };
+        assert!(first, "the call yields while its operand is held");
+        assert!(
+            woken,
+            "the request's cancellation wakes the call with the producer still held"
+        );
+        let read = next.expect("the woken call reads its cancellation without the producer");
+        assert!(
+            matches!(
+                read.value(),
+                QueryResult::Error(verter_type_engine::semantic_query::QueryError::Cancelled)
+            ),
+            "the cancelled call reads a terminal cancellation: {read:?}"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+    }
+
+    const PRIMITIVE_CALL_FILE: &str = "/semantic-task/primitive-call.ts";
+
+    /// A call whose callee is a primitive: `string`'s call signatures are
+    /// those of the `String` interface the call site's project declares.
+    const PRIMITIVE_CALL: &str = "declare global { interface String { (radix: number): boolean } }\n\
+                                  declare const s: string;\n\
+                                  const r = s(1);\n\
+                                  export {};\n";
+
+    /// `s(1)`'s result read on a fresh host with no request to scope it:
+    /// through the synchronous entry, or polled at the production entry.
+    fn primitive_call_read(polled: bool) -> ReadSummary {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            PRIMITIVE_CALL_FILE,
+            PRIMITIVE_CALL,
+            crate::FileLanguage::script_ts(),
+        );
+        host.ensure_indexed_ready(PRIMITIVE_CALL_FILE)
+            .expect("the call has indexed input");
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let key = dispatch.typeof_key_for(
+            ValueRootKey {
+                scope: ScopeId::file(
+                    PRIMITIVE_CALL_FILE,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+                name: verter_type_expr::OwnedStr::from("r"),
+            },
+            ProjectionReductionContext::published(ProjectionMode::Navigate),
+        );
+        let read = if polled {
+            let mut entry = dispatch.poll_query(key);
+            let read = poll_until_ready(|waker| entry.poll(waker));
+            drop(entry);
+            read
+        } else {
+            dispatch.execute_via_cold_build_helper(key)
+        };
+        read_summary(&dispatch, &read)
+    }
+
+    /// A primitive callee's candidate list is read in the call site's
+    /// scope wherever the call's walk runs: on a frame of the continuation
+    /// runtime with no request to scope what the runtime reads, the walk
+    /// reads the list where it stands, under its call site, and `s(1)`
+    /// selects `(radix: number): boolean` exactly as the synchronous entry
+    /// does.
+    #[test]
+    fn zz_mut_block_0() {
+        verter_type_engine::project_semantic_dispatch::PLANTED_BLOCK.store(true, std::sync::atomic::Ordering::SeqCst);
+        a_call_root_suspends_at_an_operand_dependency_and_delivers_its_call_value();
+    }
+
+    #[test]
+    fn zz_mut_block_1() {
+        verter_type_engine::project_semantic_dispatch::PLANTED_BLOCK.store(true, std::sync::atomic::Ordering::SeqCst);
+        a_call_root_waiting_on_its_second_argument_resumes_without_beginning_its_candidate_again();
+    }
+
+    #[test]
+    fn zz_mut_block_2() {
+        verter_type_engine::project_semantic_dispatch::PLANTED_BLOCK.store(true, std::sync::atomic::Ordering::SeqCst);
+        a_call_root_waiting_on_its_candidate_list_resumes_to_the_synchronous_read();
+    }
+
+    #[test]
+    fn zz_mut_block_3() {
+        verter_type_engine::project_semantic_dispatch::PLANTED_BLOCK.store(true, std::sync::atomic::Ordering::SeqCst);
+        a_call_root_is_woken_by_its_requests_cancellation_while_its_operand_is_held();
+    }
+
+    #[test]
+    fn zz_mut_restart_0() {
+        verter_type_engine::project_semantic_dispatch::PLANTED_RESTART.store(true, std::sync::atomic::Ordering::SeqCst);
+        a_call_root_suspends_at_an_operand_dependency_and_delivers_its_call_value();
+    }
+
+    #[test]
+    fn zz_mut_restart_1() {
+        verter_type_engine::project_semantic_dispatch::PLANTED_RESTART.store(true, std::sync::atomic::Ordering::SeqCst);
+        a_call_root_waiting_on_its_second_argument_resumes_without_beginning_its_candidate_again();
+    }
+
+    #[test]
+    fn zz_mut_restart_2() {
+        verter_type_engine::project_semantic_dispatch::PLANTED_RESTART.store(true, std::sync::atomic::Ordering::SeqCst);
+        a_call_root_waiting_on_its_candidate_list_resumes_to_the_synchronous_read();
+    }
+
+    #[test]
+    fn zz_mut_restart_3() {
+        verter_type_engine::project_semantic_dispatch::PLANTED_RESTART.store(true, std::sync::atomic::Ordering::SeqCst);
+        a_call_root_is_woken_by_its_requests_cancellation_while_its_operand_is_held();
+    }
+
+    #[test]
+    fn a_primitive_callees_candidate_list_is_read_in_its_call_sites_scope() {
+        let synchronous = primitive_call_read(false);
+        assert!(
+            matches!(
+                synchronous.0.as_str(),
+                "boolean" | "Union(false | true)" | "Union(true | false)"
+            ),
+            "premise: the call selects the project's `String` call signature: {synchronous:?}"
+        );
+        assert_eq!(primitive_call_read(true), synchronous);
+    }
+
+    /// `alias<args>` over the aliases' file.
+    fn projection_application(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+        alias: &str,
+        arg: verter_type_engine::semantic_query::SemanticNodeId,
+    ) -> verter_type_engine::semantic_query::SemanticNodeId {
+        use verter_type_engine::semantic_query::{DeclIdentity, PayloadArray};
+        dispatch
+            .graph_arc()
+            .intern_node(SemanticNodeData::InstantiationRef {
+                base: DeclIdentity {
+                    canonical_id: PROJECTION_FILE.into(),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    whole_hash: host
+                        .shallow_file_state(PROJECTION_FILE)
+                        .expect("the aliases are indexed")
+                        .whole_hash,
+                    decl_name: alias.into(),
+                },
+                args: PayloadArray::from(vec![arg]),
+            })
+    }
+
+    /// The path `["value"]` over the deferred access
+    /// `Pair<Pair<"deep">>["inner"]["value"]["inner"]`, read in `Navigate`,
+    /// and the instantiations its nested operand's evaluation reads, in the
+    /// order it reads them. The walk stands at the outer access, whose
+    /// object `Pair<Pair<"deep">>["inner"]["value"]` is itself a deferred
+    /// access: the shared deferred evaluator reduces it, reading
+    /// `Pair<Pair<"deep">>["inner"]` (which instantiates
+    /// `Pair<Pair<"deep">>`) and then `Box<Pair<"deep">>["value"]` (which
+    /// instantiates `Box<Pair<"deep">>`), before the hop reads the outer
+    /// access over its answer `Pair<"deep">`.
+    fn deferred_operand_path(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> (SemanticQueryKey, [SemanticQueryKey; 2]) {
+        use verter_type_engine::semantic_query::{
+            IndexKey, InstantiateKey, LiteralValue, PathSegment, PropertyKey,
+        };
+        let graph = dispatch.graph_arc();
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let deep = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "deep".into(),
+        )));
+        let pair = projection_application(host, dispatch, "Pair", deep);
+        let pair_of_pair = projection_application(host, dispatch, "Pair", pair);
+        let access = |object, index: &str| {
+            graph.intern_node(SemanticNodeData::IndexedAccess {
+                object,
+                index: IndexKey::from(index),
+                origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
+            })
+        };
+        let inner = access(pair_of_pair, "inner");
+        let value = access(inner, "value");
+        let base = access(value, "inner");
+        let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
+        let path = SemanticQueryKey::ProjectPath {
+            base,
+            path: verter_type_expr::OwnedSlice::from(
+                vec![PathSegment::Member(PropertyKey::identifier("value"))].into_boxed_slice(),
+            ),
+            context,
+        };
+        let hop = |alias: &str| {
+            SemanticQueryKey::Instantiate(InstantiateKey::new(
+                dispatch.type_slot_for(PROJECTION_FILE, owner, alias),
+                Arc::from([pair]),
+                dispatch.instantiate_context_for(
+                    PROJECTION_FILE,
+                    context.into_structural_transit_with_mode(ProjectionMode::Navigate),
+                ),
+            ))
+        };
+        (path, [hop("Pair"), hop("Box")])
+    }
+
+    /// The steps the nested operand's evaluation computes: the outer
+    /// access pushing its object (1); the object access pushing
+    /// `Pair<Pair<"deep">>`, which evaluates to itself in place (2); the
+    /// object access reading `Pair<Pair<"deep">>["inner"]` (3) and finishing
+    /// on its answer `Box<Pair<"deep">>` (4); the outer access reading
+    /// `Box<Pair<"deep">>["value"]` (5) and finishing on its answer
+    /// `Pair<"deep">` (6).
+    const DEFERRED_OPERAND_STEPS: u64 = 6;
+
+    /// The step at which the evaluation names its second read.
+    const DEFERRED_OPERAND_SECOND_READ_STEP: u64 = 5;
+
+    /// A path whose hop stands at a deferred access whose object is itself
+    /// deferred evaluates that object on the shared deferred evaluator, as
+    /// an owned sub-continuation of the hop. Polled while another task
+    /// instantiates `Pair<Pair<"deep">>` — the evaluation's first read,
+    /// which the evaluator reads through the `IndexedAccess` sugar — the
+    /// path returns `Pending` with the evaluation retained, instead of
+    /// waiting the producer out where the evaluator stands. Repolled while
+    /// held, under a probe that forbids every wait, and on another thread,
+    /// it computes nothing; released, it resumes the evaluation at its held
+    /// read and delivers exactly what the synchronous entry reads, receipt
+    /// tree included, with each step and hop computed once (absolute).
+    #[test]
+    fn a_hop_whose_deferred_operand_reads_a_held_instantiation_yields_and_resumes_to_the_synchronous_read(
+    ) {
+        let (synchronous, synchronous_work) =
+            synchronous_root(|host, dispatch| deferred_operand_path(host, dispatch).0);
+        assert_eq!(synchronous.0, "\"deep\"", "{synchronous:?}");
+        assert!(
+            !synchronous.3 && synchronous.5.is_some(),
+            "premise: a complete, priced answer: {synchronous:?}"
+        );
+        assert_eq!(synchronous_work.deferred, DEFERRED_OPERAND_STEPS);
+
+        let (host, run) = poll_root_holding(|host, dispatch| {
+            let (path, hops) = deferred_operand_path(host, dispatch);
+            (path, hops[0].clone())
+        });
+        assert!(
+            run.yielded,
+            "the path yields while its operand's first read is held"
+        );
+        assert_eq!(
+            run.at_hold.deferred, 3,
+            "the evaluation stands at its first read: both accesses pushed, the inner one read"
+        );
+        assert!(run.repolled_pending, "a repoll while held enters no wait");
+        assert_eq!(run.pending_elsewhere, Some(true));
+        assert_eq!(run.repoll, NO_WORK, "a pending repoll computes nothing");
+        assert!(run.woken, "the producer going away wakes the path");
+        assert_eq!(
+            run.total, synchronous_work,
+            "no step or hop is computed again: the evaluation resumes at its held read"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+    }
+
+    /// Sequential reads inside one helper: the nested operand's evaluation
+    /// already read `Pair<Pair<"deep">>["inner"]` and finished its inner
+    /// frame, and now reads `Box<Pair<"deep">>["value"]` while another task
+    /// instantiates `Box<Pair<"deep">>`. The path returns `Pending` holding
+    /// the completed frame's answer; resumed elsewhere, the evaluation
+    /// continues at the second read — its completed steps and first read
+    /// are not computed again, counted as physical steps where they run,
+    /// outside every charge and its rollback — and the path delivers
+    /// exactly what the synchronous entry reads.
+    #[test]
+    fn a_deferred_operand_waiting_on_its_second_read_resumes_without_evaluating_its_completed_steps_again(
+    ) {
+        let (synchronous, synchronous_work) =
+            synchronous_root(|host, dispatch| deferred_operand_path(host, dispatch).0);
+        assert_eq!(synchronous_work.deferred, DEFERRED_OPERAND_STEPS);
+
+        let (host, run) = poll_root_holding(|host, dispatch| {
+            let (path, hops) = deferred_operand_path(host, dispatch);
+            (path, hops[1].clone())
+        });
+        assert!(
+            run.yielded,
+            "the path yields while its operand's second read is held"
+        );
+        assert_eq!(
+            run.at_hold.deferred, DEFERRED_OPERAND_SECOND_READ_STEP,
+            "the inner frame completed before the wait: the outer access stands at its read"
+        );
+        assert!(run.repolled_pending);
+        assert_eq!(run.pending_elsewhere, Some(true));
+        assert_eq!(run.repoll, NO_WORK, "a pending repoll computes nothing");
+        assert!(run.woken);
+        assert_eq!(
+            run.total, synchronous_work,
+            "the completed steps are not evaluated again"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+    }
+
+    /// A path released while its nested operand's evaluation waits on a
+    /// held read withdraws its wait and leaves nothing open — no cost
+    /// recording of the evaluation's frames, no wait edge — and the
+    /// dispatcher reads the path afterwards as the synchronous entry does.
+    #[test]
+    fn a_path_released_while_its_deferred_operand_is_held_leaves_nothing_open() {
+        let (synchronous, _) =
+            synchronous_root(|host, dispatch| deferred_operand_path(host, dispatch).0);
+        for held in 0..2 {
+            let host = projection_host();
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let _scope = dispatch.enter_construction_scope();
+            let graph = host.project_type_store().semantic_graph();
+            let (path, hops) = deferred_operand_path(&host, &dispatch);
+            let (other, lease) = hold_producer(&host, graph, hops[held].clone());
+            let mut entry = dispatch.poll_query(path.clone());
+            let pending = while_held(lease, || {
+                let pending = entry.poll(Waker::noop()).is_pending();
+                drop(entry);
+                pending
+            });
+            assert!(pending, "the path yields while read {held} is held");
+            assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+            assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+            drop(other);
+            let read = dispatch.execute_via_cold_build_helper(path);
+            assert_eq!(read_summary(&dispatch, &read).0, synchronous.0);
+        }
     }
 }
 

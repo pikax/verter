@@ -114,10 +114,22 @@
       "type": "object",
       "title": "Verter",
       "properties": {
-        "verter.enable": {
-          "type": "boolean",
-          "default": true,
-          "description": "Enable/Disable Verter"
+        "verter.participation": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "disabled",
+            "workspace",
+            "full"
+          ],
+          "enumDescriptions": [
+            "Serve every feature, standing down only where an enabled extension proves it serves the same feature for the same framework.",
+            "Serve nothing: no language features, diagnostics, actions or workspace contributions.",
+            "Serve only explicitly requested workspace facts: no editor features, diagnostics or edits.",
+            "Serve every supported feature, even where another extension also serves it."
+          ],
+          "default": "auto",
+          "description": "How Verter participates in the editor alongside other tools."
         },
         "verter.lspBinaryPath": {
           "type": "string",

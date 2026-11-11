@@ -288,7 +288,7 @@ impl ActiveProviderIndex {
 const BUILT_IN_ADAPTER_SEMANTIC_VERSION: u32 = 1;
 
 /// The registered parser-grammar version of every built-in capability row.
-const BUILT_IN_PARSER_GRAMMAR_VERSION: u32 = 1;
+pub(crate) const BUILT_IN_PARSER_GRAMMAR_VERSION: u32 = 1;
 
 /// One composed carrier-grammar capability row: the exact facts the host
 /// registers for one adapter × carrier-language pair.

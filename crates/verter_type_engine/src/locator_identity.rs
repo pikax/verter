@@ -569,6 +569,54 @@ fn w_resolved_decl_slot_identity(s: &ResolvedDeclSlotIdentity) {
     key_safe(env);
 }
 
+/// The canonical encoding of a declaration slot: every field, the sealed
+/// env tail included, under explicit tags. A host-issued reference digests
+/// its declaration slot through this encoding, so two slots share a digest
+/// only when every field agrees. Each enum is matched exhaustively: a new
+/// variant fails to compile here before it could alias an old one.
+impl verter_identity::encoding::CanonicalEncode for ResolvedDeclSlotIdentity {
+    const DOMAIN_TAG: &'static str = "verter.type_engine.resolved_decl_slot.v1";
+
+    fn encode_fields(&self, encoder: &mut verter_identity::encoding::CanonicalEncoder) {
+        let ResolvedDeclSlotIdentity {
+            defining_canonical,
+            owner,
+            merged_symbol_name,
+            symbol_space,
+            env:
+                SlotEnvIdentity {
+                    type_env,
+                    lib_env,
+                    project,
+                },
+        } = self;
+        let owner_kind = match owner.kind() {
+            TopLevelOwnerKind::Module => 1,
+            TopLevelOwnerKind::Instance => 2,
+            TopLevelOwnerKind::Frontmatter => 3,
+        };
+        let owner_scope = match owner.scope() {
+            OwnerDeclarationScope::Lexical => 1,
+            OwnerDeclarationScope::GlobalAugmentation => 2,
+        };
+        let space = match symbol_space {
+            SemanticSymbolSpace::Type => 1,
+            SemanticSymbolSpace::Value => 2,
+            SemanticSymbolSpace::Namespace => 3,
+        };
+        encoder
+            .field_str(1, defining_canonical.as_ref())
+            .field_enum_discriminant(2, owner_kind)
+            .field_u32(3, owner.ordinal())
+            .field_enum_discriminant(4, owner_scope)
+            .field_str(5, merged_symbol_name.as_ref())
+            .field_enum_discriminant(6, space)
+            .field_bytes(7, &type_env.0)
+            .field_bytes(8, &lib_env.0)
+            .field_u32(9, project.0);
+    }
+}
+
 /// Typed rejection of a malformed [`LocatorLoweringKey`] identity: the
 /// locator's anchor does not name the slot's declaration. Each variant is one
 /// mismatch axis of the anchor-match gate. A mismatch means the wrong

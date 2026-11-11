@@ -20,6 +20,7 @@ import {
   ConfigurationTarget,
   ThemeColor,
   extensions,
+  EventEmitter,
 } from "vscode";
 import {
   CloseAction,
@@ -63,6 +64,13 @@ import { ComponentTreeProvider } from "./ComponentTreeProvider";
 import { RouteTreeProvider } from "./RouteTreeProvider";
 import { AnalysisTreeProvider } from "./AnalysisTreeProvider";
 import { VueApiDecorationProvider } from "./VueApiDecorationProvider";
+import {
+  buildParticipationInput,
+  ParticipationCells,
+  UPDATE_PARTICIPATION_METHOD,
+  type ParticipationObservation,
+  type ParticipationReceipt,
+} from "./participation";
 import { BindingColorDecorationProvider } from "./BindingColorDecorationProvider";
 import { PropConstnessDecorationProvider } from "./PropConstnessDecorationProvider";
 import { SourceMapWebviewPanel } from "./SourceMapWebviewPanel";
@@ -142,6 +150,19 @@ const activation = createActivationRoot<ActivationRuntime>(async (session) => {
   return activateExtension(hostContext, session);
 });
 
+/**
+ * The effective participation cells of the current server (COX0), replaced
+ * by every receipt. The client middleware and the decoration providers gate
+ * on the same cells, so a change is announced to both.
+ */
+let participationCells = new ParticipationCells();
+const participationChanged = new EventEmitter<void>();
+
+function adoptParticipationCells(cells: ParticipationCells): void {
+  participationCells = cells;
+  participationChanged.fire();
+}
+
 export async function activate(context: ExtensionContext) {
   hostContext = context;
   const session = activation.ensureSession();
@@ -149,6 +170,30 @@ export async function activate(context: ExtensionContext) {
     context.subscriptions.push(session);
   }
   await activation.run();
+}
+
+/**
+ * `verter.enable` was advertised but never read. An authored `false` meant
+ * "serve nothing", so it migrates once to `verter.participation: disabled` at
+ * the same target, unless that target already states a participation.
+ */
+async function migrateRetiredEnableSetting(log: LogOutputChannel): Promise<void> {
+  const verter = workspace.getConfiguration("verter");
+  const enable = verter.inspect<boolean>("enable");
+  const participation = verter.inspect<string>("participation");
+  const targets = [
+    [ConfigurationTarget.Global, enable?.globalValue, participation?.globalValue],
+    [ConfigurationTarget.Workspace, enable?.workspaceValue, participation?.workspaceValue],
+  ] as const;
+  for (const [target, enabled, stated] of targets) {
+    if (enabled !== false || stated !== undefined) continue;
+    try {
+      await verter.update("participation", "disabled", target);
+      log.info("Migrated verter.enable: false to verter.participation: disabled");
+    } catch (error) {
+      log.warn(`Could not migrate verter.enable: ${String(error)}`);
+    }
+  }
 }
 
 async function activateExtension(context: ExtensionContext, session: ActivationSession) {
@@ -171,6 +216,7 @@ async function activateExtension(context: ExtensionContext, session: ActivationS
   writeTimingMarker("activation_start", Date.now());
 
   log.info("Verter extension activating");
+  await migrateRetiredEnableSetting(log);
   const e2eProviderOnlyCompletions =
     process.env.VERTER_E2E_TEST === "1" && process.env.VERTER_E2E_PROVIDER_ONLY_COMPLETIONS === "1";
 
@@ -861,6 +907,58 @@ async function startVueLanguageServer(
   const cssDiagnostics = languages.createDiagnosticCollection("verter-css");
   attempt.add(cssDiagnostics);
 
+  // Participation (COX0): the host observes, the server decides. The cells of
+  // the newest receipt gate every client-local producer (the CSS service and
+  // the decorations) and every request this client sends for a carrier.
+  const observeParticipation = (): ParticipationObservation => {
+    const decorations = workspace.getConfiguration("verter.decorations");
+    return {
+      preset: workspace.getConfiguration("verter").get<string>("participation", "auto"),
+      visuals: {
+        apiCallDecorations: decorations.get<boolean>("vueApiCalls", true),
+        bindingColorDecorations: decorations.get<boolean>("bindingColors", true),
+        propConstnessDecorations: decorations.get<boolean>("propConstness", false),
+      },
+      enabledExtensionIds: new Set(extensions.all.map((extension) => extension.id)),
+    };
+  };
+  adoptParticipationCells(new ParticipationCells());
+  const adoptInitialParticipation = (started: LanguageClient) => {
+    const experimental = started.initializeResult?.capabilities?.experimental as
+      | { verterParticipation?: ParticipationReceipt }
+      | undefined;
+    adoptParticipationCells(new ParticipationCells(experimental?.verterParticipation));
+  };
+  const updateParticipation = async () => {
+    const current = client;
+    if (!current.isRunning()) return;
+    try {
+      const receipt = await current.sendRequest<ParticipationReceipt>(
+        UPDATE_PARTICIPATION_METHOD,
+        buildParticipationInput(observeParticipation()),
+      );
+      if (current === client) adoptParticipationCells(new ParticipationCells(receipt));
+      for (const problem of receipt.invalidEvidence) log.warn(`participation: ${problem}`);
+    } catch (error) {
+      log.warn(
+        `participation update refused: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+  attempt.add(
+    workspace.onDidChangeConfiguration((event) => {
+      if (
+        event.affectsConfiguration("verter.participation") ||
+        event.affectsConfiguration("verter.decorations")
+      ) {
+        void updateParticipation();
+      }
+    }),
+    extensions.onDidChange(() => void updateParticipation()),
+  );
+  const admits = (document: TextDocument, operation: string, regionRole?: string) =>
+    participationCells.admits(document.languageId, operation, regionRole);
+
   // Which client is current, and what the user is told about it. Every client
   // below — the first and each restart — starts under its own epoch.
   const lifecycle = new DesktopLanguageLifecycle(DEFAULT_RESTART_POLICY.maxAutomaticRestarts);
@@ -901,6 +999,7 @@ async function startVueLanguageServer(
         html: workspace.getConfiguration("html"),
       },
       statistics: getStatisticsInitialization(rootPath),
+      participation: buildParticipationInput(observeParticipation()),
       // The server sends recurring notifications only to a client that asks:
       // the heartbeat feeds this extension's restart watchdog, and the
       // carrier-store ping refreshes VS Code's own TypeScript service. The
@@ -985,17 +1084,31 @@ async function startVueLanguageServer(
       },
 
       provideCompletionItem: async (document, position, context, token, next) => {
+        const served = admits(document, "completion");
         if (!isFrameworkCarrierLanguageId(document.languageId)) {
-          return next(document, position, context, token);
+          return served ? next(document, position, context, token) : undefined;
         }
+        const cssServed = admits(document, "completion", "style");
+        if (!served && !cssServed) return undefined;
 
         const source = document.getText();
-        const cssService = getCssService();
         const uri = document.uri.toString();
-        const [cssResult, lspResult] = await Promise.all([
-          cssService.doComplete(uri, source, document.version, position.line, position.character),
-          next(document, position, context, token),
+        const [cssRaw, lspRaw] = await Promise.all([
+          cssServed
+            ? getCssService().doComplete(
+                uri,
+                source,
+                document.version,
+                position.line,
+                position.character,
+              )
+            : null,
+          served ? next(document, position, context, token) : undefined,
         ]);
+        // A result is shown only while its cell still admits it (COX0): a
+        // withdrawal during the await never refills the display.
+        const cssResult = admits(document, "completion", "style") ? cssRaw : null;
+        const lspResult = admits(document, "completion") ? lspRaw : undefined;
 
         if (!cssResult || !cssResult.items.length) return lspResult;
 
@@ -1017,17 +1130,31 @@ async function startVueLanguageServer(
       },
 
       provideHover: async (document, position, token, next) => {
+        const served = admits(document, "hover");
         if (!isFrameworkCarrierLanguageId(document.languageId)) {
-          return next(document, position, token);
+          return served ? next(document, position, token) : undefined;
         }
+        const cssServed = admits(document, "hover", "style");
+        if (!served && !cssServed) return undefined;
 
         const source = document.getText();
-        const cssService = getCssService();
         const uri = document.uri.toString();
-        const [cssResult, lspResult] = await Promise.all([
-          cssService.doHover(uri, source, document.version, position.line, position.character),
-          next(document, position, token),
+        const [cssRaw, lspRaw] = await Promise.all([
+          cssServed
+            ? getCssService().doHover(
+                uri,
+                source,
+                document.version,
+                position.line,
+                position.character,
+              )
+            : null,
+          served ? next(document, position, token) : undefined,
         ]);
+        // A result is shown only while its cell still admits it (COX0): a
+        // withdrawal during the await never refills the display.
+        const cssResult = admits(document, "hover", "style") ? cssRaw : null;
+        const lspResult = admits(document, "hover") ? lspRaw : undefined;
 
         if (!cssResult) return lspResult;
 
@@ -1048,17 +1175,22 @@ async function startVueLanguageServer(
       },
 
       provideDocumentColors: async (document, token, next) => {
+        const served = admits(document, "documentColor");
         if (!isFrameworkCarrierLanguageId(document.languageId)) {
-          return next(document, token);
+          return served ? next(document, token) : [];
         }
+        const cssServed = admits(document, "documentColor", "style");
 
         const source = document.getText();
         const uri = document.uri.toString();
-        const cssService = getCssService();
-        const [cssResult, lspResult] = await Promise.all([
-          cssService.findDocumentColors(uri, source, document.version),
-          next(document, token),
+        const [cssRaw, lspRaw] = await Promise.all([
+          cssServed ? getCssService().findDocumentColors(uri, source, document.version) : [],
+          served ? next(document, token) : [],
         ]);
+        // A result is shown only while its cell still admits it (COX0): a
+        // withdrawal during the await never refills the display.
+        const cssResult = admits(document, "documentColor", "style") ? cssRaw : [];
+        const lspResult = admits(document, "documentColor") ? lspRaw : [];
 
         if (!cssResult.length) return lspResult;
 
@@ -1072,8 +1204,12 @@ async function startVueLanguageServer(
       },
 
       provideColorPresentations: async (color, context, token, next) => {
+        const served = admits(context.document, "colorPresentation");
         if (!isFrameworkCarrierLanguageId(context.document.languageId)) {
-          return next(color, context, token);
+          return served ? next(color, context, token) : [];
+        }
+        if (!admits(context.document, "colorPresentation", "style")) {
+          return served ? next(color, context, token) : [];
         }
 
         const source = context.document.getText();
@@ -1088,30 +1224,40 @@ async function startVueLanguageServer(
           context.range.start.character,
         );
 
-        if (!cssResult.length) return next(color, context, token);
+        if (!admits(context.document, "colorPresentation", "style")) {
+          return admits(context.document, "colorPresentation") ? next(color, context, token) : [];
+        }
+        if (!cssResult.length) return served ? next(color, context, token) : [];
 
         const p2c = client.protocol2CodeConverter;
         return p2c.asColorPresentations(cssResult);
       },
 
       provideDocumentHighlights: async (document, position, token, next) => {
+        const served = admits(document, "documentHighlight");
         if (!isFrameworkCarrierLanguageId(document.languageId)) {
-          return next(document, position, token);
+          return served ? next(document, position, token) : undefined;
         }
+        const cssServed = admits(document, "documentHighlight", "style");
 
         const source = document.getText();
-        const cssService = getCssService();
         const uri = document.uri.toString();
-        const [cssResult, lspResult] = await Promise.all([
-          cssService.findDocumentHighlights(
-            uri,
-            source,
-            document.version,
-            position.line,
-            position.character,
-          ),
-          next(document, position, token),
+        const [cssRaw, lspRaw] = await Promise.all([
+          cssServed
+            ? getCssService().findDocumentHighlights(
+                uri,
+                source,
+                document.version,
+                position.line,
+                position.character,
+              )
+            : [],
+          served ? next(document, position, token) : undefined,
         ]);
+        // A result is shown only while its cell still admits it (COX0): a
+        // withdrawal during the await never refills the display.
+        const cssResult = admits(document, "documentHighlight", "style") ? cssRaw : [];
+        const lspResult = admits(document, "documentHighlight") ? lspRaw : undefined;
 
         if (!cssResult.length) return lspResult;
 
@@ -1121,6 +1267,54 @@ async function startVueLanguageServer(
         if (!lspResult?.length) return cssHighlights;
         return [...(cssHighlights ?? []), ...(lspResult ?? [])];
       },
+
+      resolveCompletionItem: (item, token, next) =>
+        // A resolve can never outlive the withdrawal of its item's basis.
+        participationCells.anyAdmits("completion.resolve") ? next(item, token) : item,
+      provideDefinition: (document, position, token, next) =>
+        admits(document, "definition") ? next(document, position, token) : undefined,
+      provideTypeDefinition: (document, position, token, next) =>
+        admits(document, "typeDefinition") ? next(document, position, token) : undefined,
+      provideReferences: (document, position, options, token, next) =>
+        admits(document, "references") ? next(document, position, options, token) : undefined,
+      prepareRename: (document, position, token, next) =>
+        admits(document, "rename.prepare") ? next(document, position, token) : undefined,
+      provideRenameEdits: (document, position, newName, token, next) =>
+        admits(document, "rename") ? next(document, position, newName, token) : undefined,
+      provideSignatureHelp: (document, position, context, token, next) =>
+        admits(document, "signatureHelp") ? next(document, position, context, token) : undefined,
+      provideDocumentSymbols: (document, token, next) =>
+        admits(document, "documentSymbol") ? next(document, token) : undefined,
+      provideFoldingRanges: (document, context, token, next) =>
+        admits(document, "foldingRange") ? next(document, context, token) : undefined,
+      provideSelectionRanges: (document, positions, token, next) =>
+        admits(document, "selectionRange") ? next(document, positions, token) : undefined,
+      provideLinkedEditingRange: (document, position, token, next) =>
+        admits(document, "linkedEditing") ? next(document, position, token) : undefined,
+      provideDocumentLinks: (document, token, next) =>
+        admits(document, "documentLink") ? next(document, token) : undefined,
+      prepareCallHierarchy: (document, position, token, next) =>
+        admits(document, "callHierarchy.prepare") ? next(document, position, token) : undefined,
+      provideCodeActions: (document, range, context, token, next) =>
+        admits(document, "codeAction.quickFix") ||
+        admits(document, "codeAction.organizeImports") ||
+        admits(document, "codeAction.refactor")
+          ? next(document, range, context, token)
+          : undefined,
+      provideDocumentFormattingEdits: (document, options, token, next) =>
+        admits(document, "formatting") ? next(document, options, token) : undefined,
+      provideOnTypeFormattingEdits: (document, position, ch, options, token, next) =>
+        admits(document, "onTypeFormatting.tagClosing")
+          ? next(document, position, ch, options, token)
+          : undefined,
+      provideDocumentSemanticTokens: (document, token, next) =>
+        admits(document, "semanticTokens") ? next(document, token) : undefined,
+      provideInlayHints: (document, viewPort, token, next) =>
+        admits(document, "inlayHint") ? next(document, viewPort, token) : undefined,
+      provideCodeLenses: (document, token, next) =>
+        admits(document, "codeLens") ? next(document, token) : undefined,
+      provideWorkspaceSymbols: (query, token, next) =>
+        participationCells.anyAdmits("workspaceSymbol") ? next(query, token) : undefined,
     },
   });
 
@@ -1634,7 +1828,13 @@ async function startVueLanguageServer(
       cssDiagTimers.clear();
     },
   });
-  const updateCssDiagnostics = createCssDiagnosticsUpdater(getCssService, cssDiagnostics);
+  const cssDiagnosticsAdmitted = (document: TextDocument) =>
+    admits(document, "diagnostics.lint", "style");
+  const updateCssDiagnostics = createCssDiagnosticsUpdater(
+    getCssService,
+    cssDiagnostics,
+    cssDiagnosticsAdmitted,
+  );
   const debouncedCssDiag = (document: TextDocument) => {
     const key = document.uri.toString();
     const existing = cssDiagTimers.get(key);
@@ -1660,6 +1860,18 @@ async function startVueLanguageServer(
       startupProbe?.maybeTrackDocument(document);
     }),
     workspace.onDidCloseTextDocument((doc) => cssDiagnostics.delete(doc.uri)),
+    // A withdrawn stylesheet diagnostics cell retires only its own owned
+    // publications; a re-admitted one validates afresh.
+    participationChanged.event(() => {
+      for (const document of workspace.textDocuments) {
+        if (!isFrameworkCarrierLanguageId(document.languageId)) continue;
+        if (cssDiagnosticsAdmitted(document)) {
+          void updateCssDiagnostics(document);
+        } else {
+          cssDiagnostics.delete(document.uri);
+        }
+      }
+    }),
   );
 
   if (startupProbe) {
@@ -1736,6 +1948,7 @@ async function startVueLanguageServer(
           tsQueryHandler = undefined; // Drop every project's TS service on restart
           registerTsQueryHandler(client);
           await client.start();
+          adoptInitialParticipation(client);
           if (attempt.isDisposed) {
             // Deactivation landed during the start itself. The process is up but
             // its owner is gone, so shut it down here — arming a watchdog over
@@ -1819,6 +2032,7 @@ async function startVueLanguageServer(
     };
   }
   writeTimingMarker("client_start_end", Date.now());
+  adoptInitialParticipation(client);
   if (attempt.isDisposed) {
     // Deactivation landed during the initial start: the composition root
     // disposed this attempt before the runtime was published, so nothing
@@ -2453,9 +2667,23 @@ function addVerterAnalysis(getClient: GetClient, lifetime: Lifetime) {
   const componentTreeProvider = new ComponentTreeProvider(getClient, getLastCarrierUri);
   const routeTreeProvider = new RouteTreeProvider(getClient, getLastCarrierUri);
   const analysisProvider = new AnalysisTreeProvider(getClient, getLastCarrierUri);
-  const decorationProvider = new VueApiDecorationProvider(getClient);
-  const bindingColorProvider = new BindingColorDecorationProvider(getClient);
-  const propConstnessProvider = new PropConstnessDecorationProvider(getClient);
+  const decorationAdmits = (operation: string) => (document: TextDocument) =>
+    participationCells.admits(document.languageId, operation);
+  const decorationProvider = new VueApiDecorationProvider(
+    getClient,
+    decorationAdmits("decoration.apiCalls"),
+    participationChanged.event,
+  );
+  const bindingColorProvider = new BindingColorDecorationProvider(
+    getClient,
+    decorationAdmits("decoration.bindingColors"),
+    participationChanged.event,
+  );
+  const propConstnessProvider = new PropConstnessDecorationProvider(
+    getClient,
+    decorationAdmits("decoration.propConstness"),
+    participationChanged.event,
+  );
   const sourceMapPanel = new SourceMapWebviewPanel();
 
   // ── E2E test mode: expose decoration state command ──────────

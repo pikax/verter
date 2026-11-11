@@ -1430,7 +1430,7 @@ fn print(
         SemanticNodeData::InferRef { name, .. } => name.to_string(),
         // An access of a type parameter is generic and prints as written; any
         // other access the lane kept is a gap.
-        SemanticNodeData::IndexedAccess { object, index } => {
+        SemanticNodeData::IndexedAccess { object, index, .. } => {
             let mut root = *object;
             while let Some(SemanticNodeData::IndexedAccess { object, .. }) =
                 graph.node_data(root).as_deref()

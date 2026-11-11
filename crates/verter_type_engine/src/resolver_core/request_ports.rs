@@ -1075,6 +1075,13 @@ pub trait OwnedLowering {
     ) -> verter_session_query::source::demand::DemandOutcome<
         verter_session_query::source::transient_parts::TransientTypeParts,
     >;
+    /// The name span of each reference to the type `name` in `source`'s file
+    /// a binder inside the file does not scope.
+    fn type_reference_name_spans(
+        &self,
+        source: &verter_session_query::inputs::shallow::ShallowInputRecord,
+        name: &str,
+    ) -> verter_session_query::source::demand::DemandOutcome<Vec<verter_span::Span>>;
     fn transient_value_parts(
         &self,
         source: &verter_session_query::inputs::shallow::ShallowInputRecord,

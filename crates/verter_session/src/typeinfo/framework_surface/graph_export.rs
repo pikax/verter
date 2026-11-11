@@ -72,6 +72,21 @@ pub(crate) struct EncodedFrameworkSurfaces {
     pub graph: SemanticTypeGraph,
     /// Exactly one entry per known surface kind, in tag order.
     pub surfaces: Vec<FrameworkSurfaceKindEntry>,
+    /// The exported node of every named member of an exactly resolved
+    /// props or expose surface, in encode order: the positions a reference
+    /// can address. Host-internal; never on the wire.
+    pub exported_members: Vec<ExportedMemberNode>,
+}
+
+/// One exported member value position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExportedMemberNode {
+    /// The surface kind the member is exported under.
+    pub kind: FrameworkSurfaceKind,
+    /// The member's published name.
+    pub name: String,
+    /// The member value's node in the exported graph.
+    pub type_node_id: u32,
 }
 
 /// A growable string-intern table backing the encoded graph's interned ids.
@@ -117,6 +132,8 @@ pub(super) struct GraphArena {
     /// Maps a named symbol's interned name to its symbol id so two members
     /// referencing the same alias share one `GraphSymbolNode`.
     symbol_index: HashMap<u32, u32>,
+    /// Exported member positions (see [`EncodedFrameworkSurfaces::exported_members`]).
+    exported: Vec<ExportedMemberNode>,
 }
 
 impl GraphArena {
@@ -131,6 +148,7 @@ impl GraphArena {
             signatures: Vec::new(),
             dispatch_calls: 0,
             symbol_index: HashMap::new(),
+            exported: Vec::new(),
         }
     }
 
@@ -597,6 +615,7 @@ pub(crate) fn encode_framework_surfaces_with_unsupported_message(
         surfaces.push(entry);
     }
 
+    let exported_members = std::mem::take(&mut arena.exported);
     let strings = arena.strings.into_table();
     let graph = WireGraph {
         schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
@@ -628,7 +647,48 @@ pub(crate) fn encode_framework_surfaces_with_unsupported_message(
         "the graph encoder must never call dispatch during encode"
     );
 
-    EncodedFrameworkSurfaces { graph, surfaces }
+    EncodedFrameworkSurfaces {
+        graph,
+        surfaces,
+        exported_members,
+    }
+}
+
+/// Record the exported node of every named member of an exactly resolved
+/// props or expose surface. `members` are the wire members just encoded
+/// from `dtos`, one per named row in the same order.
+fn record_exported_members(
+    arena: &mut GraphArena,
+    kind: FrameworkSurfaceKind,
+    dtos: &MacroSurfaceDtos,
+    members: &[wire::FrameworkSurfaceMember],
+) {
+    let names: Vec<&str> = match kind {
+        FrameworkSurfaceKind::Props => dtos
+            .prop_fields()
+            .iter()
+            .map(|row| row.analysis.name.as_str())
+            .collect(),
+        FrameworkSurfaceKind::Expose => dtos
+            .expose
+            .as_ref()
+            .map(|surface| surface.members.iter().map(|m| m.name.as_str()).collect())
+            .unwrap_or_default(),
+        FrameworkSurfaceKind::Emits
+        | FrameworkSurfaceKind::Slots
+        | FrameworkSurfaceKind::Options
+        | FrameworkSurfaceKind::Model => return,
+    };
+    if names.len() != members.len() {
+        return;
+    }
+    for (name, member) in names.into_iter().zip(members) {
+        arena.exported.push(ExportedMemberNode {
+            kind,
+            name: name.to_string(),
+            type_node_id: member.type_node_id,
+        });
+    }
 }
 
 /// Encode one supported kind's resolved outcome into a per-kind entry.
@@ -661,6 +721,7 @@ fn encode_kind(
                     }),
                 }
             } else {
+                record_exported_members(arena, kind, dtos, &members);
                 FrameworkSurfaceKindEntry {
                     kind: kind as i32,
                     members,

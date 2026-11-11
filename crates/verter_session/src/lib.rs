@@ -368,6 +368,7 @@ pub mod owner_import_surface;
 #[cfg(test)]
 mod parity_tests;
 mod parse;
+pub mod participation;
 /// Portable platform-services boundary: the per-target inventory of
 /// the io/time/scheduling/persistence/process service classes and the
 /// browser-closure dependency guard.
@@ -537,8 +538,8 @@ pub use host_audit_runtime::{
 pub use host_lifecycle::HostReleaseCompletion;
 pub use types::*;
 pub use verter_language::{
-    CapabilityId, FileLanguage, FrameworkAdapterId, GatedCandidate, LanguageId, LanguageRegistry,
-    LanguageRow, ScriptSourceType, StaticClassification, SVELTE_RUNE_MODULE_LANGUAGE_ID,
+    FileLanguage, FrameworkAdapterId, GatedCandidate, LanguageId, LanguageRegistry, LanguageRow,
+    ProjectCapabilityId, ScriptSourceType, StaticClassification, SVELTE_RUNE_MODULE_LANGUAGE_ID,
 };
 pub use verter_semantic_source::decl_lowering::ParseReleaseError;
 
@@ -685,6 +686,13 @@ pub struct VerterHost {
     /// not memoise query results. Different artifact type than anything in
     /// `ProjectTypeStore`.
     pub(crate) query_profile: parking_lot::Mutex<verter_semantic::profile::QueryProfile>,
+    /// The bounded private index of typeinfo fact references this host
+    /// issued: per fact, its typed query identity, committed native basis
+    /// and replay locators (64 records, the export node cap in entries,
+    /// 1 MiB). **Not a cache**: it memoises no result, and a reference is
+    /// admitted only while its basis still validates.
+    pub(crate) typeinfo_issued_refs:
+        parking_lot::Mutex<crate::typeinfo::node_refs::IssuedReferenceIndex>,
     /// Project-global type-resolution cache root. Owns `IndexedReady`,
     /// `AnalysisReady`, and the rehomed
     /// `RouteDb` / `ImportedRootDb`. See `project_type_store` module docs.

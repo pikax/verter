@@ -7,6 +7,7 @@
 //! ledgers, validators, invalidation, publication) stays workspace/
 //! session-owned.
 
+use crate::facts::native_observation::NativeWriter;
 use crate::resolution::dto::{
     ProviderTarget, ResolutionContext, ResolutionKind, ResolvePhase, ResolveRequestKind,
     ResolveResult,
@@ -591,6 +592,138 @@ impl ResolutionFactRef {
     #[must_use]
     pub fn is_decision(&self) -> bool {
         matches!(self.key, ResolutionFactKey::Decision { .. })
+    }
+}
+
+impl ResolutionFactVersion {
+    /// Raw ledger counter, for canonical native encoding only. Meaningful
+    /// only together with the issuing host's authority.
+    #[must_use]
+    pub(crate) const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
+fn encode_entry(writer: &mut NativeWriter, entry: &ResolutionEntry) {
+    match entry {
+        ResolutionEntry::Importer(canonical) => {
+            writer.tag(1).str(canonical.as_str());
+        }
+        ResolutionEntry::ExplicitProject(project) => {
+            writer.tag(2).bytes(&project.0);
+        }
+    }
+}
+
+fn encode_phase(writer: &mut NativeWriter, phase: ResolvePhase) {
+    writer.tag(match phase {
+        ResolvePhase::CodegenBlocker => 1,
+        ResolvePhase::ProviderGraph => 2,
+    });
+}
+
+fn encode_request_kind(writer: &mut NativeWriter, kind: ResolveRequestKind) {
+    writer.tag(match kind {
+        ResolveRequestKind::EsmImport => 1,
+        ResolveRequestKind::TypeImport => 2,
+        ResolveRequestKind::RequireCall => 3,
+        ResolveRequestKind::SfcSrcAttr => 4,
+    });
+}
+
+impl ResolveContextId {
+    /// Canonical native encoding: every split policy identity.
+    fn encode_native(&self, writer: &mut NativeWriter) {
+        writer
+            .bytes(&self.project_identity.0)
+            .bytes(&self.resolver_policy_identity.0)
+            .bytes(&self.provider_policy_identity.0)
+            .bytes(&self.resolve_env_hash.0);
+    }
+}
+
+impl ResolutionQueryKey {
+    /// Canonical native encoding of the complete query identity, private
+    /// fields included.
+    fn encode_native(&self, writer: &mut NativeWriter) {
+        encode_entry(writer, &self.entry);
+        writer.str(&self.normalized_specifier.0);
+        encode_phase(writer, self.phase);
+        encode_request_kind(writer, self.request_kind);
+        self.context.encode_native(writer);
+        self.population.encode_native(writer);
+    }
+}
+
+impl ResolutionFactKey {
+    /// Canonical native encoding of this key: explicit family tag, every
+    /// field, and the population. A recorded absent probe is the same key
+    /// as a present one; the committed version is what tells them apart.
+    pub(crate) fn encode_native(&self, writer: &mut NativeWriter) {
+        match self {
+            Self::PathProbe {
+                canonical,
+                population,
+            } => {
+                writer.tag(1).str(canonical.as_str());
+                population.encode_native(writer);
+            }
+            Self::Manifest {
+                canonical,
+                population,
+            } => {
+                writer.tag(2).str(canonical.as_str());
+                population.encode_native(writer);
+            }
+            Self::Realpath {
+                requested,
+                population,
+            } => {
+                writer.tag(3).str(requested.as_str());
+                population.encode_native(writer);
+            }
+            Self::ExactResolution {
+                entry,
+                specifier,
+                phase,
+                kind,
+                population,
+            } => {
+                writer.tag(4);
+                encode_entry(writer, entry);
+                writer.str(&specifier.0);
+                encode_phase(writer, *phase);
+                encode_request_kind(writer, *kind);
+                population.encode_native(writer);
+            }
+            Self::DirectoryMembers {
+                canonical,
+                population,
+            } => {
+                writer.tag(5).str(canonical.as_str());
+                population.encode_native(writer);
+            }
+            Self::RecoveryScope {
+                canonical_prefix,
+                population,
+            } => {
+                writer.tag(6).str(canonical_prefix.as_str());
+                population.encode_native(writer);
+            }
+            Self::ContextSelection { entry, population } => {
+                writer.tag(7);
+                encode_entry(writer, entry);
+                population.encode_native(writer);
+            }
+            Self::Decision { query } => {
+                writer.tag(8);
+                query.encode_native(writer);
+            }
+            Self::OwnerResolutionSet { owner, population } => {
+                writer.tag(9).str(owner.as_str());
+                population.encode_native(writer);
+            }
+        }
     }
 }
 

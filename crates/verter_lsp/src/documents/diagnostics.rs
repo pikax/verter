@@ -15,6 +15,9 @@ pub(crate) struct ReadinessBasis {
 #[derive(Clone)]
 struct ObservedEnvironment {
     generation: Option<u64>,
+    /// The participation fence the basis was admitted under: a participation
+    /// transition retires every publication computed before it (COX0).
+    participation: u64,
     // Weak identity prevents address reuse without retaining a retired root's payload.
     workspace: Option<std::sync::Weak<verter_workspace::PublishedRoot>>,
 }
@@ -47,6 +50,7 @@ impl ReadinessBasis {
             snapshot,
             environment: ObservedEnvironment {
                 generation: host.get_diagnostics_generation(&uri_to_canonical_id(uri)),
+                participation: documents.participation().fence(),
                 workspace: host
                     .workspace_read()
                     .published_root()
@@ -59,6 +63,7 @@ impl ReadinessBasis {
     fn environment_is_current(&self, documents: &DocumentRegistry, uri: &Uri) -> bool {
         self.environment
             .matches(documents.host(), &uri_to_canonical_id(uri))
+            && documents.participation().fence() == self.environment.participation
     }
 
     fn is_current(&self, documents: &DocumentRegistry, uri: &Uri) -> bool {
@@ -543,9 +548,11 @@ impl DocumentRegistry {
             let uri = uri.to_string();
             let epoch = publication.epoch;
             let environment = publication.basis.environment.clone();
+            let participation = Arc::clone(&self.participation);
             move || {
                 state.lock().epochs.get(&uri) == Some(&epoch)
                     && environment.matches(host.as_ref(), &canonical_id)
+                    && participation.fence() == environment.participation
             }
         };
         let sent = tokio::select! {

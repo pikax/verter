@@ -35,7 +35,16 @@ pub(super) fn enrich_hover_with_provenance(
     hover: Option<Hover>,
 ) -> Option<Hover> {
     use std::sync::atomic::Ordering;
-    if !server.hover_provenance_enabled.load(Ordering::Relaxed) {
+    // The supplement is its own labelled inspection cell (COX0): a withdrawn
+    // `hover.inspection` neither computes nor shows it.
+    if !server.hover_provenance_enabled.load(Ordering::Relaxed)
+        || !crate::participation::admits(
+            &server.documents,
+            verter_language::participation::CapabilityOperation::HoverInspection,
+            uri,
+            verter_language::participation::DemandPurpose::Interactive,
+        )
+    {
         return hover;
     }
     let Some(canonical_id) = server.documents.get_canonical_id(uri) else {
@@ -71,6 +80,8 @@ pub(super) fn enrich_hover_with_provenance(
         // the cache for the next hover.
         let cache = Arc::clone(&server.hover_provenance_cache);
         let canonical_for_task = canonical_id;
+        let participation = Arc::clone(server.documents.participation());
+        let admitted_fence = participation.fence();
         tokio::task::spawn_blocking(move || {
             let Some((_analysis, resolution)) = host
                 .as_ref()
@@ -86,6 +97,10 @@ pub(super) fn enrich_hover_with_provenance(
                 return;
             };
             let markdown = crate::features::hover_provenance::render_provenance_markdown(&record);
+            // Work admitted under a superseded demand epoch is never warmed.
+            if participation.fence() != admitted_fence {
+                return;
+            }
             cache.insert(
                 key,
                 crate::features::hover_provenance::HoverProvenancePayload { markdown },

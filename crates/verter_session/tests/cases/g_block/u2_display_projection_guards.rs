@@ -400,6 +400,7 @@ fn precedence_is_structural_not_string_sniffing() {
     let idx = store.intern_node(SemanticNodeData::IndexedAccess {
         object: union_ab,
         index: IndexKey::String(verter_type_expr::OwnedStr::from("x")),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     assert_eq!(render(&store, idx), "(A | B)['x']");
 
@@ -899,6 +900,7 @@ fn indexed_access_object_readonly_is_parenthesised_under_readonly_facet() {
             verter_type_engine::semantic_query::CanonicalIndexInt::from_canonical_i64(0)
                 .expect("canonical"),
         ),
+        origin: verter_type_engine::semantic_query::IndexedAccessOrigin::Composed,
     });
     let value = SemanticQueryValue::TypeNode(idx);
 

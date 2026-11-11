@@ -199,6 +199,7 @@ vi.mock("vscode", () => {
           ? { isActive: false, exports: {}, activate: mocks.state.editorTypeScriptActivate }
           : undefined,
       all: [] as unknown[],
+      onDidChange: subscribe,
     },
     lm: { registerMcpServerDefinitionProvider: () => disposable() },
     Uri: {

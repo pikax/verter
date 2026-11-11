@@ -1,19 +1,20 @@
 //! Cross-file analysis snapshot and component diagnostic functions.
 //!
-//! Pre-computed summary of project-wide issues derived from [`ProjectIndex`].
-//! Rules receive this as an immutable snapshot rather than querying the index directly,
-//! keeping rule implementations simple and testable.
+//! [`CrossFileSnapshot`] is the neutral input of the cross-file rules: the
+//! owning operation (host, LSP or build tool) fills it with the verdicts it
+//! derived from its own candidate evidence, and rules receive it as an
+//! immutable snapshot rather than querying any index directly. This crate
+//! holds no candidate storage and derives no cross-file verdict of its own.
 //!
 //! Also provides pure analysis functions for cross-file component validation
 //! (unknown props/v-models). These are called by the LSP with a resolver callback.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use verter_semantic::analysis::project_index::ProjectIndex;
 use verter_session_query::analysis::template::{TemplateComponentUsage, TemplatePropUsage};
 
-/// Pre-computed cross-file analysis data for lint rules.
+/// Pre-computed cross-file analysis data for lint rules, filled by the caller.
 #[derive(Debug, Default)]
 pub struct CrossFileSnapshot {
     /// inject() calls with no matching provide() in the project.
@@ -113,102 +114,6 @@ pub struct StoreReactivityLossEntry {
     pub file: PathBuf,
     /// Byte span of the call.
     pub span: verter_span::Span,
-}
-
-/// Build a [`CrossFileSnapshot`] for a specific file from the project index.
-///
-/// Extracts only the cross-file issues relevant to the given file path,
-/// plus project-wide issues like unused provides.
-pub fn build_cross_file_snapshot(project: &ProjectIndex, file_path: &Path) -> CrossFileSnapshot {
-    let mut snapshot = CrossFileSnapshot::default();
-
-    // 1. Missing providers: inject() calls in this file with no matching provide()
-    let validation = project.validate_file_injects(file_path);
-    for entry in validation.missing_providers {
-        snapshot.missing_providers.push(MissingProviderEntry {
-            key: entry.key,
-            file: file_path.to_path_buf(),
-            span: verter_span::Span::new(entry.start, entry.end),
-        });
-    }
-
-    // 2. Unused provides: provide() keys in this file never injected anywhere
-    if let Some(info) = project.get_file(file_path) {
-        for provide in &info.provides {
-            if let Some(key) = &provide.key {
-                if project.files_injecting(key).next().is_none() {
-                    snapshot.unused_provides.push(UnusedProvideEntry {
-                        key: key.clone(),
-                        file: file_path.to_path_buf(),
-                        span: verter_span::Span::new(provide.start, provide.end),
-                    });
-                }
-            }
-        }
-    }
-
-    // 3. Composable chains with hidden side effects
-    // Walk exported functions from dependency files to find hidden lifecycle/watcher usage.
-    // This data comes from the analysis of imported composables.
-    // (Populated when deep analysis is available via FUNC_RETURNS scope)
-
-    // 4. Store reactivity loss: destructured without storeToRefs()
-    if let Some(info) = project.get_file(file_path) {
-        for usage in &info.store_usages {
-            if usage.destructured_without_store_to_refs {
-                snapshot
-                    .store_reactivity_loss
-                    .push(StoreReactivityLossEntry {
-                        callee: usage.callee.clone(),
-                        destructured_props: usage.destructured_props.clone(),
-                        file: file_path.to_path_buf(),
-                        span: verter_span::Span::new(usage.start, usage.end),
-                    });
-            }
-        }
-    }
-
-    // 5. Circular store dependency detection
-    if let Some(info) = project.get_file(file_path) {
-        for def in &info.store_definitions {
-            if let Some(store_id) = &def.store_id {
-                if let Some(cycle) = detect_store_cycle(project, store_id) {
-                    snapshot.circular_store_deps.push(CircularStoreDepsEntry {
-                        cycle,
-                        span: verter_span::Span::new(def.start, def.end),
-                    });
-                }
-            }
-        }
-    }
-
-    snapshot
-}
-
-/// DFS cycle detection starting from `start_id` in the store dependency graph.
-fn detect_store_cycle(project: &ProjectIndex, start_id: &str) -> Option<Vec<String>> {
-    let mut visited = HashSet::new();
-    let mut stack = vec![(start_id.to_string(), vec![start_id.to_string()])];
-
-    while let Some((current, path)) = stack.pop() {
-        if !visited.insert(current.clone()) {
-            continue;
-        }
-        let deps = project.store_dependencies(&current);
-        for dep in deps {
-            if dep == start_id {
-                let mut cycle = path.clone();
-                cycle.push(dep.to_string());
-                return Some(cycle);
-            }
-            if !visited.contains(dep) {
-                let mut new_path = path.clone();
-                new_path.push(dep.to_string());
-                stack.push((dep.to_string(), new_path));
-            }
-        }
-    }
-    None
 }
 
 // ── Component cross-file analysis ────────────────────────────────────
@@ -371,99 +276,6 @@ pub fn find_unknown_models(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use verter_semantic::analysis::file_usage::{
-        FileUsageFlags, FileUsageInfoOwned, InjectUsageOwned, ProvideUsageOwned,
-    };
-
-    fn make_project_with_provide_inject() -> (ProjectIndex, PathBuf, PathBuf) {
-        let mut index = ProjectIndex::default();
-        let provider = PathBuf::from("/src/Provider.vue");
-        let consumer = PathBuf::from("/src/Consumer.vue");
-
-        // Provider provides "theme"
-        let mut provider_info = FileUsageInfoOwned::default();
-        provider_info.provides.push(ProvideUsageOwned {
-            key: Some("theme".to_string()),
-            is_dynamic_key: false,
-            start: 10,
-            end: 30,
-        });
-        provider_info.set_flags(FileUsageFlags::HAS_PROVIDE | FileUsageFlags::IS_SETUP_SCRIPT);
-        index.add_file(provider.clone(), provider_info);
-
-        // Consumer injects "theme" and "config" (no provider for config)
-        let mut consumer_info = FileUsageInfoOwned::default();
-        consumer_info.injects.push(InjectUsageOwned {
-            key: Some("theme".to_string()),
-            is_dynamic_key: false,
-            has_default: false,
-            binding_name: None,
-            start: 10,
-            end: 30,
-        });
-        consumer_info.injects.push(InjectUsageOwned {
-            key: Some("config".to_string()),
-            is_dynamic_key: false,
-            has_default: false,
-            binding_name: None,
-            start: 40,
-            end: 60,
-        });
-        consumer_info.set_flags(FileUsageFlags::HAS_INJECT | FileUsageFlags::IS_SETUP_SCRIPT);
-        index.add_file(consumer.clone(), consumer_info);
-
-        (index, provider, consumer)
-    }
-
-    #[test]
-    fn missing_provider_detected() {
-        let (index, _provider, consumer) = make_project_with_provide_inject();
-        let snapshot = build_cross_file_snapshot(&index, &consumer);
-
-        assert_eq!(snapshot.missing_providers.len(), 1);
-        assert_eq!(snapshot.missing_providers[0].key, "config");
-        assert_eq!(snapshot.missing_providers[0].span.start, 40);
-    }
-
-    #[test]
-    fn unused_provide_detected() {
-        let (index, provider, _consumer) = make_project_with_provide_inject();
-        let snapshot = build_cross_file_snapshot(&index, &provider);
-
-        // "theme" IS injected by consumer, so it should not be unused
-        assert_eq!(snapshot.unused_provides.len(), 0);
-    }
-
-    #[test]
-    fn unused_provide_when_no_consumer() {
-        let mut index = ProjectIndex::default();
-        let provider = PathBuf::from("/src/Provider.vue");
-
-        let mut info = FileUsageInfoOwned::default();
-        info.provides.push(ProvideUsageOwned {
-            key: Some("orphan-key".to_string()),
-            is_dynamic_key: false,
-            start: 5,
-            end: 25,
-        });
-        info.set_flags(FileUsageFlags::HAS_PROVIDE);
-        index.add_file(provider.clone(), info);
-
-        let snapshot = build_cross_file_snapshot(&index, &provider);
-        assert_eq!(snapshot.unused_provides.len(), 1);
-        assert_eq!(snapshot.unused_provides[0].key, "orphan-key");
-    }
-
-    #[test]
-    fn empty_project_no_issues() {
-        let index = ProjectIndex::default();
-        let file = PathBuf::from("/src/App.vue");
-        let snapshot = build_cross_file_snapshot(&index, &file);
-
-        assert!(snapshot.missing_providers.is_empty());
-        assert!(snapshot.unused_provides.is_empty());
-        assert!(snapshot.composable_chains.is_empty());
-    }
 
     // ── Component cross-file analysis tests ─────────────────────────
 

@@ -131,13 +131,13 @@ pub(super) struct LabeledEval<'r> {
     bases: ScopeBases,
 }
 
-impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
+impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     fn scope_bases(&self) -> ScopeBases {
         ScopeBases {
-            shadow: self.scope_shadows.len(),
-            break_exits: self.break_exits.len(),
-            return_edges: self.return_edges.len(),
-            throw_points: self.throw_points.len(),
+            shadow: self.st.scope_shadows.len(),
+            break_exits: self.st.break_exits.len(),
+            return_edges: self.st.return_edges.len(),
+            throw_points: self.st.throw_points.len(),
         }
     }
 
@@ -151,41 +151,41 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             state: self.layer_state(),
             narrowings: self.narrowing_snapshot(),
             bases: self.scope_bases(),
-            declared_reads: self.declared_reads,
-            dead_writes: self.dead_writes,
-            written: self.dead_written_log.len(),
+            declared_reads: self.st.declared_reads,
+            dead_writes: self.st.dead_writes,
+            written: self.st.dead_written_log.len(),
         };
-        self.declared_reads |= declared_reads;
-        self.dead_writes = true;
+        self.st.declared_reads |= declared_reads;
+        self.st.dead_writes = true;
         dead
     }
 
     /// Close `dead`, restoring the live walk it saved.
     pub(super) fn close_dead_path(&mut self, dead: DeadPath) {
-        self.declared_reads = dead.declared_reads;
-        self.dead_writes = dead.dead_writes;
-        for subject in self.dead_written_log.drain(dead.written..) {
-            self.dead_written.remove(&subject);
+        self.st.declared_reads = dead.declared_reads;
+        self.st.dead_writes = dead.dead_writes;
+        for subject in self.st.dead_written_log.drain(dead.written..) {
+            self.st.dead_written.remove(&subject);
         }
-        self.break_exits.truncate(dead.bases.break_exits);
-        self.return_edges.truncate(dead.bases.return_edges);
-        self.throw_points.truncate(dead.bases.throw_points);
-        self.scope_shadows.truncate(dead.bases.shadow);
+        self.st.break_exits.truncate(dead.bases.break_exits);
+        self.st.return_edges.truncate(dead.bases.return_edges);
+        self.st.throw_points.truncate(dead.bases.throw_points);
+        self.st.scope_shadows.truncate(dead.bases.shadow);
         self.restore_narrowings(dead.narrowings);
         self.restore_layer_state(dead.state);
     }
 
     /// Record a write to `subject` on a dead path.
     pub(super) fn record_dead_write(&mut self, subject: &FlowProductSubject) {
-        if self.dead_writes && self.dead_written.insert(subject.clone()) {
-            self.dead_written_log.push(subject.clone());
+        if self.st.dead_writes && self.st.dead_written.insert(subject.clone()) {
+            self.st.dead_written_log.push(subject.clone());
         }
     }
 
     /// Whether a read of `subject` answers its declared type: under
     /// [`Self::declared_reads`], or once a dead path wrote it.
     pub(super) fn reads_declared(&self, subject: &FlowProductSubject) -> bool {
-        self.declared_reads || self.dead_written.contains(subject)
+        self.st.declared_reads || self.st.dead_written.contains(subject)
     }
 
     fn close_scope_since(&mut self, bases: ScopeBases) -> Vec<ScopeShadow> {
@@ -265,8 +265,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             guard,
             alternate,
             contributors: Vec::new(),
-            entry_products: self.products.clone(),
-            entry_writes: self.products.observe_writes(),
+            entry_products: self.st.products.clone(),
+            entry_writes: self
+                .st
+                .products
+                .observe_writes(&self.st.frame_execution.borrow()),
             narrow_mark: self.narrowing_snapshot(),
             bases: self.scope_bases(),
             consequent: None,
@@ -286,7 +289,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // close on every abrupt edge that crossed the arm.
         let shadows = self.close_scope_since(eval.bases);
         let mut state = self.layer_state();
-        Self::close_lexical_scope(&mut state, &shadows);
+        Self::close_lexical_scope(
+            &mut self.st.frame_execution.borrow_mut(),
+            &mut state,
+            &shadows,
+        );
         let products = state.products;
         let narrowings = self.narrowings_since(&eval.narrow_mark);
         self.restore_narrowings(eval.narrow_mark.clone());
@@ -305,7 +312,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // The implicit alternate is a real false-edge
             // predecessor, with no authored body or writes.
             self.apply_guard_scoped(eval.guard, false);
-            let products = self.products.clone();
+            let products = self.st.products.clone();
             let narrowings = self.narrowings_since(&eval.narrow_mark);
             self.restore_narrowings(eval.narrow_mark.clone());
             return self.finish_if(&mut eval, (products, true, narrowings));
@@ -462,7 +469,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         cases: &[verter_session_query::flow::slice::SliceSwitchCase],
     ) -> Option<LiteralSwitchPartition> {
         use verter_session_query::flow::slice::SliceSwitchTest;
-        if !self.nullability.is_strict()
+        if !self.st.nullability.is_strict()
             || cases.iter().any(|case| {
                 matches!(
                     case.test,
@@ -818,7 +825,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         exit_states.extend(self.drain_break_exits(eval.bases.break_exits, None));
         if eval.last_falls {
             if let Some(mut end) = eval.last_end.take() {
-                Self::close_lexical_scope(&mut end, &shadows);
+                Self::close_lexical_scope(
+                    &mut self.st.frame_execution.borrow_mut(),
+                    &mut end,
+                    &shadows,
+                );
                 exit_states.push(end);
             }
         }
@@ -885,7 +896,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let shadows = self.close_scope_since(eval.bases);
         let mut exits: Vec<FlowLayerState> =
             self.drain_break_exits(eval.bases.break_exits, Some(eval.label));
-        Self::close_lexical_scope(&mut end, &shadows);
+        Self::close_lexical_scope(
+            &mut self.st.frame_execution.borrow_mut(),
+            &mut end,
+            &shadows,
+        );
         if body_falls {
             exits.push(end);
         }
@@ -956,7 +971,7 @@ pub(super) struct TryEval<'r> {
     phase: TryPhase,
 }
 
-impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
+impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// Begin one `try` clause's evaluation from `start`: the region to
     /// evaluate is the caller's, and [`Self::finish_try_clause`] reads its
     /// outcome.
@@ -969,22 +984,26 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         )>,
         collect_throws: bool,
     ) -> TryClause {
-        let write_observation = self.products.observe_writes();
+        let write_observation = self
+            .st
+            .products
+            .observe_writes(&self.st.frame_execution.borrow());
         self.restore_layer_state(start.clone());
         let clause = TryClause {
             start: start.clone(),
             write_observation,
-            shadow_base: self.scope_shadows.len(),
-            throw_base: self.throw_points.len(),
-            break_base: self.break_exits.len(),
-            return_base: self.return_edges.len(),
-            saved_collect: self.collect_throw_points,
+            shadow_base: self.st.scope_shadows.len(),
+            throw_base: self.st.throw_points.len(),
+            break_base: self.st.break_exits.len(),
+            return_base: self.st.return_edges.len(),
+            saved_collect: self.st.collect_throw_points,
         };
         // The catch variable binds before the clause collects: binding it
         // writes nothing the clause's exception flow can observe.
-        self.collect_throw_points = false;
+        self.st.collect_throw_points = false;
         if let Some((param, declared)) = catch_param.filter(|(param, _)| {
-            self.products
+            self.st
+                .products
                 .contains_subject(&FlowProductSubject::Local(*param))
         }) {
             let subject = FlowProductSubject::Local(param);
@@ -1010,7 +1029,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .dispatch
                     .graph()
                     .intern_node(SemanticNodeData::Primitive(
-                        if self.use_unknown_in_catch_variables {
+                        if self.st.use_unknown_in_catch_variables {
                             PrimitiveKind::Unknown
                         } else {
                             PrimitiveKind::Any
@@ -1030,7 +1049,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 false,
             );
         }
-        self.collect_throw_points = collect_throws;
+        self.st.collect_throw_points = collect_throws;
         clause
     }
 
@@ -1050,7 +1069,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             return_base,
             saved_collect,
         } = clause;
-        self.collect_throw_points = saved_collect;
+        self.st.collect_throw_points = saved_collect;
         let contributions = result?;
         let mut end = self.layer_state();
         // The scope close replays on every state the clause's evaluation
@@ -1058,7 +1077,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // break exits that crossed the clause's scope.
         let shadows =
             self.split_scope_shadows_close_exits(shadow_base, break_base, return_base, throw_base);
-        Self::close_lexical_scope(&mut end, &shadows);
+        Self::close_lexical_scope(
+            &mut self.st.frame_execution.borrow_mut(),
+            &mut end,
+            &shadows,
+        );
         let executed = self.written_between(&write_observation, &end);
         // Preserve the clause-refusal contract without confusing it with
         // execution evidence. Only written subjects need a type comparison.
@@ -1110,9 +1133,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         pending_break_following_return_targets: &'r Arc<[Arc<str>]>,
     ) -> BranchStep<'r> {
         let entry = self.layer_state();
-        let break_base = self.break_exits.len();
-        let return_base = self.return_edges.len();
-        let throw_base = self.throw_points.len();
+        let break_base = self.st.break_exits.len();
+        let return_base = self.st.return_edges.len();
+        let throw_base = self.st.throw_points.len();
         let clause = self.begin_try_clause(&entry, None, true);
         BranchStep::Enter(
             Entered::Try(Box::new(TryEval {
@@ -1169,9 +1192,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // leave the frame (through the finally), so they stay
                 // on the stack for an OUTER try's catch to consume.
                 eval.block_throws = if eval.catch.is_some() {
-                    self.throw_points.split_off(eval.throw_base)
+                    self.st.throw_points.split_off(eval.throw_base)
                 } else {
-                    self.throw_points[eval.throw_base..].to_vec()
+                    self.st.throw_points[eval.throw_base..].to_vec()
                 };
                 if let Some(catch) = eval.catch {
                     let catch_start = {
@@ -1274,12 +1297,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         for state in &mut normal_inputs {
             self.restore_clause_entry_narrowings(&eval.entry, &mut state.products);
         }
-        let clause_throws = self.throw_points[eval.throw_base..].to_vec();
-        let pending_exits: Vec<FlowLayerState> = self.break_exits[eval.break_base..]
+        let clause_throws = self.st.throw_points[eval.throw_base..].to_vec();
+        let pending_exits: Vec<FlowLayerState> = self.st.break_exits[eval.break_base..]
             .iter()
             .map(|exit| exit.state.clone())
             .collect();
-        let pending_returns = self.return_edges[eval.return_base..].to_vec();
+        let pending_returns = self.st.return_edges[eval.return_base..].to_vec();
         let finally_start = {
             let incoming: smallvec::SmallVec<[&FlowLayerState; 4]> = normal_inputs
                 .iter()
@@ -1292,15 +1315,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .collect();
             self.join_states(&incoming, &eval.entry.write_observation)
         };
-        eval.finally_break_base = self.break_exits.len();
-        eval.finally_return_base = self.return_edges.len();
-        eval.finally_throw_base = self.throw_points.len();
+        eval.finally_break_base = self.st.break_exits.len();
+        eval.finally_return_base = self.st.return_edges.len();
+        eval.finally_throw_base = self.st.throw_points.len();
         eval.try_writes = Some(try_writes);
         eval.pre_finally = Some(pre_finally);
         // The finally clause's own writes are points an OUTER try's catch
         // is entered from (the checker binds the finally block under the
         // enclosing exception target).
-        let collect = self.collect_throw_points;
+        let collect = self.st.collect_throw_points;
         let clause = self.begin_try_clause(&finally_start, None, collect);
         eval.clause = Some(clause);
         eval.phase = TryPhase::Finally;
@@ -1328,11 +1351,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let mut post = pre_finally.clone();
         self.restore_clause_entry_narrowings(&eval.entry, &mut post.products);
         for subject in &finally_writes.executed.0 {
-            post.products
-                .apply_executed_write_from(subject, &finally_end.products);
-            self.narrowing_writes.push(NarrowingLedgerEntry::Cleared {
-                root: self.canonical_runtime_subject(subject),
-            });
+            post.products.apply_executed_write_from(
+                &mut self.st.frame_execution.borrow_mut(),
+                subject,
+                &finally_end.products,
+            );
+            self.st
+                .narrowing_writes
+                .push(NarrowingLedgerEntry::Cleared {
+                    root: self.canonical_runtime_subject(subject),
+                });
         }
         self.restore_layer_state(post);
         if eval.catch.is_none() {
@@ -1347,7 +1375,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             let mut killed = rustc_hash::FxHashSet::default();
             for subject in &finally_writes.executed.0 {
                 if let Some(root) = self.narrow_root_of(subject) {
-                    if let Some(identity) = self.products.identity(&root) {
+                    if let Some(identity) = self.st.products.identity(&root) {
                         #[cfg(any(test, feature = "test-support"))]
                         self.dispatch
                             .observers
@@ -1387,50 +1415,60 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     facts.push(next.clone());
                 }
                 let subject = self
+                    .st
                     .bindings
                     .local(&first.binding)
                     .map(FlowProductSubject::Local)
                     .unwrap_or_else(|| FlowProductSubject::Captured(first.binding.clone()));
-                reestablish_narrowings(&mut self.products, &subject, &facts);
+                reestablish_narrowings(
+                    &mut self.st.products,
+                    &mut self.st.frame_execution.borrow_mut(),
+                    &subject,
+                    &facts,
+                );
             }
             for subject in &try_writes.type_changes.0 {
                 if eval.entry.products.assignment(subject).single_path() {
                     continue;
                 }
-                let cleared = self.products.assignment(subject).with_single_path(false);
-                self.products.set_assignment(subject, cleared);
+                let cleared = self.st.products.assignment(subject).with_single_path(false);
+                self.st.products.set_assignment(
+                    &mut self.st.frame_execution.borrow_mut(),
+                    subject,
+                    cleared,
+                );
             }
         }
         // A throw of the try / catch clauses continues to an OUTER try
         // through the finally: it reaches the outer catch as the state the
         // finally ends in (the checker's reduce label over the exception
         // antecedents), or not at all when the finally cannot complete.
-        let finally_throws = self.throw_points.split_off(eval.finally_throw_base);
-        let clause_threw = self.throw_points.len() > eval.throw_base;
-        self.throw_points.truncate(eval.throw_base);
+        let finally_throws = self.st.throw_points.split_off(eval.finally_throw_base);
+        let clause_threw = self.st.throw_points.len() > eval.throw_base;
+        self.st.throw_points.truncate(eval.throw_base);
         if clause_threw
             && finally
                 .can_fall_through
                 .reaches_end(CompletionDischarge::EvaluatorRegionWalk)
         {
-            self.throw_points.push(finally_end.clone());
+            self.st.throw_points.push(finally_end.clone());
         }
-        self.throw_points.extend(finally_throws);
+        self.st.throw_points.extend(finally_throws);
         if !finally
             .can_fall_through
             .reaches_end(CompletionDischarge::EvaluatorRegionWalk)
         {
             if eval.pending_break_contributes_undefined && finally_break_base > break_base {
-                self.observations.observe_implicit_undefined();
+                self.st.observations.observe_implicit_undefined();
             }
             // Control edges remain runtime-honest: an
             // abrupt finally replaces pending try/catch
             // returns with its own return edges before an
             // OUTER finally is entered.
-            let finally_returns = self.return_edges.split_off(finally_return_base);
-            self.return_edges.truncate(return_base);
-            self.return_edges.extend(finally_returns);
-            let retained_pending_breaks: Vec<FlowBreakExit> = self.break_exits
+            let finally_returns = self.st.return_edges.split_off(finally_return_base);
+            self.st.return_edges.truncate(return_base);
+            self.st.return_edges.extend(finally_returns);
+            let retained_pending_breaks: Vec<FlowBreakExit> = self.st.break_exits
                 [break_base..finally_break_base]
                 .iter()
                 .filter(|exit| {
@@ -1441,10 +1479,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 })
                 .cloned()
                 .collect();
-            let finally_breaks = self.break_exits.split_off(finally_break_base);
-            self.break_exits.truncate(break_base);
-            self.break_exits.extend(retained_pending_breaks);
-            self.break_exits.extend(finally_breaks);
+            let finally_breaks = self.st.break_exits.split_off(finally_break_base);
+            self.st.break_exits.truncate(break_base);
+            self.st.break_exits.extend(retained_pending_breaks);
+            self.st.break_exits.extend(finally_breaks);
         }
         let path_alive = !eval.exit_states.is_empty()
             && finally
@@ -1551,7 +1589,7 @@ enum PassStep<'r> {
     Done(Result<LoopPass, FlowReturnFailure>),
 }
 
-impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
+impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// Begin evaluating a loop statement: its init region first.
     pub(super) fn begin_loop<'r>(
         &mut self,
@@ -1560,7 +1598,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let circular: Vec<SkeletonBindingId> = self
             .circular_loop_bindings(lowered)
             .into_iter()
-            .filter(|binding| self.circular_inferred.insert(*binding))
+            .filter(|binding| self.st.circular_inferred.insert(*binding))
             .collect();
         let bases = self.scope_bases();
         BranchStep::Enter(
@@ -1668,15 +1706,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         analysis.memo.insert(reference.subject, products.clone());
         let carried = &analysis.carried[reference.subject];
         match analysis.references.last_mut() {
-            Some(parent) => parent
-                .start
-                .products
-                .restore_head_value_from(carried, &products),
+            Some(parent) => parent.start.products.restore_head_value_from(
+                &mut self.st.frame_execution.borrow_mut(),
+                carried,
+                &products,
+            ),
             None => {
-                analysis
-                    .head
-                    .products
-                    .restore_head_value_from(carried, &products);
+                analysis.head.products.restore_head_value_from(
+                    &mut self.st.frame_execution.borrow_mut(),
+                    carried,
+                    &products,
+                );
                 analysis.next_subject += 1;
             }
         }
@@ -1746,7 +1786,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 .expect("the reference analysed")
                                 .start
                                 .products
-                                .restore_head_value_from(&carried, &products);
+                                .restore_head_value_from(
+                                    &mut self.st.frame_execution.borrow_mut(),
+                                    &carried,
+                                    &products,
+                                );
                         }
                         None => {
                             analysis.in_analysis.push(other);
@@ -1790,10 +1834,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 match known {
                     Some(products) => {
                         let carried = analysis.carried[subject].clone();
-                        analysis
-                            .head
-                            .products
-                            .restore_head_value_from(&carried, &products);
+                        analysis.head.products.restore_head_value_from(
+                            &mut self.st.frame_execution.borrow_mut(),
+                            &carried,
+                            &products,
+                        );
                         analysis.next_subject += 1;
                     }
                     None => {
@@ -1819,7 +1864,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             if let Some(index) = reused {
                 let RunPass { pass, tail, .. } = eval.run.swap_remove(index);
                 let mut pass = pass;
-                pass.break_base = self.break_exits.len();
+                pass.break_base = self.st.break_exits.len();
                 self.replay_loop_pass(tail.expect("the pass's side outputs"));
                 eval.run.clear();
                 eval.converged = Some(head);
@@ -1872,10 +1917,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         #[cfg(any(test, feature = "test-support"))]
         LOOP_PASSES.with(|count| count.set(count.get() + 1));
         let pass = PassEval {
-            break_base: self.break_exits.len(),
-            return_base: self.return_edges.len(),
-            throw_base: self.throw_points.len(),
-            shadow_base: self.scope_shadows.len(),
+            break_base: self.st.break_exits.len(),
+            return_base: self.st.return_edges.len(),
+            throw_base: self.st.throw_points.len(),
+            shadow_base: self.st.scope_shadows.len(),
             narrow_mark: self.narrowing_snapshot(),
             tested: None,
             contributors: Vec::new(),
@@ -1977,7 +2022,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 let mut back_inputs = self.drain_continue_exits(pass.break_base, &lowered.labels);
                 if falls {
                     let mut end = self.layer_state();
-                    Self::close_lexical_scope(&mut end, &shadows);
+                    Self::close_lexical_scope(
+                        &mut self.st.frame_execution.borrow_mut(),
+                        &mut end,
+                        &shadows,
+                    );
                     back_inputs.push(end);
                 }
                 if back_inputs.is_empty() {
@@ -2080,7 +2129,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // closes over every state that leaves it.
         let shadows = self.close_scope_since(eval.bases);
         for exit in &mut exits {
-            Self::close_lexical_scope(exit, &shadows);
+            Self::close_lexical_scope(&mut self.st.frame_execution.borrow_mut(), exit, &shadows);
         }
         if exits.is_empty() {
             self.restore_layer_state(entry);
@@ -2089,11 +2138,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // The exits leave from the converged head (or its back edge): a
         // binding the head already holds conditionally stays conditional.
         let joined = self.join_continuations(&exits, &head.products, &entry.write_observation);
-        let written = joined.products.writes_since(&entry.write_observation);
+        let written = joined.products.writes_since(
+            &mut self.st.frame_execution.borrow_mut(),
+            &entry.write_observation,
+        );
         self.restore_layer_state(joined);
         for subject in written {
             if let Some(root) = self.narrow_root_of(&subject) {
-                self.narrowing_writes
+                self.st
+                    .narrowing_writes
                     .push(NarrowingLedgerEntry::Cleared { root });
             }
         }
@@ -2108,7 +2161,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         outcome: Result<(Vec<FlowContribution>, bool), FlowReturnFailure>,
     ) -> BranchStep<'r> {
         for binding in &eval.circular {
-            self.circular_inferred.remove(binding);
+            self.st.circular_inferred.remove(binding);
         }
         BranchStep::Done(outcome)
     }

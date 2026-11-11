@@ -134,7 +134,7 @@ sequenceDiagram
 
 | Setting                           | Type      | Default | Description                                                    |
 | --------------------------------- | --------- | ------- | -------------------------------------------------------------- |
-| `verter.enable`                   | `boolean` | `true`  | Enable or disable the Verter extension                         |
+| `verter.participation`            | `string`  | `auto`  | Preset: `auto`, `disabled`, `workspace` or `full`              |
 | `verter.statistics.enabled`       | `boolean` | `false` | Enable compilation statistics collection                       |
 | `verter.statistics.persistToFile` | `boolean` | `false` | Persist statistics to a file on disk                           |
 | `verter.statistics.maxSnapshots`  | `number`  | —       | Maximum number of statistics snapshots to retain               |

@@ -6,6 +6,8 @@ import {
   Range,
   Disposable,
   DecorationRangeBehavior,
+  type Event,
+  type TextDocument,
 } from "vscode";
 import { debounce } from "lodash";
 import { LanguageClient } from "vscode-languageclient/node";
@@ -160,8 +162,19 @@ export class BindingColorDecorationProvider implements Disposable {
     Array<{ startLine: number; startChar: number; endLine: number; endChar: number }>
   > = new Map();
 
-  constructor(private getClient: () => PatchClient<LanguageClient>) {
+  /**
+   * `admits` is this decoration's participation cell for a document (COX0):
+   * a withdrawn cell computes and shows nothing. `cellsChanged` re-evaluates
+   * the active editor when the cells change.
+   */
+  constructor(
+    private getClient: () => PatchClient<LanguageClient>,
+    private admits: (document: TextDocument) => boolean,
+    cellsChanged: Event<void>,
+  ) {
     this.readConfig();
+
+    this.subscriptions.push(cellsChanged(() => void this.updateActiveEditor()));
 
     this.subscriptions.push(
       workspace.onDidChangeConfiguration((e) => {
@@ -263,7 +276,12 @@ export class BindingColorDecorationProvider implements Disposable {
 
   private async updateActiveEditor(): Promise<void> {
     const editor = window.activeTextEditor;
-    if (!editor || !isFrameworkCarrierLanguageId(editor.document.languageId) || !this.enabled) {
+    if (
+      !editor ||
+      !isFrameworkCarrierLanguageId(editor.document.languageId) ||
+      !this.admits(editor.document) ||
+      !this.enabled
+    ) {
       this.clearAllDecorations();
       return;
     }
@@ -280,6 +298,13 @@ export class BindingColorDecorationProvider implements Disposable {
         uri: sourceUri,
       });
     } catch {
+      return;
+    }
+
+    // The cell is re-checked after the await (COX0): a withdrawal while the
+    // analysis was in flight never refills cleared decorations.
+    if (!this.admits(editor.document)) {
+      this.clearAllDecorations();
       return;
     }
 

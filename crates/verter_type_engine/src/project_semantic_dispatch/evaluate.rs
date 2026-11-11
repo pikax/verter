@@ -487,15 +487,111 @@ enum DeferredEvaluationStage {
     },
     AwaitIndexedObject {
         index: IndexKey,
+        origin: crate::semantic_query::IndexedAccessOrigin,
     },
     AwaitIndexedIndex {
         object: SemanticNodeId,
+        origin: crate::semantic_query::IndexedAccessOrigin,
     },
     AwaitValueChildren {
         data: crate::semantic_query_memo::NodeData,
         children: Vec<SemanticNodeId>,
         values: Vec<SemanticNodeId>,
     },
+    /// The frame's step named a query read; it resumes with the answer.
+    AwaitRead(ReadThen),
+    /// The frame's step resolves a `BareRef` / `ImportType` carrier, its
+    /// captured resolution standing at the query it reads next.
+    AwaitCarrier(Box<super::carrier::CapturedCarrierRead>),
+}
+
+/// What a step that named a read does with the read's answer.
+enum ReadThen {
+    /// Advance to the answered node, or finish on the fallback when the
+    /// read answered none.
+    Advance(ReadFallback),
+    /// A `keyof` of the evaluated base: under a shell or mapped-source
+    /// demand a carrier the builder kept is settled to its keys first.
+    KeyOf,
+    /// A shell's access read: a complete read that found no value answers
+    /// as the shell's origin says.
+    Indexed {
+        object: SemanticNodeId,
+        index: IndexKey,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+    },
+    /// A `typeof` carrier's value, its instantiation arguments applied.
+    TypeOf { type_args: Vec<SemanticNodeId> },
+    /// A mapped helper application's instantiated body, whose head is
+    /// evaluated next: a signature slot's when `signature`, else a mapped
+    /// member value's.
+    HelperBody {
+        carrier: SemanticNodeId,
+        base: crate::semantic_query::DeclIdentity,
+        args: Arc<[SemanticNodeId]>,
+        signature: bool,
+    },
+}
+
+/// What a step finishes on when its read answered no node.
+#[derive(Clone, Copy)]
+enum ReadFallback {
+    /// The shared miss.
+    Miss,
+    /// This node: the carrier the step stood at.
+    Node(SemanticNodeId),
+}
+
+/// A deferred evaluation as an owned continuation: the evaluator's heap
+/// worklist — its frames, each frame's delivering tracer, the outcome of
+/// an operand completed for its parent and whether the top frame's first
+/// step was paid — standing at the query a step named, which the top
+/// frame's stage resumes with ([`DeferredEvaluationStage::AwaitRead`],
+/// [`DeferredEvaluationStage::AwaitCarrier`]). It borrows nothing of the
+/// dispatcher that stepped it, so a consumer's continuation carries it to
+/// whichever thread resumes it
+/// ([`ProjectSemanticDispatch::resume_deferred_read`]).
+///
+/// Its cold frames' cost recordings stay open on the connected demand's
+/// recording stack while it waits, above the recording of the computation
+/// it is nested in — as a waiting frame's own recording does — so the
+/// read it resumes with is charged to, and recorded as the prerequisite
+/// of, the frame that named it, exactly as the in-place evaluation records
+/// it. The recordings travel with the connected demand when its task
+/// moves, and are ended only by the evaluation: sealed or abandoned as
+/// its frames finish, or abandoned top first when its holder releases it
+/// ([`ProjectSemanticDispatch::abandon_deferred_read`]). Its
+/// connected-demand entry is made per stage and never retained.
+pub(super) struct DeferredRead {
+    frames: Vec<DeferredEvaluationFrame>,
+    tracers: Vec<crate::fact_signature_helpers::OwnedStepwiseFactTracer>,
+    completed_child: Option<EvaluateDeferredOutcome>,
+    prepaid_step: bool,
+}
+
+/// Where a deferred evaluation stands after its latest stage.
+pub(super) enum DeferredStep {
+    /// The evaluation's outcome.
+    Done(EvaluateDeferredOutcome),
+    /// The evaluation reads this query next, holding everything it computed.
+    Read(SemanticQueryKey, Box<DeferredRead>),
+}
+
+// A suspended evaluation is owned state its consumer's continuation carries
+// to whichever thread resumes it, advanced by value one stage at a time.
+static_assertions::assert_impl_all!(DeferredRead: Send);
+static_assertions::assert_not_impl_any!(DeferredRead: Clone, Copy);
+
+impl DeferredRead {
+    /// Whether the read the evaluation stands at is its carrier
+    /// resolution's: a read the carrier's consumers count as their own
+    /// dispatch intent.
+    pub(super) fn reads_for_carrier(&self) -> bool {
+        matches!(
+            self.frames.last().map(|frame| &frame.stage),
+            Some(DeferredEvaluationStage::AwaitCarrier(_))
+        )
+    }
 }
 
 struct DeferredEvaluationFrame {
@@ -615,6 +711,11 @@ enum DeferredEvaluationAction {
         context: ProjectionReductionContext,
     },
     Finish(SemanticNodeId),
+    /// The step reads this query, and resumes with its answer.
+    Read(SemanticQueryKey, ReadThen),
+    /// The step's carrier resolution reads this query, and resumes with
+    /// its answer.
+    Carrier(SemanticQueryKey, Box<super::carrier::CapturedCarrierRead>),
 }
 
 fn clone_index_key(index: &IndexKey) -> IndexKey {
@@ -631,14 +732,15 @@ fn clone_index_key(index: &IndexKey) -> IndexKey {
 /// around the evaluation. A frame's tracer is a delivering scope, so this
 /// is the only way its observations reach them.
 fn deliver_evaluation_facts<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
-    tracers: &mut [crate::fact_signature_helpers::StepwiseFactTracer<'_, W>],
+    tracers: &mut [crate::fact_signature_helpers::OwnedStepwiseFactTracer],
+    source: &crate::fact_signature_helpers::FactTracerBasisSource<'_, W>,
     finalise: &FactReadSetFinalise,
 ) {
     let (FactReadSetFinalise::Ok(facts) | FactReadSetFinalise::NonCacheable(facts)) = finalise
     else {
         return;
     };
-    let _scope = tracers.last_mut().map(|parent| parent.install());
+    let _scope = tracers.last_mut().map(|parent| parent.install(source));
     crate::fact_tracing::tracing::observe_fan_out_canonical(facts);
 }
 
@@ -648,10 +750,11 @@ fn deliver_evaluation_facts<W: verter_session_query::facts::clocks::WorkspaceClo
 fn deliver_abandoned_evaluation_facts<
     W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
 >(
-    tracers: Vec<crate::fact_signature_helpers::StepwiseFactTracer<'_, W>>,
+    tracers: Vec<crate::fact_signature_helpers::OwnedStepwiseFactTracer>,
+    source: &crate::fact_signature_helpers::FactTracerBasisSource<'_, W>,
 ) {
     for tracer in tracers.into_iter().rev() {
-        deliver_evaluation_facts::<W>(&mut [], &tracer.finish());
+        deliver_evaluation_facts(&mut [], source, &tracer.finish(source));
     }
 }
 
@@ -1240,6 +1343,196 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.resolve_structural_fact_demand(node, context, true, false)
     }
 
+    /// What an access answers when its object proves a key absent, as the
+    /// checker's `getIndexedAccessType` does: a written access is TS2339 and
+    /// its error type, read as `any`; an instantiation has no access to report
+    /// on and is `unknown`. An access the engine composed has no such answer,
+    /// and neither has one whose absence is not proven.
+    pub(super) fn absent_access_answer(
+        &self,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+        object: SemanticNodeId,
+        index: &IndexKey,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        use crate::semantic_query::IndexedAccessOrigin;
+        if origin == IndexedAccessOrigin::Composed {
+            return None;
+        }
+        // An access of the error type is the error type, and no new report.
+        if let Some(error) = self
+            .normalize_node_for_structural_fact_demand(object, context)
+            .into_complete_node()
+            .filter(|node| {
+                matches!(
+                    self.graph().node_data(*node).as_deref(),
+                    Some(SemanticNodeData::Opaque(error)) if super::build::is_certified_recovery(error)
+                )
+            })
+        {
+            return Some(error);
+        }
+        let keys = match index {
+            IndexKey::Computed(node) => self.finite_index_keys(*node)?,
+            key => vec![clone_index_key(key)],
+        };
+        if !keys
+            .iter()
+            .any(|key| self.indexed_access_proves_absence(object, key, context))
+        {
+            return None;
+        }
+        Some(match origin {
+            IndexedAccessOrigin::Composed => unreachable!("answered above"),
+            IndexedAccessOrigin::Written => {
+                crate::semantic_query::checker_policy::checker_recovery(
+                    self.graph(),
+                    crate::semantic_query::checker_policy::absent_member(),
+                )
+            }
+            IndexedAccessOrigin::Instantiated => self
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
+        })
+    }
+
+    /// [`Self::absent_read_answer`] as one operation of this dispatcher, for a
+    /// request whose own builder owns what it constructs. The request's answer
+    /// is the end of the chain, so an access the walk kept as a shell for want
+    /// of an object it could read is decided here too.
+    pub fn published_absent_read_answer(
+        &self,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+        value: SemanticNodeId,
+        object: SemanticNodeId,
+        index: &IndexKey,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        let _operation = self.enter_operation(false);
+        if matches!(
+            self.graph().node_data(value).as_deref(),
+            Some(SemanticNodeData::IndexedAccess { .. })
+        ) {
+            return self.absent_access_answer(origin, object, index, context);
+        }
+        self.absent_read_answer(origin, value, object, index, context)
+    }
+
+    /// The answer of an access whose complete read gave `value`, when that
+    /// read found nothing.
+    pub(super) fn absent_read_answer(
+        &self,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+        value: SemanticNodeId,
+        object: SemanticNodeId,
+        index: &IndexKey,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        if !self.read_holds_miss(value) {
+            return None;
+        }
+        self.absent_access_answer(origin, object, index, context)
+    }
+
+    /// Whether the read `value` of an access found nothing for a key: the
+    /// typed miss, whole or as an arm of a union index's answer.
+    fn read_holds_miss(&self, value: SemanticNodeId) -> bool {
+        let miss = |data: Option<&SemanticNodeData>| {
+            matches!(data, Some(SemanticNodeData::Opaque(QueryError::Miss)))
+        };
+        let data = self.graph().node_data(value);
+        match data.as_deref() {
+            Some(SemanticNodeData::Union(arms)) => arms
+                .iter()
+                .any(|arm| miss(self.graph().node_data(*arm).as_deref())),
+            other => miss(other),
+        }
+    }
+
+    /// What an access the instantiation of `object[index]` produces stands
+    /// for. The checker decides an access's fate where it is written: over a
+    /// generic object or index it defers the access, and instantiating that
+    /// has no access node. Over anything else it answers there, so what it
+    /// holds instantiates as the written access it is. Whether the object is
+    /// generic can be undecided (`Foo<T>['k']` depends on what `Foo` is), and
+    /// such an access keeps no answer of its own.
+    pub(super) fn instantiated_access_origin(
+        &self,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+        object: SemanticNodeId,
+        index: &IndexKey,
+    ) -> crate::semantic_query::IndexedAccessOrigin {
+        use crate::semantic_query::IndexedAccessOrigin;
+        if origin != IndexedAccessOrigin::Written {
+            return origin;
+        }
+        match self.access_is_generic(object, index) {
+            Some(true) => IndexedAccessOrigin::Instantiated,
+            Some(false) => IndexedAccessOrigin::Written,
+            None => IndexedAccessOrigin::Composed,
+        }
+    }
+
+    /// The checker's `isGenericObjectType` of `object` or
+    /// `isGenericIndexType` of `index` over an authored access; `None` when
+    /// an application over a free parameter leaves it undecided.
+    fn access_is_generic(&self, object: SemanticNodeId, index: &IndexKey) -> Option<bool> {
+        let free = |node| super::symbolic_root::node_contains_free_type_param(self, node);
+        if let IndexKey::Computed(index) = index {
+            if free(*index) {
+                return Some(true);
+            }
+        }
+        let mut undecided = false;
+        let mut pending = vec![object];
+        let mut seen = rustc_hash::FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let data = self.graph().node_data(node);
+            match data.as_deref() {
+                Some(
+                    SemanticNodeData::TypeParam { .. }
+                    | SemanticNodeData::Infer { .. }
+                    | SemanticNodeData::InferRef { .. },
+                ) => return Some(true),
+                Some(SemanticNodeData::Union(arms)) => pending.extend(arms.iter().copied()),
+                Some(SemanticNodeData::Intersection(arms)) => {
+                    pending.extend(arms.iter().copied());
+                }
+                Some(SemanticNodeData::Alias(inner)) => pending.push(*inner),
+                Some(SemanticNodeData::IndexedAccess { object, index, .. }) => {
+                    if let IndexKey::Computed(index) = index {
+                        if free(*index) {
+                            return Some(true);
+                        }
+                    }
+                    pending.push(*object);
+                }
+                Some(SemanticNodeData::Conditional { check, extends, .. }) => {
+                    if free(*check) || free(*extends) {
+                        return Some(true);
+                    }
+                }
+                Some(SemanticNodeData::Mapped { mapper, .. }) => {
+                    if free(mapper.key_space) {
+                        return Some(true);
+                    }
+                }
+                Some(SemanticNodeData::InstantiationRef { args, .. }) => {
+                    undecided |= args.iter().any(|argument| free(*argument));
+                }
+                _ => {}
+            }
+        }
+        if undecided {
+            None
+        } else {
+            Some(false)
+        }
+    }
+
     /// The named declaration an indexed access reads, when its terminal is
     /// one: the object evaluated, the member read at navigate altitude, and
     /// the read kept only when it is a declaration or class reference.
@@ -1259,7 +1552,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         context: ProjectionReductionContext,
     ) -> Option<EvaluateDeferredOutcome> {
         let (object, index) = match self.graph().node_data(node)?.as_ref() {
-            SemanticNodeData::IndexedAccess { object, index }
+            SemanticNodeData::IndexedAccess { object, index, .. }
                 if !matches!(index, IndexKey::Computed(_)) =>
             {
                 (*object, clone_index_key(index))
@@ -2386,17 +2679,64 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// authority here; `observe_component_meta_read_suppress` is retained
     /// PURELY to propagate the same partiality to the request /
     /// cold-compute scope (the component-meta / materialize warm gates).
+    /// Read the access `object[index]` a shell stands for: the step names
+    /// the read, and resumes with it ([`Self::indexed_read_answer`]).
+    fn indexed_read_action(
+        &self,
+        frame: &DeferredEvaluationFrame,
+        object: SemanticNodeId,
+        index: IndexKey,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+    ) -> DeferredEvaluationAction {
+        DeferredEvaluationAction::Read(
+            SemanticQueryKey::IndexedAccess {
+                base: object,
+                index: clone_index_key(&index),
+                mode: indexed_read_mode(frame.demand.value_source_context(frame.context)),
+            },
+            ReadThen::Indexed {
+                object,
+                index,
+                origin,
+            },
+        )
+    }
+
+    /// The step a shell's access read resumes with: a complete read that
+    /// found no value answers as the shell's origin says.
+    fn indexed_read_answer(
+        &self,
+        frame: &mut DeferredEvaluationFrame,
+        read: CacheRead<QueryResult<SemanticNodeId>>,
+        object: SemanticNodeId,
+        index: IndexKey,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+    ) -> DeferredEvaluationAction {
+        let found_no_value = !read.result_is_partial()
+            && matches!(&read.value, QueryResult::Value(value) if self.read_holds_miss(*value));
+        if found_no_value {
+            if let Some(answer) = self.absent_access_answer(origin, object, &index, frame.context) {
+                frame.merge_read(&read);
+                return DeferredEvaluationAction::Finish(answer);
+            }
+        }
+        self.deferred_read_action(frame, read, ReadFallback::Miss)
+    }
+
     fn deferred_read_action(
         &self,
         frame: &mut DeferredEvaluationFrame,
         read: CacheRead<QueryResult<SemanticNodeId>>,
-        miss_fallback: impl FnOnce() -> SemanticNodeId,
+        fallback: ReadFallback,
     ) -> DeferredEvaluationAction {
         frame.merge_read(&read);
         crate::request_context::observe_component_meta_read_suppress(&read);
         match read.value {
             QueryResult::Value(next) => frame.advance_or_finish(next),
-            _ => DeferredEvaluationAction::Finish(miss_fallback()),
+            _ => DeferredEvaluationAction::Finish(match fallback {
+                ReadFallback::Miss => self.opaque(QueryError::Miss),
+                ReadFallback::Node(node) => node,
+            }),
         }
     }
 
@@ -2668,37 +3008,89 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.evaluate_deferred_demand(node, context, DeferredEvaluationDemand::MappedMemberValue)
     }
 
+    /// The in-place driver of a deferred evaluation: the evaluation
+    /// ([`Self::begin_deferred_read`]) run to its outcome, each query a step
+    /// names read where the evaluation stands. It holds the connected demand
+    /// across the whole evaluation — as the evaluation's own root when none
+    /// is open — exactly as one native evaluation did.
     fn evaluate_deferred_demand(
         &self,
         node: SemanticNodeId,
         reduction_context: ProjectionReductionContext,
         demand: DeferredEvaluationDemand,
     ) -> EvaluateDeferredOutcome {
+        if let Some(refused) = self.deferred_entry_refusal(node) {
+            return refused;
+        }
+        let (_connected_guard, _) = self.enter_connected_demand(false);
+        let mut step = self.begin_deferred_read(node, reduction_context, demand);
+        loop {
+            match step {
+                DeferredStep::Done(outcome) => return outcome,
+                DeferredStep::Read(key, build) => {
+                    let mut key = Some(key);
+                    let counts = build.reads_for_carrier();
+                    let mut read = || {
+                        let key = key.take().expect("a read is made once");
+                        if counts {
+                            self.carrier_read_in_place(key)
+                        } else {
+                            self.execute_read(key)
+                        }
+                    };
+                    step = self.resume_deferred_read(build, &mut read);
+                }
+            }
+        }
+    }
+
+    /// The outcome an evaluation of `node` is refused with before it
+    /// begins: a stopped execution, or an operand this graph no longer
+    /// holds, which is refused, never evaluated.
+    fn deferred_entry_refusal(&self, node: SemanticNodeId) -> Option<EvaluateDeferredOutcome> {
         if let Some(abort) = crate::request_context::current_execution_abort() {
-            return EvaluateDeferredOutcome::aborted(
+            return Some(EvaluateDeferredOutcome::aborted(
                 self.opaque(QueryError::ExecutionAborted(abort)),
                 abort,
-            );
+            ));
         }
-        // An operand this graph no longer holds is refused, never
-        // evaluated.
         if !self.graph().node_is_live(node) {
-            return EvaluateDeferredOutcome::refused_operand(
+            return Some(EvaluateDeferredOutcome::refused_operand(
                 self.opaque(QueryError::StaleSemanticOperand),
-            );
+            ));
+        }
+        None
+    }
+
+    /// The first stage of the deferred evaluation of `node` for `demand`:
+    /// its outcome — served, evaluating to itself, refused, or computed
+    /// without a read another task produces — or the evaluation standing at
+    /// the first query a step names, everything it computed retained
+    /// ([`DeferredRead`]). A consumer embedding the evaluation in its own
+    /// continuation resumes it with that read's answer
+    /// ([`Self::resume_deferred_read`]); it must hold an open connected
+    /// demand, which the evaluation's suspended recordings belong to.
+    pub(super) fn begin_deferred_read(
+        &self,
+        node: SemanticNodeId,
+        reduction_context: ProjectionReductionContext,
+        demand: DeferredEvaluationDemand,
+    ) -> DeferredStep {
+        if let Some(refused) = self.deferred_entry_refusal(node) {
+            return DeferredStep::Done(refused);
         }
         // Continuations live on the heap. Authored structural depth has no
         // cap here; only connected operational limits can stop evaluation.
-        let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
+        let (connected_guard, initial_trip) = self.enter_connected_demand(false);
         if let Some(reasons) = initial_trip {
-            return EvaluateDeferredOutcome::partial(node, reasons);
+            return DeferredStep::Done(EvaluateDeferredOutcome::partial(node, reasons));
         }
         // An operand that evaluates to itself completes before any step
         // reads through it, so it is admitted without being rooted.
         if self.evaluates_to_itself(node, reduction_context, demand)
             && self.admit_self_evaluation(node, reduction_context, demand)
         {
-            return EvaluateDeferredOutcome::complete(node);
+            return DeferredStep::Done(EvaluateDeferredOutcome::complete(node));
         }
         // A completed cacheable evaluation needs no connected work beyond
         // what its receipt charges. Limited outcomes can never reach this
@@ -2711,15 +3103,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.admit_served(&served.receipt, super::cost_receipt::Nesting::Entered),
                 super::ServedAdmission::Admitted
             ) {
-                return EvaluateDeferredOutcome::complete(served.value);
+                return DeferredStep::Done(EvaluateDeferredOutcome::complete(served.value));
             }
         }
         // A serve owns its operands through the memo's shared root owner.
         // Only a cold evaluation needs another root for its own recording.
         let Ok(operand) = self.graph().root_nodes([node]) else {
-            return EvaluateDeferredOutcome::refused_operand(
+            return DeferredStep::Done(EvaluateDeferredOutcome::refused_operand(
                 self.opaque(QueryError::StaleSemanticOperand),
-            );
+            ));
         };
         // The root evaluates, and records from its first step: every step
         // it takes is its own cost, so the receipt a later read replays
@@ -2736,553 +3128,185 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .with_roots(operand),
         );
         root.recording = true;
-        let mut frames = vec![root];
-        // Tracers live beside the frames so a step can mutate its frame.
-        // Only the current frame is installed; a completed child replays
-        // its proof into its parent. Deep operands do not install or copy
-        // an entire stack of tracers on every step.
-        let mut tracers = vec![crate::fact_signature_helpers::StepwiseFactTracer::new(
-            crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
-        )];
-        let mut completed_child: Option<EvaluateDeferredOutcome> = None;
-        let mut prepaid_step = false;
+        let source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
+        let build = Box::new(DeferredRead {
+            frames: vec![root],
+            // Tracers live beside the frames so a step can mutate its
+            // frame. Only the current frame's is installed; a completed
+            // child replays its proof into its parent. Deep operands do not
+            // install or copy an entire stack of tracers on every step.
+            tracers: vec![
+                crate::fact_signature_helpers::OwnedStepwiseFactTracer::delivering(&source),
+            ],
+            completed_child: None,
+            prepaid_step: false,
+        });
+        let step = self.step_deferred_read(build, None);
+        Self::leave_deferred_stage(connected_guard, &step);
+        step
+    }
 
+    /// The next stage of a deferred evaluation, given the read it stands
+    /// at: `deliver` makes or delivers that read inside the stage — under
+    /// the standing frame's tracer, over its open recording — where the
+    /// in-place evaluation made it. The step that named the read resumes
+    /// with its answer; nothing the evaluation completed runs again.
+    pub(super) fn resume_deferred_read(
+        &self,
+        build: Box<DeferredRead>,
+        deliver: &mut dyn FnMut() -> CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> DeferredStep {
+        let (connected_guard, _) = self.enter_connected_demand(false);
+        let step = self.step_deferred_read(build, Some(deliver));
+        Self::leave_deferred_stage(connected_guard, &step);
+        step
+    }
+
+    /// End a deferred stage's connected-demand entry. The entry is never
+    /// retained across a suspension: a suspended evaluation's recordings
+    /// belong to the connected demand its consumer holds open.
+    fn leave_deferred_stage(
+        guard: super::connected_demand::ConnectedDemandGuard<'_>,
+        step: &DeferredStep,
+    ) {
+        let root = guard.is_root();
+        drop(guard);
+        verter_debug_assert!(
+            !(root && matches!(step, DeferredStep::Read(..))),
+            "a deferred evaluation suspends only inside a connected demand its consumer holds"
+        );
+    }
+
+    /// Release what an abandoned evaluation holds: the recordings of its
+    /// cold frames, top first, so what they charged stays their
+    /// consumer's, and the carrier a standing resolution keeps on the
+    /// normalization record. Its tracers are dropped unread.
+    pub(super) fn abandon_deferred_read(&self, build: DeferredRead) {
+        let DeferredRead { frames, .. } = build;
+        for frame in frames.into_iter().rev() {
+            if let DeferredEvaluationStage::AwaitCarrier(read) = frame.stage {
+                self.abandon_captured_carrier_read(*read);
+            }
+            if frame.recording {
+                self.connected_demand.abandon_cost_scope();
+            }
+        }
+    }
+
+    /// An evaluation the connected demand refused a step: every recording
+    /// it opened is abandoned, what its frames observed is delivered to the
+    /// tracers active around it, and its outcome is the trip.
+    fn stop_deferred_read(
+        &self,
+        build: DeferredRead,
+        source: &crate::fact_signature_helpers::FactTracerBasisSource<
+            '_,
+            impl verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+        >,
+        reasons: PartialReasonSet,
+    ) -> EvaluateDeferredOutcome {
+        let DeferredRead {
+            frames,
+            tracers,
+            completed_child,
+            ..
+        } = build;
+        for frame in frames.iter().rev() {
+            if frame.recording {
+                self.connected_demand.abandon_cost_scope();
+            }
+        }
+        deliver_abandoned_evaluation_facts(tracers, source);
+        aborted_evaluation_outcome(&frames, completed_child.as_ref(), reasons)
+    }
+
+    /// Run a deferred evaluation's steps until it completes or a step names
+    /// a read: the evaluator's heap worklist. With `delivery`, the top frame
+    /// stands at the read its last step named, and that step resumes with
+    /// the read's answer — it was charged and counted when it ran.
+    fn step_deferred_read(
+        &self,
+        mut build: Box<DeferredRead>,
+        mut delivery: Option<&mut dyn FnMut() -> CacheRead<QueryResult<SemanticNodeId>>>,
+    ) -> DeferredStep {
+        let source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
         loop {
-            let charge = if std::mem::take(&mut prepaid_step) {
-                Ok(())
-            } else {
-                self.charge_connected_work()
-            };
-            if let Err(reasons) = charge {
-                for frame in frames.iter().rev() {
-                    if frame.recording {
-                        self.connected_demand.abandon_cost_scope();
-                    }
+            if delivery.is_none() {
+                let charge = if std::mem::take(&mut build.prepaid_step) {
+                    Ok(())
+                } else {
+                    self.charge_connected_work()
+                };
+                if let Err(reasons) = charge {
+                    return DeferredStep::Done(self.stop_deferred_read(*build, &source, reasons));
                 }
-                deliver_abandoned_evaluation_facts(tracers);
-                return aborted_evaluation_outcome(&frames, completed_child.as_ref(), reasons);
+                self.graph().record_deferred_step();
             }
 
-            let scope = tracers
-                .last_mut()
-                .expect("active evaluation tracer")
-                .install();
-            let action = if let Some(child) = completed_child.take() {
-                let frame = frames
+            let action = {
+                let DeferredRead {
+                    frames,
+                    tracers,
+                    completed_child,
+                    ..
+                } = &mut *build;
+                let _scope = tracers
                     .last_mut()
-                    .expect("a completed operand requires a suspended parent");
-                frame.merge_child(child);
-                match std::mem::replace(&mut frame.stage, DeferredEvaluationStage::EvaluateCurrent)
-                {
-                    DeferredEvaluationStage::AwaitMappedSignatureHead {
-                        carrier,
-                        base,
-                        args,
-                    } => {
-                        if frame.completeness.is_partial()
-                            || frame.availability != crate::semantic_query::FactStatus::Complete
-                        {
-                            DeferredEvaluationAction::Finish(carrier)
-                        } else {
-                            match self.mapped_helper_head_contains(
-                                child.node,
-                                MappedHelperHeadKind::Signature,
-                            ) {
-                                Ok(true) => DeferredEvaluationAction::Finish(carrier),
-                                // A container head, including a callable object
-                                // or an intersection of objects, reaches its
-                                // closed operators and recursive back-edges
-                                // through the shared Expanded instantiator.
-                                Ok(false) => self.mapped_container_head_action(
-                                    frame, child.node, carrier, &base, args,
-                                ),
-                                Err(reasons) => {
-                                    frame.completeness = frame
-                                        .completeness
-                                        .merge(ResultCompleteness::partial(reasons));
-                                    DeferredEvaluationAction::Finish(carrier)
-                                }
-                            }
+                    .expect("active evaluation tracer")
+                    .install(&source);
+                if let Some(deliver) = delivery.take() {
+                    let frame = frames
+                        .last_mut()
+                        .expect("a delivered read answers the frame that named it");
+                    match std::mem::replace(
+                        &mut frame.stage,
+                        DeferredEvaluationStage::EvaluateCurrent,
+                    ) {
+                        DeferredEvaluationStage::AwaitRead(then) => {
+                            let read = deliver();
+                            self.deferred_read_then(frame, then, read)
+                        }
+                        DeferredEvaluationStage::AwaitCarrier(read) => {
+                            let step = self.resume_captured_carrier_read(*read, deliver);
+                            self.captured_carrier_action(frame, step)
+                        }
+                        _ => {
+                            unreachable!("only a frame standing at a read is delivered its answer")
                         }
                     }
-                    DeferredEvaluationStage::AwaitMappedMemberHead {
-                        carrier,
-                        base,
-                        args,
-                    } => {
-                        if frame.completeness.is_partial()
-                            || frame.availability != crate::semantic_query::FactStatus::Complete
-                        {
-                            DeferredEvaluationAction::Finish(carrier)
-                        } else if frame.context.mode != ProjectionMode::Expanded
-                            || !crate::semantic_query::may_reduce_operator(frame.context)
-                        {
-                            frame.advance_or_finish(child.node)
-                        } else {
-                            self.mapped_container_head_action(
-                                frame, child.node, carrier, &base, args,
-                            )
-                        }
-                    }
-                    DeferredEvaluationStage::AwaitKeyOfBase => {
-                        let mut read = self.execute_read(SemanticQueryKey::KeyOf {
-                            base: child.node,
-                            context: frame.context,
-                        });
-                        // A `keyof` the builder kept as a carrier over a
-                        // declaration, an application or a mapped type is
-                        // evaluated here, at a demand for its value: its
-                        // keys where they settle, as the checker prints
-                        // them.
-                        if matches!(
-                            frame.demand,
-                            DeferredEvaluationDemand::Shell
-                                | DeferredEvaluationDemand::MappedSource
-                        ) {
-                            if let QueryResult::Value(keys) = read.value {
-                                if let Some(settled) =
-                                    self.settled_key_of_carrier(keys, frame.context)
-                                {
-                                    read.value = QueryResult::Value(settled);
-                                }
-                            }
-                        }
-                        self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
-                    }
-                    DeferredEvaluationStage::AwaitMappedSource { source, mut mapper } => {
-                        // The source is demanded before its domain, as in locator
-                        // projection. Keep the binder's value and remap untouched
-                        // until the existing per-key materializer binds it.
-                        let keyof_source = matches!(self.graph().node_data(mapper.key_space).as_deref(),
-                            Some(SemanticNodeData::KeyOf { base }) if *base == source);
-                        let key_space = if keyof_source {
-                            self.graph().intern_preserving_scope(
-                                mapper.key_space,
-                                SemanticNodeData::KeyOf { base: child.node },
-                            )
-                        } else if mapper.key_space == source {
-                            child.node
-                        } else {
-                            mapper.key_space
-                        };
-                        if keyof_source
-                            && matches!(
-                                self.graph().node_data(child.node).as_deref(),
-                                Some(SemanticNodeData::Infer { .. })
-                            )
-                        {
-                            mapper.key_space = key_space;
-                            let read = self.execute_read(SemanticQueryKey::MappedType {
-                                source: child.node,
-                                mapper,
-                                context: frame.context,
-                            });
-                            self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
-                        } else {
-                            frame.stage = DeferredEvaluationStage::AwaitMappedKeySpace {
-                                source: child.node,
-                                mapper,
-                            };
-                            DeferredEvaluationAction::Push {
-                                node: key_space,
-                                context: frame.context,
-                            }
-                        }
-                    }
-                    DeferredEvaluationStage::AwaitMappedKeySpace { source, mut mapper } => {
-                        mapper.key_space = child.node;
-                        let read = self.execute_read(SemanticQueryKey::MappedType {
-                            source,
-                            mapper,
-                            context: frame.context,
-                        });
-                        self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
-                    }
-                    DeferredEvaluationStage::AwaitIndexedObject { index } => match index {
-                        IndexKey::Computed(index_node) => {
-                            frame.stage =
-                                DeferredEvaluationStage::AwaitIndexedIndex { object: child.node };
-                            DeferredEvaluationAction::Push {
-                                node: index_node,
-                                context: ProjectionReductionContext::published(
-                                    ProjectionMode::Expanded,
-                                )
-                                .with_orthogonal_axes_from(frame.context),
-                            }
-                        }
-                        index
-                            if self.indexed_access_proves_absence(
-                                child.node,
-                                &index,
-                                frame.context,
-                            ) =>
-                        {
-                            // A completed member domain owns optional absence.
-                            DeferredEvaluationAction::Finish(self.opaque(QueryError::Miss))
-                        }
-                        index => {
-                            let read = self.execute_read(SemanticQueryKey::IndexedAccess {
-                                base: child.node,
-                                index,
-                                mode: indexed_read_mode(
-                                    frame.demand.value_source_context(frame.context),
-                                ),
-                            });
-                            self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
-                        }
-                    },
-                    DeferredEvaluationStage::AwaitIndexedIndex { object } => {
-                        let index = self.normalized_index_key_from_evaluated_node(child.node);
-                        let read = self.execute_read(SemanticQueryKey::IndexedAccess {
-                            base: object,
-                            index,
-                            mode: indexed_read_mode(
-                                frame.demand.value_source_context(frame.context),
-                            ),
-                        });
-                        self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
-                    }
-                    DeferredEvaluationStage::AwaitValueChildren {
-                        data,
-                        children,
-                        mut values,
-                    } => {
-                        values.push(child.node);
-                        if let Some(&next) = children.get(values.len()) {
-                            frame.stage = DeferredEvaluationStage::AwaitValueChildren {
-                                data,
-                                children,
-                                values,
-                            };
-                            DeferredEvaluationAction::Push {
-                                node: next,
-                                context: frame.context,
-                            }
-                        } else {
-                            let rebuilt =
-                                self.rebuild_evaluated_value(frame.node, &data, &children, &values);
-                            DeferredEvaluationAction::Finish(rebuilt)
-                        }
-                    }
-                    DeferredEvaluationStage::EvaluateCurrent => {
-                        unreachable!("only a suspended frame can receive an operand")
-                    }
-                }
-            } else {
-                let frame = frames.last().expect("the evaluator retains a root frame");
-                let context = frame.context;
-                let demand = frame.demand;
-                let current = frames
-                    .last()
-                    .expect("the evaluator retains a root frame")
-                    .node;
-                if let Some(data) = self.graph().node_data(current) {
-                    match data.as_ref() {
-                            _ if demand != DeferredEvaluationDemand::Shell
-                                && self
-                                    .selected_value_children(data.as_ref(), context, demand)
-                                    .is_some() =>
-                            {
-                                let children = self
-                                    .selected_value_children(data.as_ref(), context, demand)
-                                    .expect("selected child topology");
-                                if let Some(&first) = children.first() {
-                                    let frame = frames.last_mut().expect("active evaluator frame");
-                                    frame.stage = DeferredEvaluationStage::AwaitValueChildren {
-                                        data: data.clone(),
-                                        children,
-                                        values: Vec::new(),
-                                    };
-                                    DeferredEvaluationAction::Push {
-                                        node: first,
-                                        context,
-                                    }
-                                } else {
-                                    DeferredEvaluationAction::Finish(current)
-                                }
-                            }
-                            SemanticNodeData::Alias(target) => frames
-                                .last_mut()
-                                .expect("active evaluator frame")
-                                .advance_or_finish(*target),
-                            SemanticNodeData::KeyOf { base } => {
-                                let frame = frames.last_mut().expect("active evaluator frame");
-                                frame.stage = DeferredEvaluationStage::AwaitKeyOfBase;
-                                DeferredEvaluationAction::Push {
-                                    node: *base,
-                                    context: frame.context.into_structural_transit_with_mode(
-                                        ProjectionMode::Navigate,
-                                    ),
-                                }
-                            }
-                            SemanticNodeData::IndexedAccess { object, index } => {
-                                let frame = frames.last_mut().expect("active evaluator frame");
-                                frame.stage = DeferredEvaluationStage::AwaitIndexedObject {
-                                    index: clone_index_key(index),
-                                };
-                                DeferredEvaluationAction::Push {
-                                    node: *object,
-                                    context: self
-                                        .indexed_access_operand_context(*object, frame.context),
-                                }
-                            }
-                            SemanticNodeData::Mapped { source, mapper } => {
-                                let frame = frames.last_mut().expect("active evaluator frame");
-                                if frame.demand != DeferredEvaluationDemand::Shell
-                                    && crate::semantic_query::may_reduce_operator(frame.context)
-                                {
-                                    frame.stage = DeferredEvaluationStage::AwaitMappedSource {
-                                        source: *source,
-                                        mapper: mapper.clone(),
-                                    };
-                                    DeferredEvaluationAction::Push {
-                                        node: *source,
-                                        context: frame.context,
-                                    }
-                                } else {
-                                let read = self.execute_read(SemanticQueryKey::MappedType {
-                                    source: *source,
-                                    mapper: mapper.clone(),
-                                    context: frame.context,
-                                });
-                                self.deferred_read_action(frame, read, || {
-                                    self.opaque(QueryError::Miss)
-                                })
-                                }
-                            }
-                            // A NOMINAL (`unique symbol`) carrier is
-                            // TERMINAL: resolving its head would project the
-                            // annotation down to the shared `symbol`
-                            // primitive and erase the declaring identity that
-                            // IS the type. Finish on the carrier.
-                            SemanticNodeData::TypeOfNominal(_) => frames
-                                .last_mut()
-                                .expect("active evaluator frame")
-                                .advance_or_finish(current),
-                            SemanticNodeData::TypeOf(_) => {
-                                let (value_root, path) =
-                                    data.typeof_head().expect("TypeOf carrier head");
-                                let value_root = value_root.clone();
-                                let path = path.clone();
-                                let type_args: Vec<SemanticNodeId> =
-                                    data.carrier_type_args().to_vec();
-                                let context =
-                                    frames.last().expect("active evaluator frame").context;
-                                let read = self.execute_read(
-                                    self.typeof_key_with_path(value_root, path, context),
-                                );
-                                let frame = frames.last_mut().expect("active evaluator frame");
-                                frame.merge_read(&read);
-                                crate::request_context::observe_component_meta_read_suppress(&read);
-                                match read.value {
-                                    QueryResult::Value(projected) => {
-                                        let next = if type_args.is_empty() {
-                                            projected
-                                        } else {
-                                            self.apply_typeof_instantiation_args(
-                                                projected, &type_args,
-                                            )
-                                        };
-                                        frames
-                                            .last_mut()
-                                            .expect("active evaluator frame")
-                                            .advance_or_finish(next)
-                                    }
-                                    _ => DeferredEvaluationAction::Finish(
-                                        self.opaque(QueryError::Miss),
-                                    ),
-                                }
-                            }
-                            SemanticNodeData::Conditional {
-                                check,
-                                extends,
-                                true_branch_ref,
-                                false_branch_ref,
-                                distributive,
-                                pending,
-                            } => {
-                                let read = self.execute_read(SemanticQueryKey::Conditional {
-                                    check: *check,
-                                    extends: *extends,
-                                    true_branch: *true_branch_ref,
-                                    false_branch: *false_branch_ref,
-                                    distributive: *distributive,
-                                    pending: pending.clone(),
-                                });
-                                let frame = frames.last_mut().expect("active evaluator frame");
-                                self.deferred_read_action(frame, read, || {
-                                    self.opaque(QueryError::Miss)
-                                })
-                            }
-                            SemanticNodeData::TemplateLiteral {
-                                quasis,
-                                expressions,
-                            } => {
-                                let read =
-                                    self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
-                                        pattern: (*quasis).clone(),
-                                        args: Arc::clone(expressions.as_arc()),
-                                        context: self.template_literal_reduce_context(),
-                                    });
-                                let frame = frames.last_mut().expect("active evaluator frame");
-                                self.deferred_read_action(frame, read, || current)
-                            }
-                            SemanticNodeData::InstantiationRef { base, args }
-                                if (demand.follows_mapped_helpers()
-                                    || (demand == DeferredEvaluationDemand::MappedSource
-                                        && !self.type_is_generic(current))
-                                    || (demand == DeferredEvaluationDemand::SelectedValue
-                                        && self.selected_value_has_closed_conditional_body(current, base)))
-                                    && !matches!(
-                                        self.prepared_decl_kind(base),
-                                        Some(
-                                            verter_session_query::declarations::TypeDeclKind::Interface
-                                                | verter_session_query::declarations::TypeDeclKind::Class
-                                        )
-                                    ) =>
-                            {
-                                let slot = self.type_slot_for(
-                                    base.canonical_id.clone(),
-                                    base.owner,
-                                    base.decl_name.clone(),
-                                );
-                                let read = self.execute_read(SemanticQueryKey::Instantiate(
-                                    crate::semantic_query::InstantiateKey::new(
-                                        slot,
-                                        Arc::clone(args.as_arc()),
-                                        self.instantiate_context_for(
-                                            &base.canonical_id,
-                                            demand.value_source_context(context),
-                                        ),
-                                    ),
-                                ));
-                                let frame = frames.last_mut().expect("active evaluator frame");
-                                if matches!(demand, DeferredEvaluationDemand::MappedMemberValue | DeferredEvaluationDemand::MappedMemberInterior) {
-                                    frame.merge_read(&read);
-                                    crate::request_context::observe_component_meta_read_suppress(&read);
-                                    if frame.completeness.is_partial()
-                                        || frame.availability != crate::semantic_query::FactStatus::Complete
-                                    {
-                                        DeferredEvaluationAction::Finish(current)
-                                    } else if let QueryResult::Value(body) = read.value {
-                                        frame.stage = DeferredEvaluationStage::AwaitMappedMemberHead {
-                                            carrier: current,
-                                            base: base.clone(),
-                                            args: Arc::clone(args.as_arc()),
-                                        };
-                                        DeferredEvaluationAction::Push { node: body, context }
-                                    } else {
-                                        DeferredEvaluationAction::Finish(current)
-                                    }
-                                } else if demand == DeferredEvaluationDemand::MappedSignatureSlot {
-                                    frame.merge_read(&read);
-                                    crate::request_context::observe_component_meta_read_suppress(&read);
-                                    if frame.completeness.is_partial()
-                                        || frame.availability != crate::semantic_query::FactStatus::Complete
-                                    {
-                                        DeferredEvaluationAction::Finish(current)
-                                    } else if let QueryResult::Value(body) = read.value {
-                                        frame.stage = DeferredEvaluationStage::AwaitMappedSignatureHead {
-                                            carrier: current,
-                                            base: base.clone(),
-                                            args: Arc::clone(args.as_arc()),
-                                        };
-                                        DeferredEvaluationAction::Push {
-                                            node: body,
-                                            context,
-                                        }
-                                    } else {
-                                        DeferredEvaluationAction::Finish(current)
-                                    }
-                                } else {
-                                    self.deferred_read_action(frame, read, || current)
-                                }
-                            }
-                            SemanticNodeData::Opaque(QueryError::RecursiveRef { .. })
-                                if demand.follows_recursive_helpers() =>
-                            {
-                                let carrier = self.self_reference_declaration(current).unwrap_or(current);
-                                frames.last_mut().expect("active evaluator frame").advance_or_finish(carrier)
-                            }
-                            SemanticNodeData::DeclRef { identity }
-                                if demand == DeferredEvaluationDemand::MappedSource
-                                    && self.prepared_decl_kind(identity) == Some(verter_session_query::declarations::TypeDeclKind::Alias) =>
-                            {
-                                let read = self.execute_read(SemanticQueryKey::Instantiate(
-                                    crate::semantic_query::InstantiateKey::new(
-                                        self.type_slot_for(identity.canonical_id.clone(), identity.owner, identity.decl_name.clone()),
-                                        Arc::from([]),
-                                        self.instantiate_context_for(&identity.canonical_id, context),
-                                    ),
-                                ));
-                                let frame = frames.last_mut().expect("active evaluator frame");
-                                self.deferred_read_action(frame, read, || current)
-                            }
-                            SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
-                                canonical_id,
-                                owner,
-                                name,
-                                whole_hash: _,
-                            }) => {
-                                let base = self.type_slot_for(
-                                    canonical_id.clone(),
-                                    *owner,
-                                    name.clone(),
-                                );
-                                let context =
-                                    frames.last().expect("active evaluator frame").context;
-                                let read = self.execute_read(SemanticQueryKey::Instantiate(
-                                    crate::semantic_query::InstantiateKey::new(
-                                        base,
-                                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                                        self.instantiate_context_for(
-                                            canonical_id,
-                                            demand.value_source_context(context),
-                                        ),
-                                    ),
-                                ));
-                                let frame = frames.last_mut().expect("active evaluator frame");
-                                self.deferred_read_action(frame, read, || {
-                                    self.opaque(QueryError::Miss)
-                                })
-                            }
-                            SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
-                                let context = frames
-                                    .last()
-                                    .expect("active evaluator frame")
-                                    .context
-                                    .into_structural_transit_with_mode(ProjectionMode::Navigate);
-                                let (resolved, observed, carrier_completeness) = self
-                                    .resolve_carrier_subject_node_capturing_suppress(
-                                        current, context,
-                                    );
-                                let frame = frames.last_mut().expect("active evaluator frame");
-                                frame.completeness = frame.completeness.merge(carrier_completeness);
-                                frame.completeness = frame.completeness.or_partial_if(
-                                    observed.result_is_partial
-                                        && !carrier_completeness.is_partial(),
-                                    observed.partial_reasons,
-                                );
-                                frame.cache_suppress |= observed.cache_suppress;
-                                frame.availability = frame.availability.join(resolved.status);
-                                frame.advance_or_finish(resolved.node)
-                            }
-                            _ => DeferredEvaluationAction::Finish(current),
-                        }
+                } else if let Some(child) = completed_child.take() {
+                    let frame = frames
+                        .last_mut()
+                        .expect("a completed operand requires a suspended parent");
+                    self.completed_operand_action(frame, child)
                 } else {
-                    let frame = frames.last_mut().expect("active evaluator frame");
-                    frame.completeness = frame.completeness.merge(ResultCompleteness::partial(
-                        PartialReasonSet::MISSING_SEMANTIC_NODE_DATA,
-                    ));
-                    DeferredEvaluationAction::Finish(self.opaque(QueryError::Miss))
+                    let frame = frames
+                        .last_mut()
+                        .expect("the evaluator retains a root frame");
+                    self.evaluate_current_action(frame)
                 }
             };
 
-            drop(scope);
             match action {
                 DeferredEvaluationAction::Continue => {}
+                DeferredEvaluationAction::Read(key, then) => {
+                    build
+                        .frames
+                        .last_mut()
+                        .expect("a read is named by the frame on top")
+                        .stage = DeferredEvaluationStage::AwaitRead(then);
+                    return DeferredStep::Read(key, build);
+                }
+                DeferredEvaluationAction::Carrier(key, read) => {
+                    build
+                        .frames
+                        .last_mut()
+                        .expect("a carrier is resolved by the frame on top")
+                        .stage = DeferredEvaluationStage::AwaitCarrier(read);
+                    return DeferredStep::Read(key, build);
+                }
                 DeferredEvaluationAction::Push { node, context } => {
-                    let parent = frames.last().expect("a child has a parent demand");
+                    let parent = build.frames.last().expect("a child has a parent demand");
                     // Key enumeration consumes the source's domain,
                     // without demanding all of its member values.
                     let demand = match &parent.stage {
@@ -3323,23 +3347,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // child does. A miss carries that paid step into its
                     // first iteration.
                     if let Err(reasons) = self.charge_connected_work() {
-                        for frame in frames.iter().rev() {
-                            if frame.recording {
-                                self.connected_demand.abandon_cost_scope();
-                            }
-                        }
-                        deliver_abandoned_evaluation_facts(tracers);
-                        return aborted_evaluation_outcome(&frames, None, reasons);
+                        return DeferredStep::Done(
+                            self.stop_deferred_read(*build, &source, reasons),
+                        );
                     }
                     if self.evaluates_to_itself(node, context, demand) {
-                        completed_child = Some(EvaluateDeferredOutcome::complete(node));
+                        build.completed_child = Some(EvaluateDeferredOutcome::complete(node));
                         continue;
                     }
                     // A memo already owns the complete proof. Deliver it
                     // directly into the consuming frame; a warm operand
                     // neither starts a continuation nor seals a copy of it.
                     let served = {
-                        let _scope = tracers.last_mut().expect("active parent tracer").install();
+                        let _scope = build
+                            .tracers
+                            .last_mut()
+                            .expect("active parent tracer")
+                            .install(&source);
                         self.graph()
                             .evaluate_deferred_memo_get(node, context, demand, self.ctx)
                             .filter(|served| {
@@ -3360,7 +3384,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             ),
                             None => EvaluateDeferredOutcome::complete(served.value),
                         };
-                        completed_child = Some(outcome);
+                        build.completed_child = Some(outcome);
                         continue;
                     }
                     let mut frame = DeferredEvaluationFrame::new(
@@ -3378,22 +3402,526 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             ),
                     );
                     frame.recording = true;
-                    frames.push(frame);
-                    prepaid_step = true;
-                    tracers.push(crate::fact_signature_helpers::StepwiseFactTracer::new(
-                        crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
-                    ));
+                    build.frames.push(frame);
+                    build.prepaid_step = true;
+                    build.tracers.push(
+                        crate::fact_signature_helpers::OwnedStepwiseFactTracer::delivering(&source),
+                    );
                 }
                 DeferredEvaluationAction::Finish(result) => {
-                    let frame = frames.pop().expect("finishing an active evaluator frame");
-                    let tracer = tracers.pop().expect("each evaluation owns a tracer");
-                    let finalise = tracer.finish();
-                    deliver_evaluation_facts(&mut tracers, &finalise);
+                    let frame = build
+                        .frames
+                        .pop()
+                        .expect("finishing an active evaluator frame");
+                    let tracer = build.tracers.pop().expect("each evaluation owns a tracer");
+                    let finalise = tracer.finish(&source);
+                    deliver_evaluation_facts(&mut build.tracers, &source, &finalise);
                     let outcome = self.finish_deferred_evaluation_frame(frame, result, finalise);
-                    if frames.is_empty() {
-                        return outcome;
+                    if build.frames.is_empty() {
+                        return DeferredStep::Done(outcome);
                     }
-                    completed_child = Some(outcome);
+                    build.completed_child = Some(outcome);
+                }
+            }
+        }
+    }
+
+    /// The step a frame standing on an operand takes once the operand's
+    /// evaluation completed.
+    fn completed_operand_action(
+        &self,
+        frame: &mut DeferredEvaluationFrame,
+        child: EvaluateDeferredOutcome,
+    ) -> DeferredEvaluationAction {
+        frame.merge_child(child);
+        match std::mem::replace(&mut frame.stage, DeferredEvaluationStage::EvaluateCurrent) {
+            DeferredEvaluationStage::AwaitMappedSignatureHead {
+                carrier,
+                base,
+                args,
+            } => {
+                if frame.completeness.is_partial()
+                    || frame.availability != crate::semantic_query::FactStatus::Complete
+                {
+                    DeferredEvaluationAction::Finish(carrier)
+                } else {
+                    match self
+                        .mapped_helper_head_contains(child.node, MappedHelperHeadKind::Signature)
+                    {
+                        Ok(true) => DeferredEvaluationAction::Finish(carrier),
+                        // A container head, including a callable object or
+                        // an intersection of objects, reaches its closed
+                        // operators and recursive back-edges through the
+                        // shared Expanded instantiator.
+                        Ok(false) => self
+                            .mapped_container_head_action(frame, child.node, carrier, &base, args),
+                        Err(reasons) => {
+                            frame.completeness = frame
+                                .completeness
+                                .merge(ResultCompleteness::partial(reasons));
+                            DeferredEvaluationAction::Finish(carrier)
+                        }
+                    }
+                }
+            }
+            DeferredEvaluationStage::AwaitMappedMemberHead {
+                carrier,
+                base,
+                args,
+            } => {
+                if frame.completeness.is_partial()
+                    || frame.availability != crate::semantic_query::FactStatus::Complete
+                {
+                    DeferredEvaluationAction::Finish(carrier)
+                } else if frame.context.mode != ProjectionMode::Expanded
+                    || !crate::semantic_query::may_reduce_operator(frame.context)
+                {
+                    frame.advance_or_finish(child.node)
+                } else {
+                    self.mapped_container_head_action(frame, child.node, carrier, &base, args)
+                }
+            }
+            DeferredEvaluationStage::AwaitKeyOfBase => DeferredEvaluationAction::Read(
+                SemanticQueryKey::KeyOf {
+                    base: child.node,
+                    context: frame.context,
+                },
+                ReadThen::KeyOf,
+            ),
+            DeferredEvaluationStage::AwaitMappedSource { source, mut mapper } => {
+                // The source is demanded before its domain, as in locator
+                // projection. Keep the binder's value and remap untouched
+                // until the existing per-key materializer binds it.
+                let keyof_source = matches!(self.graph().node_data(mapper.key_space).as_deref(),
+                    Some(SemanticNodeData::KeyOf { base }) if *base == source);
+                let key_space = if keyof_source {
+                    self.graph().intern_preserving_scope(
+                        mapper.key_space,
+                        SemanticNodeData::KeyOf { base: child.node },
+                    )
+                } else if mapper.key_space == source {
+                    child.node
+                } else {
+                    mapper.key_space
+                };
+                if keyof_source
+                    && matches!(
+                        self.graph().node_data(child.node).as_deref(),
+                        Some(SemanticNodeData::Infer { .. })
+                    )
+                {
+                    mapper.key_space = key_space;
+                    DeferredEvaluationAction::Read(
+                        SemanticQueryKey::MappedType {
+                            source: child.node,
+                            mapper,
+                            context: frame.context,
+                        },
+                        ReadThen::Advance(ReadFallback::Miss),
+                    )
+                } else {
+                    frame.stage = DeferredEvaluationStage::AwaitMappedKeySpace {
+                        source: child.node,
+                        mapper,
+                    };
+                    DeferredEvaluationAction::Push {
+                        node: key_space,
+                        context: frame.context,
+                    }
+                }
+            }
+            DeferredEvaluationStage::AwaitMappedKeySpace { source, mut mapper } => {
+                mapper.key_space = child.node;
+                DeferredEvaluationAction::Read(
+                    SemanticQueryKey::MappedType {
+                        source,
+                        mapper,
+                        context: frame.context,
+                    },
+                    ReadThen::Advance(ReadFallback::Miss),
+                )
+            }
+            DeferredEvaluationStage::AwaitIndexedObject { index, origin } => match index {
+                IndexKey::Computed(index_node) => {
+                    frame.stage = DeferredEvaluationStage::AwaitIndexedIndex {
+                        object: child.node,
+                        origin,
+                    };
+                    DeferredEvaluationAction::Push {
+                        node: index_node,
+                        context: ProjectionReductionContext::published(ProjectionMode::Expanded)
+                            .with_orthogonal_axes_from(frame.context),
+                    }
+                }
+                index => self.indexed_read_action(frame, child.node, index, origin),
+            },
+            DeferredEvaluationStage::AwaitIndexedIndex { object, origin } => {
+                let index = self.normalized_index_key_from_evaluated_node(child.node);
+                self.indexed_read_action(frame, object, index, origin)
+            }
+            DeferredEvaluationStage::AwaitValueChildren {
+                data,
+                children,
+                mut values,
+            } => {
+                values.push(child.node);
+                if let Some(&next) = children.get(values.len()) {
+                    frame.stage = DeferredEvaluationStage::AwaitValueChildren {
+                        data,
+                        children,
+                        values,
+                    };
+                    DeferredEvaluationAction::Push {
+                        node: next,
+                        context: frame.context,
+                    }
+                } else {
+                    let rebuilt =
+                        self.rebuild_evaluated_value(frame.node, &data, &children, &values);
+                    DeferredEvaluationAction::Finish(rebuilt)
+                }
+            }
+            DeferredEvaluationStage::EvaluateCurrent
+            | DeferredEvaluationStage::AwaitRead(_)
+            | DeferredEvaluationStage::AwaitCarrier(_) => {
+                unreachable!("only a frame suspended on an operand can receive one")
+            }
+        }
+    }
+
+    /// The step a frame takes at its current node.
+    fn evaluate_current_action(
+        &self,
+        frame: &mut DeferredEvaluationFrame,
+    ) -> DeferredEvaluationAction {
+        let context = frame.context;
+        let demand = frame.demand;
+        let current = frame.node;
+        let Some(data) = self.graph().node_data(current) else {
+            frame.completeness = frame.completeness.merge(ResultCompleteness::partial(
+                PartialReasonSet::MISSING_SEMANTIC_NODE_DATA,
+            ));
+            return DeferredEvaluationAction::Finish(self.opaque(QueryError::Miss));
+        };
+        match data.as_ref() {
+            _ if demand != DeferredEvaluationDemand::Shell
+                && self
+                    .selected_value_children(data.as_ref(), context, demand)
+                    .is_some() =>
+            {
+                let children = self
+                    .selected_value_children(data.as_ref(), context, demand)
+                    .expect("selected child topology");
+                if let Some(&first) = children.first() {
+                    frame.stage = DeferredEvaluationStage::AwaitValueChildren {
+                        data: data.clone(),
+                        children,
+                        values: Vec::new(),
+                    };
+                    DeferredEvaluationAction::Push {
+                        node: first,
+                        context,
+                    }
+                } else {
+                    DeferredEvaluationAction::Finish(current)
+                }
+            }
+            SemanticNodeData::Alias(target) => frame.advance_or_finish(*target),
+            SemanticNodeData::KeyOf { base } => {
+                frame.stage = DeferredEvaluationStage::AwaitKeyOfBase;
+                DeferredEvaluationAction::Push {
+                    node: *base,
+                    context: frame
+                        .context
+                        .into_structural_transit_with_mode(ProjectionMode::Navigate),
+                }
+            }
+            SemanticNodeData::IndexedAccess {
+                object,
+                index,
+                origin,
+            } => {
+                frame.stage = DeferredEvaluationStage::AwaitIndexedObject {
+                    index: clone_index_key(index),
+                    origin: *origin,
+                };
+                DeferredEvaluationAction::Push {
+                    node: *object,
+                    context: self.indexed_access_operand_context(*object, frame.context),
+                }
+            }
+            SemanticNodeData::Mapped { source, mapper } => {
+                if frame.demand != DeferredEvaluationDemand::Shell
+                    && crate::semantic_query::may_reduce_operator(frame.context)
+                {
+                    frame.stage = DeferredEvaluationStage::AwaitMappedSource {
+                        source: *source,
+                        mapper: mapper.clone(),
+                    };
+                    DeferredEvaluationAction::Push {
+                        node: *source,
+                        context: frame.context,
+                    }
+                } else {
+                    DeferredEvaluationAction::Read(
+                        SemanticQueryKey::MappedType {
+                            source: *source,
+                            mapper: mapper.clone(),
+                            context: frame.context,
+                        },
+                        ReadThen::Advance(ReadFallback::Miss),
+                    )
+                }
+            }
+            // A NOMINAL (`unique symbol`) carrier is TERMINAL: resolving its
+            // head would project the annotation down to the shared `symbol`
+            // primitive and erase the declaring identity that IS the type.
+            // Finish on the carrier.
+            SemanticNodeData::TypeOfNominal(_) => frame.advance_or_finish(current),
+            SemanticNodeData::TypeOf(_) => {
+                let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
+                DeferredEvaluationAction::Read(
+                    self.typeof_key_with_path(value_root.clone(), path.clone(), context),
+                    ReadThen::TypeOf {
+                        type_args: data.carrier_type_args().to_vec(),
+                    },
+                )
+            }
+            SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                distributive,
+                pending,
+            } => DeferredEvaluationAction::Read(
+                SemanticQueryKey::Conditional {
+                    check: *check,
+                    extends: *extends,
+                    true_branch: *true_branch_ref,
+                    false_branch: *false_branch_ref,
+                    distributive: *distributive,
+                    pending: pending.clone(),
+                },
+                ReadThen::Advance(ReadFallback::Miss),
+            ),
+            SemanticNodeData::TemplateLiteral {
+                quasis,
+                expressions,
+            } => DeferredEvaluationAction::Read(
+                SemanticQueryKey::TemplateLiteralReduce {
+                    pattern: (*quasis).clone(),
+                    args: Arc::clone(expressions.as_arc()),
+                    context: self.template_literal_reduce_context(),
+                },
+                ReadThen::Advance(ReadFallback::Node(current)),
+            ),
+            SemanticNodeData::InstantiationRef { base, args }
+                if (demand.follows_mapped_helpers()
+                    || (demand == DeferredEvaluationDemand::MappedSource
+                        && !self.type_is_generic(current))
+                    || (demand == DeferredEvaluationDemand::SelectedValue
+                        && self.selected_value_has_closed_conditional_body(current, base)))
+                    && !matches!(
+                        self.prepared_decl_kind(base),
+                        Some(
+                            verter_session_query::declarations::TypeDeclKind::Interface
+                                | verter_session_query::declarations::TypeDeclKind::Class
+                        )
+                    ) =>
+            {
+                let slot = self.type_slot_for(
+                    base.canonical_id.clone(),
+                    base.owner,
+                    base.decl_name.clone(),
+                );
+                let key =
+                    SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                        slot,
+                        Arc::clone(args.as_arc()),
+                        self.instantiate_context_for(
+                            &base.canonical_id,
+                            demand.value_source_context(context),
+                        ),
+                    ));
+                let then = match demand {
+                    DeferredEvaluationDemand::MappedMemberValue
+                    | DeferredEvaluationDemand::MappedMemberInterior => ReadThen::HelperBody {
+                        carrier: current,
+                        base: base.clone(),
+                        args: Arc::clone(args.as_arc()),
+                        signature: false,
+                    },
+                    DeferredEvaluationDemand::MappedSignatureSlot => ReadThen::HelperBody {
+                        carrier: current,
+                        base: base.clone(),
+                        args: Arc::clone(args.as_arc()),
+                        signature: true,
+                    },
+                    _ => ReadThen::Advance(ReadFallback::Node(current)),
+                };
+                DeferredEvaluationAction::Read(key, then)
+            }
+            SemanticNodeData::Opaque(QueryError::RecursiveRef { .. })
+                if demand.follows_recursive_helpers() =>
+            {
+                let carrier = self.self_reference_declaration(current).unwrap_or(current);
+                frame.advance_or_finish(carrier)
+            }
+            SemanticNodeData::DeclRef { identity }
+                if demand == DeferredEvaluationDemand::MappedSource
+                    && self.prepared_decl_kind(identity)
+                        == Some(verter_session_query::declarations::TypeDeclKind::Alias) =>
+            {
+                DeferredEvaluationAction::Read(
+                    SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                        self.type_slot_for(
+                            identity.canonical_id.clone(),
+                            identity.owner,
+                            identity.decl_name.clone(),
+                        ),
+                        Arc::from([]),
+                        self.instantiate_context_for(&identity.canonical_id, context),
+                    )),
+                    ReadThen::Advance(ReadFallback::Node(current)),
+                )
+            }
+            SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+                canonical_id,
+                owner,
+                name,
+                whole_hash: _,
+            }) => {
+                let base = self.type_slot_for(canonical_id.clone(), *owner, name.clone());
+                DeferredEvaluationAction::Read(
+                    SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                        base,
+                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                        self.instantiate_context_for(
+                            canonical_id,
+                            demand.value_source_context(context),
+                        ),
+                    )),
+                    ReadThen::Advance(ReadFallback::Miss),
+                )
+            }
+            SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
+                let context = frame
+                    .context
+                    .into_structural_transit_with_mode(ProjectionMode::Navigate);
+                let step = self.begin_captured_carrier_read(current, context);
+                self.captured_carrier_action(frame, step)
+            }
+            _ => DeferredEvaluationAction::Finish(current),
+        }
+    }
+
+    /// The step a frame resolving a `BareRef` / `ImportType` carrier takes
+    /// from its captured resolution's latest stage: the read it names next,
+    /// or the resolved subject, its capture folded into the frame's own
+    /// accumulators — the publish gate is a separate admission authority
+    /// from any enclosing build frame.
+    fn captured_carrier_action(
+        &self,
+        frame: &mut DeferredEvaluationFrame,
+        step: super::carrier::CapturedCarrierStep,
+    ) -> DeferredEvaluationAction {
+        let (resolved, observed, carrier_completeness) = match step {
+            super::carrier::CapturedCarrierStep::Read(key, read) => {
+                return DeferredEvaluationAction::Carrier(key, read)
+            }
+            super::carrier::CapturedCarrierStep::Done(resolved, observed, completeness) => {
+                (resolved, observed, completeness)
+            }
+        };
+        frame.completeness = frame.completeness.merge(carrier_completeness);
+        frame.completeness = frame.completeness.or_partial_if(
+            observed.result_is_partial && !carrier_completeness.is_partial(),
+            observed.partial_reasons,
+        );
+        frame.cache_suppress |= observed.cache_suppress;
+        frame.availability = frame.availability.join(resolved.status);
+        frame.advance_or_finish(resolved.node)
+    }
+
+    /// The step a frame standing at a read takes with its answer.
+    fn deferred_read_then(
+        &self,
+        frame: &mut DeferredEvaluationFrame,
+        then: ReadThen,
+        mut read: CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> DeferredEvaluationAction {
+        match then {
+            ReadThen::Advance(fallback) => self.deferred_read_action(frame, read, fallback),
+            ReadThen::Indexed {
+                object,
+                index,
+                origin,
+            } => self.indexed_read_answer(frame, read, object, index, origin),
+            ReadThen::KeyOf => {
+                // A `keyof` the builder kept as a carrier over a
+                // declaration, an application or a mapped type is
+                // evaluated here, at a demand for its value: its keys where
+                // they settle, as the checker prints them.
+                if matches!(
+                    frame.demand,
+                    DeferredEvaluationDemand::Shell | DeferredEvaluationDemand::MappedSource
+                ) {
+                    if let QueryResult::Value(keys) = read.value {
+                        if let Some(settled) = self.settled_key_of_carrier(keys, frame.context) {
+                            read.value = QueryResult::Value(settled);
+                        }
+                    }
+                }
+                self.deferred_read_action(frame, read, ReadFallback::Miss)
+            }
+            ReadThen::TypeOf { type_args } => {
+                frame.merge_read(&read);
+                crate::request_context::observe_component_meta_read_suppress(&read);
+                match read.value {
+                    QueryResult::Value(projected) => {
+                        let next = if type_args.is_empty() {
+                            projected
+                        } else {
+                            self.apply_typeof_instantiation_args(projected, &type_args)
+                        };
+                        frame.advance_or_finish(next)
+                    }
+                    _ => DeferredEvaluationAction::Finish(self.opaque(QueryError::Miss)),
+                }
+            }
+            ReadThen::HelperBody {
+                carrier,
+                base,
+                args,
+                signature,
+            } => {
+                frame.merge_read(&read);
+                crate::request_context::observe_component_meta_read_suppress(&read);
+                if frame.completeness.is_partial()
+                    || frame.availability != crate::semantic_query::FactStatus::Complete
+                {
+                    DeferredEvaluationAction::Finish(carrier)
+                } else if let QueryResult::Value(body) = read.value {
+                    frame.stage = if signature {
+                        DeferredEvaluationStage::AwaitMappedSignatureHead {
+                            carrier,
+                            base,
+                            args,
+                        }
+                    } else {
+                        DeferredEvaluationStage::AwaitMappedMemberHead {
+                            carrier,
+                            base,
+                            args,
+                        }
+                    };
+                    DeferredEvaluationAction::Push {
+                        node: body,
+                        context: frame.context,
+                    }
+                } else {
+                    DeferredEvaluationAction::Finish(carrier)
                 }
             }
         }
@@ -3598,20 +4126,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return frame.advance_or_finish(head);
         }
         match self.mapped_helper_head_contains(head, MappedHelperHeadKind::Container) {
-            Ok(true) => {
-                let read = self.execute_read(SemanticQueryKey::Instantiate(
-                    crate::semantic_query::InstantiateKey::new(
-                        self.type_slot_for(
-                            base.canonical_id.clone(),
-                            base.owner,
-                            base.decl_name.clone(),
-                        ),
-                        args,
-                        self.instantiate_context_for(&base.canonical_id, frame.context),
+            Ok(true) => DeferredEvaluationAction::Read(
+                SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                    self.type_slot_for(
+                        base.canonical_id.clone(),
+                        base.owner,
+                        base.decl_name.clone(),
                     ),
-                ));
-                self.deferred_read_action(frame, read, || carrier)
-            }
+                    args,
+                    self.instantiate_context_for(&base.canonical_id, frame.context),
+                )),
+                ReadThen::Advance(ReadFallback::Node(carrier)),
+            ),
             Ok(false) => frame.advance_or_finish(head),
             Err(reasons) => {
                 frame.completeness = frame

@@ -2340,6 +2340,27 @@ impl HostStoreView {
             .project_identity_for(canonical)
     }
 
+    /// The effective environment a native fact basis commits for
+    /// `canonical` under this view: the parse / resolve / type / lib
+    /// environment and the owning project identity, read root-relative from
+    /// the captured published root.
+    ///
+    /// Demand-time only, never during a build: the cost is scalar reads and
+    /// one point lookup of the owning project.
+    pub(crate) fn native_environment_for(
+        &self,
+        canonical: &str,
+    ) -> (
+        crate::session_view::EnvHashes,
+        crate::file_artifact_store::ProjectIdentity,
+    ) {
+        let env_root = &self.snapshot.roots.project_env_root;
+        (
+            env_root.env_hashes_for(canonical),
+            env_root.project_identity_for(canonical),
+        )
+    }
+
     fn is_tombstoned(&self, canonical_id: &str) -> bool {
         self.snapshot.roots.is_tombstoned(canonical_id)
     }

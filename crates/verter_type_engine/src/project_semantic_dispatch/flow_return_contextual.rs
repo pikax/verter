@@ -12,6 +12,55 @@ use verter_session_query::flow::slice::SliceExpr;
 
 impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanticDispatch<'_, C> {
     /// Expand a contextual alias without erasing marker applications in its body.
+    /// The checker's error type `contextual` holds, if it holds one: a written
+    /// union or intersection with the error type among its arms IS the error
+    /// type (`getUnionType`, `getIntersectionType`), through every declaration
+    /// that names it. It gives its literal no members, no signatures and no
+    /// marker, and reads as `any` where a literal's `this` reads it.
+    pub(in crate::project_semantic_dispatch) fn contextual_error_type(
+        &self,
+        contextual: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        self.contextual_error_arms(contextual).first().copied()
+    }
+
+    /// Each occurrence of the checker's TS2304 the error type `contextual`
+    /// holds reports, in the file `canonical`.
+    pub(in crate::project_semantic_dispatch) fn contextual_undeclared_names(
+        &self,
+        contextual: SemanticNodeId,
+        canonical: &str,
+    ) -> Vec<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        self.contextual_error_arms(contextual)
+            .into_iter()
+            .flat_map(|arm| self.undeclared_name_occurrences(arm, canonical))
+            .collect()
+    }
+
+    /// The error types `contextual` holds, in the order its arms are read.
+    fn contextual_error_arms(&self, contextual: SemanticNodeId) -> Vec<SemanticNodeId> {
+        let mut arms_found = Vec::new();
+        let mut pending = vec![contextual];
+        let mut seen = rustc_hash::FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let view = self.contextual_carrier_view(node);
+            match self.graph().node_data(view).as_deref() {
+                Some(SemanticNodeData::Opaque(error))
+                    if crate::project_semantic_dispatch::build::is_certified_recovery(error) =>
+                {
+                    arms_found.push(view);
+                }
+                Some(SemanticNodeData::Union(arms)) => pending.extend(arms.iter().copied()),
+                Some(SemanticNodeData::Intersection(arms)) => pending.extend(arms.iter().copied()),
+                _ => {}
+            }
+        }
+        arms_found
+    }
+
     pub(in crate::project_semantic_dispatch) fn contextual_carrier_view(
         &self,
         node: SemanticNodeId,
@@ -196,7 +245,7 @@ impl CalleeParameters {
     }
 }
 
-impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// Whether a method of an object literal typed by `contextual` may take
     /// an explicit `this` from its contextual signature: the checker copies a
     /// contextual signature's `this` parameter onto the method
@@ -402,8 +451,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         Some(FunctionArgumentRequest {
             demand,
             mark: FunctionArgumentMark {
-                holds_before: self.holds.len(),
-                degradation_before: self.degradation,
+                holds_before: self.st.holds.len(),
+                degradation_before: self.st.degradation,
             },
         })
     }
@@ -420,10 +469,11 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             holds_before,
             degradation_before,
         } = mark;
-        let finished = self.holds.len() == holds_before && self.degradation == degradation_before;
-        self.holds.truncate(holds_before);
+        let finished =
+            self.st.holds.len() == holds_before && self.st.degradation == degradation_before;
+        self.st.holds.truncate(holds_before);
         if !finished {
-            self.degradation = degradation_before;
+            self.st.degradation = degradation_before;
             return None;
         }
         let Positional::Value(node) = value else {

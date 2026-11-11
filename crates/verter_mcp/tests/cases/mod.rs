@@ -5,6 +5,7 @@
 
 mod carrier_routing_no_vue_gate;
 mod http_readiness;
+mod index_backed_tool_discovery;
 // Reads optional audit capture: runs in the instrumentation lane.
 #[cfg(feature = "semantic-observe")]
 mod mcp_tool_audit_integration;

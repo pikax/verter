@@ -589,8 +589,16 @@ impl VerterHost {
             dep.dependencies = deps;
             dep.generation = snap.generation;
         }
-        self.derived_raw_entry_or_default(canonical_id.to_string())
-            .evicted = false;
+        {
+            let mut derived_ref = self.derived_raw_entry_or_default(canonical_id.to_string());
+            let derived = derived_ref.value_mut();
+            if derived.evicted {
+                derived.evicted = false;
+                self.project_type_store
+                    .workspace_index()
+                    .note_membership_change(canonical_id);
+            }
+        }
         Ok(true)
     }
 
@@ -1356,6 +1364,13 @@ impl VerterHost {
         {
             let mut derived_ref = self.derived_raw_entry_or_default(canonical_id.to_string());
             let derived = derived_ref.value_mut();
+            if !derived.evicted {
+                // The scheduler keeps the node, so the index learns of this
+                // membership change from the host.
+                self.project_type_store
+                    .workspace_index()
+                    .note_membership_change(canonical_id);
+            }
             derived.mark_evicted(pre_evict_hash);
             derived.cached_tsc_extract = None;
             derived.clear_raw_template_analysis();

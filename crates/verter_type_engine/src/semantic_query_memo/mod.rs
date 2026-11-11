@@ -1910,6 +1910,44 @@ impl SemanticGraphStore {
             .projection_hops_walked
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped once per machinery relation root whose root obligation frame
+    /// opens.
+    pub fn record_relation_root_opened(&self) {
+        self.stats
+            .relation_roots_opened
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Bumped once per structural relation reduction.
+    pub fn record_relation_reduction(&self) {
+        self.stats
+            .relation_reductions
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Bumped once per call candidate whose applicability check begins.
+    pub fn record_call_candidate_begun(&self) {
+        self.stats
+            .call_candidates_begun
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Bumped once per argument relation a call's first inference pass
+    /// runs.
+    pub fn record_call_argument_related(&self) {
+        self.stats
+            .call_arguments_related
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Bumped by a query entry's admission once per stage it computes.
+    pub fn record_admission_stage(&self) {
+        self.stats
+            .admission_stages_walked
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Bumped by a deferred evaluation once per step it computes.
+    pub fn record_deferred_step(&self) {
+        self.stats
+            .deferred_steps_evaluated
+            .fetch_add(1, Ordering::Relaxed);
+    }
     pub fn record_conditional_decided(&self) {
         self.stats
             .conditional_decided_count

@@ -213,6 +213,7 @@ impl<'a, M: verter_audit::observe::ObserveExec> ComponentMetaQueryEngine<'a, M> 
         if let verter_type_engine::semantic_query::SemanticNodeData::IndexedAccess {
             object,
             index: verter_type_engine::semantic_query::IndexKey::String(member_name),
+            ..
         } = root_data.as_ref()
         {
             let object_data = self.dispatch.graph().read_in_scope(*object);
@@ -818,7 +819,7 @@ fn node_references_type_param_names<M: verter_audit::observe::ObserveExec>(
             SemanticNodeData::Alias(inner) => vec![*inner],
             SemanticNodeData::Array { element, .. } => vec![*element],
             SemanticNodeData::KeyOf { base } => vec![*base],
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 let mut parts = vec![*object];
                 if let verter_type_engine::semantic_query::IndexKey::Computed(inner) = index {
                     parts.push(*inner);

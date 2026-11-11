@@ -293,9 +293,147 @@ impl CarrierResolution {
     }
 }
 
-impl CarrierResolutionPlan {
+/// A reference head's plan as far as it goes without reading another query:
+/// settled, needing its arguments, or — an eager head that resolved to a
+/// declaration — reading that declaration next ([`AnchorRead`]).
+pub(super) enum HeadPlan {
+    Ready(CarrierResolution),
+    NeedsArgs(CarrierArgsContinuation),
+    ReadsAnchor(AnchorRead),
+}
+
+impl HeadPlan {
     fn complete(node: SemanticNodeId) -> Self {
         Self::Ready(CarrierResolution::complete(node))
+    }
+}
+
+/// An eager head's declaration read: the `ResolveDecl` it names, and what
+/// the head resolved before it, which the read's answer resumes
+/// ([`ProjectSemanticDispatch::resume_anchor`]).
+pub(super) struct AnchorRead {
+    key: SemanticQueryKey,
+    resolved_root: ResolvedRootIdentity,
+    decl_identity: DeclIdentity,
+    arg_count: usize,
+    context: ProjectionReductionContext,
+}
+
+impl AnchorRead {
+    /// The declaration read the head waits on.
+    pub(super) fn key(&self) -> &SemanticQueryKey {
+        &self.key
+    }
+}
+
+/// An `import("./m").A.B` head's plan: its first segment's head plan, and
+/// the qualified tail projected from that head's node once it settles.
+pub(super) struct ImportHeadPlan {
+    pub(super) head: HeadPlan,
+    pub(super) tail: Option<QualifiedTail>,
+}
+
+/// The qualifier segments past an import type's head, projected from the
+/// head's settled node as one `ProjectPath` read.
+pub(super) struct QualifiedTail {
+    path: verter_type_expr::OwnedSlice<PathSegment>,
+    context: ProjectionReductionContext,
+}
+
+/// A carrier subject's resolution as an owned continuation: the carrier
+/// (`BareRef`, `ImportType` or `typeof`) whose head it resolves, and where
+/// that resolution stands — at the query it reads next, with everything its
+/// earlier stages computed retained. It borrows nothing of the dispatcher
+/// that stepped it, so it is carried across a suspension to whichever thread
+/// resumes it ([`ProjectSemanticDispatch::resume_carrier_read`]). While it
+/// stands between its stages its carrier is held on the dispatcher's
+/// normalization record (the pre-memo cycle guard); an abandoned one
+/// releases it ([`ProjectSemanticDispatch::abandon_carrier_read`]).
+pub(super) struct CarrierRead {
+    node: SemanticNodeId,
+    stage: CarrierStage,
+}
+
+/// The read a carrier resolution stands at, and what it computed before it.
+enum CarrierStage {
+    /// Between the first stage and its read: never stored.
+    Begun,
+    /// A `typeof` carrier's value read; the carrier's instantiation
+    /// arguments apply to its answer.
+    Typeof { type_args: Vec<SemanticNodeId> },
+    /// An eager head's declaration read, then its finish over `args`.
+    Anchor {
+        anchor: Box<AnchorRead>,
+        args: Arc<[SemanticNodeId]>,
+        tail: Option<QualifiedTail>,
+    },
+    /// The read finishing a head: an instantiation joined with the head's
+    /// status, or a `typeof` import's value with its arguments applied.
+    Finish {
+        source_status: FactStatus,
+        apply: Option<Arc<[SemanticNodeId]>>,
+        tail: Option<QualifiedTail>,
+    },
+    /// A qualified import head's tail projection.
+    Tail { head_status: FactStatus },
+}
+
+/// Where a carrier resolution stands after its latest stage.
+pub(super) enum CarrierStep {
+    /// The carrier's resolved subject.
+    Done(CarrierResolution),
+    /// The resolution reads this query next, holding everything it computed.
+    Read(SemanticQueryKey, Box<CarrierRead>),
+}
+
+// A suspended carrier resolution is owned state a frame carries to whichever
+// thread resumes it, advanced by value one stage at a time.
+static_assertions::assert_impl_all!(CarrierRead: Send);
+static_assertions::assert_not_impl_any!(CarrierRead: Clone, Copy);
+
+/// A carrier subject's resolution under the capture the deferred evaluator
+/// reads it with ([`ProjectSemanticDispatch::resolve_carrier_subject_node_capturing_suppress`]):
+/// the resolution, standing at the query it reads next, and the capture its
+/// earlier stages observed — the nested fact tracer, the build-local taint
+/// frame and the cold-compute completeness — each installed again for the
+/// stage that resumes it, so a resolution waiting across the steps of a
+/// continuation observes exactly what one native call would.
+pub(super) struct CapturedCarrierRead {
+    read: Box<CarrierRead>,
+    capture: CarrierCapture,
+}
+
+/// What a captured carrier resolution observed so far.
+struct CarrierCapture {
+    tracer: crate::fact_signature_helpers::OwnedStepwiseFactTracer,
+    taint: crate::project_semantic_dispatch::BuildLocalTaint,
+    completeness: crate::semantic_query::ResultCompleteness,
+}
+
+/// Where a captured carrier resolution stands after its latest stage.
+pub(super) enum CapturedCarrierStep {
+    /// The carrier's resolved subject, the observation its stages captured
+    /// (already folded into the enclosing frame) and their completeness.
+    Done(
+        CarrierResolution,
+        crate::project_semantic_dispatch::BuildLocalTaint,
+        crate::semantic_query::ResultCompleteness,
+    ),
+    /// The resolution reads this query next, holding everything it captured.
+    Read(SemanticQueryKey, Box<CapturedCarrierRead>),
+}
+
+static_assertions::assert_impl_all!(CapturedCarrierRead: Send);
+static_assertions::assert_not_impl_any!(CapturedCarrierRead: Clone, Copy);
+
+impl QualifiedTail {
+    /// The path read over the settled head `base`.
+    pub(super) fn key(&self, base: SemanticNodeId) -> SemanticQueryKey {
+        SemanticQueryKey::ProjectPath {
+            base,
+            path: self.path.clone(),
+            context: self.context,
+        }
     }
 }
 
@@ -901,12 +1039,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.enclosing_namespace_type_member(canonical_id.as_ref(), namespace, name, outer_bound)
     }
 
-    pub(super) fn plan_bare_ref_head(
+    /// Plan a `BareRef` head as far as it goes without reading another
+    /// query: the resolver's in-place lookups decide the head, and an eager
+    /// head that resolved to a declaration names that declaration's read
+    /// ([`HeadPlan::ReadsAnchor`]) instead of making it.
+    pub(super) fn plan_bare_ref_head_steps(
         &self,
         ctx: &CarrierResolverContext<'_>,
         name: &Arc<str>,
         arg_count: usize,
-    ) -> CarrierResolutionPlan {
+    ) -> HeadPlan {
         let scope = ctx.scope();
         let name_resolution = ctx.name_resolution();
         let scope_payload = ctx.scope_payload();
@@ -915,7 +1057,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mode = ctx.mode();
 
         if let Some((specifier, decl_name)) = self.ambient_namespace_type_target(scope, name) {
-            return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::ExternalModule {
+            return HeadPlan::NeedsArgs(CarrierArgsContinuation::ExternalModule {
                 specifier,
                 decl_name,
                 name: Arc::clone(name),
@@ -933,7 +1075,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(member_type) =
                 self.resolve_enum_member_type(scope, name_resolution, scope_payload, name.as_ref())
             {
-                return CarrierResolutionPlan::complete(member_type);
+                return HeadPlan::complete(member_type);
             }
         }
 
@@ -954,7 +1096,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && !shadowing.is_shadowing_lib(name.as_ref())
             && self.runtime_nominal_global_name(name.as_ref()).is_some()
         {
-            return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::Intern {
+            return HeadPlan::NeedsArgs(CarrierArgsContinuation::Intern {
                 head: RefHeadResolution::Builtin(DeclIdentity {
                     canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -984,7 +1126,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 whole_hash: HashValue::default(),
                 decl_name: verter_type_expr::OwnedStr::from(name),
             };
-            return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::Builtin {
+            return HeadPlan::NeedsArgs(CarrierArgsContinuation::Builtin {
                 identity: builtin_identity,
                 name: Arc::clone(name),
                 scope: scope.clone(),
@@ -1115,15 +1257,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if let Some((specifier, decl_name)) =
                     self.external_module_type_target(canonical_id.as_ref(), *owner, name.as_ref())
                 {
-                    return CarrierResolutionPlan::NeedsArgs(
-                        CarrierArgsContinuation::ExternalModule {
-                            specifier,
-                            decl_name,
-                            name: Arc::clone(name),
-                            scope: scope.clone(),
-                            context: reduction_context,
-                        },
-                    );
+                    return HeadPlan::NeedsArgs(CarrierArgsContinuation::ExternalModule {
+                        specifier,
+                        decl_name,
+                        name: Arc::clone(name),
+                        scope: scope.clone(),
+                        context: reduction_context,
+                    });
                 }
             }
         }
@@ -1154,13 +1294,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(member_type) =
                 self.resolve_enum_member_type(scope, name_resolution, scope_payload, name.as_ref())
             {
-                return CarrierResolutionPlan::complete(member_type);
+                return HeadPlan::complete(member_type);
             }
             // A conditional's `infer` declaration read outside its scope,
             // with nothing else binding the name, is the checker's TS2304 —
             // applied (`U<string>`) or bare.
             if let Some(recovery) = ctx.env().get(&out_of_scope_infer_env_key(name.as_ref())) {
-                return CarrierResolutionPlan::complete(*recovery);
+                return HeadPlan::complete(*recovery);
+            }
+            // A name no scope binds, in a project whose program is every
+            // declaration there is, is the checker's TS2304.
+            if self.names_nothing_in_program(scope, name) {
+                return HeadPlan::complete(
+                    crate::semantic_query::checker_policy::undeclared_name_recovery(
+                        self.graph(),
+                        Arc::clone(name),
+                        scope.clone(),
+                    ),
+                );
             }
             // Currently-unresolved authored reference. Under the carrier
             // modes the head STAYS a scoped `BareRef` carrier — the authored
@@ -1174,13 +1325,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 mode,
                 ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
             ) {
-                return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::Intern {
+                return HeadPlan::NeedsArgs(CarrierArgsContinuation::Intern {
                     head: RefHeadResolution::Unresolved,
                     name: Arc::clone(name),
                     scope: scope.clone(),
                 });
             }
-            return CarrierResolutionPlan::complete(self.opaque(QueryError::Miss));
+            return HeadPlan::complete(self.opaque(QueryError::Miss));
         };
 
         // Recursive-ref back-edge: a 0-arg head resolving to an identity already
@@ -1204,7 +1355,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .ctx
                 .authoritative_current_content_hash(resolved_root.canonical_id.as_ref())
                 .unwrap_or_default();
-            return CarrierResolutionPlan::complete(self.recursive_ref_sentinel(
+            return HeadPlan::complete(self.recursive_ref_sentinel(
                 &DeclIdentity {
                     canonical_id: resolved_root.canonical_id.clone(),
                     owner: resolved_root.owner,
@@ -1245,14 +1396,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ))
         {
             if arg_count == 0 {
-                return CarrierResolutionPlan::complete(self.intern_ref_head_carrier(
+                return HeadPlan::complete(self.intern_ref_head_carrier(
                     RefHeadResolution::Resolved(decl_identity),
                     name,
                     scope,
                     Arc::from(Vec::new().into_boxed_slice()),
                 ));
             }
-            return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::Intern {
+            return HeadPlan::NeedsArgs(CarrierArgsContinuation::Intern {
                 head: RefHeadResolution::Resolved(decl_identity),
                 name: Arc::clone(name),
                 scope: scope.clone(),
@@ -1262,22 +1413,46 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Eager modes (Expanded / Identity): resolve the decl, then route
         // through `Instantiate` when the caller supplied args OR the decl has
         // type parameters (defaults must apply); a non-generic, no-arg decl
-        // short-circuits to the bare `ResolveDecl` result.
-        let anchor = self.carrier_resolution_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-            scope: ScopeId {
-                canonical_id: resolved_root.canonical_id.clone(),
-                owner: resolved_root.owner,
-                local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
-                    resolved_root.owner,
-                ),
-            },
-            name: resolved_root.symbol_name.clone(),
-        }));
-        if matches!(anchor.status, FactStatus::Unavailable(_)) {
-            return CarrierResolutionPlan::Ready(anchor);
-        }
+        // short-circuits to the bare `ResolveDecl` result. The declaration
+        // read is the head's next transition ([`AnchorRead`]).
+        HeadPlan::ReadsAnchor(AnchorRead {
+            key: SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                scope: ScopeId {
+                    canonical_id: resolved_root.canonical_id.clone(),
+                    owner: resolved_root.owner,
+                    local_scope: None,
+                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                        resolved_root.owner,
+                    ),
+                },
+                name: resolved_root.symbol_name.clone(),
+            }),
+            resolved_root,
+            decl_identity,
+            arg_count,
+            context: reduction_context,
+        })
+    }
 
+    /// An eager head resumed with its declaration's read: the declaration
+    /// itself, or the instantiation it routes through when the reference
+    /// applies arguments or the declaration has type parameters (whose
+    /// defaults must apply).
+    pub(super) fn resume_anchor(
+        &self,
+        anchor: AnchorRead,
+        read: CarrierResolution,
+    ) -> CarrierResolutionPlan {
+        if matches!(read.status, FactStatus::Unavailable(_)) {
+            return CarrierResolutionPlan::Ready(read);
+        }
+        let AnchorRead {
+            resolved_root,
+            decl_identity,
+            arg_count,
+            context,
+            ..
+        } = anchor;
         let decl_routes_through_instantiate = self
             .ctx
             .prepared_type_decl_return_only(
@@ -1287,13 +1462,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )
             .is_some_and(|prepared| !prepared.type_parameters.is_empty());
         if arg_count == 0 && !decl_routes_through_instantiate {
-            CarrierResolutionPlan::Ready(anchor)
+            CarrierResolutionPlan::Ready(read)
         } else {
             CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::Instantiate {
                 identity: decl_identity,
-                context: reduction_context,
-                source_status: anchor.status,
+                context,
+                source_status: read.status,
             })
+        }
+    }
+
+    /// [`Self::plan_bare_ref_head_steps`] with an eager head's declaration
+    /// read in place: the plan a caller that reads where it stands settles.
+    pub(super) fn plan_bare_ref_head(
+        &self,
+        ctx: &CarrierResolverContext<'_>,
+        name: &Arc<str>,
+        arg_count: usize,
+    ) -> CarrierResolutionPlan {
+        self.settle_head_plan(self.plan_bare_ref_head_steps(ctx, name, arg_count))
+    }
+
+    /// Settle a head's plan in place, reading an eager head's declaration
+    /// where the caller stands.
+    pub(super) fn settle_head_plan(&self, plan: HeadPlan) -> CarrierResolutionPlan {
+        match plan {
+            HeadPlan::Ready(value) => CarrierResolutionPlan::Ready(value),
+            HeadPlan::NeedsArgs(continuation) => CarrierResolutionPlan::NeedsArgs(continuation),
+            HeadPlan::ReadsAnchor(anchor) => {
+                let read = self.carrier_resolution_read(anchor.key.clone());
+                self.resume_anchor(anchor, read)
+            }
         }
     }
 
@@ -1326,6 +1525,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 !state.has_type_symbol_in(*owner, name)
                     && state.import_target_in(*owner, name).is_some()
             })
+    }
+
+    /// Whether the bare `name` an unresolved head reads is proven to name
+    /// nothing: no scope binds it, the program declares no such global, and
+    /// the project loads no library that could (`noLib`). An ambient
+    /// registry is partial by design ([`Self::lib_global_is_available`]), so
+    /// a project with a library proves nothing by not listing a name.
+    pub(super) fn names_nothing_in_program(&self, scope: &NodeScopeId, name: &str) -> bool {
+        let NodeScopeId::File { canonical_id, .. } = scope else {
+            return false;
+        };
+        !name.contains('.')
+            && self
+                .ctx
+                .semantic_compiler_options_for(canonical_id.as_ref())
+                .no_lib
+            && self
+                .project_stable_key_for_canonical(canonical_id.as_ref())
+                .is_some()
+            && !self.unresolved_head_is_authored_import(scope, name)
+            && self
+                .first_global_declaration(canonical_id.as_ref(), name)
+                .is_none()
     }
 
     /// Resolve an `ImportType` head (`import("specifier").qualifier<args>` /
@@ -1370,6 +1592,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// [`Self::plan_import_type_head_steps`] settled in place: an eager
+    /// head's declaration and a qualified tail's projection read where the
+    /// caller stands.
     pub(super) fn plan_import_type_head(
         &self,
         ctx: &CarrierResolverContext<'_>,
@@ -1379,35 +1604,74 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         typeof_query: bool,
         arg_count: usize,
     ) -> CarrierResolutionPlan {
+        let ImportHeadPlan { head, tail } = self.plan_import_type_head_steps(
+            ctx,
+            owner_canonical,
+            specifier,
+            qualifier,
+            typeof_query,
+            arg_count,
+        );
+        let head = self.settle_head_plan(head);
+        let Some(tail) = tail else {
+            return head;
+        };
+        let head = match head {
+            CarrierResolutionPlan::Ready(value) => value,
+            CarrierResolutionPlan::NeedsArgs(continuation) => {
+                self.finish_carrier_resolution_fact(continuation, Arc::from([]))
+            }
+        };
+        let mut result = self.carrier_resolution_read(tail.key(head.node));
+        result.status = result.status.join(head.status);
+        CarrierResolutionPlan::Ready(result)
+    }
+
+    /// Plan an `import("./m")…` head as far as it goes without reading
+    /// another query: its first qualifier segment's head plan, and — for a
+    /// multi-segment qualifier — the tail projected from that head once it
+    /// settles over no arguments.
+    pub(super) fn plan_import_type_head_steps(
+        &self,
+        ctx: &CarrierResolverContext<'_>,
+        owner_canonical: &str,
+        specifier: &str,
+        qualifier: &[verter_type_expr::OwnedStr],
+        typeof_query: bool,
+        arg_count: usize,
+    ) -> ImportHeadPlan {
+        let settled = |head: HeadPlan| ImportHeadPlan { head, tail: None };
         let reduction_context = ctx.reduction_context();
         let Some(dep_canonical) = self
             .ctx
             .resolve_type_dependency_canonical(owner_canonical, specifier.as_ref())
         else {
             // Unresolvable specifier — miss WITHOUT lowering the dead args.
-            return CarrierResolutionPlan::complete(self.opaque(QueryError::Miss));
+            return settled(HeadPlan::complete(self.opaque(QueryError::Miss)));
         };
 
         if typeof_query {
-            return match self.import_value_target(&dep_canonical, qualifier, reduction_context) {
-                Some(super::module_object::ImportValueTarget::Query(key)) => {
-                    CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::ReadTypeof { key })
-                }
-                Some(super::module_object::ImportValueTarget::Namespace(module)) => {
-                    let result = CarrierResolution::complete(
-                        self.build_import_value_namespace(&module, reduction_context),
-                    );
-                    if arg_count > 0 {
-                        CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::ApplyTypeof {
-                            base: result.node,
-                            source_status: result.status,
-                        })
-                    } else {
-                        CarrierResolutionPlan::Ready(result)
+            return settled(
+                match self.import_value_target(&dep_canonical, qualifier, reduction_context) {
+                    Some(super::module_object::ImportValueTarget::Query(key)) => {
+                        HeadPlan::NeedsArgs(CarrierArgsContinuation::ReadTypeof { key })
                     }
-                }
-                None => CarrierResolutionPlan::complete(self.opaque(QueryError::Miss)),
-            };
+                    Some(super::module_object::ImportValueTarget::Namespace(module)) => {
+                        let result = CarrierResolution::complete(
+                            self.build_import_value_namespace(&module, reduction_context),
+                        );
+                        if arg_count > 0 {
+                            HeadPlan::NeedsArgs(CarrierArgsContinuation::ApplyTypeof {
+                                base: result.node,
+                                source_status: result.status,
+                            })
+                        } else {
+                            HeadPlan::Ready(result)
+                        }
+                    }
+                    None => HeadPlan::complete(self.opaque(QueryError::Miss)),
+                },
+            );
         }
 
         // `import("./m").Member` in TYPE position — resolve the qualifier as a
@@ -1415,21 +1679,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some((first, rest)) = qualifier.split_first() else {
             // A bare `import("./m")` with no qualifier is the whole
             // module-namespace TYPE — not a single addressable declaration.
-            return CarrierResolutionPlan::complete(self.opaque(QueryError::Miss));
+            return settled(HeadPlan::complete(self.opaque(QueryError::Miss)));
         };
         // A MULTI-SEGMENT qualifier carrying generic args binds them to the
         // TERMINAL segment, which the multi-hop tail (`ProjectPath`, plain
         // member projection) cannot carry — emit an HONEST error carrier rather
         // than silently dropping the args.
         if !rest.is_empty() && arg_count > 0 {
-            return CarrierResolutionPlan::complete(self.opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
+            return settled(HeadPlan::complete(self.opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
                 "import-type generic args on a multi-segment qualifier are not yet instantiated",
-            ))));
+            )))));
         }
 
         // Bind the head segment into the imported module's TYPE-export space
         // over a CLONE of the caller's `name_resolution`, then route the head
-        // through the SHARED `resolve_bare_ref_head` (its fast-path targets the
+        // through the SHARED bare-name head planner (its fast-path targets the
         // injected entry directly). The terminal segment carries the args (lowered
         // lazily by the head resolver); a multi-hop resolves the head bare and
         // projects the tail.
@@ -1440,7 +1704,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .resolve_imported_type_root_with_facts(dep_canonical.as_str(), head_name.as_ref());
         self.ctx.observe_borrowed_signature(&route_facts);
         let Some(resolved_head) = resolved_head else {
-            return CarrierResolutionPlan::complete(self.opaque(QueryError::Miss));
+            return settled(HeadPlan::complete(self.opaque(QueryError::Miss)));
         };
         injected.insert(head_name.clone(), resolved_head);
         // Single-segment terminal carries the args; a multi-hop head is bare (its
@@ -1454,33 +1718,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ctx.shadowing(),
             reduction_context,
         );
-        let head_plan =
-            self.plan_bare_ref_head(&head_ctx, &Arc::<str>::from(first), head_arg_count);
-        if rest.is_empty() {
-            return head_plan;
-        }
-        let head = match head_plan {
-            CarrierResolutionPlan::Ready(value) => value,
-            CarrierResolutionPlan::NeedsArgs(continuation) => {
-                self.finish_carrier_resolution_fact(continuation, Arc::from([]))
-            }
-        };
-        let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
-            rest.iter()
-                .map(|seg| {
-                    PathSegment::Member(crate::semantic_query::PropertyKey::identifier(seg.clone()))
-                })
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        );
-        let mut result = self.carrier_resolution_read(SemanticQueryKey::ProjectPath {
-            base: head.node,
-            path,
+        let head =
+            self.plan_bare_ref_head_steps(&head_ctx, &Arc::<str>::from(first), head_arg_count);
+        let tail = (!rest.is_empty()).then(|| QualifiedTail {
+            path: verter_type_expr::OwnedSlice::from(
+                rest.iter()
+                    .map(|seg| {
+                        PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
+                            seg.clone(),
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
             context: ProjectionReductionContext::published(ProjectionMode::Navigate)
                 .with_orthogonal_axes_from(reduction_context),
         });
-        result.status = result.status.join(head.status);
-        CarrierResolutionPlan::Ready(result)
+        ImportHeadPlan { head, tail }
     }
 
     construction_ordinal_seam! {
@@ -1525,7 +1779,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> CarrierResolution {
-        let scope = self.observe_read(|| self.resolve_carrier_subject_node_inner(node, context));
+        self.adopt_carrier_observation(
+            self.observe_read(|| self.resolve_carrier_subject_node_inner(node, context)),
+        )
+    }
+
+    /// Adopt a carrier resolution's observed read into the enclosing build:
+    /// a resolution whose observations were incomplete is unavailable by
+    /// what they observed, and an aborted one is the abort's opaque node.
+    /// Shared by the in-place entry and an entry's stepped admission, which
+    /// held the observation across its suspensions.
+    pub(super) fn adopt_carrier_observation(
+        &self,
+        scope: super::flow_return_fact::ObservedRead<CarrierResolution>,
+    ) -> CarrierResolution {
         let complete = scope.observations_are_complete();
         match scope.adopt(self) {
             Ok(mut value) => {
@@ -1587,19 +1854,114 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         crate::project_semantic_dispatch::BuildLocalTaint,
         crate::semantic_query::ResultCompleteness,
     ) {
+        let mut step = self.begin_captured_carrier_read(node, context);
+        loop {
+            match step {
+                CapturedCarrierStep::Done(resolved, observed, completeness) => {
+                    return (resolved, observed, completeness)
+                }
+                CapturedCarrierStep::Read(key, capture) => {
+                    let mut key = Some(key);
+                    let mut read =
+                        || self.carrier_read_in_place(key.take().expect("a read is made once"));
+                    step = self.resume_captured_carrier_read(*capture, &mut read);
+                }
+            }
+        }
+    }
+
+    /// The first stage of a carrier subject's resolution under the capture
+    /// [`Self::resolve_carrier_subject_node_capturing_suppress`] reads it
+    /// with: settled at once, or standing at the query it reads next with
+    /// the capture retained ([`CapturedCarrierRead`]).
+    pub(super) fn begin_captured_carrier_read(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> CapturedCarrierStep {
+        let source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
+        let capture = CarrierCapture {
+            tracer: crate::fact_signature_helpers::OwnedStepwiseFactTracer::fanning_out(&source),
+            taint: crate::project_semantic_dispatch::BuildLocalTaint::default(),
+            completeness: crate::semantic_query::ResultCompleteness::Complete,
+        };
+        self.captured_carrier_stage(capture, |dispatch| {
+            dispatch.begin_carrier_read(node, context)
+        })
+    }
+
+    /// The next stage of a captured carrier resolution, given the read it
+    /// stands at: the read is made inside the stage, under the capture.
+    pub(super) fn resume_captured_carrier_read(
+        &self,
+        read: CapturedCarrierRead,
+        deliver: &mut dyn FnMut() -> crate::semantic_query::CacheRead<
+            crate::semantic_query::QueryResult<SemanticNodeId>,
+        >,
+    ) -> CapturedCarrierStep {
+        let CapturedCarrierRead { read, capture } = read;
+        self.captured_carrier_stage(capture, |dispatch| {
+            let answer = dispatch.carrier_resolution_of(deliver());
+            dispatch.resume_carrier_read(*read, answer)
+        })
+    }
+
+    /// Release what an abandoned captured resolution holds: its carrier's
+    /// entry on the normalization record. Its capture is dropped unread.
+    pub(super) fn abandon_captured_carrier_read(&self, read: CapturedCarrierRead) {
+        self.abandon_carrier_read(*read.read);
+    }
+
+    /// One stage of a captured carrier resolution: the stage runs under the
+    /// capture's tracer, taint frame and completeness, which the capture
+    /// keeps when the stage names a read. Once the resolution settles the
+    /// capture is finished as one native resolution's would be.
+    fn captured_carrier_stage(
+        &self,
+        mut capture: CarrierCapture,
+        stage: impl FnOnce(&Self) -> CarrierStep,
+    ) -> CapturedCarrierStep {
+        let source = crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx);
         let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
-        let observation =
-            crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
-        let (mut resolved, finalise) = crate::fact_signature_helpers::install_fact_tracer(
-            &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
-            || self.resolve_carrier_subject_node_inner(node, context),
-        );
-        // Order is LOAD-BEARING: finish the local frame, OR the nested tracer's
-        // non-cacheability AND its instability into `observed.cache_suppress`, and
-        // ONLY THEN re-fold the merged observation into the enclosing frame.
-        // Re-folding the Rail-1-only frame before adding the tracer bits would
-        // recreate the gap the nested tracer exists to close.
-        let mut observed = observation.finish();
+        crate::request_context::fold_result_completeness(capture.completeness);
+        let step = {
+            let _taint = super::StepTaint::install(&self.build_local_taint, &mut capture.taint);
+            let _installed = capture.tracer.install(&source);
+            stage(self)
+        };
+        let resolved = match step {
+            CarrierStep::Read(key, read) => {
+                capture.completeness = crate::request_context::current_cold_compute_completeness();
+                completeness_scope.discard();
+                return CapturedCarrierStep::Read(
+                    key,
+                    Box::new(CapturedCarrierRead { read, capture }),
+                );
+            }
+            CarrierStep::Done(resolved) => resolved,
+        };
+        let CarrierCapture {
+            tracer,
+            taint: mut observed,
+            ..
+        } = capture;
+        let finalise = tracer.finish(&source);
+        self.finish_captured_carrier(resolved, &mut observed, finalise, completeness_scope)
+    }
+
+    /// Finish a settled captured resolution. Order is LOAD-BEARING: OR the
+    /// nested tracer's non-cacheability AND its instability into the
+    /// captured frame's `cache_suppress`, and ONLY THEN re-fold the merged
+    /// observation into the enclosing frame. Re-folding the Rail-1-only
+    /// frame before adding the tracer bits would recreate the gap the
+    /// nested tracer exists to close.
+    fn finish_captured_carrier(
+        &self,
+        mut resolved: CarrierResolution,
+        observed: &mut crate::project_semantic_dispatch::BuildLocalTaint,
+        finalise: verter_session_query::facts::fact_read_set::FactReadSetFinalise,
+        completeness_scope: crate::request_context::ColdComputeCompletenessScope,
+    ) -> CapturedCarrierStep {
         if matches!(
             &finalise,
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
@@ -1633,23 +1995,65 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let completeness = completeness.merge(resolved.status.completeness());
         completeness_scope.discard();
         crate::request_context::fold_result_completeness(completeness);
-        self.fold_observed_frame_into_top(&observed);
-        (resolved, observed, completeness)
+        self.fold_observed_frame_into_top(observed);
+        CapturedCarrierStep::Done(resolved, std::mem::take(observed), completeness)
     }
 
     /// Carrier-subject head-resolution body (see
-    /// [`Self::resolve_carrier_subject_node`] for the contract). Wrapped by
-    /// [`Self::resolve_carrier_subject_node_capturing_suppress`] under an
-    /// observation taint frame; never called directly except through those two
-    /// entry points.
+    /// [`Self::resolve_carrier_subject_node`] for the contract): the
+    /// synchronous driver of the carrier's continuation ([`CarrierRead`]),
+    /// reading each query it names where the caller stands. Wrapped by
+    /// [`Self::resolve_carrier_subject_node_capturing_suppress`] or
+    /// [`Self::resolve_carrier_subject_fact`] under an observation taint
+    /// frame; never called directly except through those entry points.
     fn resolve_carrier_subject_node_inner(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> CarrierResolution {
+        let mut step = self.begin_carrier_read(node, context);
+        loop {
+            match step {
+                CarrierStep::Done(resolved) => return resolved,
+                CarrierStep::Read(key, read) => {
+                    let answer = self.carrier_resolution_read(key);
+                    step = self.resume_carrier_read(*read, answer);
+                }
+            }
+        }
+    }
+
+    /// The resolution a carrier's read answered: its node, or an opaque
+    /// node carrying its error, with the read's fact status.
+    pub(super) fn carrier_resolution_of(
+        &self,
+        read: crate::semantic_query::CacheRead<crate::semantic_query::QueryResult<SemanticNodeId>>,
+    ) -> CarrierResolution {
+        let node = match read.value {
+            crate::semantic_query::QueryResult::Value(node)
+            | crate::semantic_query::QueryResult::Recursive(node) => node,
+            crate::semantic_query::QueryResult::Error(error) => self.opaque(error),
+        };
+        CarrierResolution {
+            node,
+            status: read.fact_status,
+        }
+    }
+
+    /// The first stage of a carrier subject's resolution: settled at once —
+    /// a node that is no head-resolvable carrier, a carrier already being
+    /// normalized on this dispatcher (the pre-memo cycle guard), a nominal
+    /// `typeof` — or standing at the first query it reads, with `node` held
+    /// on the dispatcher's normalization record until the resolution
+    /// settles or is abandoned ([`Self::abandon_carrier_read`]).
+    pub(super) fn begin_carrier_read(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> CarrierStep {
         let graph = self.graph();
         let Some(data) = graph.node_data(node) else {
-            return CarrierResolution::complete(node);
+            return CarrierStep::Done(CarrierResolution::complete(node));
         };
         // Fast reject: only the three unresolved-reference carriers are
         // head-resolvable as a query subject.
@@ -1657,7 +2061,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let is_import = data.import_type_head().is_some();
         let is_typeof = data.typeof_head().is_some();
         if !is_bare && !is_import && !is_typeof {
-            return CarrierResolution::complete(node);
+            return CarrierStep::Done(CarrierResolution::complete(node));
         }
         drop(data);
 
@@ -1668,9 +2072,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // termination mechanism; this only prevents a pre-memo carrier ->
         // carrier normalization loop.
         if self.carrier_normalizing_holds(node) {
-            return CarrierResolution::complete(node);
+            return CarrierStep::Done(CarrierResolution::complete(node));
         }
         self.carrier_normalizing.borrow_mut().push(node);
+        let read = CarrierRead {
+            node,
+            stage: CarrierStage::Begun,
+        };
 
         // TypeOf carrier subject: `typeof value.path<args>`. The empty-path
         // entry points (a macro payload `defineProps<typeof config>()`, an
@@ -1697,32 +2105,30 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .node_data(node)
                 .is_some_and(|data| data.typeof_nominal_identity().is_some())
             {
-                self.carrier_normalizing.borrow_mut().pop();
-                return CarrierResolution::complete(node);
+                return self.settle_carrier_read(read, CarrierResolution::complete(node));
             }
-            let (value_root, typeof_path) = {
+            let (value_root, typeof_path, type_args) = {
                 let data = graph.node_data(node).expect("TypeOf carrier data");
                 let (value_root, typeof_path) = data.typeof_head().expect("TypeOf head");
-                (value_root.clone(), typeof_path.clone())
-            };
-            let type_args: Vec<SemanticNodeId> = {
-                let data = graph.node_data(node).expect("TypeOf carrier data");
-                data.carrier_type_args().to_vec()
+                (
+                    value_root.clone(),
+                    typeof_path.clone(),
+                    data.carrier_type_args().to_vec(),
+                )
             };
             // The typeof value-root resolves under the caller's reduction
             // context (the demand point); the carrier-internal dotted path is
-            // an INTERMEDIATE hop and projects in `Navigate`. Use `execute_read`
-            // (NOT `execute_type_node`) so a budget-exhausted / partial subquery
-            // folds its `result_is_partial` + `cache_suppress` into the request
-            // (`observe_component_meta_read_suppress`) — the no-poison rail: a
-            // partial carrier resolution must not warm any enclosing cache.
+            // an INTERMEDIATE hop and projects in `Navigate`. The read keeps
+            // its partial / suppress rails (the no-poison rail: a partial
+            // carrier resolution must not warm any enclosing cache).
             let typeof_key = self.typeof_key_with_path(value_root, typeof_path, context);
-            let mut resolved = self.carrier_resolution_read(typeof_key);
-            if resolved.node != node && !type_args.is_empty() {
-                resolved.node = self.apply_typeof_instantiation_args(resolved.node, &type_args);
-            }
-            self.carrier_normalizing.borrow_mut().pop();
-            return resolved;
+            return CarrierStep::Read(
+                typeof_key,
+                Box::new(CarrierRead {
+                    stage: CarrierStage::Typeof { type_args },
+                    ..read
+                }),
+            );
         }
 
         // The carrier's already-lowered args (read through the SOLE sanctioned
@@ -1742,7 +2148,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
         let name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
             FxHashMap::default();
-        let resolved = if is_bare {
+        let plan = if is_bare {
             let (name, scope) = {
                 let data = graph.node_data(node).expect("BareRef carrier data");
                 let (name, scope) = data.bare_ref_head().expect("BareRef head");
@@ -1766,14 +2172,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 &shadowing,
                 context,
             );
-            // The carrier carries ALREADY-LOWERED args — the lazy `lower_args`
-            // closure simply returns them (no lowering happens here).
-            let arg_count = type_args.len();
-            match self.plan_bare_ref_head(&ctx, &name, arg_count) {
-                CarrierResolutionPlan::Ready(value) => value,
-                CarrierResolutionPlan::NeedsArgs(continuation) => {
-                    self.finish_carrier_resolution_fact(continuation, type_args)
-                }
+            // The carrier carries ALREADY-LOWERED args (no lowering happens
+            // here).
+            ImportHeadPlan {
+                head: self.plan_bare_ref_head_steps(&ctx, &name, type_args.len()),
+                tail: None,
             }
         } else {
             let (specifier, qualifier, typeof_query) = {
@@ -1798,33 +2201,206 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 context,
             );
             match owner_canonical {
-                Some(owner) => {
-                    // The carrier carries ALREADY-LOWERED args — the lazy closure
-                    // returns them (no lowering here).
-                    let arg_count = type_args.len();
-                    match self.plan_import_type_head(
-                        &ctx,
-                        owner.as_ref(),
-                        &specifier,
-                        &qualifier,
-                        typeof_query,
-                        arg_count,
-                    ) {
-                        CarrierResolutionPlan::Ready(value) => value,
-                        CarrierResolutionPlan::NeedsArgs(continuation) => {
-                            self.finish_carrier_resolution_fact(continuation, type_args)
-                        }
-                    }
-                }
+                // The carrier carries ALREADY-LOWERED args (no lowering here).
+                Some(owner) => self.plan_import_type_head_steps(
+                    &ctx,
+                    owner.as_ref(),
+                    &specifier,
+                    &qualifier,
+                    typeof_query,
+                    type_args.len(),
+                ),
                 // An `ImportType` carrier with no file scope cannot resolve its
                 // relative specifier — an honest miss (mirrors the eager arm's
                 // non-`File` scope guard).
-                None => CarrierResolution::complete(self.opaque(QueryError::Miss)),
+                None => ImportHeadPlan {
+                    head: HeadPlan::complete(self.opaque(QueryError::Miss)),
+                    tail: None,
+                },
             }
         };
+        let ImportHeadPlan { head, tail } = plan;
+        // A qualified import head settles over no arguments; the carrier's
+        // own arguments belong to a single-segment head.
+        let args = if tail.is_some() {
+            Arc::from([])
+        } else {
+            type_args
+        };
+        match head {
+            HeadPlan::Ready(value) => self.carrier_head_settled(read, value, tail),
+            HeadPlan::NeedsArgs(continuation) => {
+                self.carrier_finish_step(read, continuation, args, tail)
+            }
+            HeadPlan::ReadsAnchor(anchor) => CarrierStep::Read(
+                anchor.key().clone(),
+                Box::new(CarrierRead {
+                    stage: CarrierStage::Anchor {
+                        anchor: Box::new(anchor),
+                        args,
+                        tail,
+                    },
+                    ..read
+                }),
+            ),
+        }
+    }
 
-        self.carrier_normalizing.borrow_mut().pop();
-        resolved
+    /// The next stage of a carrier's resolution, given the answer to the
+    /// query it named. Each stage resumes exactly where its read was
+    /// named; no completed stage runs again.
+    pub(super) fn resume_carrier_read(
+        &self,
+        read: CarrierRead,
+        answer: CarrierResolution,
+    ) -> CarrierStep {
+        let CarrierRead { node, stage } = read;
+        let read = CarrierRead {
+            node,
+            stage: CarrierStage::Begun,
+        };
+        match stage {
+            CarrierStage::Begun => unreachable!("a begun carrier read names no query"),
+            CarrierStage::Typeof { type_args } => {
+                let mut resolved = answer;
+                if resolved.node != node && !type_args.is_empty() {
+                    resolved.node = self.apply_typeof_instantiation_args(resolved.node, &type_args);
+                }
+                self.settle_carrier_read(read, resolved)
+            }
+            CarrierStage::Anchor { anchor, args, tail } => {
+                match self.resume_anchor(*anchor, answer) {
+                    CarrierResolutionPlan::Ready(value) => {
+                        self.carrier_head_settled(read, value, tail)
+                    }
+                    CarrierResolutionPlan::NeedsArgs(continuation) => {
+                        self.carrier_finish_step(read, continuation, args, tail)
+                    }
+                }
+            }
+            CarrierStage::Finish {
+                source_status,
+                apply,
+                tail,
+            } => {
+                let value = match apply {
+                    // A `typeof` import's value, its instantiation arguments
+                    // applied after the read.
+                    Some(args) => CarrierResolution {
+                        node: self.apply_typeof_instantiation_args(answer.node, &args),
+                        status: answer.status,
+                    },
+                    None => CarrierResolution {
+                        node: answer.node,
+                        status: answer.status.join(source_status),
+                    },
+                };
+                self.carrier_head_settled(read, value, tail)
+            }
+            CarrierStage::Tail { head_status } => self.settle_carrier_read(
+                read,
+                CarrierResolution {
+                    node: answer.node,
+                    status: answer.status.join(head_status),
+                },
+            ),
+        }
+    }
+
+    /// Release what an abandoned carrier resolution holds: its carrier's
+    /// entry on the dispatcher's normalization record.
+    pub(super) fn abandon_carrier_read(&self, read: CarrierRead) {
+        self.release_carrier_normalizing(read.node);
+    }
+
+    /// Finish a resolved head over `args`: settled at once, or reading the
+    /// `typeof` value or instantiation that finishes it.
+    fn carrier_finish_step(
+        &self,
+        read: CarrierRead,
+        continuation: CarrierArgsContinuation,
+        args: Arc<[SemanticNodeId]>,
+        tail: Option<QualifiedTail>,
+    ) -> CarrierStep {
+        if let CarrierArgsContinuation::ReadTypeof { key } = continuation {
+            return CarrierStep::Read(
+                *key,
+                Box::new(CarrierRead {
+                    stage: CarrierStage::Finish {
+                        source_status: FactStatus::Complete,
+                        apply: (!args.is_empty()).then_some(args),
+                        tail,
+                    },
+                    ..read
+                }),
+            );
+        }
+        // Outside a projection run the reference keeps its declaration back-edge.
+        let source_status = match &continuation {
+            CarrierArgsContinuation::ApplyTypeof { source_status, .. }
+            | CarrierArgsContinuation::Instantiate { source_status, .. } => *source_status,
+            _ => FactStatus::Complete,
+        };
+        match self.plan_carrier_finish(continuation, args, &|| true) {
+            CarrierFinish::Node(node) => self.carrier_head_settled(
+                read,
+                CarrierResolution {
+                    node,
+                    status: FactStatus::Complete.join(source_status),
+                },
+                tail,
+            ),
+            CarrierFinish::Instantiate(key) => CarrierStep::Read(
+                key,
+                Box::new(CarrierRead {
+                    stage: CarrierStage::Finish {
+                        source_status,
+                        apply: None,
+                        tail,
+                    },
+                    ..read
+                }),
+            ),
+        }
+    }
+
+    /// A head that settled: the carrier's resolution, or — for a qualified
+    /// import type — the read projecting its tail from the head.
+    fn carrier_head_settled(
+        &self,
+        read: CarrierRead,
+        head: CarrierResolution,
+        tail: Option<QualifiedTail>,
+    ) -> CarrierStep {
+        match tail {
+            None => self.settle_carrier_read(read, head),
+            Some(tail) => CarrierStep::Read(
+                tail.key(head.node),
+                Box::new(CarrierRead {
+                    stage: CarrierStage::Tail {
+                        head_status: head.status,
+                    },
+                    ..read
+                }),
+            ),
+        }
+    }
+
+    /// The carrier settled: off the normalization record.
+    fn settle_carrier_read(&self, read: CarrierRead, resolved: CarrierResolution) -> CarrierStep {
+        self.release_carrier_normalizing(read.node);
+        CarrierStep::Done(resolved)
+    }
+
+    /// Take `node`'s latest entry off the carrier-normalization record. A
+    /// resolution suspended between its stages may see other computations
+    /// push and settle their own carriers meanwhile, so its own entry is
+    /// found by identity, not taken from the top.
+    fn release_carrier_normalizing(&self, node: SemanticNodeId) {
+        let mut normalizing = self.carrier_normalizing.borrow_mut();
+        if let Some(index) = normalizing.iter().rposition(|held| *held == node) {
+            normalizing.remove(index);
+        }
     }
 
     /// Rewrite a base-bearing [`SemanticQueryKey`] whose SUBJECT node is a
@@ -1840,83 +2416,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// key's own context (so an `Expanded` query resolves the carrier eagerly,
     /// a `Navigate` query carrier-preserves).
     #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn normalize_carrier_subject_key(&self, key: SemanticQueryKey) -> SemanticQueryKey {
-        self.normalize_carrier_subject_key_with_fact(key).0
-    }
-
-    pub(super) fn normalize_carrier_subject_key_with_fact(
+    pub(super) fn normalize_carrier_subject_key(
         &self,
-        key: SemanticQueryKey,
-    ) -> (SemanticQueryKey, Option<CarrierResolution>) {
-        let mut normalized_source = None;
-        let mut resolve = |node, context| {
-            let source = self.resolve_carrier_subject_fact(node, context);
-            normalized_source = Some(source);
-            source.node
-        };
-        let normalized = match key {
-            SemanticQueryKey::ProjectPath {
-                base,
-                path,
-                context,
-            } => {
-                // A `TypeOf` carrier subject with a NON-EMPTY path is left for the
-                // PathWalker's per-segment `TypeOf` arm, which runs the path-precise
-                // resolve -> project (Navigate intermediate hop) -> apply chain.
-                // Pre-resolving it here would over-resolve the internal carrier path
-                // under the caller's outer mode and bypass the walker's
-                // intermediate-hop demotion. The EMPTY-path case (a `typeof config`
-                // macro payload) has no walker segment to fire the arm, so it MUST
-                // resolve here. `BareRef` / `ImportType` subjects normalize in both
-                // cases (the walker only re-enters this same helper for them).
-                let base = if !path.is_empty()
-                    && self
-                        .graph()
-                        .node_data(base)
-                        .is_some_and(|d| d.typeof_head().is_some())
-                {
-                    base
-                } else {
-                    resolve(base, context)
-                };
-                SemanticQueryKey::ProjectPath {
-                    base,
-                    path,
-                    context,
-                }
-            }
-            SemanticQueryKey::ProjectMember { base, member, mode } => {
-                let base = resolve(base, ProjectionReductionContext::published(mode));
-                SemanticQueryKey::ProjectMember { base, member, mode }
-            }
-            SemanticQueryKey::IndexedAccess { base, index, mode } => {
-                let base = resolve(base, ProjectionReductionContext::published(mode));
-                SemanticQueryKey::IndexedAccess { base, index, mode }
-            }
-            SemanticQueryKey::KeyOf { base, context } => {
-                let base = resolve(base, context);
-                SemanticQueryKey::KeyOf { base, context }
-            }
-            SemanticQueryKey::MappedType {
-                source,
-                mapper,
-                context,
-            } => {
-                let source = resolve(source, context);
-                SemanticQueryKey::MappedType {
-                    source,
-                    mapper,
-                    context,
-                }
-            }
-            // Every other key carries no `SemanticNodeId` subject that could be a
-            // carrier (or carries content-free slot identities) — return
-            // verbatim. Nested carriers inside Intersection / Union / heritage
-            // surfaces re-enter THIS normalization through the shallow-synthesis
-            // worklist's re-dispatch (not resolved here).
-            other => other,
-        };
-        (normalized, normalized_source)
+        mut key: SemanticQueryKey,
+    ) -> SemanticQueryKey {
+        if let Some((subject, context)) = super::query_entry::carrier_subject(self, &key) {
+            let source = self.resolve_carrier_subject_fact(subject, context);
+            super::query_entry::set_carrier_subject(&mut key, source.node);
+        }
+        key
     }
 
     /// Test-support view of the carrier-normalization prelude's

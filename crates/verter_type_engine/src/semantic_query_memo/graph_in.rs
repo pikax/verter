@@ -203,6 +203,34 @@ impl<M: ObserveExec> crate::semantic_query::NodeRead for GraphIn<'_, M> {
 impl<M: ObserveExec> GraphIn<'_, M> {
     /// Record optional telemetry for this execution.
     #[inline(always)]
+    pub fn record_relation_root_opened(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_relation_root_opened();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_relation_reduction(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_relation_reduction();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_call_candidate_begun(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_call_candidate_begun();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_call_argument_related(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_call_argument_related();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
     pub fn record_instantiate(self) {
         if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
             self.store.record_instantiate();
@@ -290,6 +318,20 @@ impl<M: ObserveExec> GraphIn<'_, M> {
     pub fn record_projection_hop(self) {
         if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
             self.store.record_projection_hop();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_admission_stage(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_admission_stage();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_deferred_step(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_deferred_step();
         }
     }
     /// Record a path sample only for captured execution or test work accounting.

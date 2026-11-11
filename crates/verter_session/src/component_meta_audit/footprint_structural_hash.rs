@@ -527,7 +527,7 @@ impl StructuralEncoder<'_> {
                 self.push_str_slice(quasis);
                 self.encode_child_slice(expressions, depth);
             }
-            SemanticNodeData::IndexedAccess { object, index } => {
+            SemanticNodeData::IndexedAccess { object, index, .. } => {
                 self.buf.push(SemanticNodeTag::IndexedAccess.stable_id());
                 self.encode_child(*object, depth);
                 self.encode_index_key(index, depth);

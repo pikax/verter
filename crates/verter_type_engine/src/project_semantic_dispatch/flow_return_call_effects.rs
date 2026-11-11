@@ -21,7 +21,7 @@ enum SignatureEffect {
     Unread,
 }
 
-impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
+impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// Settle one statement call's effects signature, the checker's
     /// `getEffectsSignature`: a callee's lone non-generic call signature,
     /// or — when some signature asserts or returns `never` — the signature
@@ -54,13 +54,14 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     /// typed guard-narrowing gap.
     fn settle_this_call_effect(&mut self, site: SliceCallSite) -> bool {
         if self
+            .st
             .receiver
             .as_ref()
             .is_some_and(|receiver| receiver.explicit_this)
         {
             self.record_degradation(FlowReturnDegradation::FlowGap(FlowGap::GuardNarrowing));
         } else {
-            self.call_evidence.push(FlowCallEvidence {
+            self.st.call_evidence.push(FlowCallEvidence {
                 span: site.span(),
                 relations_decided: true,
             });
@@ -78,7 +79,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     ) -> bool {
         match node.and_then(|node| self.effects_signature_diverges(node, site)) {
             Some(diverges) => {
-                self.call_evidence.push(FlowCallEvidence {
+                self.st.call_evidence.push(FlowCallEvidence {
                     span: site.span(),
                     relations_decided: true,
                 });

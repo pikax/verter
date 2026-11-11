@@ -410,6 +410,30 @@ impl ProjectEnvRoot {
             .unwrap_or(self.env_hashes.resolve_env_hash)
     }
 
+    /// Every effective environment dimension for `canonical` AS OF this
+    /// root: parse, resolve, type and lib, from the owning project's
+    /// captured array, else the captured workspace default.
+    ///
+    /// The four-dimension sibling of [`Self::parse_env_hash_for`] and
+    /// [`Self::resolve_env_hash_for`], with the same project selection and
+    /// the same captured published root, so a native fact basis commits
+    /// exactly the environment its validators read.
+    pub(crate) fn env_hashes_for(&self, canonical: &str) -> crate::session_view::EnvHashes {
+        let array = self.published.as_ref().and_then(|root| {
+            let project = self.project_for_canonical(canonical, root)?;
+            root.env_hashes_by_project.get(&project).copied()
+        });
+        match array {
+            Some([parse, resolve, type_, lib]) => crate::session_view::EnvHashes {
+                parse_env_hash: self.apply_override(parse),
+                resolve_env_hash: resolve,
+                type_env_hash: type_,
+                lib_env_hash: lib,
+            },
+            None => self.env_hashes,
+        }
+    }
+
     /// Per-canonical project identity AS OF this root.
     ///
     /// Mirrors `VerterHost::host_view_project_identity_for` — owning

@@ -4,18 +4,23 @@
 //! snapshots. The function graph and sealed demand own selection; dependence
 //! edges never stand in for control-flow predecessors. All mutable product
 //! state lives here. Semantic composites use the canonical type algebra.
-//! Execution capabilities and snapshots are thread-local: a control interpreter
-//! cannot share partially published source authority with another worker.
-//! Immutable graph/selection artifacts remain shared across independent executions.
+//!
+//! Identity is shared; execution is exclusive. The immutable product identity
+//! (inputs, selection, subjects, storage representatives, captures) is shared
+//! by every snapshot, key, site and evidence of one execution and may cross
+//! workers. The mutable execution authority — the execution-lifetime
+//! declaration bank, budget, evidence and failure/sealing state — is owned by
+//! exactly one [`FlowProductExecution`] and advanced only through `&mut`:
+//! no snapshot holds it, so a declaration-bearing read
+//! ([`FlowProductRead`]) pairs a snapshot with its own execution, and no
+//! observer can see a partially published transfer bundle.
 
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::flow_solve::{FlowDemandBasis, FlowDemandPlan, FlowDomain, FlowExecutionSelection};
 use crate::semantic_query::SemanticNodeId;
 use rustc_hash::FxHashMap;
-use std::cell::{Cell, OnceCell, RefCell};
 use std::hash::{Hash, Hasher};
-use std::rc::Rc;
 use std::sync::Arc;
 use verter_session_query::flow::binding::FlowBindingRef;
 use verter_session_query::flow::bundle::{BoundFlowGraph, FlowSliceFunctionKey};
@@ -134,36 +139,53 @@ struct ProductSubject {
     storage: usize,
 }
 
-/// A layout is also an unforgeable execution capability. Pointer equality
-/// permits constant-time scope checks; graph/content and full demand basis
-/// are validated once, before it can be minted.
+/// The immutable identity of one execution, shared by its snapshots, keys,
+/// sites and evidence. Allocation identity is the scope check: equal graph
+/// contents never make two executions interchangeable. Graph/content and
+/// full demand basis are validated once, before it can be minted.
 #[derive(Debug)]
-struct ProductLayout {
+struct ProductIdentity {
     inputs: FlowProductInputs,
     selection: Arc<FlowExecutionSelection>,
     subjects: Box<[ProductSubject]>,
     representatives: Box<[usize]>,
     captures: FxHashMap<FlowBindingIdentity, usize>,
-    // Authored facts have execution lifetime, independent of branch snapshots.
-    declarations: Box<[OnceCell<Box<FlowProductValue>>]>,
-    declared_active: RefCell<imbl::OrdSet<usize>>,
-    declared_by_runtime: Box<[Cell<Option<usize>>]>,
 }
 
-impl ProductLayout {
+/// The authored declaration facts of one execution. They have execution
+/// lifetime, independent of branch snapshots: a snapshot taken before a
+/// declaration installs reads it once installed. Owned exclusively by its
+/// [`FlowProductExecution`], written only by a validated transfer bundle.
+#[derive(Debug)]
+struct DeclarationBank {
+    /// The installed fact of each selected subject, installed once.
+    declarations: Box<[Option<Box<FlowProductValue>>]>,
+    /// The subjects with an installed fact, in subject order.
+    active: imbl::OrdSet<usize>,
+    /// Per runtime storage, the first source-ordered installed declaration.
+    by_runtime: Box<[Option<usize>]>,
+}
+
+impl DeclarationBank {
+    fn declared(&self, subject: usize) -> Option<&FlowProductValue> {
+        self.declarations[subject].as_deref()
+    }
+}
+
+impl ProductIdentity {
     fn subject_at(&self, node: FlowNodeId) -> Result<usize, FlowProductKeyError> {
         self.subjects
             .binary_search_by_key(&node.index(), |subject| subject.node.index())
             .map_err(|_| FlowProductKeyError::UnselectedNode)
     }
     fn key(
-        self: &Rc<Self>,
+        self: &Arc<Self>,
         domain: FlowDomain,
         subject: usize,
     ) -> Result<FlowProductKey, FlowProductKeyError> {
         let offset = product_offset(domain).ok_or(FlowProductKeyError::DomainCarriesNoProduct)?;
         Ok(FlowProductKey {
-            scope: Rc::clone(self),
+            scope: Arc::clone(self),
             subject,
             offset,
         })
@@ -173,14 +195,14 @@ impl ProductLayout {
 /// A selected domain/subject address, bound to one execution.
 #[derive(Debug, Clone)]
 pub struct FlowProductKey {
-    scope: Rc<ProductLayout>,
+    scope: Arc<ProductIdentity>,
     subject: usize,
     offset: usize,
 }
 
 impl PartialEq for FlowProductKey {
     fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.scope, &other.scope)
+        Arc::ptr_eq(&self.scope, &other.scope)
             && self.subject == other.subject
             && self.offset == other.offset
     }
@@ -188,7 +210,7 @@ impl PartialEq for FlowProductKey {
 impl Eq for FlowProductKey {}
 impl Hash for FlowProductKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        Rc::as_ptr(&self.scope).hash(state);
+        Arc::as_ptr(&self.scope).hash(state);
         self.subject.hash(state);
         self.offset.hash(state);
     }
@@ -237,7 +259,7 @@ impl FlowProductKey {
 /// A real selected site. The control interpreter decides when it executes.
 #[derive(Debug, Clone)]
 pub struct SelectedFlowSite {
-    scope: Rc<ProductLayout>,
+    scope: Arc<ProductIdentity>,
     subject: usize,
 }
 
@@ -246,29 +268,78 @@ pub struct SelectedFlowSite {
 /// Source-declaration facts live in the shared append-only authority bank.
 #[derive(Debug, Clone)]
 pub struct FlowProductStore {
-    scope: Rc<ProductLayout>,
+    scope: Arc<ProductIdentity>,
     values: imbl::OrdMap<(usize, usize), FlowProductValue>,
 }
 
-// Immutable structural artifacts can cross workers; mutable execution and its
-// publication-observing handles cannot. This is an architectural contract in
-// every profile, not a convention left to the current caller.
+// Immutable identity and every handle over it can cross workers; the mutable
+// execution authority is Send for one exclusive owner and never cloned, so no
+// second handle can observe a partially published bank. This is an
+// architectural contract in every profile, not a convention left to the
+// current caller.
 static_assertions::assert_impl_all!(FlowProductInputs: Send, Sync);
-static_assertions::assert_not_impl_any!(FlowProductStore: Send, Sync);
-static_assertions::assert_not_impl_any!(FlowProductExecution: Send, Sync);
-static_assertions::assert_not_impl_any!(FlowProductKey: Send, Sync);
-static_assertions::assert_not_impl_any!(SelectedFlowSite: Send, Sync);
+static_assertions::assert_impl_all!(FlowProductStore: Send, Sync);
+static_assertions::assert_impl_all!(FlowProductKey: Send, Sync);
+static_assertions::assert_impl_all!(SelectedFlowSite: Send, Sync);
+static_assertions::assert_impl_all!(FlowProductContent: Send, Sync);
+static_assertions::assert_impl_all!(FlowProductEvidence: Send, Sync);
+static_assertions::assert_impl_all!(FlowProductExecution: Send);
+static_assertions::assert_not_impl_any!(FlowProductExecution: Clone);
 
 impl FlowProductStore {
-    /// Whether `other` holds exactly these products, in the same layout.
+    /// Whether `other` holds exactly these products, in the same execution.
     #[must_use]
     pub fn same_as(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.scope, &other.scope) && self.values == other.values
+        Arc::ptr_eq(&self.scope, &other.scope) && self.values == other.values
     }
 
+    /// The runtime product at `key`. Declarations are execution authority,
+    /// read through [`FlowProductExecution::read`].
     #[must_use]
     pub fn get(&self, key: &FlowProductKey) -> Option<&FlowProductValue> {
-        if !Rc::ptr_eq(&self.scope, &key.scope) {
+        if !Arc::ptr_eq(&self.scope, &key.scope) || key.domain() == FlowDomain::DeclaredType {
+            return None;
+        }
+        self.values.get(&key.storage())
+    }
+    /// The materialized runtime products, in domain then selected-subject
+    /// order. Declarations are read through [`FlowProductExecution::read`].
+    pub fn runtime_entries(&self) -> impl Iterator<Item = (FlowProductKey, &FlowProductValue)> {
+        self.values.iter().map(move |(&(offset, storage), value)| {
+            (
+                self.scope
+                    .key(PRODUCT_DOMAINS[offset], self.scope.representatives[storage])
+                    .expect("a product domain"),
+                value,
+            )
+        })
+    }
+    /// Whether two continuations of the same execution hold equal products
+    /// in every runtime domain — the loop fixed point's convergence test.
+    #[must_use]
+    pub fn same_products(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.scope, &other.scope) && self.values == other.values
+    }
+    /// Structural sharing is observable only to the hermetic performance proof.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn shares_continuation_storage(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.scope, &other.scope) && self.values.ptr_eq(&other.values)
+    }
+}
+
+/// A snapshot read together with its execution's declaration authority: the
+/// complete product view of one continuation. It borrows both for one read
+/// and is never retained.
+#[derive(Clone, Copy)]
+pub struct FlowProductRead<'a> {
+    store: &'a FlowProductStore,
+    bank: &'a DeclarationBank,
+}
+
+impl<'a> FlowProductRead<'a> {
+    #[must_use]
+    pub fn get(&self, key: &FlowProductKey) -> Option<&'a FlowProductValue> {
+        if !Arc::ptr_eq(&self.store.scope, &key.scope) {
             return None;
         }
         self.get_at(key.storage())
@@ -277,72 +348,59 @@ impl FlowProductStore {
     /// installed declaration in the same runtime group, without copying its fact.
     #[must_use]
     pub fn declared_type(&self, key: &FlowProductKey) -> Option<SemanticNodeId> {
-        if !Rc::ptr_eq(&self.scope, &key.scope) || key.domain() != FlowDomain::DeclaredType {
+        if !Arc::ptr_eq(&self.store.scope, &key.scope) || key.domain() != FlowDomain::DeclaredType {
             return None;
         }
-        let exact = self.scope.declarations[key.subject].get();
-        let value = exact.or_else(|| {
-            let storage = self.scope.subjects[key.subject].storage;
-            let authority = self.scope.declared_by_runtime[storage].get()?;
-            self.scope.declarations[authority].get()
+        let value = self.bank.declared(key.subject).or_else(|| {
+            let storage = self.store.scope.subjects[key.subject].storage;
+            self.bank.declared(self.bank.by_runtime[storage]?)
         })?;
-        let FlowProductValue::DeclaredType(product) = value.as_ref() else {
+        let FlowProductValue::DeclaredType(product) = value else {
             return None;
         };
         product.declared()
     }
-    fn get_at(&self, address: (usize, usize)) -> Option<&FlowProductValue> {
+    fn get_at(&self, address: (usize, usize)) -> Option<&'a FlowProductValue> {
         if address.0 == product_offset(FlowDomain::DeclaredType).unwrap() {
-            self.scope.declarations[address.1].get().map(Box::as_ref)
+            self.bank.declared(address.1)
         } else {
-            self.values.get(&address)
+            self.store.values.get(&address)
         }
     }
     #[must_use]
     pub fn len(&self) -> usize {
-        self.values.len() + self.scope.declared_active.borrow().len()
+        self.store.values.len() + self.bank.active.len()
     }
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.values.is_empty() && self.scope.declared_active.borrow().is_empty()
+        self.store.values.is_empty() && self.bank.active.is_empty()
     }
     /// Visits only materialized cells, in domain then selected-subject order.
-    pub fn ordered_entries(&self) -> impl Iterator<Item = (FlowProductKey, &FlowProductValue)> {
-        let declarations = self.scope.declared_active.borrow().clone();
+    pub fn ordered_entries(self) -> impl Iterator<Item = (FlowProductKey, &'a FlowProductValue)> {
+        let store: &'a FlowProductStore = self.store;
+        let bank: &'a DeclarationBank = self.bank;
+        let scope = &store.scope;
         let runtime = move |(&(offset, storage), value)| {
             (
-                self.scope
-                    .key(PRODUCT_DOMAINS[offset], self.scope.representatives[storage])
+                scope
+                    .key(PRODUCT_DOMAINS[offset], scope.representatives[storage])
                     .expect("a product domain"),
                 value,
             )
         };
-        self.values
+        store
+            .values
             .range(..(3, 0))
             .map(runtime)
-            .chain(declarations.into_iter().map(move |subject| {
+            .chain(bank.active.iter().map(move |&subject| {
                 (
-                    self.scope
+                    scope
                         .key(FlowDomain::DeclaredType, subject)
                         .expect("a product domain"),
-                    self.scope.declarations[subject]
-                        .get()
-                        .expect("published authored fact")
-                        .as_ref(),
+                    bank.declared(subject).expect("published authored fact"),
                 )
             }))
-            .chain(self.values.range((4, 0)..).map(runtime))
-    }
-    /// Whether two continuations of the same execution hold equal products
-    /// in every runtime domain — the loop fixed point's convergence test.
-    #[must_use]
-    pub fn same_products(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.scope, &other.scope) && self.values == other.values
-    }
-    /// Structural sharing is observable only to the hermetic performance proof.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn shares_continuation_storage(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.scope, &other.scope) && self.values.ptr_eq(&other.values)
+            .chain(store.values.range((4, 0)..).map(runtime))
     }
 }
 
@@ -351,13 +409,23 @@ impl FlowProductStore {
 /// product API; returned keys and definition sites retain this execution scope.
 #[derive(Debug, Clone)]
 pub struct FlowProductContent {
-    scope: Rc<ProductLayout>,
+    scope: Arc<ProductIdentity>,
 }
 
 impl FlowProductContent {
+    /// Whether `other` attaches the same execution's identity.
+    #[must_use]
+    pub fn same_execution(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.scope, &other.scope)
+    }
+    /// Whether `store` is a snapshot of this attachment's execution.
+    #[must_use]
+    pub fn holds(&self, store: &FlowProductStore) -> bool {
+        Arc::ptr_eq(&self.scope, &store.scope)
+    }
     pub fn site(&self, node: FlowNodeId) -> Result<SelectedFlowSite, FlowProductKeyError> {
         Ok(SelectedFlowSite {
-            scope: Rc::clone(&self.scope),
+            scope: Arc::clone(&self.scope),
             subject: self.scope.subject_at(node)?,
         })
     }
@@ -394,7 +462,7 @@ impl FlowProductContent {
 impl FlowProductKey {
     pub fn site(&self) -> SelectedFlowSite {
         SelectedFlowSite {
-            scope: Rc::clone(&self.scope),
+            scope: Arc::clone(&self.scope),
             subject: self.subject,
         }
     }
@@ -456,7 +524,7 @@ impl From<FlowProductKeyError> for FlowProductFailure {
 /// Successfully executed domains/subjects, including unchanged operations.
 #[derive(Debug, Clone)]
 pub struct FlowProductEvidence {
-    scope: Rc<ProductLayout>,
+    scope: Arc<ProductIdentity>,
     executed: Arc<[bool]>,
     iterations: u32,
 }
@@ -464,7 +532,7 @@ pub struct FlowProductEvidence {
 impl FlowProductEvidence {
     #[must_use]
     pub fn executed(&self, key: &FlowProductKey) -> bool {
-        Rc::ptr_eq(&self.scope, &key.scope) && self.executed[key.evidence()]
+        Arc::ptr_eq(&self.scope, &key.scope) && self.executed[key.evidence()]
     }
     #[must_use]
     pub fn iterations(&self) -> u32 {
@@ -480,7 +548,8 @@ impl FlowProductEvidence {
 /// actual transfers and predecessor joins can change stored products.
 #[derive(Debug)]
 pub struct FlowProductExecution {
-    scope: Rc<ProductLayout>,
+    scope: Arc<ProductIdentity>,
+    bank: DeclarationBank,
     budget: FlowProductBudget,
     executed: Vec<bool>,
     iterations: u32,
@@ -581,22 +650,21 @@ impl FlowProductExecution {
         budget.max_declared_products = budget
             .max_declared_products
             .min(u32::try_from(subjects.len()).unwrap_or(u32::MAX));
-        let declarations = (0..subjects.len()).map(|_| OnceCell::new()).collect();
-        let declared_by_runtime = (0..representatives.len())
-            .map(|_| Cell::new(None))
-            .collect();
+        let bank = DeclarationBank {
+            declarations: (0..subjects.len()).map(|_| None).collect(),
+            active: imbl::OrdSet::new(),
+            by_runtime: vec![None; representatives.len()].into(),
+        };
         let executed = vec![false; subjects.len() * PRODUCT_DOMAINS.len()];
         Ok(Self {
-            scope: Rc::new(ProductLayout {
+            scope: Arc::new(ProductIdentity {
                 inputs: inputs.clone(),
                 selection,
                 subjects: subjects.into(),
                 representatives: representatives.into(),
                 captures,
-                declarations,
-                declared_active: RefCell::new(imbl::OrdSet::new()),
-                declared_by_runtime,
             }),
+            bank,
             budget,
             executed,
             iterations: 0,
@@ -607,10 +675,20 @@ impl FlowProductExecution {
         })
     }
 
+    /// Read `store` with this execution's declaration authority. `None`
+    /// when the snapshot belongs to another execution.
+    #[must_use]
+    pub fn read<'a>(&'a self, store: &'a FlowProductStore) -> Option<FlowProductRead<'a>> {
+        Arc::ptr_eq(&self.scope, &store.scope).then_some(FlowProductRead {
+            store,
+            bank: &self.bank,
+        })
+    }
+
     #[must_use]
     pub fn empty_state(&self) -> FlowProductStore {
         FlowProductStore {
-            scope: Rc::clone(&self.scope),
+            scope: Arc::clone(&self.scope),
             values: imbl::OrdMap::new(),
         }
     }
@@ -633,14 +711,14 @@ impl FlowProductExecution {
             return Err(FlowProductKeyError::GraphMismatch);
         }
         Ok(FlowProductContent {
-            scope: Rc::clone(&self.scope),
+            scope: Arc::clone(&self.scope),
         })
     }
     /// Enumerate already scoped selected sites; callers cannot supply a naked id
     /// and silently relabel a site belonging to another execution or graph.
     pub fn selected_sites(&self) -> impl ExactSizeIterator<Item = SelectedFlowSite> + '_ {
         (0..self.scope.subjects.len()).map(|subject| SelectedFlowSite {
-            scope: Rc::clone(&self.scope),
+            scope: Arc::clone(&self.scope),
             subject,
         })
     }
@@ -649,7 +727,7 @@ impl FlowProductExecution {
         domain: FlowDomain,
         site: &SelectedFlowSite,
     ) -> Result<FlowProductKey, FlowProductKeyError> {
-        if !Rc::ptr_eq(&self.scope, &site.scope) {
+        if !Arc::ptr_eq(&self.scope, &site.scope) {
             return Err(FlowProductKeyError::GraphMismatch);
         }
         self.scope.key(domain, site.subject)
@@ -678,23 +756,27 @@ impl FlowProductExecution {
         transfers: &[FlowProductTransfer],
     ) -> Result<bool, FlowProductFailure> {
         self.ready()?;
-        if !Rc::ptr_eq(&self.scope, &state.scope) || !Rc::ptr_eq(&self.scope, &site.scope) {
+        if !Arc::ptr_eq(&self.scope, &state.scope) || !Arc::ptr_eq(&self.scope, &site.scope) {
             return self.reject(FlowProductFailure::ScopeMismatch);
         }
         type StagedWrite = ((usize, usize), Option<FlowProductValue>);
         let mut staged: smallvec::SmallVec<[StagedWrite; 5]> = smallvec::SmallVec::new();
         let mut active = state.values.len();
-        let mut declared = self.scope.declared_active.borrow().len();
+        let mut declared = self.bank.active.len();
         for transfer in transfers {
-            if !Rc::ptr_eq(&self.scope, &transfer.key.scope) {
+            if !Arc::ptr_eq(&self.scope, &transfer.key.scope) {
                 return self.reject(FlowProductFailure::ScopeMismatch);
             }
             let slot = transfer.key.storage();
+            let current = FlowProductRead {
+                store: state,
+                bank: &self.bank,
+            };
             let prior = staged
                 .iter()
                 .find(|(held, _)| *held == slot)
                 .map(|(_, value)| value.as_ref())
-                .unwrap_or_else(|| state.get_at(slot));
+                .unwrap_or_else(|| current.get_at(slot));
             let value =
                 match transfer_product(&self.budget, &transfer.key, prior, transfer.value.as_ref())
                 {
@@ -731,27 +813,27 @@ impl FlowProductExecution {
                 },
             ));
         }
-        // The execution capability is thread-local. Publication performs no
-        // callbacks, awaits, or evaluator reentry, so no observer can see only
-        // part of this fully validated bank/continuation transaction.
+        // The execution authority is exclusively borrowed. Publication performs
+        // no callbacks, awaits, or evaluator reentry, so no observer can see
+        // only part of this fully validated bank/continuation transaction.
         let mut changed = false;
         for (slot, value) in staged {
-            if state.get_at(slot) == value.as_ref() {
+            let current = FlowProductRead {
+                store: state,
+                bank: &self.bank,
+            };
+            if current.get_at(slot) == value.as_ref() {
                 continue;
             }
             changed = true;
             if slot.0 == product_offset(FlowDomain::DeclaredType).unwrap() {
                 if let Some(value) = value {
-                    if self.scope.declarations[slot.1].get().is_none() {
-                        self.scope.declarations[slot.1]
-                            .set(Box::new(value))
-                            .expect("validated install-once authority");
-                        self.scope.declared_active.borrow_mut().insert(slot.1);
+                    if self.bank.declarations[slot.1].is_none() {
+                        self.bank.declarations[slot.1] = Some(Box::new(value));
+                        self.bank.active.insert(slot.1);
                         let storage = self.scope.subjects[slot.1].storage;
-                        let authority = &self.scope.declared_by_runtime[storage];
-                        authority.set(Some(
-                            authority.get().map_or(slot.1, |held| held.min(slot.1)),
-                        ));
+                        let authority = &mut self.bank.by_runtime[storage];
+                        *authority = Some(authority.map_or(slot.1, |held| held.min(slot.1)));
                     }
                 }
             } else if let Some(value) = value {
@@ -780,7 +862,7 @@ impl FlowProductExecution {
             self.join_product_visits = 0;
         }
         for state in incoming {
-            if !Rc::ptr_eq(&self.scope, &state.scope) {
+            if !Arc::ptr_eq(&self.scope, &state.scope) {
                 return self.reject(FlowProductFailure::ScopeMismatch);
             }
         }
@@ -949,7 +1031,7 @@ impl FlowProductExecution {
         }
         self.sealed = true;
         Ok(FlowProductEvidence {
-            scope: Rc::clone(&self.scope),
+            scope: Arc::clone(&self.scope),
             executed: std::mem::take(&mut self.executed).into(),
             iterations: self.iterations,
         })
@@ -981,7 +1063,7 @@ pub fn transfer_product(
             if product
                 .scope
                 .as_ref()
-                .is_some_and(|scope| !Rc::ptr_eq(scope, &key.scope))
+                .is_some_and(|scope| !Arc::ptr_eq(scope, &key.scope))
             {
                 return Err(FlowProductFailure::ScopeMismatch);
             }
@@ -1201,7 +1283,7 @@ pub fn domain_carries_product(domain: FlowDomain) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct ReachingValueProduct {
     definitions: Arc<[FlowNodeId]>,
-    scope: Option<Rc<ProductLayout>>,
+    scope: Option<Arc<ProductIdentity>>,
 }
 
 impl PartialEq for ReachingValueProduct {
@@ -1209,7 +1291,7 @@ impl PartialEq for ReachingValueProduct {
         self.definitions == other.definitions
             && match (&self.scope, &other.scope) {
                 (None, None) => true,
-                (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
                 _ => false,
             }
     }
@@ -1222,7 +1304,7 @@ impl ReachingValueProduct {
     pub fn at(site: &SelectedFlowSite) -> Self {
         Self {
             definitions: Arc::from([site.scope.subjects[site.subject].node]),
-            scope: Some(Rc::clone(&site.scope)),
+            scope: Some(Arc::clone(&site.scope)),
         }
     }
 
@@ -2112,7 +2194,7 @@ fn join_reaching_values(
     products: &[&FlowProductValue],
 ) -> Result<ReachingValueProduct, FlowProductFailure> {
     let mut sources: smallvec::SmallVec<[&ReachingValueProduct; 4]> = smallvec::SmallVec::new();
-    let mut scope: Option<Rc<ProductLayout>> = None;
+    let mut scope: Option<Arc<ProductIdentity>> = None;
     let mut total = 0usize;
     for product in products {
         let FlowProductValue::ReachingValue(value) = product else {
@@ -2123,11 +2205,11 @@ fn join_reaching_values(
         }
         if let Some(incoming) = &value.scope {
             if let Some(held) = &scope {
-                if !Rc::ptr_eq(held, incoming) {
+                if !Arc::ptr_eq(held, incoming) {
                     return Err(FlowProductFailure::ScopeMismatch);
                 }
             } else {
-                scope = Some(Rc::clone(incoming));
+                scope = Some(Arc::clone(incoming));
             }
         }
         total = total.saturating_add(value.definitions.len());
