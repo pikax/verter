@@ -73,8 +73,8 @@ pub(crate) struct EncodedFrameworkSurfaces {
     /// Exactly one entry per known surface kind, in tag order.
     pub surfaces: Vec<FrameworkSurfaceKindEntry>,
     /// The exported node of every named member of an exactly resolved
-    /// props or expose surface, in encode order: the positions a reference
-    /// can address. Host-internal; never on the wire.
+    /// props, expose, options or slots surface, in encode order: the
+    /// positions a reference can address. Host-internal; never on the wire.
     pub exported_members: Vec<ExportedMemberNode>,
 }
 
@@ -655,7 +655,7 @@ pub(crate) fn encode_framework_surfaces_with_unsupported_message(
 }
 
 /// Record the exported node of every named member of an exactly resolved
-/// props or expose surface. `members` are the wire members just encoded
+/// props, expose, options or slots surface. `members` are the wire members just encoded
 /// from `dtos`, one per named row in the same order.
 fn record_exported_members(
     arena: &mut GraphArena,
@@ -674,10 +674,17 @@ fn record_exported_members(
             .as_ref()
             .map(|surface| surface.members.iter().map(|m| m.name.as_str()).collect())
             .unwrap_or_default(),
-        FrameworkSurfaceKind::Emits
-        | FrameworkSurfaceKind::Slots
-        | FrameworkSurfaceKind::Options
-        | FrameworkSurfaceKind::Model => return,
+        FrameworkSurfaceKind::Options => dtos
+            .options
+            .as_ref()
+            .map(|surface| surface.members.iter().map(|m| m.name.as_str()).collect())
+            .unwrap_or_default(),
+        FrameworkSurfaceKind::Slots => dtos
+            .slot_fields()
+            .iter()
+            .map(|slot| slot.name.as_str())
+            .collect(),
+        FrameworkSurfaceKind::Emits | FrameworkSurfaceKind::Model => return,
     };
     if names.len() != members.len() {
         return;

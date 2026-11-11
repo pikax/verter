@@ -564,8 +564,26 @@ pub struct MacroSurfaceDtos {
     /// extract layer reads these (the SFC object-literal fields union with
     /// them downstream).
     pub exposed_fields: Vec<ResolvedExposeField>,
+    /// Each options member's value source, by member name: the address a
+    /// reference to the member replays. Empty when no `defineOptions`
+    /// surface was resolved.
+    pub option_sources: Vec<MemberValueSource>,
+    /// Each slot's value source, by slot name: the address a reference to
+    /// the slot member replays (its realized callable root is read off the
+    /// replayed value, as [`Self::slot_member_types`] is). Empty when no
+    /// `defineSlots` surface was resolved.
+    pub slot_sources: Vec<MemberValueSource>,
     /// The resolved model binding(s).
     pub model: Option<ModelSurface>,
+}
+
+/// One named member's published value source.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MemberValueSource {
+    /// The member's published name.
+    pub name: String,
+    /// The member value's source position.
+    pub source: verter_type_expr::facts::SourcePosition,
 }
 
 impl MacroSurfaceDtos {
@@ -879,6 +897,8 @@ mod tests {
             options,
             expose,
             exposed_fields,
+            option_sources,
+            slot_sources,
             model,
         } = &dtos;
         assert!(props.is_none());
@@ -889,6 +909,8 @@ mod tests {
         assert!(options.is_none());
         assert!(expose.is_none());
         assert!(exposed_fields.is_empty());
+        assert!(option_sources.is_empty());
+        assert!(slot_sources.is_empty());
         assert!(model.is_none());
     }
 

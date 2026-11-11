@@ -560,19 +560,18 @@ struct ExecutorResolveCtx<
     members: std::cell::RefCell<Vec<MemberSource>>,
 }
 
-/// A replayable member source one producing macro contributed.
+/// A replayable member source one producer contributed.
 struct MemberSource {
     surface: FrameworkSurfaceKind,
     role: crate::typeinfo::node_refs::MemberRole,
     name: String,
-    macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
-    macro_index: u32,
+    producer: crate::typeinfo::node_refs::MemberProducer,
     scope_owner: verter_type_expr::TopLevelOwnerId,
     source: verter_type_expr::facts::SemanticTypeSource,
 }
 
-/// The exported members a response can address: each exported props or
-/// expose member whose name exactly one producing macro contributed a
+/// The exported members a response can address: each exported props,
+/// expose, options or slots member whose name exactly one producer contributed a
 /// replayable source for. A name contributed twice, or exported twice, is
 /// ambiguous and addressed by nothing.
 fn exported_framework_members<M: verter_audit::observe::ObserveExec>(
@@ -619,8 +618,7 @@ fn exported_framework_members<M: verter_audit::observe::ObserveExec>(
                     framework_profile: selector.framework_profile.clone(),
                     scope_owner: source.scope_owner,
                     surface: source.surface,
-                    macro_kind: source.macro_kind,
-                    macro_index: source.macro_index,
+                    producer: source.producer,
                     role: source.role,
                     member_name: Arc::from(source.name.as_str()),
                     source: source.source.clone(),
@@ -678,14 +676,23 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
             PlannedDemand::ShallowSurface { node } => {
                 ResolvedDemand::ShallowSurface(self.resolve_shallow_surface(&node))
             }
-            PlannedDemand::SvelteSurface { owner, source } => ResolvedDemand::SvelteSurface(
-                crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
-                    self.ctx,
-                    self.dispatch,
-                    &owner,
-                    source,
-                ),
-            ),
+            PlannedDemand::SvelteSurface { owner, source } => {
+                let outcome =
+                    crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
+                        self.ctx,
+                        self.dispatch,
+                        &owner,
+                        source,
+                    );
+                if let ResolvedOutcome::Resolved(dtos) = &outcome {
+                    self.collect_member_sources(
+                        requested_kind,
+                        crate::typeinfo::node_refs::MemberProducer::Svelte(source),
+                        dtos,
+                    );
+                }
+                ResolvedDemand::SvelteSurface(outcome)
+            }
         };
         let observed = verter_type_engine::request_context::current_cold_compute_completeness();
         drop(scope);
@@ -783,13 +790,16 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
                 crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read,
             );
             any_partial |= dtos_read.is_partial();
-            self.collect_member_sources(
-                requested_kind,
-                mac.kind,
-                macro_index,
-                mac.owner,
-                &dtos_read.dtos,
-            );
+            if let Ok(index) = u32::try_from(macro_index) {
+                self.collect_member_sources(
+                    requested_kind,
+                    crate::typeinfo::node_refs::MemberProducer::VueMacro {
+                        kind: mac.kind,
+                        index,
+                    },
+                    &dtos_read.dtos,
+                );
+            }
             fold_requested_slot(&mut aggregate, requested_kind, &dtos_read.dtos);
         }
         if !any {
@@ -812,34 +822,31 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
         ResolvedOutcome::Resolved(Arc::new(aggregate))
     }
 
-    /// Record every replayable member source `dtos` (one macro's bundle)
+    /// Record every replayable member source `dtos` (one producer's bundle)
     /// contributes to `requested_kind`: a props row's value authority, an
-    /// exposed row's value source. Closed, synthesized, failed and absent
-    /// positions are not addresses and are skipped.
+    /// exposed row's value source, an options member's or a slot's value
+    /// source. Closed, synthesized, failed and absent positions are not
+    /// addresses and are skipped. Each source replays under the owner its
+    /// authored anchor is written in.
     fn collect_member_sources(
         &self,
         requested_kind: FrameworkSurfaceKind,
-        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind,
-        macro_index: usize,
-        scope_owner: verter_type_expr::TopLevelOwnerId,
+        producer: crate::typeinfo::node_refs::MemberProducer,
         dtos: &MacroSurfaceDtos,
     ) {
-        use crate::typeinfo::node_refs::{is_replayable_source, MemberRole};
+        use crate::typeinfo::node_refs::{is_replayable_source, source_scope_owner, MemberRole};
         type Row<'r> = (
             MemberRole,
             &'r str,
             Option<&'r verter_type_expr::facts::SemanticTypeSource>,
         );
-        let Ok(macro_index) = u32::try_from(macro_index) else {
-            return;
-        };
         let rows: Vec<Row<'_>> = match requested_kind {
             FrameworkSurfaceKind::Props => dtos
                 .prop_fields()
                 .iter()
                 .map(|row| {
                     (
-                        MemberRole::PropValue,
+                        MemberRole::Prop,
                         row.analysis.name.as_str(),
                         row.authority.source(),
                     )
@@ -850,28 +857,43 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
                 .iter()
                 .map(|row| {
                     (
-                        MemberRole::ExposeValue,
+                        MemberRole::Exposed,
                         row.analysis.name.as_str(),
                         row.type_source.present(),
                     )
                 })
                 .collect(),
-            FrameworkSurfaceKind::Emits
-            | FrameworkSurfaceKind::Slots
-            | FrameworkSurfaceKind::Options
-            | FrameworkSurfaceKind::Model => return,
+            FrameworkSurfaceKind::Options => dtos
+                .option_sources
+                .iter()
+                .map(|row| {
+                    (
+                        MemberRole::OptionsMember,
+                        row.name.as_str(),
+                        row.source.present(),
+                    )
+                })
+                .collect(),
+            FrameworkSurfaceKind::Slots => dtos
+                .slot_sources
+                .iter()
+                .map(|row| (MemberRole::Slot, row.name.as_str(), row.source.present()))
+                .collect(),
+            FrameworkSurfaceKind::Emits | FrameworkSurfaceKind::Model => return,
         };
         let mut members = self.members.borrow_mut();
         for (role, name, source) in rows {
             let Some(source) = source.filter(|source| is_replayable_source(source)) else {
                 continue;
             };
+            let Some(scope_owner) = source_scope_owner(source) else {
+                continue;
+            };
             members.push(MemberSource {
                 surface: requested_kind,
                 role,
                 name: name.to_string(),
-                macro_kind,
-                macro_index,
+                producer,
                 scope_owner,
                 source: source.clone(),
             });
