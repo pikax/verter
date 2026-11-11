@@ -519,15 +519,17 @@ fn assert_module_chain_work_per_module(per_module: usize, lengths: [usize; 3]) {
     );
 }
 
-/// Generic module chains at 9, 10 and 11 modules and at 26, 51 and 101: the
-/// gate version of the test that reaches 128 modules, in the nightly scale
-/// tier. Every chain answers exactly like a four-module one, and every added
-/// module costs the same connected work; re-evaluating a body under each
-/// instantiation would make the work grow with the square of the chain, which
-/// shows at these lengths already. The 101-module chain is past the
-/// checker's instantiation depth of 100.
+/// Generic module chains at 9, 10 and 11 modules and at 13, 19 and 25: the
+/// gate version of [`nightly_scale::a_generic_chain_across_modules_costs_the_same_work_per_module`],
+/// which reaches 128 modules. Every chain answers exactly like a four-module
+/// one, and every added module costs the same connected work; re-evaluating a
+/// body under each instantiation would make the work grow with the square of
+/// the chain, which shows at these lengths already (with the read disabled,
+/// 25 modules cost about eleven times what they cost with it). A chain past
+/// the checker's instantiation depth of 100 is held by
+/// [`a_generic_chain_across_101_modules_answers_without_a_refusal`].
 #[test]
-fn a_generic_chain_across_modules_costs_the_same_work_per_module_to_101_modules() {
+fn a_generic_chain_across_modules_costs_the_same_work_per_module_to_25_modules() {
     on_stack(8 << 20, || {
         let (short, _) = module_chain_work(4);
         assert_tagged_value(&short, &[number(), string()]);
@@ -544,7 +546,7 @@ fn a_generic_chain_across_modules_costs_the_same_work_per_module_to_101_modules(
             works[1] - works[0],
             "every added module must cost the same connected work ({works:?} at 9 / 10 / 11 modules)"
         );
-        assert_module_chain_work_per_module(works[2] - works[1], [26, 51, 101]);
+        assert_module_chain_work_per_module(works[2] - works[1], [13, 19, 25]);
     });
 }
 

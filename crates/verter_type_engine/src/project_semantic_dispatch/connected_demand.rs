@@ -227,7 +227,7 @@ pub(super) const MAX_CONNECTED_INSTANTIATION_DEPTH: u32 = 10_000;
 /// time, and the arguments it has seen for its recurrence check.
 ///
 /// [`ConditionalTail`]: crate::semantic_query::checker_policy::ConditionalTail
-pub(super) const MAX_CONNECTED_TAIL_STEPS: u32 = 10_000;
+pub const MAX_CONNECTED_TAIL_STEPS: u32 = 10_000;
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
