@@ -1917,6 +1917,8 @@ impl RequestContext {
     #[must_use]
     #[cfg_attr(feature = "test-support", track_caller)]
     pub fn is_cancelled(&self) -> bool {
+        #[cfg(feature = "test-support")]
+        crate::cancel_trace::poll();
         let cancelled = self.cancellation.is_cancelled();
         #[cfg(feature = "test-support")]
         if cancelled {

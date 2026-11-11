@@ -2162,20 +2162,23 @@ fn a_tripped_demand_discovers_no_further_callee() {
 
 /// A cancellation landing anywhere in a request leaves the host so that a
 /// retry answers exactly what a fresh host answers. The request is the
-/// public audited, cancellable flow-return query of a witness over four
-/// sibling eight-level chains. It is cancelled at a spread of points: at
-/// the Nth query boundary, deterministically, for N from the first up to
-/// past the request's end, and after wall-clock delays spread over one
-/// uncancelled cold request, from a second thread. Every cancelled
-/// request answers `Cancelled` or, when it finished before the
-/// cancellation landed, exactly the fresh answer; every retry under a
-/// fresh token on the same host answers exactly the fresh answer.
-#[test]
-fn a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers() {
+/// public audited, cancellable flow-return query of a witness over `chains`
+/// sibling `levels`-level chains. It is cancelled at a spread of points,
+/// deterministically: at the Nth query boundary, for N from the first up
+/// to past the request's end, and at the Nth cancellation poll, for N
+/// spread over the polls of one uncancelled cold request — between query
+/// boundaries as well as at them — from its first to past its end. Every
+/// cancelled request answers `Cancelled` or, when it finished before the
+/// cancellation landed, exactly the fresh answer; every retry under a fresh
+/// token on the same host answers exactly the fresh answer.
+fn assert_a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers(
+    chains: usize,
+    levels: usize,
+) {
     use crate::host_flow_return_audit::FlowReturnError;
     use verter_execution::cancellation::CancellationToken;
 
-    let source = sibling_chains(4, 8);
+    let source = sibling_chains(chains, levels);
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
             canonical_id: verter_type_expr::OwnedStr::from(PATH),
@@ -2210,13 +2213,14 @@ fn a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers() {
         }
     };
     let fresh_host = host_with(&[(PATH, source.as_str())]);
-    let started = std::time::Instant::now();
-    let fresh = answer(&fresh_host, CancellationToken::new());
-    let cold = started.elapsed();
+    let (fresh, polls) = verter_type_engine::cancel_trace::count_polls(|| {
+        answer(&fresh_host, CancellationToken::new())
+    });
     assert!(
         matches!(fresh, Answer::Clean(_)),
         "a fresh host answers clean: {fresh:?}"
     );
+    assert!(polls > 0, "a cold request polls its cancellation");
 
     let mut cancelled = 0;
     let check = |host: &Arc<VerterHost>, got: Answer, label: &str| {
@@ -2232,7 +2236,7 @@ fn a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers() {
         got == Answer::Cancelled
     };
 
-    // Deterministic: cancelled as the Nth query family opens.
+    // Cancelled as the Nth query family opens.
     for nth in [1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610] {
         let host = host_with(&[(PATH, source.as_str())]);
         let token = CancellationToken::new();
@@ -2244,23 +2248,32 @@ fn a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers() {
         cancelled += usize::from(check(&host, got, &format!("family {nth}")));
     }
 
-    // Wall clock: cancelled from another thread after a delay.
-    for percent in [0u32, 5, 10, 25, 50, 75, 90, 110] {
+    // Cancelled at the Nth poll, spread over a cold request's polls.
+    for percent in [0, 5, 10, 25, 50, 75, 90, 110] {
         let host = host_with(&[(PATH, source.as_str())]);
         let token = CancellationToken::new();
-        let delay = cold * percent / 100;
-        let canceller = {
-            let token = token.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(delay);
-                token.cancel();
-            })
+        let nth = (polls * percent / 100).max(1);
+        let got = {
+            let _cancel = verter_type_engine::cancel_trace::cancel_at_poll(token.clone(), nth);
+            answer(&host, token)
         };
-        let got = answer(&host, token);
-        canceller.join().expect("the canceller finishes");
-        cancelled += usize::from(check(&host, got, &format!("{percent}% of a cold request")));
+        cancelled += usize::from(check(
+            &host,
+            got,
+            &format!("poll {nth} of {polls} ({percent}% of a cold request)"),
+        ));
     }
     assert!(cancelled > 0, "some cancellation landed inside a request");
+}
+
+/// A retry after a cancellation anywhere in a request over two sibling
+/// four-level chains answers what a fresh host answers: the gate version
+/// of [`nightly_scale::a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers`],
+/// over four eight-level chains, at the same cancellation points (on the
+/// smaller request more of the family points land past its end).
+#[test]
+fn a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers() {
+    assert_a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers(2, 4);
 }
 
 /// `witness` as a `switch` whose `cases` cases each return their own
@@ -2761,6 +2774,14 @@ fn a_chains_answer_is_the_same_whatever_completed_first() {
 /// Each has a gate version outside this module.
 mod nightly_scale {
     use super::*;
+
+    /// The full-size version of
+    /// [`super::a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers`],
+    /// over four sibling eight-level chains.
+    #[test]
+    fn a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers() {
+        assert_a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers(4, 8);
+    }
 
     /// Every module added to a generic chain costs the same connected work.
     ///

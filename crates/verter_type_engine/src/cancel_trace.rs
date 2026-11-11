@@ -97,6 +97,76 @@ pub fn cancel_at_family_entry(
     Disarm
 }
 
+/// What [`poll`] does on this thread: count every cancellation poll, and
+/// cancel `token` as the `nth` (1-based) one reads it.
+struct PollHook {
+    polls: usize,
+    cancel_at: Option<(verter_execution::cancellation::CancellationToken, usize)>,
+}
+
+thread_local! {
+    static POLL_HOOK: RefCell<Option<PollHook>> = const { RefCell::new(None) };
+}
+
+/// Disarms the poll hook it was returned with.
+pub struct PollHookGuard(());
+
+impl Drop for PollHookGuard {
+    fn drop(&mut self) {
+        POLL_HOOK.with(|cell| cell.borrow_mut().take());
+    }
+}
+
+fn install_poll_hook(
+    cancel_at: Option<(verter_execution::cancellation::CancellationToken, usize)>,
+) -> PollHookGuard {
+    POLL_HOOK.with(|cell| {
+        *cell.borrow_mut() = Some(PollHook {
+            polls: 0,
+            cancel_at,
+        })
+    });
+    PollHookGuard(())
+}
+
+/// Cancel `token` as the `nth` (1-based) cancellation poll on this thread
+/// reads it, while the returned guard lives: that poll is the first to
+/// observe it. A test cancels a request at any chosen point of its work
+/// this way — between two query families as well as at one — without a
+/// second thread or a wall-clock delay.
+pub fn cancel_at_poll(
+    token: verter_execution::cancellation::CancellationToken,
+    nth: usize,
+) -> PollHookGuard {
+    install_poll_hook(Some((token, nth.max(1))))
+}
+
+/// Run `work` and count the cancellation polls it made on this thread.
+pub fn count_polls<R>(work: impl FnOnce() -> R) -> (R, usize) {
+    let guard = install_poll_hook(None);
+    let result = work();
+    let polls = POLL_HOOK.with(|cell| cell.borrow().as_ref().map_or(0, |hook| hook.polls));
+    drop(guard);
+    (result, polls)
+}
+
+/// A cancellation poll is about to read the request's cancellation.
+pub(crate) fn poll() {
+    let due = POLL_HOOK.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let hook = slot.as_mut()?;
+        hook.polls += 1;
+        match &hook.cancel_at {
+            Some((_, nth)) if hook.polls == *nth => hook.cancel_at.take().map(|(token, _)| token),
+            _ => None,
+        }
+    });
+    // Cancelled outside the borrow: a cancellation may wake work that polls.
+    if let Some(token) = due {
+        token.cancel();
+    }
+}
+
 /// An open query family; closing it restores the enclosing one.
 pub(crate) struct FamilyFrame {
     recorded: bool,

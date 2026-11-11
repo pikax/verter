@@ -691,6 +691,8 @@ impl CancellationCheckpoint {
         // A job token that accepted a request owner decides; otherwise the
         // installed request's token, else the ownerless job token. Each is
         // read in place.
+        #[cfg(feature = "test-support")]
+        crate::cancel_trace::poll();
         let cancelled = verter_execution::cancellation::with_current_job_cancellation_token(
             Self::selected_token_cancelled,
         );
