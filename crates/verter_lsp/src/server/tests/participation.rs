@@ -627,7 +627,7 @@ async fn workspace_scope_open_schedules_no_eager_work() {
         .contains(&uri_to_canonical_id(&uri)));
 }
 
-/// PC09 at the server: a positional request is admitted against the cell of
+/// A positional request is admitted against the cell of
 /// the region it lands in, so a stylesheet-region overlap refuses a hover in
 /// `<style>` while template hover is still served.
 #[tokio::test]

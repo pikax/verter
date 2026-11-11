@@ -2331,6 +2331,12 @@ impl LanguageServer for VerterLanguageServer {
 
     async fn document_color(&self, params: DocumentColorParams) -> Result<Vec<ColorInformation>> {
         let uri = params.text_document.uri.clone();
+        let revision = || {
+            self.documents
+                .get(&uri)
+                .map(|document| document.document_revision)
+        };
+        let produced_from = revision();
         let colors = self
             .interactive(
                 Op::DocumentColor,
@@ -2339,7 +2345,11 @@ impl LanguageServer for VerterLanguageServer {
             )
             .await?;
         // Each color is served only where its own region's cell admits it,
-        // so a stylesheet-region withdrawal leaves no Verter color there.
+        // so a stylesheet-region withdrawal leaves no Verter color there. The
+        // regions are read from the revision the colors were produced from.
+        if revision() != produced_from {
+            return Err(crate::participation::superseded_error());
+        }
         Ok(colors
             .into_iter()
             .filter(|color| {
