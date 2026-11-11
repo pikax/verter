@@ -730,14 +730,12 @@ fn alternating_projection_instantiation_flow_and_call_chains_answer_on_a_one_meb
             ));
         }
         let probe = format!("ReturnType<typeof g{LENGTH}>");
-        let displays = on_a_one_mebibyte_stack(move || {
-            assert_eq!(
-                evaluated_mismatches(&source, &[(probe.as_str(), "\"ok\"")]),
-                Vec::<String>::new()
-            );
-            cold_and_warm_displays(&source, &probe)
-        });
-        assert_eq!(displays[0], displays[1], "cold and warm answer alike");
+        let displays = on_a_one_mebibyte_stack(move || cold_and_warm_displays(&source, &probe));
+        assert_eq!(
+            displays[0], "\"ok\"",
+            "the chain answers the checker's `\"ok\"` cold"
+        );
+        assert_eq!(displays[1], displays[0], "cold and warm answer alike");
     });
 }
 
@@ -1361,12 +1359,15 @@ fn recursive_applications_in_eager_positions_reach_verters_budget() {
         "type W<Y> = { w: Y }; type X<T> = T extends any ? W<X<[T]>> : never;",
         "type W<Y> = Y[]; type X<T> = T extends any ? W<X<[T]>> : never;",
     ];
+    // Each step nests the argument one tuple deeper, so a step costs more
+    // the further the run goes: the stand-in budget stays low.
+    const EAGER_BUDGET: u32 = 50;
     for options in SETTINGS {
         for declaration in EAGER {
             assert!(
                 holds_a_ts2589(
                     options,
-                    150,
+                    EAGER_BUDGET,
                     format!(
                         "{declaration}
 "
