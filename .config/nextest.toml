@@ -99,7 +99,7 @@ filter = 'test(svelte_progressive_component_completion_uses_committed_child_cont
 test-group = 'progressive-child-contract-completion'
 
 [[profile.default.overrides]]
-filter = 'package(verter_session) & (test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_stop_at_verters_budget_and_cost_the_same_work_per_step) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_101_level_chain_returning_a_same_name_function_type_answers) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_256_level_chain_returning_a_same_name_generic_answers))'
+filter = 'package(verter_session) & (test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_stop_at_verters_budget_and_cost_the_same_work_per_step) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_101_level_chain_returning_a_same_name_function_type_answers) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_101_level_chain_returning_a_same_name_generic_answers))'
 test-group = 'flow-speed-gates'
 
 [profile.ci]
@@ -131,7 +131,7 @@ filter = 'test(svelte_progressive_component_completion_uses_committed_child_cont
 test-group = 'progressive-child-contract-completion'
 
 [[profile.ci.overrides]]
-filter = 'package(verter_session) & (test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_stop_at_verters_budget_and_cost_the_same_work_per_step) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_101_level_chain_returning_a_same_name_function_type_answers) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_256_level_chain_returning_a_same_name_generic_answers))'
+filter = 'package(verter_session) & (test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_stop_at_verters_budget_and_cost_the_same_work_per_step) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_101_level_chain_returning_a_same_name_function_type_answers) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_101_level_chain_returning_a_same_name_generic_answers))'
 test-group = 'flow-speed-gates'
 
 # Produce JUnit XML for dorny/test-reporter in CI
