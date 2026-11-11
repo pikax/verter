@@ -30,9 +30,13 @@ use arc_swap::ArcSwap;
 use parking_lot::Mutex;
 use verter_identity::identity::SourceUnitId;
 use verter_language::participation::{
-    AdmissionRequest, AdmittedCell, CapabilityOwnershipMask, MaskConstructionError, MaskIdentity,
-    NonExecution, ParticipationInputs, ProfileRef, ProviderAvailability,
+    AdmissionRequest, AdmittedCell, CapabilityId, CapabilityOwnershipMask, MaskConstructionError,
+    MaskIdentity, NonExecution, ParticipationInputs, ProfileRef, ProviderAvailability,
+    ProviderRequirement, RequestSite,
 };
+/// The participation vocabulary an invocation host names its demands in,
+/// for hosts that reach participation only through this crate.
+pub use verter_language::participation::{CapabilityOperation, CatalogSupport, DemandPurpose};
 use verter_language::FileLanguage;
 use verter_protocol::participation::{ParticipationResolver, ProfileKind};
 
@@ -284,6 +288,92 @@ pub fn language_profile(host: &crate::VerterHost, language: &FileLanguage) -> Pr
 /// the same unit the workspace index records it under.
 pub fn file_unit(canonical: &str) -> SourceUnitId {
     crate::workspace_index::host_unit(canonical)
+}
+
+/// Admit one explicit invocation's demand of `operation` on one host file
+/// through that invocation's own participation scope (`service`): the
+/// file's profile cell at its unit, under the catalog support the
+/// capability's owner declared. An editor scope never decides it.
+pub fn admit_file(
+    service: &ParticipationService,
+    host: &crate::VerterHost,
+    canonical: &str,
+    operation: CapabilityOperation,
+    purpose: DemandPurpose,
+    catalog: CatalogSupport,
+) -> Result<ParticipationPermit, NonExecution> {
+    let unit = file_unit(canonical);
+    service.admit(&AdmissionRequest {
+        capability: &CapabilityId::new(file_profile(host, canonical), operation),
+        site: RequestSite {
+            unit: Some(&unit),
+            region_role: None,
+        },
+        purpose,
+        provider: ProviderRequirement::NotRequired,
+        catalog,
+    })
+}
+
+/// Admit one explicit invocation's workspace-wide query over classified
+/// component-API facts, before any index or owner read. It spans every
+/// profile whose adapter declares those facts and is admitted only when each
+/// admits it; a host that serves no such profile refuses it as an
+/// unsupported capability.
+pub fn admit_component_api_query(
+    service: &ParticipationService,
+    host: &crate::VerterHost,
+    operation: CapabilityOperation,
+    purpose: DemandPurpose,
+) -> Result<ParticipationPermit, NonExecution> {
+    let registry = host.framework_registry();
+    let request = |profile: ProfileRef, catalog| {
+        service.admit(&AdmissionRequest {
+            capability: &CapabilityId::new(profile, operation),
+            site: RequestSite::default(),
+            purpose,
+            provider: ProviderRequirement::NotRequired,
+            catalog,
+        })
+    };
+    let mut admitted = None;
+    for descriptor in registry.descriptors() {
+        if !descriptor.classifies_component_api_calls {
+            continue;
+        }
+        if let Some(entry) = registry.profile_for_adapter(&descriptor.id) {
+            admitted = Some(request(
+                ProfileRef::Framework(entry.profile.clone()),
+                CatalogSupport::Supported,
+            )?);
+        }
+    }
+    match admitted {
+        Some(permit) => Ok(permit),
+        None => request(
+            ProfileRef::Carrier(crate::workspace_index::carrier_profile(
+                &FileLanguage::script_ts(),
+            )),
+            CatalogSupport::UnsupportedCapability,
+        ),
+    }
+}
+
+/// The catalog support of a query over classified component-API facts
+/// (lifecycle hooks, `provide`/`inject`, `defineComponent`, stores) for one
+/// host file: supported only when its adapter's descriptor declares that
+/// its carrier analysis classifies them. Registry data, never a framework
+/// identity.
+pub fn component_api_support(host: &crate::VerterHost, canonical: &str) -> CatalogSupport {
+    let language = host.language_classifier().classify(canonical);
+    if host
+        .framework_registry()
+        .classifies_component_api_calls(&language)
+    {
+        CatalogSupport::Supported
+    } else {
+        CatalogSupport::UnsupportedCapability
+    }
 }
 
 /// Resolves a host's wire references against this host's own authorities:

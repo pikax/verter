@@ -12,11 +12,11 @@
 //!
 //! This guard scans the NON-TEST production source under `verter_mcp/src`
 //! (`server.rs` is the bulk) and FAILS on any executable `.vue`-literal /
-//! `"vue"`-language-id GATE outside a NARROW, documented allowlist of
-//! Vue-INTRINSIC tools — tools whose semantics are Vue-specific by definition
-//! (Provide/Inject API classification, Options→Composition migration targets,
-//! Pinia/Vuex store analysis, Vue-lifecycle SSR readiness), where `is_vue()`
-//! is the correct, intended classification.
+//! `"vue"`-language-id GATE. There is no allowlist: the component-API
+//! queries (provide/inject, stores, migration targets, SSR readiness) admit
+//! each unit through the invocation's own participation scope under the
+//! catalog support its adapter's descriptor declares (COX0, UAK0 `D11`),
+//! never through a framework identity.
 //!
 //! A "gate" is a CLASSIFICATION / ROUTING decision keyed on a `.vue` (or
 //! `"vue"`-language-id) literal — exactly the shapes that strand `.svelte`.
@@ -33,10 +33,6 @@
 //!   - a hardcoded carrier PROVIDER literal (`.vue.ts` / `.vue.tsx` /
 //!     `.vue.jsx`), including a `format!("{src}.vue.ts")` reconstruction.
 //!
-//! The allowlist is FUNCTION-scoped and needle-NARROW: an `is_vue()` /
-//! `.vue` gate is excused ONLY inside one of the enumerated Vue-intrinsic tool
-//! functions ([`VUE_INTRINSIC_FNS`]). A carrier-neutral tool may NOT carry a
-//! Vue gate, and the allowlist never whitelists a carrier-neutral function.
 //! Test code (`#[cfg(test)]` + `*_tests.rs`, stripped), comments (stripped),
 //! and explicit `is_svelte()` checks (a DIFFERENT carrier) are excluded.
 //!
@@ -46,26 +42,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-
-/// The Vue-INTRINSIC MCP tool functions whose semantics are Vue-specific by
-/// definition, where an `is_vue()` classification is correct and intended. An
-/// `is_vue()` / `.vue` gate is allowlisted ONLY when it appears textually
-/// inside one of these `fn` bodies. Every OTHER tool operates on carrier-
-/// neutral analysis and must be carrier-generic.
-///
-/// - `validate_provide_inject` — Vue `provide`/`inject` API classification.
-/// - `detect_migration_targets` — Options→Composition / `defineComponent`.
-/// - `get_store_usage` / `get_store_graph` / `trace_store_flow` — Pinia/Vuex
-///   `store_definitions`.
-/// - `ssr_project_report` — Vue-lifecycle SSR readiness.
-const VUE_INTRINSIC_FNS: &[&str] = &[
-    "validate_provide_inject",
-    "detect_migration_targets",
-    "get_store_usage",
-    "get_store_graph",
-    "trace_store_flow",
-    "ssr_project_report",
-];
 
 fn crate_src() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -153,28 +129,9 @@ fn strip_comment(code: &str) -> String {
 /// One flagged violation: file, 1-based line, the executable text.
 type Violation = (String, usize, String);
 
-/// Detect the function name on a `fn NAME(` / `async fn NAME(` definition line
-/// (already comment-stripped), so the allowlist can be FUNCTION-scoped.
-fn fn_name_on_line(code: &str) -> Option<String> {
-    let trimmed = code.trim_start();
-    let after = trimmed.strip_prefix("pub ").unwrap_or(trimmed).trim_start();
-    let after = after.strip_prefix("async ").unwrap_or(after).trim_start();
-    let rest = after.strip_prefix("fn ")?;
-    let name: String = rest
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
-}
-
-/// Walk one file, tracking `#[cfg(test)]` brace depth, multi-line block
-/// comments, AND the enclosing function name (for the Vue-intrinsic
-/// allowlist), and flag every executable line that contains a forbidden
-/// `.vue`/`"vue"` gate outside an allowlisted Vue-intrinsic function.
+/// Walk one file, tracking `#[cfg(test)]` brace depth and multi-line block
+/// comments, and flag every executable line that contains a forbidden
+/// `.vue`/`"vue"` gate.
 fn file_violations(path: &Path) -> Vec<Violation> {
     let Ok(src) = fs::read_to_string(path) else {
         return Vec::new();
@@ -190,12 +147,6 @@ fn file_violations(path: &Path) -> Vec<Violation> {
     let mut pending_cfg_test = false;
     let mut cfg_test_depth: Option<i32> = None;
     let mut depth: i32 = 0;
-
-    // Enclosing-function tracking: when a `fn NAME(` opens its body, remember
-    // NAME and the brace depth its body lives at; clear it when we close back
-    // out. A line is "inside" the function while `depth > fn_depth`.
-    let mut current_fn: Option<(String, i32)> = None;
-    let mut pending_fn: Option<String> = None;
 
     for (idx, raw) in src.lines().enumerate() {
         let lineno = idx + 1;
@@ -224,12 +175,6 @@ fn file_violations(path: &Path) -> Vec<Violation> {
             pending_cfg_test = true;
         }
 
-        // A `fn NAME(` definition arms the enclosing-fn record for the brace
-        // its body opens on (this line or a following one).
-        if let Some(name) = fn_name_on_line(&code) {
-            pending_fn = Some(name);
-        }
-
         let opens = code.matches('{').count() as i32;
         let closes = code.matches('}').count() as i32;
 
@@ -237,24 +182,8 @@ fn file_violations(path: &Path) -> Vec<Violation> {
             cfg_test_depth = Some(depth);
             pending_cfg_test = false;
         }
-        if let Some(name) = pending_fn.clone() {
-            if opens > 0 {
-                current_fn = Some((name, depth));
-                pending_fn = None;
-            }
-        }
-
         let inside_cfg_test = cfg_test_depth.is_some();
-        let in_vue_intrinsic_fn = current_fn
-            .as_ref()
-            .map(|(name, _)| VUE_INTRINSIC_FNS.contains(&name.as_str()))
-            .unwrap_or(false);
-
-        if !inside_cfg_test
-            && !in_vue_intrinsic_fn
-            && !trimmed.is_empty()
-            && line_gate_kind(&code).is_some()
-        {
+        if !inside_cfg_test && !trimmed.is_empty() && line_gate_kind(&code).is_some() {
             violations.push((rel.clone(), lineno, trimmed.to_string()));
         }
 
@@ -262,11 +191,6 @@ fn file_violations(path: &Path) -> Vec<Violation> {
         if let Some(base) = cfg_test_depth {
             if depth <= base {
                 cfg_test_depth = None;
-            }
-        }
-        if let Some((_, fn_depth)) = &current_fn {
-            if depth <= *fn_depth {
-                current_fn = None;
             }
         }
     }
@@ -580,10 +504,9 @@ fn match_arm_vue_gate_is_flagged_but_value_side_vue_is_not() {
 }
 
 #[test]
-fn vue_intrinsic_fn_allowlist_is_function_scoped() {
-    // An `is_vue()` gate INSIDE an allowlisted Vue-intrinsic fn is NOT flagged;
-    // the SAME gate inside a carrier-neutral fn IS flagged. This proves the
-    // allowlist is function-scoped (not whole-file) and discriminating.
+fn no_tool_function_is_excused() {
+    // The component-API queries admit through participation, so an `is_vue()`
+    // gate is flagged in every function, the former Vue-intrinsic ones too.
     let src = "\
 async fn get_store_usage(&self) -> Result<X, Y> {
     for (_, kind) in files {
@@ -605,40 +528,8 @@ async fn detect_css_bleed(&self) -> Result<X, Y> {
     fs::write(&tmp, src).unwrap();
     let v = file_violations(&tmp);
     let _ = fs::remove_file(&tmp);
-    // Exactly ONE violation: the `is_vue()` inside the carrier-neutral
-    // `detect_css_bleed`, NOT the one inside the allowlisted `get_store_usage`.
-    assert_eq!(
-        v.len(),
-        1,
-        "expected exactly the carrier-neutral fn's gate to flag; got {v:?}"
-    );
-    assert!(
-        v[0].2.contains("is_vue"),
-        "the flagged line must be the is_vue gate; got {:?}",
-        v[0].2
-    );
-    // The flagged line is INSIDE detect_css_bleed (line 10 in the fixture),
-    // never inside get_store_usage (line 3).
-    assert_eq!(v[0].1, 10, "the flagged gate must be in detect_css_bleed");
-}
-
-#[test]
-fn fn_name_detector_parses_definition_forms() {
-    assert_eq!(
-        fn_name_on_line("    async fn get_store_usage(&self) -> Result<X, Y> {"),
-        Some("get_store_usage".to_string())
-    );
-    assert_eq!(
-        fn_name_on_line("    fn build_route_snapshot("),
-        Some("build_route_snapshot".to_string())
-    );
-    assert_eq!(
-        fn_name_on_line("pub async fn detect_css_bleed("),
-        Some("detect_css_bleed".to_string())
-    );
-    assert_eq!(fn_name_on_line("    let x = foo();"), None);
-    // `fn` as a substring of an identifier must NOT parse as a definition.
-    assert_eq!(fn_name_on_line("    transform_data();"), None);
+    let lines: Vec<usize> = v.iter().map(|(_, line, _)| *line).collect();
+    assert_eq!(lines, vec![3, 10], "both gates flag; got {v:?}");
 }
 
 #[test]

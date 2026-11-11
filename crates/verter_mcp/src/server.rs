@@ -246,6 +246,9 @@ pub struct VerterMcpServer {
     pub project_root: Option<PathBuf>,
     #[allow(dead_code)]
     pub config: McpServerConfig,
+    /// This agent invocation's own participation scope (COX0): its tools
+    /// admit their demands here, and no editor scope governs them.
+    pub(crate) participation: Arc<verter_session::participation::ParticipationService>,
     // Used implicitly by rmcp's `#[tool_router]` / `#[tool_handler]` macros.
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
@@ -404,6 +407,7 @@ impl VerterMcpServer {
             action_engine: Arc::new(verter_actions::ActionEngine::builtin()),
             project_root,
             config,
+            participation: Arc::default(),
             tool_router: Self::coordinate_tagged_tool_router(),
         }
     }
@@ -420,6 +424,11 @@ impl VerterMcpServer {
             route.attr.meta = Some(meta);
         }
         router
+    }
+
+    /// This invocation's own participation scope (COX0).
+    pub fn participation(&self) -> &Arc<verter_session::participation::ParticipationService> {
+        &self.participation
     }
 
     pub(crate) fn resolve(&self, path: &str) -> String {
