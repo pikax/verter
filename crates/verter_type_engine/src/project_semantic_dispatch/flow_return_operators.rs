@@ -270,22 +270,37 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// cannot answer, is itself; a declaration reference is not unfolded,
     /// as its members enter the flow where a read projects them.
     pub(super) fn declared_positional_read(&mut self, node: SemanticNodeId) -> SemanticNodeId {
-        if let Some(done) = self.tables.declared_type_reads.borrow().get(&node) {
-            return *done;
+        {
+            let reads = self.tables.declared_type_reads.borrow();
+            let done = super::DeclaredTypeReads::read_in(&reads.by_node, &reads.walks, node, None);
+            if let Some(done) = done {
+                return done;
+            }
         }
         // The walk starts from every part this evaluation already read, so
         // a nest whose every level enters the flow is walked once overall.
-        let mut read = std::mem::take(&mut *self.tables.declared_type_reads.borrow_mut());
-        let result = self
-            .dispatch
-            .outside_inline_costs(|| self.declared_read_within(node, &mut read));
+        let (mut by_node, walk) = {
+            let mut shared = self.tables.declared_type_reads.borrow_mut();
+            shared
+                .walks
+                .push(crate::semantic_query::ResultCompleteness::Complete);
+            let walk = u32::try_from(shared.walks.len() - 1).unwrap_or(u32::MAX);
+            (std::mem::take(&mut shared.by_node), walk)
+        };
+        let walked = super::Memoized::compute(|| {
+            self.dispatch
+                .outside_inline_costs(|| self.declared_read_within(node, &mut by_node, walk))
+        });
         let mut shared = self.tables.declared_type_reads.borrow_mut();
-        if shared.is_empty() {
-            *shared = read;
-        } else {
-            shared.extend(read);
+        if let Some(completeness) = shared.walks.get_mut(walk as usize) {
+            *completeness = walked.completeness();
         }
-        result
+        if shared.by_node.is_empty() {
+            shared.by_node = by_node;
+        } else {
+            shared.by_node.extend(by_node);
+        }
+        walked.computed()
     }
 
     /// The structural walk behind [`Self::declared_positional_read`]:
@@ -296,7 +311,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     fn declared_read_within(
         &mut self,
         root: SemanticNodeId,
-        read: &mut rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+        by_node: &mut super::DeclaredReadsByNode,
+        walk: u32,
     ) -> SemanticNodeId {
         struct Frame {
             node: SemanticNodeId,
@@ -305,10 +321,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
             next: usize,
         }
         let enter =
-            |this: &Self,
-             node: SemanticNodeId,
-             read: &mut rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>| {
-                read.insert(node, node);
+            |this: &Self, node: SemanticNodeId, by_node: &mut super::DeclaredReadsByNode| {
+                by_node.insert(node, (node, walk));
                 let data = this.dispatch.graph().node_data(node);
                 let parts = data.as_deref().map_or_else(Vec::new, declared_read_parts);
                 Frame {
@@ -318,27 +332,31 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                     next: 0,
                 }
             };
-        if let Some(done) = read.get(&root) {
-            return *done;
+        let earlier = |this: &Self, by_node: &super::DeclaredReadsByNode, node| {
+            let reads = this.tables.declared_type_reads.borrow();
+            super::DeclaredTypeReads::read_in(by_node, &reads.walks, node, Some(walk))
+        };
+        if let Some(done) = earlier(self, by_node, root) {
+            return done;
         }
-        let mut stack = vec![enter(self, root, read)];
+        let mut stack = vec![enter(self, root, by_node)];
         while let Some(frame) = stack.last_mut() {
             if let Some(&part) = frame.parts.get(frame.next) {
                 frame.next += 1;
-                if !read.contains_key(&part) {
-                    let entered = enter(self, part, read);
+                if earlier(self, by_node, part).is_none() {
+                    let entered = enter(self, part, by_node);
                     stack.push(entered);
                 }
                 continue;
             }
             let Frame { node, data, .. } = stack.pop().expect("a frame on the stack");
             let result = match data {
-                Some(data) => self.declared_read_rebuild(node, &data, read),
+                Some(data) => self.declared_read_rebuild(node, &data, by_node),
                 None => node,
             };
-            read.insert(node, result);
+            by_node.insert(node, (result, walk));
         }
-        read.get(&root).copied().unwrap_or(root)
+        by_node.get(&root).map_or(root, |&(read, _)| read)
     }
 
     /// One node of [`Self::declared_read_within`], its parts already read.
@@ -346,9 +364,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         &mut self,
         node: SemanticNodeId,
         data: &SemanticNodeData,
-        read: &rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+        read: &super::DeclaredReadsByNode,
     ) -> SemanticNodeId {
-        let part = |id: SemanticNodeId| read.get(&id).copied().unwrap_or(id);
+        let part = |id: SemanticNodeId| read.get(&id).map_or(id, |&(read, _)| read);
         match data {
             SemanticNodeData::IndexedAccess { object, index, .. } => {
                 return self.declared_indexed_read(node, *object, index.clone());

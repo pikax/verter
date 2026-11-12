@@ -13159,8 +13159,117 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
 }
 
 /// A memo one root evaluation keeps for every activation it advances, and
-/// drops with them.
-type EvaluationMemo<K, V> = std::cell::RefCell<rustc_hash::FxHashMap<K, V>>;
+/// drops with them. Each entry keeps the completeness of the reads that
+/// computed it ([`Memoized`]).
+type EvaluationMemo<K, V> = std::cell::RefCell<rustc_hash::FxHashMap<K, Memoized<V>>>;
+
+/// An evaluation memo entry: its value and the completeness of the reads
+/// that computed it. A later reader takes that completeness with the value
+/// ([`Self::read`]), as performing the reads again would fold it: an entry
+/// computed from a partial read never reads as complete, whichever
+/// activation reads it, and whether or not the computing reader's own
+/// completeness was kept.
+#[derive(Clone)]
+pub(super) struct Memoized<V> {
+    value: V,
+    completeness: crate::semantic_query::ResultCompleteness,
+}
+
+impl<V: Clone> Memoized<V> {
+    /// Compute an entry. Its reads are measured in a completeness scope of
+    /// their own, which folds into the computing reader's as the reads would
+    /// have.
+    pub(super) fn compute(compute: impl FnOnce() -> V) -> Self {
+        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let value = compute();
+        let completeness = crate::request_context::current_cold_compute_completeness();
+        drop(scope);
+        Self {
+            value,
+            completeness,
+        }
+    }
+
+    /// The value for a later reader, the entry's completeness folded into
+    /// that reader's.
+    pub(super) fn read(&self) -> V {
+        crate::request_context::fold_result_completeness(self.completeness);
+        self.value.clone()
+    }
+
+    /// The value for the reader that just computed it: its completeness
+    /// already folded into that reader's.
+    pub(super) fn computed(&self) -> V {
+        self.value.clone()
+    }
+
+    /// The completeness of the reads that computed the entry.
+    pub(super) fn completeness(&self) -> crate::semantic_query::ResultCompleteness {
+        self.completeness
+    }
+}
+
+impl<V> Memoized<V> {
+    /// An entry keeping `value`, computed by the reads that computed this
+    /// one.
+    pub(super) fn with_value<W>(self, value: W) -> Memoized<W> {
+        Memoized {
+            value,
+            completeness: self.completeness,
+        }
+    }
+}
+
+/// [`EvaluationMemo`]'s read: the entry at `key`, read as
+/// [`Memoized::read`] reads it, or computed with `compute` and kept.
+fn memo_read<K: std::hash::Hash + Eq, V: Clone>(
+    memo: &EvaluationMemo<K, V>,
+    key: K,
+    compute: impl FnOnce() -> V,
+) -> V {
+    if let Some(entry) = memo.borrow().get(&key) {
+        return entry.read();
+    }
+    let entry = Memoized::compute(compute);
+    let value = entry.computed();
+    memo.borrow_mut().insert(key, entry);
+    value
+}
+
+/// Every node a declared-type walk read, by node: what it reads as, and
+/// the walk that read it.
+pub(super) type DeclaredReadsByNode = rustc_hash::FxHashMap<SemanticNodeId, (SemanticNodeId, u32)>;
+
+/// The declared-type reads one root evaluation made
+/// ([`FlowEvaluator::declared_positional_read`]): every node a walk read,
+/// and each walk's completeness (`Complete` while the walk runs). A walk
+/// reusing a node an earlier walk read, or a reader taking it, folds that
+/// walk's completeness, as reading the node again would.
+#[derive(Default)]
+pub(super) struct DeclaredTypeReads {
+    pub(super) by_node: DeclaredReadsByNode,
+    pub(super) walks: Vec<crate::semantic_query::ResultCompleteness>,
+}
+
+impl DeclaredTypeReads {
+    /// The read of `node` in `by_node` for a reader on walk `walk`
+    /// (`None` outside one), folding the completeness of the earlier walk
+    /// that read it.
+    pub(super) fn read_in(
+        by_node: &DeclaredReadsByNode,
+        walks: &[crate::semantic_query::ResultCompleteness],
+        node: SemanticNodeId,
+        walk: Option<u32>,
+    ) -> Option<SemanticNodeId> {
+        let &(read, by) = by_node.get(&node)?;
+        if walk != Some(by) {
+            if let Some(completeness) = walks.get(by as usize) {
+                crate::request_context::fold_result_completeness(*completeness);
+            }
+        }
+        Some(read)
+    }
+}
 
 /// A frame's product execution in its root evaluation's [`FlowTables`]:
 /// the frame names it, and the frames nested in it reach it through their
@@ -13189,7 +13298,7 @@ struct FlowTables {
     /// Every type this evaluation has read as the checker reads a declared
     /// type ([`FlowEvaluator::declared_positional_read`]), by node: a
     /// structure entering the flow again is walked once.
-    declared_type_reads: EvaluationMemo<SemanticNodeId, SemanticNodeId>,
+    declared_type_reads: std::cell::RefCell<DeclaredTypeReads>,
     /// Every identity-carrier unwrap this evaluation's guards read
     /// ([`FlowEvaluator::carrier_unwrap`]), by node: a chain of guards over
     /// one subject reads each remaining arm's unwrap once per evaluation
@@ -20825,17 +20934,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// read once per evaluation: every guard of a chain over one subject
     /// asks it again for each arm it passes over.
     fn carrier_unwrap(&self, node: SemanticNodeId) -> super::relation::IdentityCarrierUnwrap {
-        if let Some(unwrap) = self.tables.carrier_unwraps.borrow().get(&node) {
-            return *unwrap;
-        }
         let dispatch = self.dispatch;
-        let unwrap =
-            dispatch.outside_inline_costs(|| dispatch.unwrap_identity_carrier_for_relation(node));
-        self.tables
-            .carrier_unwraps
-            .borrow_mut()
-            .insert(node, unwrap);
-        unwrap
+        memo_read(&self.tables.carrier_unwraps, node, || {
+            dispatch.outside_inline_costs(|| dispatch.unwrap_identity_carrier_for_relation(node))
+        })
     }
 
     /// The CURRENT node of a narrowable reference: the binding's reaching
@@ -24231,16 +24333,18 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             return self.project_segments_navigate(arm, member);
         };
         let key = (arm, Arc::clone(name));
-        if let Some(read) = self.tables.discriminant_members.borrow().get(&key) {
-            return *read;
+        if let Some(entry) = self.tables.discriminant_members.borrow().get(&key) {
+            return entry.read();
         }
-        let read = self
-            .dispatch
-            .outside_inline_costs(|| self.project_segments_navigate(arm, member));
+        let entry = Memoized::compute(|| {
+            self.dispatch
+                .outside_inline_costs(|| self.project_segments_navigate(arm, member))
+        });
+        let read = entry.computed();
         self.tables
             .discriminant_members
             .borrow_mut()
-            .insert(key, read);
+            .insert(key, entry);
         read
     }
 
@@ -25474,17 +25578,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         // its edges, and a chain of guards asks it again for the arms each
         // guard passes over: the pair is related once per evaluation.
         let pair = (source, target);
-        if let Some(known) = self.tables.guard_relations.borrow().get(&pair) {
-            return *known;
-        }
-        let related = self
-            .dispatch
-            .outside_inline_costs(|| self.assignable(source, target));
-        self.tables
-            .guard_relations
-            .borrow_mut()
-            .insert(pair, related);
-        related
+        memo_read(&self.tables.guard_relations, pair, || {
+            self.dispatch
+                .outside_inline_costs(|| self.assignable(source, target))
+        })
     }
 
     /// Whether `node` is the global `Object` or `Function` interface.
@@ -32601,5 +32698,72 @@ mod nested_input_basis_tests {
             .expect("spawn the dropping thread")
             .join()
             .expect("the ancestry drops");
+    }
+}
+
+#[cfg(test)]
+mod evaluation_memo_tests {
+    use super::{memo_read, DeclaredTypeReads, EvaluationMemo};
+    use crate::request_context::{
+        current_cold_compute_completeness, mark_request_result_partial,
+        ColdComputeCompletenessScope,
+    };
+    use crate::semantic_query::{ResultCompleteness, SemanticNodeId};
+
+    /// An evaluation memo entry computed from a partial read reads as
+    /// partial for every later reader, whichever scope computed it, and one
+    /// computed from complete reads leaves its readers complete.
+    #[test]
+    fn a_memo_entry_reads_with_the_completeness_it_was_computed_from() {
+        let memo: EvaluationMemo<u32, u32> = EvaluationMemo::default();
+        let computing = ColdComputeCompletenessScope::enter();
+        let computed = memo_read(&memo, 1, || {
+            mark_request_result_partial();
+            7
+        });
+        assert_eq!(computed, 7);
+        assert!(current_cold_compute_completeness().is_partial());
+        computing.discard();
+
+        let later = ColdComputeCompletenessScope::enter();
+        assert_eq!(memo_read(&memo, 1, || 0), 7, "the entry is kept");
+        assert!(
+            current_cold_compute_completeness().is_partial(),
+            "a later reader takes the entry's partiality"
+        );
+        later.discard();
+
+        let complete = ColdComputeCompletenessScope::enter();
+        assert_eq!(memo_read(&memo, 2, || 9), 9);
+        assert_eq!(memo_read(&memo, 2, || 0), 9);
+        assert!(!current_cold_compute_completeness().is_partial());
+        complete.discard();
+    }
+
+    /// A declared-type read made by an earlier, partial walk folds that
+    /// walk's completeness into a reader outside it or on another walk, and
+    /// not into the walk that is making it.
+    #[test]
+    fn a_declared_read_folds_the_completeness_of_the_walk_that_made_it() {
+        let node = SemanticNodeId(3);
+        let mut reads = DeclaredTypeReads::default();
+        reads.walks.push(ResultCompleteness::partial(
+            crate::semantic_query::PartialReasonSet::PROPAGATED,
+        ));
+        reads.by_node.insert(node, (node, 0));
+
+        let own = ColdComputeCompletenessScope::enter();
+        let read = DeclaredTypeReads::read_in(&reads.by_node, &reads.walks, node, Some(0));
+        assert_eq!(read, Some(node));
+        assert!(!current_cold_compute_completeness().is_partial());
+        own.discard();
+
+        for walk in [None, Some(1)] {
+            let other = ColdComputeCompletenessScope::enter();
+            let read = DeclaredTypeReads::read_in(&reads.by_node, &reads.walks, node, walk);
+            assert_eq!(read, Some(node));
+            assert!(current_cold_compute_completeness().is_partial());
+            other.discard();
+        }
     }
 }
