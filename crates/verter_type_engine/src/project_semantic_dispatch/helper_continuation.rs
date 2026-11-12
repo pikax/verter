@@ -31,22 +31,26 @@
 //!
 //! What a helper still computes in place — its stages below the point it
 //! suspends at — is inventoried in `docs/arch/root-continuations.md`
-//! ("Boundaries that still block"). Today only a machinery relation root
-//! driven by a frame suspends: at the first instantiations its structural
-//! dispatch reads, unwrapping its operands. A pair or
-//! member relation and a call compute in place on either driver.
+//! ("Boundaries that still block"). Driven by a frame, a machinery relation
+//! root suspends at the first instantiations its structural dispatch reads,
+//! unwrapping its operands, and an inline call's executor walk at its
+//! candidate lists and at each first-pass argument relation's operand
+//! instantiations; on either driver a contextual call exchanges its
+//! callbacks with its consumer. A pair or member relation computes in
+//! place on either driver.
 
-use super::call_resolve::{ContextualCallState, DeclaredCallResult, ResolveCallStep};
+use super::call_resolve::{CallWalk, ContextualCallState, DeclaredCallResult, ResolveCallStep};
 use super::dispatch_txn::{InferenceOccurrence, RelationStep};
 use super::query_frames::{OperandDemand, QueryDelivery};
 use super::relation::RelateRootBuild;
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    RelateMemoKey, RelationKind, ResolveCallKey, SemanticNodeId, SemanticQueryKey,
-    SemanticQueryValue,
+    CallArgKey, RelateMemoKey, RelationKind, ResolveCallFailure, ResolveCallKey, SemanticNodeId,
+    SemanticQueryKey, SemanticQueryValue,
 };
 use crate::semantic_query_memo::ClaimAttempt;
+use std::sync::Arc;
 
 /// Where a helper computation stands after it advanced.
 pub(super) enum HelperStep<T> {
@@ -67,6 +71,14 @@ enum RequestKind {
     /// A query, needed as a frame's need would be: the claim it already
     /// entered with continues when the runtime starts it.
     Query(SemanticQueryKey, Option<ClaimAttempt>),
+    /// A contextual call's callback exchange: the call names the
+    /// context-sensitive argument at `position` and the contextual type its
+    /// consumer types that argument under. The candidate's collector stays
+    /// with the call while the consumer types it.
+    Callback {
+        position: u32,
+        contextual: SemanticNodeId,
+    },
 }
 
 impl HelperRequest {
@@ -76,10 +88,44 @@ impl HelperRequest {
         }
     }
 
-    /// The query and the claim it entered with, for the driver.
+    fn callback(position: u32, contextual: SemanticNodeId) -> Self {
+        Self {
+            kind: RequestKind::Callback {
+                position,
+                contextual,
+            },
+        }
+    }
+
+    /// The query a frame's request reads.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn query_key_for_tests(&self) -> &SemanticQueryKey {
+        match &self.kind {
+            RequestKind::Query(key, _) => key,
+            RequestKind::Callback { .. } => unreachable!("a frame requests queries"),
+        }
+    }
+
+    /// The argument a callback exchange asks its consumer to type, and the
+    /// contextual type it types it under; `None` for a query.
+    pub(super) fn callback_at(&self) -> Option<(u32, SemanticNodeId)> {
+        match self.kind {
+            RequestKind::Callback {
+                position,
+                contextual,
+            } => Some((position, contextual)),
+            RequestKind::Query(..) => None,
+        }
+    }
+
+    /// The query and the claim it entered with, for a frame's driver: a
+    /// frame drives only helpers that read queries.
     pub(super) fn into_query(self) -> (SemanticQueryKey, Option<ClaimAttempt>) {
         match self.kind {
             RequestKind::Query(key, claim) => (key, claim),
+            RequestKind::Callback { .. } => {
+                unreachable!("a callback exchange is its consumer's, not a frame's need")
+            }
         }
     }
 }
@@ -115,8 +161,13 @@ pub(super) struct HelperDelivery {
     kind: DeliveryKind,
 }
 
+#[allow(clippy::large_enum_variant)] // a query's delivery is the common one, read where it lands
 enum DeliveryKind {
     Query(SemanticQueryKey, QueryDelivery),
+    /// The call's arguments with the one its callback exchange named typed
+    /// by the consumer.
+    #[allow(dead_code)] // interface for the flow evaluator's retained call frames
+    Callback(Arc<[CallArgKey]>),
 }
 
 impl HelperDelivery {
@@ -126,10 +177,29 @@ impl HelperDelivery {
         }
     }
 
+    /// The answer to a callback exchange: the call's arguments, the one the
+    /// exchange named now typed under its contextual type.
+    #[allow(dead_code)] // interface for the flow evaluator's retained call frames
+    pub(super) fn callback(args: Arc<[CallArgKey]>) -> Self {
+        Self {
+            kind: DeliveryKind::Callback(args),
+        }
+    }
+
     /// The query this delivery answers, and its delivery.
     pub(super) fn into_query(self) -> (SemanticQueryKey, QueryDelivery) {
         match self.kind {
             DeliveryKind::Query(key, delivery) => (key, delivery),
+            DeliveryKind::Callback(_) => unreachable!("a query's read is delivered a query"),
+        }
+    }
+
+    fn into_callback(self) -> Arc<[CallArgKey]> {
+        match self.kind {
+            DeliveryKind::Callback(args) => args,
+            DeliveryKind::Query(..) => {
+                unreachable!("a callback exchange is answered by its typed arguments")
+            }
         }
     }
 }
@@ -269,27 +339,81 @@ impl RelationRead {
 /// A call resolution as an owned computation: the call executor's
 /// contextual entry over `key`, whose contextual continuation holds the
 /// candidate's collector across the consumer's callback typing.
+///
+/// Its requests: on a frame, an inline call's executor walk reads its
+/// candidate list and its argument relations' operand instantiations as
+/// queries ([`ProjectSemanticDispatch::advance_call_walk`]); on either
+/// driver, a call naming a context-sensitive argument for its consumer to
+/// type is a callback exchange ([`HelperRequest::callback_at`]), answered
+/// with the typed arguments ([`HelperDelivery::callback`]).
 pub(super) struct CallRead {
-    key: Option<ResolveCallKey>,
+    state: CallState,
     contextual: ContextualCallState,
+}
+
+enum CallState {
+    /// Not begun: nothing is read yet.
+    Begin(ResolveCallKey),
+    /// An inline call's executor walk stopped at a read, its executor frame
+    /// `frame` open on the transaction beneath the obligation it runs under.
+    Walk {
+        key: ResolveCallKey,
+        frame: usize,
+        walk: Box<CallWalk>,
+    },
+    /// The call named the argument at `position` for its consumer to type.
+    Callback {
+        key: ResolveCallKey,
+        position: usize,
+    },
+    /// The answer was delivered, or the call was released.
+    Finished,
 }
 
 /// What a call resolution answers: the executor's step, and the declared
 /// result a completed recipe supplied.
 pub(super) type CallAnswer = (ResolveCallStep, Option<DeclaredCallResult>);
 
+/// Where a call stands after one stage.
+enum CallStep {
+    Answered(CallAnswer),
+    /// The answer of a contextual round its callback's delivery resumed.
+    Resumed(CallAnswer),
+    Walking {
+        frame: usize,
+        walk: Box<CallWalk>,
+        request: HelperRequest,
+    },
+}
+
 impl CallRead {
     /// The resolution of the call `key`, continuing `contextual`.
     pub(super) fn begin(key: ResolveCallKey, contextual: ContextualCallState) -> Self {
         Self {
-            key: Some(key),
+            state: CallState::Begin(key),
             contextual,
         }
+    }
+
+    /// The contextual continuation the call holds while its consumer types
+    /// the argument its callback exchange named: an object or array literal
+    /// is typed member by member into the candidate's collector.
+    #[allow(dead_code)] // interface for the flow evaluator's retained call frames
+    pub(super) fn contextual_mut(&mut self) -> &mut ContextualCallState {
+        verter_debug_assert!(
+            matches!(self.state, CallState::Callback { .. }),
+            "a call's continuation is lent while it waits on its callback"
+        );
+        &mut self.contextual
     }
 
     /// The contextual continuation the resolution left, for the consumer's
     /// next round of callback typing.
     pub(super) fn into_contextual(self) -> ContextualCallState {
+        verter_debug_assert!(
+            !matches!(self.state, CallState::Walk { .. }),
+            "a call's walk is released, not taken apart"
+        );
         self.contextual
     }
 }
@@ -496,26 +620,204 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Advance a call resolution with the delivery of the request it stood
-    /// at. The executor resolves the call in place today: a call makes no
-    /// request yet, so its consumer's driver answers none.
+    /// at (`None` as it begins).
+    ///
+    /// The call authority's answer-before-execute steps (a reentered
+    /// executor frame's hold, a provisional component result, a validated
+    /// warm result) run once, as it begins, under the call's contextual
+    /// continuation; a machinery-root call then resolves in place through
+    /// its family memo. An inline call on a frame opens its executor frame
+    /// beneath the obligation it runs under and walks its candidates as an
+    /// owned computation ([`ProjectSemanticDispatch::advance_call_walk`]):
+    /// each read the walk stops at is a request, and the delivery enters the
+    /// walk where it stood. Driven in place, the walk never stops.
+    ///
+    /// A call whose candidate names a context-sensitive argument for its
+    /// consumer to type answers with a callback exchange; its typed
+    /// arguments resume the candidate's collector the call kept, and the
+    /// call answers again.
     #[inline(never)]
     pub(super) fn advance_call_read(
         &self,
         read: &mut CallRead,
         delivery: Option<HelperDelivery>,
-        _drive: HelperDrive,
+        drive: HelperDrive,
     ) -> HelperStep<CallAnswer> {
-        verter_debug_assert!(delivery.is_none(), "a call makes no request yet");
-        let key = read.key.take().expect("a call delivers its answer once");
-        HelperStep::Done(self.execute_contextual_call(key, &mut read.contextual))
+        let (key, step) = match std::mem::replace(&mut read.state, CallState::Finished) {
+            CallState::Begin(key) => {
+                verter_debug_assert!(delivery.is_none(), "a call begins unasked");
+                let step = self.with_contextual_call(&key, &mut read.contextual, || {
+                    self.begin_call_read(&key, drive)
+                });
+                (key, step)
+            }
+            CallState::Walk {
+                key,
+                frame,
+                mut walk,
+            } => {
+                let step = self.with_contextual_call(&key, &mut read.contextual, || {
+                    match self.advance_resolve_call_inline(&key, frame, &mut walk, delivery, drive)
+                    {
+                        HelperStep::Done(answer) => CallStep::Answered(answer),
+                        HelperStep::Request(request) => CallStep::Walking {
+                            frame,
+                            walk,
+                            request,
+                        },
+                    }
+                });
+                (key, step)
+            }
+            CallState::Callback { mut key, position } => {
+                let args = delivery
+                    .expect("a callback exchange resumes with its typed arguments")
+                    .into_callback();
+                // The resumed round settles the continuation itself when it
+                // answers the call again.
+                let answer =
+                    self.resume_contextual_call(&mut key, &args, position, &mut read.contextual);
+                (key, CallStep::Resumed(answer))
+            }
+            CallState::Finished => unreachable!("a call delivers its answer once"),
+        };
+        match step {
+            CallStep::Walking {
+                frame,
+                walk,
+                request,
+            } => {
+                read.state = CallState::Walk { key, frame, walk };
+                HelperStep::Request(request)
+            }
+            CallStep::Answered(answer) => {
+                if let ResolveCallStep::Degraded(ResolveCallFailure::ContextSensitiveInference {
+                    contextual: Some((position, contextual)),
+                }) = &answer.0
+                {
+                    read.state = CallState::Callback {
+                        key,
+                        position: *position as usize,
+                    };
+                    return HelperStep::Request(HelperRequest::callback(*position, *contextual));
+                }
+                read.contextual.settle();
+                HelperStep::Done(answer)
+            }
+            CallStep::Resumed(answer) => {
+                if let ResolveCallStep::Degraded(ResolveCallFailure::ContextSensitiveInference {
+                    contextual: Some((position, contextual)),
+                }) = &answer.0
+                {
+                    read.state = CallState::Callback {
+                        key,
+                        position: *position as usize,
+                    };
+                    return HelperStep::Request(HelperRequest::callback(*position, *contextual));
+                }
+                HelperStep::Done(answer)
+            }
+        }
+    }
+
+    /// The first stage of a call, under its contextual continuation: the
+    /// authority's answer-before-execute steps, then the machinery root's
+    /// in-place resolution, the inline call's in-place resolution, or — on
+    /// a frame — the inline call's walk begun under its executor frame.
+    fn begin_call_read(&self, key: &ResolveCallKey, drive: HelperDrive) -> CallStep {
+        if let Some(answer) = self.resolve_call_answer_at_entry(key) {
+            return CallStep::Answered(answer);
+        }
+        if self.dispatch_txn.borrow().obligations.decides_root() {
+            return CallStep::Answered((self.execute_resolve_call_root(key.clone()), None));
+        }
+        if drive == HelperDrive::InPlace {
+            return CallStep::Answered(
+                self.execute_resolve_call_inline_with_declared_result(key.clone()),
+            );
+        }
+        let frame = match self.begin_resolve_call_inline(key) {
+            Ok(frame) => frame,
+            Err(answer) => return CallStep::Answered(*answer),
+        };
+        let mut walk = Box::new(CallWalk::new(key.clone()));
+        match self.advance_resolve_call_inline(key, frame, &mut walk, None, drive) {
+            HelperStep::Done(answer) => CallStep::Answered(answer),
+            HelperStep::Request(request) => CallStep::Walking {
+                frame,
+                walk,
+                request,
+            },
+        }
     }
 
     /// Drive a call resolution to its answer in place: the synchronous
-    /// adapter.
+    /// adapter. A callback exchange answers as the executor's step naming
+    /// the argument, its collector kept in the call's continuation for the
+    /// consumer's next round ([`Self::resume_contextual_call`]).
+    ///
+    /// A call not yet begun answers through the call authority's
+    /// synchronous entry, which is what its first advance runs in place,
+    /// taken directly: a read nested under the call stands on none of the
+    /// state machine's frames.
     pub(super) fn drive_call_in_place(&self, read: &mut CallRead) -> CallAnswer {
+        if matches!(read.state, CallState::Begin(_)) {
+            return self.answer_call_in_place(read);
+        }
         match self.advance_call_read(read, None, HelperDrive::InPlace) {
             HelperStep::Done(answer) => answer,
-            HelperStep::Request(_) => unreachable!("an in-place call makes no request"),
+            HelperStep::Request(request) => {
+                let contextual = request
+                    .callback_at()
+                    .expect("an in-place call reads no query as a request");
+                (
+                    ResolveCallStep::Degraded(ResolveCallFailure::ContextSensitiveInference {
+                        contextual: Some(contextual),
+                    }),
+                    None,
+                )
+            }
         }
+    }
+
+    /// A call's first advance in place, under its contextual continuation:
+    /// the call authority's answer, the call kept at the argument a
+    /// callback exchange names, or its continuation settled.
+    #[inline(never)]
+    fn answer_call_in_place(&self, read: &mut CallRead) -> CallAnswer {
+        let CallState::Begin(key) = std::mem::replace(&mut read.state, CallState::Finished) else {
+            unreachable!("only a call not yet begun answers in place");
+        };
+        let answer = self.with_contextual_call(&key, &mut read.contextual, || {
+            self.execute_resolve_call_with_declared_result(key.clone())
+        });
+        if let ResolveCallStep::Degraded(ResolveCallFailure::ContextSensitiveInference {
+            contextual: Some((position, _)),
+        }) = &answer.0
+        {
+            read.state = CallState::Callback {
+                position: *position as usize,
+                key,
+            };
+        } else {
+            read.contextual.settle();
+        }
+        answer
+    }
+
+    /// Release a call its consumer stopped before it answered: a walk that
+    /// waited releases its candidate's collector and pops its executor
+    /// frame undecided; a contextual collector waiting on its callback is
+    /// abandoned.
+    #[allow(dead_code)] // interface for the flow evaluator's retained call frames
+    pub(super) fn release_call_read(&self, mut read: CallRead) {
+        if let CallState::Walk { key, frame, walk } =
+            std::mem::replace(&mut read.state, CallState::Finished)
+        {
+            self.with_contextual_call(&key, &mut read.contextual, || {
+                self.abandon_resolve_call_inline(frame, *walk);
+            });
+        }
+        self.release_contextual_collector(&mut read.contextual);
     }
 }

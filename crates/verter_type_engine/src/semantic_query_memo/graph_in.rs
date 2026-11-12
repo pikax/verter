@@ -217,6 +217,20 @@ impl<M: ObserveExec> GraphIn<'_, M> {
     }
     /// Record optional telemetry for this execution.
     #[inline(always)]
+    pub fn record_call_candidate_begun(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_call_candidate_begun();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_call_argument_related(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_call_argument_related();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
     pub fn record_instantiate(self) {
         if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
             self.store.record_instantiate();

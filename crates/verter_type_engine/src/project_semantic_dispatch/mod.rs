@@ -155,9 +155,9 @@ mod query_frames;
 pub(crate) mod request_completions;
 #[cfg(any(test, feature = "test-support"))]
 pub use query_frames::{
-    seam_need_probes_for_tests, seam_need_questions_for_tests, take_call_suspensions_for_tests,
-    CallSuspensionForTests, ContextualRouteEventForTests, OpenRequestStateForTests,
-    TaskOutcomeForTests,
+    hold_call_needs_here_for_tests, seam_need_probes_for_tests, seam_need_questions_for_tests,
+    take_call_suspensions_for_tests, CallSuspensionForTests, ContextualRouteEventForTests,
+    OpenRequestStateForTests, TaskOutcomeForTests,
 };
 pub use query_frames::{SemanticQueryPoll, SemanticTask};
 pub mod signature_discovery;
@@ -723,9 +723,6 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// and how many queries the decision is evaluating in place, which read
     /// only those answers.
     decision_seam: verter_execution::sync_cell::SyncRefCell<Option<query_frames::DecisionSeam>>,
-    /// The call resolution whose frame is stepping, while its walk runs:
-    /// the walk it resumes and the answers its operand demands read.
-    call_seam: verter_execution::sync_cell::SyncRefCell<Option<query_frames::CallSeam>>,
     /// The flow evaluation whose frame is stepping, while its run lasts:
     /// the answers its frame received, the contextual callbacks typing now
     /// and the contextual calls held across its runs.
@@ -1380,7 +1377,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             composite_fixed_points: Default::default(),
             driven_root_traced: verter_execution::sync_cell::SyncRefCell::new(None),
             decision_seam: verter_execution::sync_cell::SyncRefCell::new(None),
-            call_seam: verter_execution::sync_cell::SyncRefCell::new(None),
             flow_seam: verter_execution::sync_cell::SyncRefCell::new(None),
             substitution_binder: verter_execution::sync_cell::SyncRefCell::new(None),
             operation_depth: verter_execution::sync_cell::SyncU32::new(0),
@@ -1455,7 +1451,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             composite_fixed_points,
             driven_root_traced,
             decision_seam,
-            call_seam,
             flow_seam,
             substitution_binder,
             operation_depth,
@@ -1502,7 +1497,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         composite_fixed_points.swap(&other.composite_fixed_points);
         driven_root_traced.swap(&other.driven_root_traced);
         decision_seam.swap(&other.decision_seam);
-        call_seam.swap(&other.call_seam);
         flow_seam.swap(&other.flow_seam);
         substitution_binder.swap(&other.substitution_binder);
         // An operation the task's drive enters nests in the lender's open one,

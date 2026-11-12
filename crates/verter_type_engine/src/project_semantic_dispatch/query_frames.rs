@@ -257,6 +257,24 @@ impl OperandDemand {
     }
 }
 
+/// A relation's operand answers installed while it computes in place
+/// ([`ProjectSemanticDispatch::operand_answers_scope`]); dropped, the seam
+/// it hid is restored.
+pub(super) struct OperandAnswers<'d> {
+    seam: &'d verter_execution::sync_cell::SyncRefCell<Option<DecisionSeam>>,
+    outer: Option<Option<DecisionSeam>>,
+}
+
+impl Drop for OperandAnswers<'_> {
+    fn drop(&mut self) {
+        let seam = self.seam.replace(self.outer.take().flatten());
+        verter_debug_assert!(
+            seam.is_some_and(|seam| seam.needs.is_empty()),
+            "a relation computing in place reaches no read it waits on"
+        );
+    }
+}
+
 /// Where a load's terminal outcome is kept for the frame that waited on it:
 /// the frame consumes it once, and never begins the same load again.
 pub(super) struct LoadCompletion {
@@ -320,42 +338,27 @@ pub(super) struct FlowSeam {
     routes: Vec<super::flow_return::HeldContextualRoute>,
 }
 
-/// A call resolution between its steps: the executor frame its walk
-/// opened, the walk itself once it stopped — its candidate's collecting
-/// session included — and the answers to the operand demands it stopped
-/// on, the one it waits on and the others it reached.
+/// A machinery-root call resolution between its steps: the executor frame
+/// its walk opened, the walk as an owned computation
+/// ([`super::call_resolve::CallWalk`]), and the read it waits on.
 ///
-/// The walk stops before an argument relation whose operands — the
-/// argument's type and its parameter's — name instantiations or `typeof`s
-/// the frame has no answer for: the frame needs each, and the walk resumes
-/// at that argument with the same collector, which then relates over
-/// answered operands. Nothing the frame's needs evaluate meanwhile sees the
-/// collector: it is out of the transaction until the walk resumes, so a
-/// call nested in those evaluations deposits into its own.
+/// The walk stops at its candidate list when the memo does not serve it
+/// warm, and before an argument relation whose operands name an
+/// instantiation that must be computed: the frame needs it, and the walk
+/// resumes where it stood with the delivery — the candidate it stopped
+/// inside at that argument, with the same collector. Nothing the frame's
+/// needs evaluate meanwhile sees the collector: it is out of the
+/// transaction until the walk resumes, so a call nested in those
+/// evaluations deposits into its own.
 #[derive(Default)]
 pub(super) struct CallBuild {
     /// The call's executor frame, open from the walk's first step until it
     /// closes.
     frame: Option<usize>,
-    suspension: Option<Box<super::call_resolve::CallSuspension>>,
-    answers: FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
-    resumes: OperandResumes,
-    awaiting: Option<SemanticQueryKey>,
-    /// The claim the awaited demand entered with, until the runtime takes it.
+    walk: Option<super::call_resolve::CallWalk>,
+    awaiting: Option<HelperAwait>,
+    /// The claim the awaited read entered with, until the runtime takes it.
     claim: Option<ClaimAttempt>,
-    pending: std::collections::VecDeque<(SemanticQueryKey, ClaimAttempt)>,
-}
-
-/// What the walk of the call whose frame is stepping reads at its seam:
-/// the walk it resumes, and its operand demands' answers and needs.
-pub(super) struct CallSeam {
-    key: crate::semantic_query::ResolveCallKey,
-    resume: Option<Box<super::call_resolve::CallSuspension>>,
-    answers: FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
-    resumes: OperandResumes,
-    needs: SeamNeeds,
-    /// The frame depth a needed demand's own frame runs at.
-    depth: u32,
 }
 
 /// What a frame's build did in one step.
@@ -465,11 +468,6 @@ impl SeamNeeds {
 
     fn len(&self) -> usize {
         self.reached.len()
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    fn iter(&self) -> std::slice::Iter<'_, (SemanticQueryKey, ClaimAttempt)> {
-        self.reached.iter()
     }
 }
 
@@ -1927,10 +1925,19 @@ impl<'d, 'a: 'd, C: crate::resolver_core::ResolverCapabilities> std::future::Fut
 
 impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a, C> {
     /// Claim `key` as another task's producer, when the test holds the
-    /// demands a call's walk suspends on.
+    /// reads a call's walk suspends on: by default the instantiations its
+    /// argument relations' operands name, or what the thread's filter
+    /// ([`hold_call_needs_here_for_tests`]) selects.
     #[cfg(any(test, feature = "test-support"))]
     fn hold_call_need_for_tests(&mut self, key: &SemanticQueryKey, site: TupleSplicePosition) {
-        let Some(held) = self.held_call_needs.as_mut() else {
+        let filter = HELD_CALL_NEEDS_HERE.with(std::cell::Cell::get);
+        if let Some(filter) = filter {
+            if filter(key) {
+                self.held_call_needs.get_or_insert_with(Vec::new);
+            }
+        }
+        let holds = filter.unwrap_or(|key| matches!(key, SemanticQueryKey::Instantiate(_)));
+        let Some(held) = self.held_call_needs.as_mut().filter(|_| holds(key)) else {
             return;
         };
         let dispatch = &self.dispatch;
@@ -2352,7 +2359,7 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
         if let Some(FrameBuild::Call(build)) = frame.build.as_mut() {
             if let Some(idx) = build.frame.take() {
                 self.dispatch
-                    .abandon_resolve_call_build(idx, build.suspension.take());
+                    .abandon_resolve_call_build(idx, build.walk.take());
             }
         }
         // A relation root stopped while its operands are demanded closes its
@@ -4068,10 +4075,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Carry a call resolution's frame on: record a delivery as the answer
-    /// to the operand demand its walk waited on, need the next one its walk
-    /// reached, or run the walk — resuming it where it stopped — until it
-    /// stops again or closes.
+    /// Carry a call resolution's frame on: its first step opens the
+    /// executor frame; each step advances the call's walk with the delivery
+    /// of the read it stood at, until it stands at another — the frame's
+    /// need — or delivers its verdict and the frame closes.
     fn drain_call(
         &self,
         key: &SemanticQueryKey,
@@ -4082,18 +4089,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let SemanticQueryKey::ResolveCall(call) = key else {
             unreachable!("a call frame produces a call resolution")
         };
-        if let Some(delivery) = delivery {
-            let answered = build
-                .awaiting
-                .take()
-                .expect("a delivery answers the demand the walk waited on");
-            build.answers.insert((answered, delivery.site), delivery);
-        }
-        if let Some((need, claim)) = build.pending.pop_front() {
-            build.awaiting = Some(need.clone());
-            build.claim = Some(claim);
-            return FramePoll::Need(need);
-        }
         let idx = match build.frame {
             Some(idx) => idx,
             None => match self.open_resolve_call_build(call) {
@@ -4101,134 +4096,56 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Err(refusal) => return FramePoll::Done(refusal),
             },
         };
-        let installed = self.call_seam.replace(Some(CallSeam {
-            key: (**call).clone(),
-            resume: build.suspension.take(),
-            answers: std::mem::take(&mut build.answers),
-            resumes: std::mem::take(&mut build.resumes),
-            needs: SeamNeeds::default(),
-            depth,
-        }));
-        verter_debug_assert!(installed.is_none(), "one call walk runs per step");
-        let step = self.step_resolve_call_build(call, idx);
-        let seam = self
-            .call_seam
-            .take()
-            .expect("the walk's seam stays installed for its run");
-        build.answers = seam.answers;
-        build.resumes = seam.resumes;
-        match step {
-            super::call_resolve::CallWalkStep::Suspended(suspension) => {
+        let delivered = delivery.map(|delivery| {
+            let awaiting = build
+                .awaiting
+                .take()
+                .expect("a delivery answers the read the walk waited on");
+            self.helper_delivery(awaiting, delivery)
+        });
+        let walk = build
+            .walk
+            .get_or_insert_with(|| super::call_resolve::CallWalk::new((**call).clone()));
+        match self.advance_resolve_call_build(idx, walk, delivered, HelperDrive::Frame { depth }) {
+            HelperStep::Request(request) => {
+                // A walk stopped inside a candidate, its collector held.
                 #[cfg(any(test, feature = "test-support"))]
-                CALL_SUSPENSIONS_FOR_TESTS.with(|observed| {
-                    observed.borrow_mut().push(CallSuspensionForTests {
-                        needs: seam.needs.iter().map(|(need, _)| need.clone()).collect(),
-                        collected_candidates: suspension.collected_candidates(),
-                    })
-                });
-                build.suspension = Some(suspension);
-                let mut needs = seam.needs.into_iter();
-                let (need, claim) = needs.next().expect("a suspended walk waits on a demand");
-                build.awaiting = Some(need.clone());
-                build.claim = Some(claim);
-                build.pending = needs.collect();
-                FramePoll::Need(need)
+                if let Some(collected_candidates) = walk.held_collector_for_tests() {
+                    CALL_SUSPENSIONS_FOR_TESTS.with(|observed| {
+                        observed.borrow_mut().push(CallSuspensionForTests {
+                            needs: vec![request.query_key_for_tests().clone()],
+                            collected_candidates,
+                        })
+                    });
+                }
+                self.helper_request_poll(request, &mut build.awaiting, &mut build.claim)
             }
-            super::call_resolve::CallWalkStep::Done(output) => {
+            HelperStep::Done(output) => {
                 build.frame = None;
+                build.walk = None;
                 FramePoll::Done(output)
             }
         }
     }
 
-    /// Whether the walk of `key` is the one its frame is stepping, which
-    /// stops on its operands' demands instead of evaluating them in place.
-    pub(super) fn call_walk_suspends(&self, key: &crate::semantic_query::ResolveCallKey) -> bool {
-        self.call_seam
-            .borrow()
-            .as_ref()
-            .is_some_and(|seam| &seam.key == key)
-    }
-
-    /// The walk of `key` its frame suspended, to resume where it stopped.
-    pub(super) fn take_call_resume(
+    /// Enter `key` as a helper computation's read on a frame whose needs run
+    /// `depth` deep, exactly as the synchronous entry would enter it: the
+    /// read the memo serves warm, or the request with the claim it entered
+    /// with, which continues when the runtime starts it.
+    pub(super) fn enter_helper_read(
         &self,
-        key: &crate::semantic_query::ResolveCallKey,
-    ) -> Option<Box<super::call_resolve::CallSuspension>> {
-        self.call_seam
-            .borrow_mut()
-            .as_mut()
-            .filter(|seam| &seam.key == key)
-            .and_then(|seam| seam.resume.take())
-    }
-
-    /// Demand what an argument relation over `operands` unwraps — as the
-    /// checker instantiates an argument's and its parameter's types before
-    /// relating them — at the walk's seam: an instantiation or a `typeof`
-    /// the frame's answers hold, or the memo serves warm, reads at once;
-    /// one that must be computed becomes one of the frame's needs. What the
-    /// demand observed is the relation's to observe, so it is dropped.
-    /// Whether the walk must stop for any.
-    pub(super) fn call_operands_wait(&self, operands: [SemanticNodeId; 2]) -> bool {
-        let (mut answers, mut resumes, depth) = {
-            let mut seam = self.call_seam.borrow_mut();
-            let seam = seam
-                .as_mut()
-                .expect("an operand demand runs inside its frame's walk");
-            (
-                std::mem::take(&mut seam.answers),
-                std::mem::take(&mut seam.resumes),
-                seam.depth,
-            )
-        };
-        let needs = self.demand_operands_at_seam(operands, &mut answers, &mut resumes, depth);
-        let waits = !needs.is_empty();
-        let mut seam = self.call_seam.borrow_mut();
-        let seam = seam
-            .as_mut()
-            .expect("an operand demand runs inside its frame's walk");
-        seam.answers = answers;
-        seam.resumes = resumes;
-        seam.needs = needs;
-        waits
-    }
-
-    /// Demand what a relation over `operands` unwraps at a seam of its own
-    /// over `answers`, each operand's walk resuming where `resumes` says it
-    /// stopped: the reads it reached that no answer holds, in order, each
-    /// with the claim it entered with. What the demand observed is the
-    /// relation's to observe, so it is dropped.
-    fn demand_operands_at_seam(
-        &self,
-        operands: [SemanticNodeId; 2],
-        answers: &mut FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
-        resumes: &mut OperandResumes,
+        key: &SemanticQueryKey,
         depth: u32,
-    ) -> SeamNeeds {
-        let outer = self.decision_seam.replace(Some(DecisionSeam {
-            answers: std::mem::take(answers),
-            resumes: std::mem::take(resumes),
-            needs: SeamNeeds::default(),
-            depth,
-            nested: 0,
-            materialized_children: false,
-        }));
-        let demanded = self.observe_read(|| {
-            let _ = self.demand_relation_operands(operands);
-        });
-        let _ = demanded.discard();
-        let DecisionSeam {
-            answers: answered,
-            resumes: resumed,
-            needs,
-            ..
-        } = self
-            .decision_seam
-            .replace(outer)
-            .expect("the operand demand's seam stays installed for its run");
-        *answers = answered;
-        *resumes = resumed;
-        needs
+    ) -> Result<HelperRequest, Box<QueryDelivery>> {
+        self.enter_query_frame(key, depth)
+            .map(|claim| HelperRequest::query(key.clone(), Some(claim)))
+    }
+
+    /// The read a helper computation makes of a delivery it requested, or
+    /// that was served warm as it entered, as the frame's need nested
+    /// `depth` deep.
+    pub(super) fn read_helper_delivery(&self, delivery: QueryDelivery, depth: u32) -> ValueRead {
+        self.read_delivery(delivery, Nesting::Frame { depth })
     }
 
     /// Carry a relation's operand demand on with the delivery of the read it
@@ -4302,6 +4219,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         demand.answers = seam.answers;
         out
+    }
+
+    /// Install the answers `demand` received for the rest of a relation
+    /// computing where its driver stands, as [`Self::with_operand_answers`]
+    /// does around a body: its operand reads the answers hold read them,
+    /// every other read evaluates in place. `None` when the demand
+    /// received no answer, and nothing is installed.
+    pub(super) fn operand_answers_scope(
+        &self,
+        demand: OperandDemand,
+        depth: u32,
+    ) -> Option<OperandAnswers<'_>> {
+        if demand.answers.is_empty() {
+            return None;
+        }
+        let outer = self.decision_seam.replace(Some(DecisionSeam {
+            answers: demand.answers,
+            resumes: OperandResumes::default(),
+            needs: SeamNeeds::default(),
+            depth,
+            nested: 1,
+            materialized_children: false,
+        }));
+        Some(OperandAnswers {
+            seam: &self.decision_seam,
+            outer: Some(outer),
+        })
     }
 
     /// The frame's next poll for the request a helper computation it
@@ -4750,6 +4694,25 @@ pub enum ContextualRouteEventForTests {
     Resumed { session: u64, collected: usize },
     /// Released unresumed, its collector abandoned.
     Released { session: u64, collected: usize },
+}
+
+/// Which reads a call frame's needs another task holds for a test.
+#[cfg(any(test, feature = "test-support"))]
+type HeldCallNeeds = fn(&SemanticQueryKey) -> bool;
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static HELD_CALL_NEEDS_HERE: std::cell::Cell<Option<HeldCallNeeds>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// From now on, have another task produce each read a call frame needs on
+/// this thread that `filter` selects, before the frame's task claims it —
+/// until the task's [`SemanticTask::release_held_call_needs_for_tests`];
+/// `None` stops selecting. Test-only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn hold_call_needs_here_for_tests(filter: Option<HeldCallNeeds>) {
+    HELD_CALL_NEEDS_HERE.with(|held| held.set(filter));
 }
 
 /// What a call frame's walk held when it suspended. Test-only.

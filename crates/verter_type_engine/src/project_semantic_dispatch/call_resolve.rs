@@ -11,6 +11,7 @@ use super::dispatch_txn::{
     ResolveCallPendingState, ResolveCallSelection, ReturnDomainMetadata, ReturnEquationFailure,
     ReturnEquationMember, ReturnObligationIdentity, SessionId,
 };
+use super::helper_continuation::{HelperDelivery, HelperDrive, HelperRequest, HelperStep};
 use super::inference::session::{InferenceSessionSetup, InferenceSessionState, SessionCheckpoint};
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
@@ -181,14 +182,6 @@ enum ResolveCallRootClose {
     Degraded(ResolveCallFailure),
 }
 
-/// What one step of a call resolution's frame did.
-pub(super) enum CallWalkStep {
-    /// The walk stopped; its frame holds it.
-    Suspended(Box<CallSuspension>),
-    /// The build's output.
-    Done(Box<QueryBuildOutput<SemanticQueryValue>>),
-}
-
 enum ResolveCallFramePop {
     Provisional(ResolveCallStep),
     RootClose(ResolveCallRootClose),
@@ -247,46 +240,115 @@ struct CallArgument {
 }
 
 #[allow(clippy::large_enum_variant)]
-enum CandidateVerdict {
+pub(super) enum CandidateVerdict {
     Selected(ResolveCallPendingState),
     Mismatch,
     Degraded(ResolveCallFailure),
-    /// The walk stopped before an argument relation whose operands need
-    /// demands its frame has no answer for; the frame holds the walk, its
-    /// collector included, until they are delivered.
-    Suspended(Box<CallSuspension>),
+    /// The candidate stopped before an argument relation whose operands its
+    /// frame must produce first: the candidate as it stands, its collector
+    /// out of the transaction, and the read it waits on.
+    Suspended(Box<SuspendedCandidate>, HelperRequest),
 }
 
-/// The candidates and arguments one call resolution walks, acquired once:
-/// a walk resumed on its frame reads them again from here instead of
-/// rediscovering its callee's signatures and re-acquiring its arguments.
+/// The candidates and arguments one call resolution walks, acquired once.
 pub(super) struct CallPlan {
-    callee: SemanticNodeId,
     visible: verter_session_query::retention::owned::OwnedSlice<SignatureRef>,
     raw: verter_session_query::retention::owned::OwnedSlice<SignatureRef>,
     arguments: Vec<CallArgument>,
 }
 
-/// A call's candidate walk suspended on its frame
-/// ([`ProjectSemanticDispatch::drain_call`]): where the walk stands, and
-/// the candidate's open inference — its collecting session, taken out of
-/// the transaction while the frame waits, so nothing that runs meanwhile
-/// can deposit into it.
-pub(super) struct CallSuspension {
-    /// Set by the walk around the candidate.
-    walk: Option<SuspendedWalk>,
-    candidate: SuspendedCandidate,
+/// A call resolution's executor walk as an owned computation
+/// ([`ProjectSemanticDispatch::advance_call_walk`]): the executor frame it
+/// opened, and where the walk stands — acquiring its plan, or between its
+/// candidates with the one it stopped inside retained.
+///
+/// On a frame of the continuation runtime ([`HelperDrive::Frame`]) the
+/// walk reads its candidate list and each argument relation's operand
+/// instantiations as requests; a delivery enters the walk where it stood.
+/// Driven in place, it makes every read where it stands and never stops.
+pub(super) struct CallWalk {
+    key: ResolveCallKey,
+    stage: WalkStage,
 }
 
-struct SuspendedWalk {
-    plan: Arc<CallPlan>,
-    applicability: crate::semantic_query::RelationKind,
-    candidate: SemanticNodeId,
-    /// The transaction's session count when the walk began.
+enum WalkStage {
+    /// Not begun: nothing is read yet.
+    Begin,
+    /// The plan being acquired: the callee, the explicit type arguments,
+    /// and the candidate lists read so far.
+    Plan(Box<PlanStage>),
+    /// Between candidates, or inside the one that stopped.
+    Candidates(Box<CandidateWalk>),
+    /// The walk delivered its verdict, or was released.
+    Finished,
+}
+
+struct PlanStage {
+    callee: SemanticNodeId,
+    explicit_type_args: Arc<[SemanticNodeId]>,
     session_watermark: usize,
+    /// The visible candidate list, once read.
+    visible: Option<verter_session_query::retention::owned::OwnedSlice<SignatureRef>>,
+    /// The candidate list read the walk waits on.
+    awaiting: Option<SemanticQueryKey>,
 }
 
-struct SuspendedCandidate {
+/// Where a call's candidate walk stands: the pass and candidate it checks
+/// next — or the candidate that stopped inside its argument relations —
+/// and what the passes before decided.
+struct CandidateWalk {
+    plan: Arc<CallPlan>,
+    session_watermark: usize,
+    outer_applicability: crate::semantic_query::RelationKind,
+    passes: &'static [crate::semantic_query::RelationKind],
+    pass: usize,
+    position: usize,
+    /// A contextual round resumes at the candidate the last round stopped
+    /// at; every candidate before it is passed over.
+    resume_at: Option<(crate::semantic_query::RelationKind, SemanticNodeId)>,
+    explicit_recovery: Option<ExplicitOverloadRecovery>,
+    /// The sole candidate (or the explicitly reported one) and the one
+    /// recovered with, as positions in the visible and raw lists.
+    only_candidate: Option<(usize, usize)>,
+    recovered_candidate: Option<(usize, usize)>,
+    /// The candidate that stopped inside its argument relations, and the
+    /// position of its raw form.
+    suspended: Option<(Box<SuspendedCandidate>, usize)>,
+}
+
+static SUBTYPE_THEN_ASSIGNABLE: [crate::semantic_query::RelationKind; 2] = [
+    crate::semantic_query::RelationKind::Subtype,
+    crate::semantic_query::RelationKind::Assignable,
+];
+static ASSIGNABLE_ONLY: [crate::semantic_query::RelationKind; 1] =
+    [crate::semantic_query::RelationKind::Assignable];
+
+/// What a candidate's applicability check reads once, as it begins: its
+/// parameters under the call's substitution, its type parameters, its
+/// receiver and rest shape, its arity verdict. A candidate resumed inside
+/// its argument relations continues from these, never reading them again.
+struct CandidatePrologue {
+    contextual_fixed: FxHashMap<SemanticNodeId, SemanticNodeId>,
+    contextual_diagnostic: Option<crate::semantic_query::CheckerDiagnosticRecipe>,
+    contextual_substitution: CanonicalTypeSubstitution,
+    params: Arc<[FunctionParam]>,
+    visible_type_params: Arc<[crate::semantic_query::TypeParamDecl]>,
+    raw_type_params: Arc<[crate::semantic_query::TypeParamDecl]>,
+    own_return_function: Option<crate::semantic_query::FlowFunctionSlotIdentity>,
+    call_receiver: Option<SemanticNodeId>,
+    rest_shape: Option<RestShape>,
+    /// The call's argument count does not fit: no argument is related.
+    truncated: bool,
+    failure: Option<crate::semantic_query::CheckerDiagnosticRecipe>,
+}
+
+/// A candidate stopped inside its argument relations on its frame: its
+/// prologue, the arguments it relates, its open inference — its collecting
+/// session, taken out of the transaction while the frame waits, so nothing
+/// that runs meanwhile can deposit into it — and the argument it stands at.
+pub(super) struct SuspendedCandidate {
+    prologue: Box<CandidatePrologue>,
+    arguments: Vec<CallArgument>,
     session: super::inference::session::InferenceSession,
     checkpoint: SessionCheckpoint,
     /// The first-pass argument the candidate relates next.
@@ -298,23 +360,79 @@ struct SuspendedCandidate {
     /// The generic function arguments the first pass skipped so far: the
     /// argument's position, its one generic signature and its parameter.
     generic_function_arguments: Vec<(usize, SemanticNodeId, SemanticNodeId)>,
+    /// The argument it stands at: its parameter type, the evidence mapping
+    /// it recorded, and the demand of its relation's operands.
+    pending: PendingArgument,
 }
 
-impl CallSuspension {
-    /// The collecting session the suspended candidate holds.
-    pub(super) fn session_id(&self) -> SessionId {
-        self.candidate.session.id
+/// A suspended candidate resumed, its collector back in the transaction
+/// as `session_id`.
+struct ResumedCandidate {
+    session_id: SessionId,
+    checkpoint: SessionCheckpoint,
+    next_argument: usize,
+    failure: Option<crate::semantic_query::CheckerDiagnosticRecipe>,
+    deferred_for_relation_scc: bool,
+    generic_function_arguments: Vec<(usize, SemanticNodeId, SemanticNodeId)>,
+    pending: PendingArgument,
+}
+
+struct PendingArgument {
+    target: SemanticNodeId,
+    evidence: crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+    demand: Box<super::query_frames::OperandDemand>,
+}
+
+/// What acquiring a call's plan did in one advance.
+#[allow(clippy::large_enum_variant)] // a request is the common outcome; boxing it costs an allocation per read
+enum PlanProgress {
+    /// A candidate list read the walk waits on.
+    Request(HelperRequest),
+    /// The verdict that answers the call before any candidate is tried.
+    Verdict(Box<CandidateVerdict>),
+    /// The plan, its candidate walk begun.
+    Planned(Box<CandidateWalk>),
+}
+
+/// Where a candidate's check starts: fresh over its prologue, or resumed
+/// where it stopped with the delivery of the read it waited on.
+#[allow(clippy::large_enum_variant)] // passed by value once per candidate check
+enum CandidateStart<'a> {
+    Fresh {
+        prologue: Box<CandidatePrologue>,
+        arguments: &'a [CallArgument],
+    },
+    Resumed {
+        suspended: Box<SuspendedCandidate>,
+        delivery: Option<(SemanticQueryKey, super::query_frames::QueryDelivery)>,
+    },
+}
+
+// A suspended walk is owned state its frame carries to whichever thread
+// resumes it, advanced through an exclusive borrow.
+static_assertions::assert_impl_all!(CallWalk: Send);
+static_assertions::assert_not_impl_any!(CallWalk: Clone, Copy);
+
+impl CallWalk {
+    /// The executor walk of `key`, begun with nothing read.
+    pub(super) fn new(key: ResolveCallKey) -> Self {
+        Self {
+            key,
+            stage: WalkStage::Begin,
+        }
     }
 
-    /// Give the held collector back to the transaction it was taken from.
-    pub(super) fn into_session(self) -> super::inference::session::InferenceSession {
-        self.candidate.session
-    }
-
-    /// The deposits the held collector has accepted so far.
+    /// The candidate collector a walk stopped inside a candidate holds, and
+    /// the deposits it accepted so far.
     #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn collected_candidates(&self) -> usize {
-        self.candidate.session.collected_candidates_for_tests()
+    pub(super) fn held_collector_for_tests(&self) -> Option<usize> {
+        match &self.stage {
+            WalkStage::Candidates(walk) => walk
+                .suspended
+                .as_ref()
+                .map(|(candidate, _)| candidate.session.collected_candidates_for_tests()),
+            _ => None,
+        }
     }
 }
 
@@ -357,6 +475,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: ResolveCallKey,
     ) -> (ResolveCallStep, Option<DeclaredCallResult>) {
+        if let Some(answer) = self.resolve_call_answer_at_entry(&key) {
+            return answer;
+        }
+        if self.dispatch_txn.borrow().obligations.decides_root() {
+            (self.execute_resolve_call_root(key), None)
+        } else {
+            self.execute_resolve_call_inline_with_declared_result(key)
+        }
+    }
+
+    /// The call authority's answer-before-execute steps: a reentered
+    /// executor frame's hold, a provisional component result, or a validated
+    /// warm result. `None` when the call is left to execute.
+    pub(super) fn resolve_call_answer_at_entry(
+        &self,
+        key: &ResolveCallKey,
+    ) -> Option<(ResolveCallStep, Option<DeclaredCallResult>)> {
         // Per-request dispatch-mask trace, mirroring the cold-build choke point:
         // an INLINE call resolution (one running under an open flow or relation
         // obligation) never funnels through `execute_via_cold_build_helper`, so
@@ -375,19 +510,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut txn = self.dispatch_txn.borrow_mut();
             if let Some(idx) = txn.reentry().find(&identity) {
                 txn.obligations.record_assumption(idx);
-                return (ResolveCallStep::Hold(Box::new(key)), None);
+                return Some((ResolveCallStep::Hold(Box::new(key.clone())), None));
             }
             if let Some(result) = super::dispatch_txn::provisional_resolve_call_result(
                 txn.obligations.substitution(),
-                &key,
+                key,
             ) {
-                return (ResolveCallStep::Complete(result.clone()), None);
+                return Some((ResolveCallStep::Complete(result.clone()), None));
             }
         }
         if let Some(served) = self
             .graph()
-            .get_resolve_call_result(self.ctx, &key)
-            .or_else(|| self.kept_call_result(&key))
+            .get_resolve_call_result(self.ctx, key)
+            .or_else(|| self.kept_call_result(key))
         {
             if self.admits_served(&served.receipt) {
                 self.fold_cache_read_rails(
@@ -400,18 +535,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         key.callee,
                         super::return_equation::resolved_call_return_type(&served.value),
                     ]);
-                    self.declared_call_result(&key, &served.value, roots)
+                    self.declared_call_result(key, &served.value, roots)
                 } else {
                     None
                 };
-                return (ResolveCallStep::Complete(served.value), proof);
+                return Some((ResolveCallStep::Complete(served.value), proof));
             }
         }
-        if self.dispatch_txn.borrow().obligations.decides_root() {
-            (self.execute_resolve_call_root(key), None)
-        } else {
-            self.execute_resolve_call_inline_with_declared_result(key)
-        }
+        None
     }
 
     /// Whether a call evaluated in a frame's step resolves as a frame of its
@@ -522,7 +653,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    fn execute_resolve_call_inline_with_declared_result(
+    pub(super) fn execute_resolve_call_inline_with_declared_result(
         &self,
         key: ResolveCallKey,
     ) -> (ResolveCallStep, Option<DeclaredCallResult>) {
@@ -532,6 +663,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let idx = self.resolve_call_frame_open(&key);
         let outcome = self.run_resolve_call(&key);
+        self.finish_resolve_call_inline(&key, idx, outcome)
+    }
+
+    /// Close an inline call resolution's executor frame `idx` over its
+    /// walk's outcome: the executor's step, and the declared result a
+    /// completed winner's recipe supplies.
+    pub(super) fn finish_resolve_call_inline(
+        &self,
+        key: &ResolveCallKey,
+        idx: usize,
+        outcome: CandidateVerdict,
+    ) -> (ResolveCallStep, Option<DeclaredCallResult>) {
         // Only a completed winner with no return or applicability assumptions
         // supplies the declared recipe. A provisional cached seed never does.
         let proof = match &outcome {
@@ -543,7 +686,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let result = state
                     .selection
                     .with_return_type(self, state.concrete_seeds[0]);
-                self.declared_call_result(&key, &result, state.self_roots.clone())
+                self.declared_call_result(key, &result, state.self_roots.clone())
             }
             _ => None,
         };
@@ -561,7 +704,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         (step, proof)
     }
 
-    fn execute_resolve_call_root(&self, key: ResolveCallKey) -> ResolveCallStep {
+    pub(super) fn execute_resolve_call_root(&self, key: ResolveCallKey) -> ResolveCallStep {
         let mut publication = None;
         let read = self.execute_via_cold_build_helper_capturing_publication(
             SemanticQueryKey::ResolveCall(Box::new(key.clone())),
@@ -621,27 +764,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Ok(self.resolve_call_frame_open(key))
     }
 
-    /// One step of a call resolution's frame: walk its candidates — or
-    /// resume the walk `resume` holds — until it selects, fails, or stops
-    /// on operands its frame must demand first ([`CallWalkStep::Suspended`]).
-    pub(super) fn step_resolve_call_build(&self, key: &ResolveCallKey, idx: usize) -> CallWalkStep {
+    /// Advance a machinery-root call resolution's walk under its executor
+    /// frame `idx` with the delivery of the read it stood at: the build's
+    /// output once the walk delivers its verdict and the frame closes, or
+    /// the read the walk stands at next.
+    pub(super) fn advance_resolve_call_build(
+        &self,
+        idx: usize,
+        walk: &mut CallWalk,
+        delivery: Option<HelperDelivery>,
+        drive: HelperDrive,
+    ) -> HelperStep<Box<QueryBuildOutput<SemanticQueryValue>>> {
         let (_connected_guard, _) = self.enter_connected_demand(false);
-        match self.run_resolve_call(key) {
-            CandidateVerdict::Suspended(suspension) => CallWalkStep::Suspended(suspension),
-            outcome => CallWalkStep::Done(Box::new(self.close_resolve_call_build(idx, outcome))),
+        match self.advance_call_walk(walk, delivery, drive) {
+            HelperStep::Request(request) => HelperStep::Request(request),
+            HelperStep::Done(outcome) => {
+                HelperStep::Done(Box::new(self.close_resolve_call_build(idx, outcome)))
+            }
         }
     }
 
     /// Release a call resolution's frame abandoned between its steps: the
     /// collector its walk held and its executor frame, with every
     /// obligation the frame opened.
-    pub(super) fn abandon_resolve_call_build(
-        &self,
-        idx: usize,
-        suspension: Option<Box<CallSuspension>>,
-    ) {
-        if let Some(suspension) = suspension {
-            self.abandon_call_suspension(*suspension);
+    pub(super) fn abandon_resolve_call_build(&self, idx: usize, walk: Option<CallWalk>) {
+        if let Some(walk) = walk {
+            self.release_call_walk(walk);
         }
         let _ = self.resolve_call_frame_pop(
             idx,
@@ -649,6 +797,57 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             true,
         );
         self.relation_abort_completed_members();
+    }
+
+    /// Begin an inline call's executor walk on a frame: its executor frame
+    /// opened beneath the obligation it runs under, or the budget failure of
+    /// a demand whose connected work already tripped.
+    pub(super) fn begin_resolve_call_inline(
+        &self,
+        key: &ResolveCallKey,
+    ) -> Result<usize, Box<(ResolveCallStep, Option<DeclaredCallResult>)>> {
+        let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
+        if initial_trip.is_some() {
+            return Err(Box::new((
+                ResolveCallStep::Degraded(ResolveCallFailure::Budget),
+                None,
+            )));
+        }
+        Ok(self.resolve_call_frame_open(key))
+    }
+
+    /// Advance an inline call's executor walk under its executor frame
+    /// `idx` with the delivery of the read it stood at: the executor's
+    /// answer once the walk delivers its verdict and the frame closes, or
+    /// the read the walk stands at next.
+    pub(super) fn advance_resolve_call_inline(
+        &self,
+        key: &ResolveCallKey,
+        idx: usize,
+        walk: &mut CallWalk,
+        delivery: Option<HelperDelivery>,
+        drive: HelperDrive,
+    ) -> HelperStep<(ResolveCallStep, Option<DeclaredCallResult>)> {
+        let (_connected_guard, _) = self.enter_connected_demand(false);
+        match self.advance_call_walk(walk, delivery, drive) {
+            HelperStep::Request(request) => HelperStep::Request(request),
+            HelperStep::Done(outcome) => {
+                HelperStep::Done(self.finish_resolve_call_inline(key, idx, outcome))
+            }
+        }
+    }
+
+    /// Release an inline call's walk its consumer stopped while it waited:
+    /// the collector it held, and its executor frame popped undecided. The
+    /// members its walk completed belong to the component it runs under.
+    #[allow(dead_code)] // interface for the flow evaluator's retained call frames
+    pub(super) fn abandon_resolve_call_inline(&self, idx: usize, walk: CallWalk) {
+        self.release_call_walk(walk);
+        let _ = self.resolve_call_frame_pop(
+            idx,
+            CandidateVerdict::Degraded(ResolveCallFailure::Undecidable),
+            false,
+        );
     }
 
     /// Close a machinery-root call resolution's executor frame over its
@@ -838,7 +1037,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 CandidateVerdict::Mismatch => {
                     unreachable!("candidate mismatch is not a call outcome")
                 }
-                CandidateVerdict::Suspended(_) => {
+                CandidateVerdict::Suspended(..) => {
                     unreachable!("a suspended walk stays on its frame")
                 }
             };
@@ -911,7 +1110,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(failure));
             }
             CandidateVerdict::Mismatch => unreachable!("candidate mismatch is not a call outcome"),
-            CandidateVerdict::Suspended(_) => unreachable!("a suspended walk stays on its frame"),
+            CandidateVerdict::Suspended(..) => unreachable!("a suspended walk stays on its frame"),
         };
         root.inline_flight = inline_flight;
         let relation_substitution: ProvisionalSubstitution = relation_members
@@ -1408,7 +1607,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.relation_abort_completed_members();
                 Err(failure)
             }
-            CandidateVerdict::Suspended(_) => {
+            CandidateVerdict::Suspended(..) => {
                 unreachable!("a replay relates in place and never suspends")
             }
         }
@@ -1440,50 +1639,112 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The executor walk of `key` driven in place: every read made where it
+    /// stands.
     fn run_resolve_call(&self, key: &ResolveCallKey) -> CandidateVerdict {
-        let _contextual_isolation = self.isolate_contextual_call(key);
-        // A walk its frame suspended resumes where it stopped, over the plan
-        // it acquired.
-        let resumed = self.take_call_resume(key);
-        let session_watermark = match &resumed {
-            Some(resumed) => {
-                resumed
-                    .walk
-                    .as_ref()
-                    .expect("a suspended walk")
-                    .session_watermark
-            }
-            None => self.dispatch_txn.borrow().relation.sessions.len(),
-        };
-        let callee = match &resumed {
-            Some(resumed) => resumed.walk.as_ref().expect("a suspended walk").plan.callee,
-            None => self.substitute_canonical(key.callee, &key.context.substitution),
-        };
+        let mut walk = CallWalk::new(key.clone());
+        match self.advance_call_walk(&mut walk, None, HelperDrive::InPlace) {
+            HelperStep::Done(verdict) => verdict,
+            HelperStep::Request(_) => unreachable!("a walk driven in place makes no request"),
+        }
+    }
+
+    /// Advance a call's executor walk with the delivery of the read it stood
+    /// at (`None` on its first advance): the walk's verdict, or the read it
+    /// stands at next, everything it computed before that read retained.
+    ///
+    /// The walk substitutes its callee, reads its candidate lists and
+    /// acquires its arguments once, then checks its candidates in list
+    /// order under each pass. On a frame (`drive`), a candidate list the
+    /// memo does not serve warm is a request, and so is an instantiation an
+    /// argument relation's operands name that must be computed: the
+    /// candidate stops before the relation records anything, its collector
+    /// out of the transaction, and its next advance resumes at that argument
+    /// with the delivery — no candidate before it is checked again, and its
+    /// own parameters are not read again.
+    #[inline(never)]
+    pub(super) fn advance_call_walk(
+        &self,
+        walk: &mut CallWalk,
+        delivery: Option<HelperDelivery>,
+        drive: HelperDrive,
+    ) -> HelperStep<CandidateVerdict> {
+        let _contextual_isolation = self.isolate_contextual_call(&walk.key);
+        let mut delivery = delivery.map(HelperDelivery::into_query);
         // The shared signature list reads an apparent global (a primitive or
         // collection callee) from the project of the demanding site: the
         // call site is that site.
-        let _demand_scope = super::LexicalDemandScopeGuard::push(
-            &self.lexical_demand_scope,
-            key.point.canonical_id.clone(),
-        );
-        let plan = match &resumed {
-            Some(resumed) => Arc::clone(&resumed.walk.as_ref().expect("a suspended walk").plan),
-            None => match self.prepare_call_plan(key, callee) {
-                Ok(plan) => Arc::new(plan),
-                Err(verdict) => return *verdict,
-            },
-        };
-        self.walk_call_plan(key, &plan, session_watermark, resumed)
+        let mut demand_scope = None;
+        loop {
+            match std::mem::replace(&mut walk.stage, WalkStage::Finished) {
+                WalkStage::Begin => {
+                    verter_debug_assert!(delivery.is_none(), "a walk begins unasked");
+                    demand_scope.get_or_insert_with(|| {
+                        super::LexicalDemandScopeGuard::push(
+                            &self.lexical_demand_scope,
+                            walk.key.point.canonical_id.clone(),
+                        )
+                    });
+                    match self.begin_call_walk(&walk.key) {
+                        Ok(plan) => walk.stage = WalkStage::Plan(plan),
+                        Err(verdict) => return HelperStep::Done(*verdict),
+                    }
+                }
+                WalkStage::Plan(mut plan) => {
+                    demand_scope.get_or_insert_with(|| {
+                        super::LexicalDemandScopeGuard::push(
+                            &self.lexical_demand_scope,
+                            walk.key.point.canonical_id.clone(),
+                        )
+                    });
+                    match self.advance_call_plan(&walk.key, &mut plan, delivery.take(), drive) {
+                        PlanProgress::Request(request) => {
+                            walk.stage = WalkStage::Plan(plan);
+                            return HelperStep::Request(request);
+                        }
+                        PlanProgress::Verdict(verdict) => return HelperStep::Done(*verdict),
+                        PlanProgress::Planned(candidates) => {
+                            walk.stage = WalkStage::Candidates(candidates);
+                        }
+                    }
+                }
+                WalkStage::Candidates(mut candidates) => {
+                    demand_scope.get_or_insert_with(|| {
+                        super::LexicalDemandScopeGuard::push(
+                            &self.lexical_demand_scope,
+                            walk.key.point.canonical_id.clone(),
+                        )
+                    });
+                    return match self.advance_candidate_walk(
+                        &walk.key,
+                        &mut candidates,
+                        delivery.take(),
+                        drive,
+                    ) {
+                        HelperStep::Request(request) => {
+                            walk.stage = WalkStage::Candidates(candidates);
+                            HelperStep::Request(request)
+                        }
+                        HelperStep::Done(verdict) => HelperStep::Done(verdict),
+                    };
+                }
+                WalkStage::Finished => unreachable!("a walk delivers its verdict once"),
+            }
+        }
     }
 
-    /// Acquire the candidates and arguments a call resolution walks, or the
-    /// verdict that answers it before any candidate is tried.
-    fn prepare_call_plan(
+    /// A call walk's first stage, under the call site's demand scope: its
+    /// callee and explicit type arguments substituted, or the verdict of a
+    /// dynamic `any` callee, which answers the call before any candidate.
+    /// Out of line, so the walk's frame holds none of it while a candidate
+    /// it checks reads in place.
+    #[inline(never)]
+    fn begin_call_walk(
         &self,
         key: &ResolveCallKey,
-        callee: SemanticNodeId,
-    ) -> Result<CallPlan, Box<CandidateVerdict>> {
-        let graph = self.graph();
+    ) -> Result<Box<PlanStage>, Box<CandidateVerdict>> {
+        let session_watermark = self.dispatch_txn.borrow().relation.sessions.len();
+        let callee = self.substitute_canonical(key.callee, &key.context.substitution);
         let explicit_type_args: Arc<[SemanticNodeId]> = Arc::from(
             key.explicit_type_args
                 .iter()
@@ -1492,7 +1753,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .into_boxed_slice(),
         );
         if self.call_callee_is_dynamic_any(callee) {
-            let return_type = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+            let return_type = self
+                .graph()
+                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
             return Err(Box::new(CandidateVerdict::Selected(
                 self.resolve_call_pending_state(
                     key,
@@ -1504,98 +1767,258 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ),
             )));
         }
+        Ok(Box::new(PlanStage {
+            callee,
+            explicit_type_args,
+            session_watermark,
+            visible: None,
+            awaiting: None,
+        }))
+    }
 
+    /// Release a walk its consumer stopped before it delivered its verdict:
+    /// the collector of the candidate it stopped inside returns to the
+    /// transaction abandoned, as a rejected candidate's does.
+    pub(super) fn release_call_walk(&self, walk: CallWalk) {
+        if let WalkStage::Candidates(candidates) = walk.stage {
+            if let Some((suspended, _)) = candidates.suspended {
+                let id = suspended.session.id;
+                self.restore_suspended_session(suspended.session);
+                self.abandon_session(id);
+            }
+        }
+    }
+
+    /// Acquire the candidates and arguments a call resolution walks, or the
+    /// verdict that answers it before any candidate is tried. A candidate
+    /// list read on a frame that the memo does not serve warm is a request.
+    fn advance_call_plan(
+        &self,
+        key: &ResolveCallKey,
+        plan: &mut PlanStage,
+        mut delivery: Option<(SemanticQueryKey, super::query_frames::QueryDelivery)>,
+        drive: HelperDrive,
+    ) -> PlanProgress {
         // A call site demands exactly ITS bucket of the callee's shared
         // signature list: the call bucket for a call, the construct bucket
         // for `new`. The other bucket is never read, so its settlement
         // never gates this call.
         let bucket = signature_bucket(key.kind);
-        let visible = match self.acquire_call_candidates(
-            callee,
-            bucket,
-            &explicit_type_args,
-            key.context.resolve_env_hash,
-        ) {
-            CallCandidates::Candidates(visible) => visible,
-            failed => {
-                return Err(Box::new(CandidateVerdict::Degraded(
-                    self.candidate_failure(callee, failed),
-                )))
+        let callee = plan.callee;
+        let session_watermark = plan.session_watermark;
+        if plan.visible.is_none() {
+            let visible = match self.call_candidate_list(
+                callee,
+                bucket,
+                &plan.explicit_type_args,
+                key.context.resolve_env_hash,
+                &mut plan.awaiting,
+                delivery.take(),
+                drive,
+            ) {
+                Err(request) => return PlanProgress::Request(*request),
+                Ok(CallCandidates::Candidates(visible)) => visible,
+                Ok(failed) => {
+                    return PlanProgress::Verdict(Box::new(CandidateVerdict::Degraded(
+                        self.candidate_failure(callee, failed),
+                    )))
+                }
+            };
+            // `resolveNewExpression` refuses an abstract class before
+            // resolving anything: a `new` over a class's own construct
+            // signatures is an error ("cannot create an instance of an
+            // abstract class") whose answer is the error type, never the
+            // instance.
+            if bucket == SignatureKind::Construct
+                && visible
+                    .iter()
+                    .any(|candidate| self.is_abstract_class_construct_signature(candidate.node))
+            {
+                return PlanProgress::Verdict(Box::new(CandidateVerdict::Degraded(
+                    ResolveCallFailure::NotCallable,
+                )));
             }
-        };
-        // `resolveNewExpression` refuses an abstract class before resolving
-        // anything: a `new` over a class's own construct signatures is an
-        // error ("cannot create an instance of an abstract class") whose
-        // answer is the error type, never the instance.
-        if bucket == SignatureKind::Construct
-            && visible
-                .iter()
-                .any(|candidate| self.is_abstract_class_construct_signature(candidate.node))
-        {
-            return Err(Box::new(CandidateVerdict::Degraded(
-                ResolveCallFailure::NotCallable,
-            )));
+            plan.visible = Some(visible);
         }
+        let visible = plan.visible.clone().expect("the visible list is read");
         let raw = if key.explicit_type_args.is_empty() {
             visible.clone()
         } else {
-            match self.acquire_call_candidates(
+            match self.call_candidate_list(
                 callee,
                 bucket,
                 &Arc::<[SemanticNodeId]>::from([]),
                 key.context.resolve_env_hash,
+                &mut plan.awaiting,
+                delivery.take(),
+                drive,
             ) {
+                Err(request) => return PlanProgress::Request(*request),
                 // Explicit type arguments DROP the candidates that cannot
                 // accept them, so the raw bucket takes the same drop before
                 // it is paired positionally: a ROOTLESS candidate has no
                 // occurrence to pair by, and its raw form is the candidate
                 // at the same position in the equally-filtered list.
-                CallCandidates::Candidates(raw) => raw
+                Ok(CallCandidates::Candidates(raw)) => raw
                     .iter()
                     .filter(|candidate| {
-                        self.instantiate_call_candidate(candidate.node, &explicit_type_args)
+                        self.instantiate_call_candidate(candidate.node, &plan.explicit_type_args)
                             .is_some()
                     })
                     .cloned()
                     .collect(),
-                failed => {
-                    return Err(Box::new(CandidateVerdict::Degraded(
+                Ok(failed) => {
+                    return PlanProgress::Verdict(Box::new(CandidateVerdict::Degraded(
                         self.candidate_failure(callee, failed),
                     )))
                 }
             }
         };
-
         let arguments = match self.acquire_call_arguments(key) {
             Ok(arguments) => arguments,
-            Err(failure) => return Err(Box::new(CandidateVerdict::Degraded(failure))),
+            Err(failure) => {
+                return PlanProgress::Verdict(Box::new(CandidateVerdict::Degraded(failure)))
+            }
         };
-        Ok(CallPlan {
-            callee,
+        let plan = CallPlan {
             visible,
             raw,
             arguments,
-        })
+        };
+        let txn = self.dispatch_txn.borrow();
+        let resume_at = txn
+            .call
+            .contextual
+            .as_ref()
+            .and_then(|state| state.resume_at);
+        let outer_applicability = txn.call.applicability;
+        drop(txn);
+        // With explicit type arguments every candidate is instantiated, and
+        // the checker reports the argument error of the ONE candidate whose
+        // arity fits rather than TS2769, then continues with the candidate
+        // it recovers with (`getLongestCandidateIndex`: the first that takes
+        // as many parameters as the call has arguments) — the same one, or
+        // another whose instantiated return the call then takes.
+        let explicit_recovery = (plan.visible.len() > 1 && !key.explicit_type_args.is_empty())
+            .then(|| self.explicit_overload_recovery(&plan.visible, &plan.arguments))
+            .flatten();
+        // Several candidates are tried twice, as the checker's
+        // `resolveCall` does: first under the SUBTYPE relation, then under
+        // assignability, so an argument `{ a: any }` selects `(v: unknown)`
+        // before an earlier `(v: { a: string })` it is only assignable to.
+        let passes: &'static [crate::semantic_query::RelationKind] = if plan.visible.len() > 1 {
+            &SUBTYPE_THEN_ASSIGNABLE
+        } else {
+            &ASSIGNABLE_ONLY
+        };
+        PlanProgress::Planned(Box::new(CandidateWalk {
+            plan: Arc::new(plan),
+            session_watermark,
+            outer_applicability,
+            passes,
+            pass: 0,
+            position: 0,
+            resume_at,
+            explicit_recovery,
+            only_candidate: None,
+            recovered_candidate: None,
+            suspended: None,
+        }))
     }
 
-    /// Try a call's candidates in list order, under the subtype pass then
-    /// assignability, and recover with a sole candidate; resume a suspended
-    /// walk at the candidate it stopped at.
-    fn walk_call_plan(
+    /// The callee's candidate list for `bucket` under `type_args`: the
+    /// shared overload set. On a frame, a set the memo does not serve warm
+    /// is the request (`Err`), and its delivery is read where it was asked;
+    /// a set whose entry admits its subject reads in place.
+    #[allow(clippy::too_many_arguments)]
+    fn call_candidate_list(
+        &self,
+        callee: SemanticNodeId,
+        bucket: SignatureKind,
+        type_args: &Arc<[SemanticNodeId]>,
+        resolve_env_hash: crate::semantic_query::HashValue,
+        awaiting: &mut Option<SemanticQueryKey>,
+        delivery: Option<(SemanticQueryKey, super::query_frames::QueryDelivery)>,
+        drive: HelperDrive,
+    ) -> Result<CallCandidates, Box<HelperRequest>> {
+        let key = SemanticQueryKey::ResolveOverloadSet {
+            callee,
+            kind: bucket,
+            type_args: Arc::clone(type_args),
+            context: crate::semantic_query::OverloadSetContext {
+                resolve_env_hash,
+                ..Default::default()
+            },
+        };
+        let answer = match (delivery, drive) {
+            (Some((delivered, delivery)), HelperDrive::Frame { depth }) => {
+                let awaited = awaiting
+                    .take()
+                    .expect("a delivery answers the candidate list the walk waited on");
+                verter_debug_assert!(
+                    awaited == delivered && delivered == key,
+                    "a delivery answers the list it was asked"
+                );
+                Some((delivery, depth))
+            }
+            (Some(_), HelperDrive::InPlace) => {
+                unreachable!("a walk driven in place is delivered nothing")
+            }
+            (None, HelperDrive::Frame { depth })
+                if !self.admits_through_entry(&key) && self.walk_scope_is_ambient() =>
+            {
+                match self.enter_helper_read(&key, depth) {
+                    Ok(request) => {
+                        *awaiting = Some(key);
+                        return Err(Box::new(request));
+                    }
+                    Err(delivery) => Some((*delivery, depth)),
+                }
+            }
+            (None, _) => None,
+        };
+        Ok(self.acquire_call_candidates(key, callee, bucket, type_args, answer))
+    }
+
+    /// Whether a read the walk requests of its frame is scoped as the walk
+    /// would read it in place. The walk pushes its call site as the
+    /// innermost demand scope; a requested read is produced on the runtime
+    /// outside that push, under the scope beneath it — the enclosing demand
+    /// site, else the request's file. A primitive or collection callee's
+    /// candidate list looks its apparent global (`String`, `Array`) up in
+    /// that scope's project, so a list the runtime would read under another
+    /// scope, or under none, is read where the walk stands.
+    fn walk_scope_is_ambient(&self) -> bool {
+        let stack = self.lexical_demand_scope.borrow();
+        let Some((site, beneath)) = stack.split_last() else {
+            return false;
+        };
+        match beneath.last() {
+            Some(outer) => outer.as_ref() == site.as_ref(),
+            None => crate::request_context::current_request_canonical()
+                .is_some_and(|request| *request == *site.as_ref()),
+        }
+    }
+
+    /// Carry a call's candidate walk on: resume the candidate it stopped
+    /// inside with the delivery, or check the next candidate, until one is
+    /// selected, the walk fails, a candidate stops on a read, or every
+    /// candidate mismatched and the walk recovers.
+    fn advance_candidate_walk(
         &self,
         key: &ResolveCallKey,
-        plan: &Arc<CallPlan>,
-        session_watermark: usize,
-        mut resumed: Option<Box<CallSuspension>>,
-    ) -> CandidateVerdict {
+        walk: &mut CandidateWalk,
+        mut delivery: Option<(SemanticQueryKey, super::query_frames::QueryDelivery)>,
+        drive: HelperDrive,
+    ) -> HelperStep<CandidateVerdict> {
         let graph = self.graph();
         let bucket = signature_bucket(key.kind);
+        let plan = Arc::clone(&walk.plan);
         let CallPlan {
             visible,
             raw,
             arguments,
-            ..
-        } = &**plan;
+        } = &*plan;
         let mut budget = CallResolutionBudget::new(&self.connected_demand);
 
         let consumer = crate::semantic_query::ResolveCallConsumer::witness();
@@ -1612,149 +2035,154 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // signature list, in list order: the first applicable candidate
         // wins. A union callee arrives as its common or synthesized union
         // signatures, so there is no per-arm acceptance here.
-        //
-        // Several candidates are tried twice, as the checker's
-        // `resolveCall` does: first under the SUBTYPE relation, then under
-        // assignability, so an argument `{ a: any }` selects `(v: unknown)`
-        // before an earlier `(v: { a: string })` it is only assignable to.
-        let passes: &[crate::semantic_query::RelationKind] = if visible.len() > 1 {
-            &[
-                crate::semantic_query::RelationKind::Subtype,
-                crate::semantic_query::RelationKind::Assignable,
-            ]
-        } else {
-            &[crate::semantic_query::RelationKind::Assignable]
-        };
-        let outer_applicability = self.dispatch_txn.borrow().call.applicability;
-        let resume_at = self
-            .dispatch_txn
-            .borrow()
-            .call
-            .contextual
-            .as_ref()
-            .and_then(|state| state.resume_at)
-            .or_else(|| {
-                resumed.as_ref().map(|resumed| {
-                    let walk = resumed.walk.as_ref().expect("a suspended walk");
-                    (walk.applicability, walk.candidate)
-                })
-            });
-        let mut resuming = resume_at.is_some();
-        let mut only_candidate = None;
-        // With explicit type arguments every candidate is instantiated, and
-        // the checker reports the argument error of the ONE candidate whose
-        // arity fits rather than TS2769, then continues with the candidate
-        // it recovers with (`getLongestCandidateIndex`: the first that takes
-        // as many parameters as the call has arguments) — the same one, or
-        // another whose instantiated return the call then takes.
-        let explicit_recovery = (visible.len() > 1 && !key.explicit_type_args.is_empty())
-            .then(|| self.explicit_overload_recovery(visible, arguments))
-            .flatten();
-        let mut recovered_candidate = None;
         let mut raw_pairing = RawCandidatePairing::new(raw);
-        for &applicability in passes {
-            for (position, candidate) in visible.iter().enumerate() {
-                if resuming {
-                    if resume_at != Some((applicability, candidate.node)) {
-                        continue;
-                    }
-                    resuming = false;
-                }
-                let Some(kind) = bucket_kind(candidate.node) else {
-                    return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
-                };
-                // The set was demanded for exactly this bucket; a candidate of
-                // the other bucket is a producer contract violation, and the
-                // call fails closed rather than deciding on it.
-                if kind != bucket {
-                    return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
-                }
-                // Pair the (possibly instantiated) candidate with its RAW form
-                // through the content-free authored origin — instantiation
-                // preserves the occurrence but mints a new graph node, so a
-                // node-id pairing would lose the raw type parameters. A
-                // ROOTLESS candidate has no occurrence to compare: both lists
-                // are the same callee's ordered bucket, so its raw form is the
-                // candidate at the same flat position.
-                let raw_candidate = match candidate.occurrence.authored() {
-                    Some(occurrence) => raw_pairing.authored(occurrence, kind, bucket_kind),
-                    None => raw.get(position).filter(|raw| {
-                        raw.occurrence.authored().is_none() && bucket_kind(raw.node) == Some(kind)
-                    }),
-                };
-                let Some(raw_candidate) = raw_candidate else {
-                    return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
-                };
-                self.dispatch_txn.borrow_mut().call.applicability = applicability;
-                let prepared = if self.dispatch_txn.borrow().call.contextual.is_some() {
-                    self.prepare_contextual_candidate(
+        while let Some(&applicability) = walk.passes.get(walk.pass) {
+            let Some(candidate) = visible.get(walk.position) else {
+                walk.pass += 1;
+                walk.position = 0;
+                continue;
+            };
+            let position = walk.position;
+            let (verdict, raw_position) = match walk.suspended.take() {
+                // The candidate that stopped resumes where it stood, over the
+                // arguments it was checking.
+                Some((suspended, raw_position)) => {
+                    self.dispatch_txn.borrow_mut().call.applicability = applicability;
+                    let verdict = self.check_call_candidate_at(
                         key,
                         candidate,
-                        arguments,
-                        &mut budget,
-                        position + 1 == visible.len(),
-                    )
-                } else {
-                    Ok(arguments.clone())
-                };
-                let verdict = match prepared {
-                    Ok(arguments) => self.check_call_candidate(
-                        key,
-                        candidate,
-                        raw_candidate,
-                        &arguments,
+                        &raw[raw_position],
                         &mut budget,
                         false,
                         visible.len() == 1,
-                        resumed.take().map(|resumed| resumed.candidate),
-                        None,
-                    ),
-                    Err(verdict) => verdict.into(),
-                };
-                self.dispatch_txn.borrow_mut().call.applicability = outer_applicability;
-                match verdict {
-                    CandidateVerdict::Selected(result) => {
-                        return CandidateVerdict::Selected(result)
-                    }
-                    CandidateVerdict::Suspended(mut suspension) => {
-                        suspension.walk = Some(SuspendedWalk {
-                            plan: Arc::clone(plan),
-                            applicability,
-                            candidate: candidate.node,
-                            session_watermark,
-                        });
-                        return CandidateVerdict::Suspended(suspension);
-                    }
-                    CandidateVerdict::Mismatch => {}
-                    CandidateVerdict::Degraded(failure) => {
-                        if failure == ResolveCallFailure::Budget {
-                            self.abandon_call_sessions_since(session_watermark);
+                        CandidateStart::Resumed {
+                            suspended,
+                            delivery: delivery.take(),
+                        },
+                        drive,
+                    );
+                    (verdict, raw_position)
+                }
+                None => {
+                    if walk.resume_at.is_some() {
+                        if walk.resume_at != Some((applicability, candidate.node)) {
+                            walk.position += 1;
+                            continue;
                         }
-                        // A contextual request suspends this candidate. Its
-                        // collector is inactive while the callback body runs.
-                        return CandidateVerdict::Degraded(failure);
+                        walk.resume_at = None;
                     }
+                    let Some(kind) = bucket_kind(candidate.node) else {
+                        return HelperStep::Done(CandidateVerdict::Degraded(
+                            ResolveCallFailure::Undecidable,
+                        ));
+                    };
+                    // The set was demanded for exactly this bucket; a
+                    // candidate of the other bucket is a producer contract
+                    // violation, and the call fails closed rather than
+                    // deciding on it.
+                    if kind != bucket {
+                        return HelperStep::Done(CandidateVerdict::Degraded(
+                            ResolveCallFailure::Undecidable,
+                        ));
+                    }
+                    // Pair the (possibly instantiated) candidate with its RAW
+                    // form through the content-free authored origin —
+                    // instantiation preserves the occurrence but mints a new
+                    // graph node, so a node-id pairing would lose the raw
+                    // type parameters. A ROOTLESS candidate has no occurrence
+                    // to compare: both lists are the same callee's ordered
+                    // bucket, so its raw form is the candidate at the same
+                    // flat position.
+                    let raw_position = match candidate.occurrence.authored() {
+                        Some(occurrence) => raw_pairing.authored(occurrence, kind, bucket_kind),
+                        None => raw
+                            .get(position)
+                            .filter(|raw| {
+                                raw.occurrence.authored().is_none()
+                                    && bucket_kind(raw.node) == Some(kind)
+                            })
+                            .map(|_| position),
+                    };
+                    let Some(raw_position) = raw_position else {
+                        return HelperStep::Done(CandidateVerdict::Degraded(
+                            ResolveCallFailure::Undecidable,
+                        ));
+                    };
+                    self.dispatch_txn.borrow_mut().call.applicability = applicability;
+                    let prepared = if self.dispatch_txn.borrow().call.contextual.is_some() {
+                        self.prepare_contextual_candidate(
+                            key,
+                            candidate,
+                            arguments,
+                            &mut budget,
+                            position + 1 == visible.len(),
+                        )
+                    } else {
+                        Ok(arguments.clone())
+                    };
+                    let verdict = match prepared {
+                        Ok(arguments) => self.check_call_candidate(
+                            key,
+                            candidate,
+                            &raw[raw_position],
+                            &arguments,
+                            &mut budget,
+                            false,
+                            visible.len() == 1,
+                            None,
+                            drive,
+                        ),
+                        Err(verdict) => verdict.into(),
+                    };
+                    (verdict, raw_position)
                 }
-                if visible.len() == 1
-                    || explicit_recovery.is_some_and(|explicit| explicit.reported == position)
-                {
-                    only_candidate.get_or_insert((candidate, raw_candidate));
+            };
+            self.dispatch_txn.borrow_mut().call.applicability = walk.outer_applicability;
+            match verdict {
+                CandidateVerdict::Selected(result) => {
+                    return HelperStep::Done(CandidateVerdict::Selected(result))
                 }
-                if explicit_recovery.is_some_and(|explicit| {
-                    explicit.recovered == position && explicit.reported != position
-                }) {
-                    recovered_candidate.get_or_insert((candidate, raw_candidate));
+                CandidateVerdict::Suspended(suspended, request) => {
+                    walk.suspended = Some((suspended, raw_position));
+                    return HelperStep::Request(request);
+                }
+                CandidateVerdict::Mismatch => {}
+                CandidateVerdict::Degraded(failure) => {
+                    if failure == ResolveCallFailure::Budget {
+                        self.abandon_call_sessions_since(walk.session_watermark);
+                    }
+                    // A contextual request suspends this candidate. Its
+                    // collector is inactive while the callback body runs.
+                    return HelperStep::Done(CandidateVerdict::Degraded(failure));
                 }
             }
+            if visible.len() == 1
+                || walk
+                    .explicit_recovery
+                    .is_some_and(|explicit| explicit.reported == position)
+            {
+                walk.only_candidate.get_or_insert((position, raw_position));
+            }
+            if walk.explicit_recovery.is_some_and(|explicit| {
+                explicit.recovered == position && explicit.reported != position
+            }) {
+                walk.recovered_candidate
+                    .get_or_insert((position, raw_position));
+            }
+            walk.position += 1;
         }
-        self.recover_call_failure(
-            key,
-            only_candidate,
-            recovered_candidate,
-            arguments,
-            &mut budget,
-            outer_applicability,
-            session_watermark,
+        HelperStep::Done(
+            self.recover_call_failure(
+                key,
+                walk.only_candidate
+                    .map(|(position, raw_position)| (&visible[position], &raw[raw_position])),
+                walk.recovered_candidate
+                    .map(|(position, raw_position)| (&visible[position], &raw[raw_position])),
+                arguments,
+                &mut budget,
+                walk.outer_applicability,
+                walk.session_watermark,
+            ),
         )
     }
 
@@ -1793,7 +2221,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 true,
                 true,
                 None,
-                None,
+                HelperDrive::InPlace,
             );
             if let (CandidateVerdict::Selected(reported), Some((recovered, raw_recovered))) =
                 (&verdict, recovered)
@@ -1810,15 +2238,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         budget,
                         true,
                         true,
-                        None,
                         Some(diagnostic),
+                        HelperDrive::InPlace,
                     );
                 }
             }
             self.dispatch_txn.borrow_mut().call.applicability = outer_applicability;
             match verdict {
                 CandidateVerdict::Selected(result) => return CandidateVerdict::Selected(result),
-                CandidateVerdict::Suspended(_) => {
+                CandidateVerdict::Suspended(..) => {
                     unreachable!("an error-recovery candidate never suspends")
                 }
                 CandidateVerdict::Mismatch => {}
@@ -2030,23 +2458,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// through the SAME shared signature list the producer read — never
     /// through the other bucket, whose settlement is not this call site's
     /// business.
+    /// The callee's candidates read from the overload set `key`: in place,
+    /// or from `answer`, the set's delivery to a walk on a frame whose needs
+    /// run at its depth.
     fn acquire_call_candidates(
         &self,
+        key: SemanticQueryKey,
         callee: SemanticNodeId,
         bucket: SignatureKind,
         type_args: &Arc<[SemanticNodeId]>,
-        resolve_env_hash: crate::semantic_query::HashValue,
+        answer: Option<(super::query_frames::QueryDelivery, u32)>,
     ) -> CallCandidates {
-        let probe = self.observe_read(|| {
-            self.execute_via_cold_build_helper(SemanticQueryKey::ResolveOverloadSet {
-                callee,
-                kind: bucket,
-                type_args: Arc::clone(type_args),
-                context: crate::semantic_query::OverloadSetContext {
-                    resolve_env_hash,
-                    ..Default::default()
-                },
-            })
+        let probe = self.observe_read(|| match answer {
+            Some((delivery, depth)) => self.read_helper_delivery(delivery, depth),
+            None => self.execute_via_cold_build_helper(key),
         });
         if matches!(
             &probe.value().value,
@@ -2325,15 +2750,50 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         budget: &mut CallResolutionBudget<'_>,
         recovery: bool,
         sole_candidate: bool,
-        resume: Option<SuspendedCandidate>,
         reported: Option<crate::semantic_query::CheckerDiagnosticRecipe>,
+        drive: HelperDrive,
     ) -> CandidateVerdict {
+        let prologue = match self.candidate_prologue(
+            key,
+            candidate,
+            raw_candidate,
+            arguments,
+            recovery,
+            reported,
+        ) {
+            Ok(prologue) => prologue,
+            Err(verdict) => return *verdict,
+        };
+        self.check_call_candidate_at(
+            key,
+            candidate,
+            raw_candidate,
+            budget,
+            recovery,
+            sole_candidate,
+            CandidateStart::Fresh {
+                prologue,
+                arguments,
+            },
+            drive,
+        )
+    }
+
+    /// What a candidate's check reads once, as it begins
+    /// ([`CandidatePrologue`]), or the verdict that rejects it before any
+    /// argument relates.
+    fn candidate_prologue(
+        &self,
+        key: &ResolveCallKey,
+        candidate: &SignatureRef,
+        raw_candidate: &SignatureRef,
+        arguments: &[CallArgument],
+        recovery: bool,
+        reported: Option<crate::semantic_query::CheckerDiagnosticRecipe>,
+    ) -> Result<Box<CandidatePrologue>, Box<CandidateVerdict>> {
+        self.graph().record_call_candidate_begun();
         let graph = self.graph();
         let consumer = crate::semantic_query::ResolveCallConsumer::witness();
-        // A candidate suspended on its frame reads everything below as it
-        // did before it stopped: what follows up to its collector reads the
-        // graph and records nothing, so it reaches the collector exactly as
-        // the first run did.
         let (contextual_fixed, contextual_diagnostic) = self
             .dispatch_txn
             .borrow()
@@ -2363,7 +2823,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let parts = callable.parts(&consumer);
                 (Arc::clone(parts.params), Arc::clone(parts.type_parameters))
             }
-            _ => return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable),
+            _ => {
+                return Err(Box::new(CandidateVerdict::Degraded(
+                    ResolveCallFailure::Undecidable,
+                )))
+            }
         };
         let params: Arc<[FunctionParam]> = Arc::from(
             params
@@ -2384,7 +2848,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(SemanticNodeData::DeferredCallable(callable)) => {
                 Arc::clone(callable.parts(&consumer).type_parameters)
             }
-            _ => return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable),
+            _ => {
+                return Err(Box::new(CandidateVerdict::Degraded(
+                    ResolveCallFailure::Undecidable,
+                )))
+            }
         };
         let own_return_function = candidate
             .return_carrier
@@ -2414,19 +2882,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 shape: self.rest_shape(param.ty),
             });
         let rest = rest.as_ref();
-        // A GENERIC rest is one inference position over the whole trailing
-        // argument list: the arguments from the rest slot onward assemble
-        // into a single tuple candidate for the parameter itself.
-        let generic_rest = rest.and_then(|rest| match rest.shape {
-            RestShape::GenericTuple(param) => {
-                Some((param, ordinary_params.len().saturating_sub(1)))
-            }
-            _ => None,
-        });
         let (required, maximum, supports_indefinite) = call_candidate_arity(ordinary_params, rest);
         let indefinite = arguments.iter().any(|argument| argument.indefinite_spread);
         if indefinite && !supports_indefinite {
-            return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
+            return Err(Box::new(CandidateVerdict::Degraded(
+                ResolveCallFailure::Undecidable,
+            )));
         }
         let too_few = !indefinite && arguments.len() < required;
         let too_many = maximum.is_some_and(|maximum| arguments.len() > maximum);
@@ -2435,17 +2896,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // failure applicability meets. An applicable candidate has none. A
         // candidate recovering for another candidate's argument error
         // (`reported`) reports that error instead.
-        let mut failure = match &resume {
-            Some(resume) => resume.failure,
-            None if recovery => reported.or(contextual_diagnostic),
-            None => None,
+        let mut failure = if recovery {
+            reported.or(contextual_diagnostic)
+        } else {
+            None
         };
         if too_few || too_many {
             // Only a non-generic candidate recovers past an argument-count
             // mismatch: it infers nothing from the arguments applicability
             // never related.
             if !recovery || !visible_type_params.is_empty() {
-                return CandidateVerdict::Mismatch;
+                return Err(Box::new(CandidateVerdict::Mismatch));
             }
             // "Expected at least N" needs an EFFECTIVE rest: an array rest,
             // or a tuple rest with a rest element. A fixed-length tuple rest
@@ -2455,7 +2916,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(RestShape::Array(_)) => true,
                 Some(RestShape::Tuple(elements)) => elements.iter().any(|element| element.rest),
                 Some(RestShape::GenericTuple(_) | RestShape::Unresolved) => {
-                    return CandidateVerdict::Mismatch;
+                    return Err(Box::new(CandidateVerdict::Mismatch));
                 }
             };
             if reported.is_none() {
@@ -2478,51 +2939,177 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && !visible_type_params.is_empty()
             && self.arguments_hold_a_generic_function(arguments)
         {
-            return CandidateVerdict::Mismatch;
+            return Err(Box::new(CandidateVerdict::Mismatch));
         }
+        let rest_shape = rest.map(|rest| rest.shape.clone());
+        Ok(Box::new(CandidatePrologue {
+            contextual_fixed,
+            contextual_diagnostic,
+            contextual_substitution,
+            params,
+            visible_type_params,
+            raw_type_params,
+            own_return_function,
+            call_receiver,
+            rest_shape,
+            truncated: too_few || too_many,
+            failure,
+        }))
+    }
 
-        let setup = InferenceSessionSetup::new(
-            self.graph().store(),
-            self.call_inference_infos(&visible_type_params),
-            VariancePhase::Covariant,
-            InferencePassKind::CallApplicability,
-            InferenceCandidatePriority::Argument,
-            NoInferMask::empty(),
-            ConstParamPolicy::NonConst,
-            ContextualInferenceMode::None,
-        );
-        // A resumed candidate's collector returns to the transaction with
+    /// A suspended candidate given back its collector: the session returns
+    /// to the transaction with every deposit it accepted before it stopped,
+    /// and the candidate continues from its prologue, its arguments and the
+    /// argument it stands at. Out of line, so the candidate's check holds
+    /// no session while it relates its arguments.
+    #[inline(never)]
+    fn resume_suspended_candidate(
+        &self,
+        suspended: Box<SuspendedCandidate>,
+    ) -> (Box<CandidatePrologue>, Vec<CallArgument>, ResumedCandidate) {
+        let SuspendedCandidate {
+            prologue,
+            arguments,
+            session,
+            checkpoint,
+            next_argument,
+            failure,
+            deferred_for_relation_scc,
+            generic_function_arguments,
+            pending,
+        } = *suspended;
+        let session_id = session.id;
+        self.restore_suspended_session(session);
+        (
+            prologue,
+            arguments,
+            ResumedCandidate {
+                session_id,
+                checkpoint,
+                next_argument,
+                failure,
+                deferred_for_relation_scc,
+                generic_function_arguments,
+                pending,
+            },
+        )
+    }
+
+    /// A candidate's applicability check from `start`: fresh over the
+    /// prologue its check began with, or resumed inside its argument
+    /// relations where it stopped, its collector given back to the
+    /// transaction with every deposit it accepted before it stopped. On a
+    /// frame (`drive`), an argument relation whose operands name an
+    /// instantiation that must be computed stops the candidate before it
+    /// records anything, the instantiation its request.
+    #[allow(clippy::too_many_arguments)]
+    fn check_call_candidate_at(
+        &self,
+        key: &ResolveCallKey,
+        candidate: &SignatureRef,
+        raw_candidate: &SignatureRef,
+        budget: &mut CallResolutionBudget<'_>,
+        recovery: bool,
+        sole_candidate: bool,
+        start: CandidateStart<'_>,
+        drive: HelperDrive,
+    ) -> CandidateVerdict {
+        let graph = self.graph();
+        let (prologue, retained, resume, mut delivery) = match start {
+            CandidateStart::Fresh {
+                prologue,
+                arguments,
+            } => (prologue, std::borrow::Cow::Borrowed(arguments), None, None),
+            CandidateStart::Resumed {
+                suspended,
+                delivery,
+            } => {
+                let (prologue, arguments, resumed) = self.resume_suspended_candidate(suspended);
+                (
+                    prologue,
+                    std::borrow::Cow::Owned(arguments),
+                    Some(resumed),
+                    delivery,
+                )
+            }
+        };
+        let contextual_fixed = &prologue.contextual_fixed;
+        let contextual_diagnostic = prologue.contextual_diagnostic;
+        let contextual_substitution = &prologue.contextual_substitution;
+        let params = Arc::clone(&prologue.params);
+        let visible_type_params = Arc::clone(&prologue.visible_type_params);
+        let raw_type_params = Arc::clone(&prologue.raw_type_params);
+        let own_return_function = prologue.own_return_function.clone();
+        let call_receiver = prologue.call_receiver;
+        let (receiver_param, ordinary_params) = crate::semantic_query::split_this_receiver(&params);
+        let rest = ordinary_params
+            .last()
+            .filter(|param| param.rest)
+            .zip(prologue.rest_shape.clone())
+            .map(|(param, shape)| RestParam { param, shape });
+        let rest = rest.as_ref();
+        // A GENERIC rest is one inference position over the whole trailing
+        // argument list: the arguments from the rest slot onward assemble
+        // into a single tuple candidate for the parameter itself.
+        let generic_rest = rest.and_then(|rest| match rest.shape {
+            RestShape::GenericTuple(param) => {
+                Some((param, ordinary_params.len().saturating_sub(1)))
+            }
+            _ => None,
+        });
+        let arguments: &[CallArgument] = if prologue.truncated {
+            &retained[..0]
+        } else {
+            &retained
+        };
+        let mut failure = match &resume {
+            Some(resume) => resume.failure,
+            None => prologue.failure,
+        };
+
+        // A resumed candidate's collector is back in the transaction with
         // every deposit it accepted before it stopped.
         let (session_id, checkpoint, resume) = match resume {
             Some(resume) => {
-                let SuspendedCandidate {
-                    session,
+                let ResumedCandidate {
+                    session_id,
                     checkpoint,
                     next_argument,
                     failure: _,
                     deferred_for_relation_scc,
                     generic_function_arguments,
+                    pending,
                 } = resume;
-                drop(setup);
-                let id = session.id;
-                self.restore_suspended_session(session);
                 (
-                    id,
+                    session_id,
                     Some(checkpoint),
                     Some((
                         next_argument,
                         deferred_for_relation_scc,
                         generic_function_arguments,
+                        Some(pending),
                     )),
                 )
             }
-            None => (
-                self.dispatch_txn
-                    .borrow_mut()
-                    .push_collecting_session(setup),
-                None,
-                None,
-            ),
+            None => {
+                let setup = InferenceSessionSetup::new(
+                    self.graph().store(),
+                    self.call_inference_infos(&visible_type_params),
+                    VariancePhase::Covariant,
+                    InferencePassKind::CallApplicability,
+                    InferenceCandidatePriority::Argument,
+                    NoInferMask::empty(),
+                    ConstParamPolicy::NonConst,
+                    ContextualInferenceMode::None,
+                );
+                (
+                    self.dispatch_txn
+                        .borrow_mut()
+                        .push_collecting_session(setup),
+                    None,
+                    None,
+                )
+            }
         };
         // A bare type-parameter rest takes its arity from the arguments
         // (`impliedArity`), none when a spread feeds it; inference from
@@ -2548,7 +3135,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .checkpoint()
         });
         let resumed = resume.is_some();
-        let (first_argument, mut deferred_for_relation_scc, skipped_generic_functions) =
+        let (first_argument, mut deferred_for_relation_scc, skipped_generic_functions, mut pending) =
             resume.unwrap_or_default();
         // An argument whose parameter IS a `const` type parameter of this
         // candidate is checked in its const context (`isConstContext`): a
@@ -2656,52 +3243,81 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // one generic signature it holds and its parameter type.
         let mut generic_function_arguments: Vec<(usize, SemanticNodeId, SemanticNodeId)> =
             skipped_generic_functions;
-        // Only the walk a frame drives over its own call suspends; an
-        // error-recovery reading, a contextual route and every call
-        // evaluated in place relate in place. A contextual route suspends
-        // where its flow evaluation's frame holds it, between the callback
-        // it waits on and the relation of that callback's type
-        // (`flow_return_call_stack`).
-        let suspends = !recovery
-            && self.call_walk_suspends(key)
-            && self.dispatch_txn.borrow().call.contextual.is_none();
+        // Only a walk driven on a frame stops; an error-recovery reading and
+        // every walk driven in place relate in place.
+        let suspends = !recovery && matches!(drive, HelperDrive::Frame { .. });
         for (index, argument) in arguments.iter().enumerate().skip(first_argument) {
             if generic_rest.is_some_and(|(_, rest_start)| index >= rest_start) {
                 continue;
             }
-            let mut canonical_evidence =
-                crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
-            let mapped = mapped_parameter_type(
-                ordinary_params,
-                rest,
-                index,
-                arguments.len(),
-                argument.clone(),
-                graph,
-                self.construction_meter(),
-                &mut canonical_evidence,
-            );
-            // An argument relation whose operands need a demand its frame has
-            // no answer for stops here, before it records anything: the
-            // frame needs each, and the candidate resumes at this argument
-            // with its collector as it stands.
-            if let (true, Some(target), false) = (suspends, mapped, argument.context_sensitive) {
-                let (source, _, _) = argument_source(argument, target);
-                if self.call_operands_wait([source, target]) {
-                    let session = self.take_suspended_session(session_id);
-                    return CandidateVerdict::Suspended(Box::new(CallSuspension {
-                        walk: None,
-                        candidate: SuspendedCandidate {
-                            session,
-                            checkpoint,
-                            next_argument: index,
-                            failure,
-                            deferred_for_relation_scc,
-                            generic_function_arguments,
-                        },
-                    }));
+            // The argument the candidate stopped at continues with its
+            // parameter type as mapped and the demand of its operands, the
+            // delivery entering the demand where it waited; any other is
+            // mapped here, and on a frame its operands are demanded before
+            // it relates. An instantiation that must be computed stops the
+            // candidate here, before it records anything: the candidate
+            // resumes at this argument with its collector as it stands.
+            let (mapped, canonical_evidence, demand) = match pending.take() {
+                Some(PendingArgument {
+                    target,
+                    evidence,
+                    demand,
+                }) => (Some(target), evidence, Some(demand)),
+                None => {
+                    let mut canonical_evidence =
+                        crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
+                    let mapped = mapped_parameter_type(
+                        ordinary_params,
+                        rest,
+                        index,
+                        arguments.len(),
+                        argument.clone(),
+                        graph,
+                        self.construction_meter(),
+                        &mut canonical_evidence,
+                    );
+                    let demand = match (suspends, mapped, argument.context_sensitive) {
+                        (true, Some(target), false) => {
+                            let (source, _, _) = argument_source(argument, target);
+                            Some(Box::new(super::query_frames::OperandDemand::new([
+                                source, target,
+                            ])))
+                        }
+                        _ => None,
+                    };
+                    (mapped, canonical_evidence, demand)
                 }
-            }
+            };
+            let _operand_answers = match (demand, drive, mapped) {
+                (Some(mut demand), HelperDrive::Frame { depth }, Some(target)) => {
+                    if let Some(request) =
+                        self.advance_operand_demand(&mut demand, delivery.take(), depth)
+                    {
+                        let session = self.take_suspended_session(session_id);
+                        return CandidateVerdict::Suspended(
+                            Box::new(SuspendedCandidate {
+                                prologue,
+                                arguments: retained.into_owned(),
+                                session,
+                                checkpoint,
+                                next_argument: index,
+                                failure,
+                                deferred_for_relation_scc,
+                                generic_function_arguments,
+                                pending: PendingArgument {
+                                    target,
+                                    evidence: canonical_evidence,
+                                    demand,
+                                },
+                            }),
+                            request,
+                        );
+                    }
+                    self.operand_answers_scope(*demand, depth)
+                }
+                (None, _, _) => None,
+                _ => unreachable!("only a frame demands an argument's operands"),
+            };
             self.deposit_canonical_evidence(canonical_evidence);
             let Some(target) = mapped else {
                 self.abandon_session(session_id);
@@ -2735,6 +3351,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // reading whole at a naked type parameter.
                 if let Some(view) = argument.first_pass {
                     let checkpoint = self.relation_session_checkpoint();
+                    self.graph().record_call_argument_related();
                     let deposits_before = self.accepted_inference_deposits();
                     let step = self.call_argument_relation(
                         view,
@@ -2763,6 +3380,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // inferring parameter's const policy — never to the
             // assignability source.
             let (source, freshness_origin, literal_mode) = argument_source(argument, target);
+            self.graph().record_call_argument_related();
             let deposits_before = self.accepted_inference_deposits();
             let step = self.call_argument_relation(
                 source,
@@ -2951,10 +3569,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|mut decl| {
                 decl.constraint = decl
                     .constraint
-                    .map(|node| self.substitute_canonical(node, &contextual_substitution));
+                    .map(|node| self.substitute_canonical(node, contextual_substitution));
                 decl.default = decl
                     .default
-                    .map(|node| self.substitute_canonical(node, &contextual_substitution));
+                    .map(|node| self.substitute_canonical(node, contextual_substitution));
                 decl
             })
             .collect();
@@ -4397,15 +5015,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.restore_collecting_session(&mut Some(session));
     }
 
-    /// Release a call walk its frame abandoned while suspended: its held
-    /// collector returns to the transaction abandoned, as a rejected
-    /// candidate's does.
-    pub(super) fn abandon_call_suspension(&self, suspension: CallSuspension) {
-        let id = suspension.session_id();
-        self.restore_suspended_session(suspension.into_session());
-        self.abandon_session(id);
-    }
-
     pub fn abandon_session(&self, session_id: SessionId) {
         if let Some(session) = self
             .dispatch_txn
@@ -5105,7 +5714,8 @@ impl<'r> RawCandidatePairing<'r> {
         }
     }
 
-    /// The first raw candidate authored at `occurrence` in bucket `kind`.
+    /// The position of the first raw candidate authored at `occurrence` in
+    /// bucket `kind`.
     /// Every raw candidate before the scan cursor is already indexed, so a
     /// miss scans forward only from the cursor.
     fn authored(
@@ -5113,9 +5723,9 @@ impl<'r> RawCandidatePairing<'r> {
         occurrence: &'r crate::semantic_query::SignatureOccurrenceIdentity,
         kind: SignatureKind,
         kind_of: impl Fn(SemanticNodeId) -> Option<SignatureKind>,
-    ) -> Option<&'r SignatureRef> {
+    ) -> Option<usize> {
         if let Some(&index) = self.first.get(&(occurrence, kind)) {
-            return Some(&self.raw[index]);
+            return Some(index);
         }
         while let Some(raw) = self.raw.get(self.scanned) {
             let index = self.scanned;
@@ -5129,7 +5739,7 @@ impl<'r> RawCandidatePairing<'r> {
                 .entry((raw_occurrence, raw_kind))
                 .or_insert(index);
             if raw_occurrence == occurrence && raw_kind == kind {
-                return Some(raw);
+                return Some(index);
             }
         }
         None
@@ -5192,6 +5802,7 @@ struct DefaultedParam {
 
 /// What a rest parameter's type proves about arity and about each trailing
 /// argument's target.
+#[derive(Clone)]
 enum RestShape {
     /// The rest parameter is still an uninstantiated type parameter
     /// (`...xs: A`). It is ONE inference position over the whole trailing

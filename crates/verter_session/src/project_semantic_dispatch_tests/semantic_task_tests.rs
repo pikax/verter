@@ -8233,6 +8233,364 @@ mod semantic_poll_contract {
         drop(other);
     }
 
+    /// The physical work call resolutions on `host` did, wherever they ran:
+    /// the candidates whose applicability check began, and the argument
+    /// relations their first inference pass ran. Each is counted where the
+    /// work is done, outside every charge and its rollback.
+    fn call_work(host: &crate::VerterHost) -> [u64; 2] {
+        let stats = host.project_type_store().semantic_graph().stats_snapshot();
+        [stats.call_candidates_begun, stats.call_arguments_related]
+    }
+
+    fn call_work_since(after: [u64; 2], before: [u64; 2]) -> [u64; 2] {
+        [after[0] - before[0], after[1] - before[1]]
+    }
+
+    /// `pick(1, box)`'s result read through the synchronous entry on a
+    /// fresh host, and the call work it did. Its premise: `T` infers from
+    /// both arguments, the call's one candidate begun once and each of its
+    /// two arguments related once.
+    fn synchronous_call() -> (ReadSummary, [u64; 2]) {
+        let host = call_host();
+        let _request = verter_type_engine::request_context::install_test_request_for(CALL_FILE);
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let before = call_work(&host);
+        let read = dispatch.execute_via_cold_build_helper(call_result_key(&dispatch));
+        let summary = read_summary(&dispatch, &read);
+        let work = call_work_since(call_work(&host), before);
+        assert_eq!(
+            summary.0, "Union(2 | 1)",
+            "premise: what the first argument deposited survives the second: {summary:?}"
+        );
+        assert_eq!(
+            work,
+            [1, 2],
+            "premise: one candidate begun, both arguments related"
+        );
+        (summary, work)
+    }
+
+    /// What a polled call root did while the reads `held` selects were
+    /// produced by another task.
+    struct HeldCall {
+        /// The first poll returned `Pending` instead of waiting the
+        /// producer out.
+        yielded: bool,
+        /// How many reads another task held for the call's frame.
+        held: usize,
+        /// The suspensions the call's walk made inside its candidate.
+        suspensions: Vec<verter_type_engine::project_semantic_dispatch::CallSuspensionForTests>,
+        /// Work done by the first poll.
+        at_hold: [u64; 2],
+        /// A second poll here while still held — under a probe that
+        /// forbids every wait — and then its task polled on another thread
+        /// stayed pending.
+        repolled_pending: bool,
+        pending_elsewhere: Option<bool>,
+        /// Work done by those repolls.
+        repoll_work: [u64; 2],
+        /// The producers going away woke the root.
+        woken: bool,
+        /// Work done over the whole polled read.
+        work: [u64; 2],
+        read: ValueRead,
+    }
+
+    /// `pick(1, box)`'s result polled at the production entry on a fresh
+    /// host while another task produces each read its call frame needs that
+    /// `held` selects; released, its task resumes on another thread and the
+    /// answer is delivered here.
+    fn poll_call_holding(
+        held: fn(&SemanticQueryKey) -> bool,
+    ) -> (Arc<crate::VerterHost>, HeldCall) {
+        let host = call_host();
+        // The call is demanded by a request on its own file, as a root a
+        // request reads from its file is.
+        let _request = verter_type_engine::request_context::install_test_request_for(CALL_FILE);
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let key = call_result_key(&dispatch);
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let _ = verter_type_engine::project_semantic_dispatch::take_call_suspensions_for_tests();
+        let before = call_work(&host);
+        let mut entry = dispatch.poll_query(key);
+        verter_type_engine::project_semantic_dispatch::hold_call_needs_here_for_tests(Some(held));
+        let first = entry.poll(&waker);
+        verter_type_engine::project_semantic_dispatch::hold_call_needs_here_for_tests(None);
+        let at_hold = call_work_since(call_work(&host), before);
+        let suspensions =
+            verter_type_engine::project_semantic_dispatch::take_call_suspensions_for_tests();
+        let (yielded, held, repolled_pending, pending_elsewhere, repoll_work, read) = match first {
+            Poll::Ready(read) => (false, 0, false, None, [0; 2], read),
+            Poll::Pending => {
+                let repolled_pending = {
+                    let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                    entry.poll(&waker).is_pending()
+                };
+                let pending_elsewhere = entry.task().map(|task| {
+                    assert_send(task);
+                    std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| task.poll(&waker).is_pending())
+                            .join()
+                            .expect("the pending poll returns")
+                    })
+                });
+                let repoll_work =
+                    call_work_since(call_work_since(call_work(&host), before), at_hold);
+                let held = entry
+                    .task()
+                    .map_or(0, |task| task.release_held_call_needs_for_tests());
+                let read = resume_elsewhere(&mut entry);
+                (
+                    true,
+                    held,
+                    repolled_pending,
+                    pending_elsewhere,
+                    repoll_work,
+                    read,
+                )
+            }
+        };
+        let woken = counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1;
+        drop(entry);
+        let run = HeldCall {
+            yielded,
+            held,
+            suspensions,
+            at_hold,
+            repolled_pending,
+            pending_elsewhere,
+            repoll_work,
+            woken,
+            work: call_work_since(call_work(&host), before),
+            read,
+        };
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+        drop(scope);
+        drop(dispatch);
+        (host, run)
+    }
+
+    fn instantiation_reads(key: &SemanticQueryKey) -> bool {
+        matches!(key, SemanticQueryKey::Instantiate(_))
+    }
+
+    fn candidate_list_reads(key: &SemanticQueryKey) -> bool {
+        matches!(key, SemanticQueryKey::ResolveOverloadSet { .. })
+    }
+
+    /// Sequential reads inside a candidate: a call root whose candidate
+    /// already related its first argument — its collector holding what `1`
+    /// inferred for `T` — and now waits on an instantiation its second
+    /// argument's relation names returns `Pending` with the candidate
+    /// retained at that argument. Polled again while held, under a probe
+    /// that forbids every wait, and on another thread, it stays pending and
+    /// does no work. Released, it resumes on another thread at the second
+    /// argument — the candidate is not begun again and the first argument
+    /// is not related again — and delivers exactly what the synchronous
+    /// entry reads, receipt tree included, with the same absolute work.
+    #[test]
+    fn a_call_root_waiting_on_its_second_argument_resumes_without_beginning_its_candidate_again() {
+        let (synchronous, synchronous_work) = synchronous_call();
+        let (host, run) = poll_call_holding(instantiation_reads);
+        assert!(
+            run.yielded,
+            "the call yields while another task instantiates its second argument's operand"
+        );
+        assert!(run.held > 0);
+        let [suspension] = run.suspensions.as_slice() else {
+            panic!(
+                "the walk stops once inside its candidate: {:?}",
+                run.suspensions
+            );
+        };
+        assert!(
+            suspension
+                .needs
+                .iter()
+                .all(|need| matches!(need, SemanticQueryKey::Instantiate(_))),
+            "it waits on an instantiation `box` against `Box<T>` names: {suspension:?}"
+        );
+        assert_eq!(
+            suspension.collected_candidates, 1,
+            "its collector holds what the first argument inferred"
+        );
+        assert_eq!(
+            run.at_hold,
+            [1, 1],
+            "the candidate began and related its first argument before the wait"
+        );
+        assert!(run.repolled_pending);
+        assert_eq!(run.pending_elsewhere, Some(true));
+        assert_eq!(run.repoll_work, [0; 2], "a pending repoll does no work");
+        assert!(run.woken, "the producers going away wake the call");
+        assert_eq!(
+            run.work, synchronous_work,
+            "no candidate begins again and no argument relates twice"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+    }
+
+    /// A call root whose candidate list another task is producing returns
+    /// `Pending` before any candidate begins, the list its frame's need.
+    /// Polled again while held and on another thread, it stays pending and
+    /// does no work. Released, it resumes on another thread with the
+    /// delivered list — read once — and delivers exactly what the
+    /// synchronous entry reads, receipt tree included, with the same
+    /// absolute work.
+    #[test]
+    fn a_call_root_waiting_on_its_candidate_list_resumes_to_the_synchronous_read() {
+        let (synchronous, synchronous_work) = synchronous_call();
+        let (host, run) = poll_call_holding(candidate_list_reads);
+        assert!(
+            run.yielded,
+            "the call yields while another task produces its candidate list"
+        );
+        assert!(run.held > 0);
+        assert!(
+            run.suspensions.is_empty(),
+            "no candidate began: {:?}",
+            run.suspensions
+        );
+        assert_eq!(run.at_hold, [0; 2], "no candidate begins before its list");
+        assert!(run.repolled_pending);
+        assert_eq!(run.pending_elsewhere, Some(true));
+        assert_eq!(run.repoll_work, [0; 2], "a pending repoll does no work");
+        assert!(run.woken, "the producer going away wakes the call");
+        assert_eq!(run.work, synchronous_work);
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+    }
+
+    /// A call root waiting inside its candidate on a held instantiation is
+    /// woken by its request's cancellation with the producer still held,
+    /// and its next poll delivers the terminal cancelled read: its
+    /// candidate's collector released, its executor frame closed and its
+    /// wait withdrawn, nothing left open.
+    #[test]
+    fn a_call_root_is_woken_by_its_requests_cancellation_while_its_operand_is_held() {
+        let host = call_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let key = call_result_key(&dispatch);
+        let request = budgeted_request(1);
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let wakes = || counter.0.load(std::sync::atomic::Ordering::SeqCst);
+        let (first, woken, next) = {
+            let _request = verter_type_engine::request_context::RequestContextGuard::install(
+                Arc::clone(&request),
+            );
+            let mut entry = dispatch.poll_query(key);
+            verter_type_engine::project_semantic_dispatch::hold_call_needs_here_for_tests(Some(
+                instantiation_reads,
+            ));
+            let first = entry.poll(&waker).is_pending();
+            verter_type_engine::project_semantic_dispatch::hold_call_needs_here_for_tests(None);
+            let before = wakes();
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| request.cancel())
+                    .join()
+                    .expect("the request is cancelled on another thread");
+            });
+            let woken = wakes() > before;
+            let next = match entry.poll(&waker) {
+                Poll::Ready(read) => Some(read),
+                Poll::Pending => None,
+            };
+            drop(entry);
+            (first, woken, next)
+        };
+        assert!(first, "the call yields while its operand is held");
+        assert!(
+            woken,
+            "the request's cancellation wakes the call with the producer still held"
+        );
+        let read = next.expect("the woken call reads its cancellation without the producer");
+        assert!(
+            matches!(
+                read.value(),
+                QueryResult::Error(verter_type_engine::semantic_query::QueryError::Cancelled)
+            ),
+            "the cancelled call reads a terminal cancellation: {read:?}"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+    }
+
+    const PRIMITIVE_CALL_FILE: &str = "/semantic-task/primitive-call.ts";
+
+    /// A call whose callee is a primitive: `string`'s call signatures are
+    /// those of the `String` interface the call site's project declares.
+    const PRIMITIVE_CALL: &str =
+        "declare global { interface String { (radix: number): boolean } }\n\
+                                  declare const s: string;\n\
+                                  const r = s(1);\n\
+                                  export {};\n";
+
+    /// `s(1)`'s result read on a fresh host with no request to scope it:
+    /// through the synchronous entry, or polled at the production entry.
+    fn primitive_call_read(polled: bool) -> ReadSummary {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            PRIMITIVE_CALL_FILE,
+            PRIMITIVE_CALL,
+            crate::FileLanguage::script_ts(),
+        );
+        host.ensure_indexed_ready(PRIMITIVE_CALL_FILE)
+            .expect("the call has indexed input");
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let key = dispatch.typeof_key_for(
+            ValueRootKey {
+                scope: ScopeId::file(
+                    PRIMITIVE_CALL_FILE,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+                name: verter_type_expr::OwnedStr::from("r"),
+            },
+            ProjectionReductionContext::published(ProjectionMode::Navigate),
+        );
+        let read = if polled {
+            let mut entry = dispatch.poll_query(key);
+            let read = poll_until_ready(|waker| entry.poll(waker));
+            drop(entry);
+            read
+        } else {
+            dispatch.execute_via_cold_build_helper(key)
+        };
+        read_summary(&dispatch, &read)
+    }
+
+    /// A primitive callee's candidate list is read in the call site's
+    /// scope wherever the call's walk runs: on a frame of the continuation
+    /// runtime with no request to scope what the runtime reads, the walk
+    /// reads the list where it stands, under its call site, and `s(1)`
+    /// selects `(radix: number): boolean` exactly as the synchronous entry
+    /// does.
+    #[test]
+    fn a_primitive_callees_candidate_list_is_read_in_its_call_sites_scope() {
+        let synchronous = primitive_call_read(false);
+        assert!(
+            matches!(
+                synchronous.0.as_str(),
+                "boolean" | "Union(false | true)" | "Union(true | false)"
+            ),
+            "premise: the call selects the project's `String` call signature: {synchronous:?}"
+        );
+        assert_eq!(primitive_call_read(true), synchronous);
+    }
+
     /// `alias<args>` over the aliases' file.
     fn projection_application(
         host: &crate::VerterHost,

@@ -1923,6 +1923,19 @@ impl SemanticGraphStore {
             .relation_reductions
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped once per call candidate whose applicability check begins.
+    pub fn record_call_candidate_begun(&self) {
+        self.stats
+            .call_candidates_begun
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Bumped once per argument relation a call's first inference pass
+    /// runs.
+    pub fn record_call_argument_related(&self) {
+        self.stats
+            .call_arguments_related
+            .fetch_add(1, Ordering::Relaxed);
+    }
     /// Bumped by a query entry's admission once per stage it computes.
     pub fn record_admission_stage(&self) {
         self.stats
