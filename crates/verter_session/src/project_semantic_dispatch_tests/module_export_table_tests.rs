@@ -746,8 +746,8 @@ fn star_exports_exclude_ambiguous_names_and_default() {
         files: &files,
         ..ProbeProject::default()
     };
-    for probe in ["typeof ns.x", "(typeof ns)['x']", "typeof ns.default"] {
-        let measured = super::checker_probe_lane_tests::with_probe_in(
+    let measure = |probe: &str| {
+        super::checker_probe_lane_tests::with_probe_in(
             project,
             "import * as ns from './index';",
             probe,
@@ -756,12 +756,42 @@ fn star_exports_exclude_ambiguous_names_and_default() {
                     dispatch, node, 0,
                 )
             },
-        );
+        )
+    };
+    for probe in ["typeof ns.x", "(typeof ns)['x']", "typeof ns.default"] {
         assert_eq!(
-            measured, "Opaque(Miss)",
+            measure(probe),
+            "Opaque(Miss)",
             "excluded namespace member: {probe}"
         );
     }
+    // The table only leaves the excluded name out. A name it does not know of
+    // is absent, and reading that as written is the checker's TS2339.
+    let absent = super::checker_probe_lane_tests::with_probe_in(
+        project,
+        "import * as ns from './index';",
+        "(typeof ns)['zz']",
+        |dispatch, mut node| loop {
+            match dispatch.graph().node_data(node).as_deref() {
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Alias(inner)) => {
+                    node = *inner;
+                }
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Opaque(
+                    verter_type_engine::semantic_query::QueryError::CheckerRecovery {
+                        diagnostic,
+                        ..
+                    },
+                )) => break Some(diagnostic.code.code()),
+                _ => break None,
+            }
+        },
+    );
+    assert_eq!(
+        absent,
+        Some(2339),
+        "absent namespace member: {}",
+        measure("(typeof ns)['zz']")
+    );
 }
 
 #[test]
