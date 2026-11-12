@@ -46,7 +46,9 @@ use verter_protocol::verter::v1::{
     GraphQueryErrorOther, GraphReference, GraphSignature, GraphSignatureParameter,
     GraphStringTable, GraphSymbolNode, GraphTypeNode, SemanticTypeGraph as WireGraph,
 };
-use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
+#[cfg(test)]
+use verter_type_expr::TypeExpr;
+use verter_type_expr::{LiteralValue, PrimitiveName};
 
 use crate::typeinfo::framework_surface::results;
 use crate::typeinfo::framework_surface::results::{
@@ -62,6 +64,7 @@ use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 /// depth 1. The budget exists to make the boundedness explicit and to
 /// fail-closed (a deeper-than-shallow walk degrades to `GraphOpaque` rather
 /// than recursing).
+#[cfg(test)]
 const SHALLOW_DEPTH_BUDGET: u32 = 1;
 
 /// The framework-neutral encoder output: the wire graph plus one per-kind
@@ -73,8 +76,9 @@ pub(crate) struct EncodedFrameworkSurfaces {
     /// Exactly one entry per known surface kind, in tag order.
     pub surfaces: Vec<FrameworkSurfaceKindEntry>,
     /// The exported node of every named member of an exactly resolved
-    /// props, expose, options or slots surface, in encode order: the
-    /// positions a reference can address. Host-internal; never on the wire.
+    /// props, expose, options, slots, model or emits surface, in encode
+    /// order: the positions a reference can address. Host-internal; never on
+    /// the wire.
     pub exported_members: Vec<ExportedMemberNode>,
 }
 
@@ -85,15 +89,29 @@ pub(crate) struct ExportedMemberNode {
     pub kind: FrameworkSurfaceKind,
     /// The member's published name.
     pub name: String,
+    /// The emit occurrence an emits member exports; `None` for every other
+    /// surface.
+    pub occurrence: Option<verter_type_expr::facts::ResolvedEmitOccurrenceId>,
     /// The member value's node in the exported graph.
     pub type_node_id: u32,
 }
 
 /// A growable string-intern table backing the encoded graph's interned ids.
-#[derive(Default)]
 pub(super) struct StringTableBuilder {
     entries: Vec<String>,
     index: HashMap<String, u32>,
+}
+
+impl Default for StringTableBuilder {
+    /// Entry 0 is the empty string, as in the protocol exporter: an id field
+    /// that reads 0 as "none" (an unlabeled tuple element) never aliases
+    /// the first interned string.
+    fn default() -> Self {
+        Self {
+            entries: vec![String::new()],
+            index: HashMap::from([(String::new(), 0)]),
+        }
+    }
 }
 
 impl StringTableBuilder {
@@ -187,6 +205,7 @@ impl GraphArena {
     /// structural shape outside the shallow vocabulary, or a walk past the
     /// depth budget) degrades to a `GraphOpaque` — NEVER a fabricated ref,
     /// NEVER a recursion into resolution.
+    #[cfg(test)]
     pub(super) fn encode_member_value(&mut self, value: Option<&TypeExpr>, depth: u32) -> u32 {
         let Some(value) = value else {
             // A member with no resolved type expression is structurally
@@ -285,6 +304,9 @@ impl GraphArena {
                 parameters,
                 return_type,
             } => self.encode_function(parameters, return_type.as_ref()),
+            NamedTypeMemberOutput::Tuple { readonly, elements } => {
+                self.encode_tuple(*readonly, elements)
+            }
             NamedTypeMemberOutput::Opaque => {
                 self.push_opaque("member value is structurally unencodable shallowly")
             }
@@ -318,6 +340,35 @@ impl GraphArena {
                 self.push_opaque("member value is structurally unencodable shallowly")
             }
         }
+    }
+
+    /// A tuple: each element's label (0 when unlabeled), flags and leaf or
+    /// leaf-union type.
+    fn encode_tuple(&mut self, readonly: bool, elements: &[results::NamedTupleElement]) -> u32 {
+        let elements = elements
+            .iter()
+            .map(|element| verter_protocol::verter::v1::GraphTupleElement {
+                label_name_id: element
+                    .label
+                    .as_deref()
+                    .map_or(0, |label| self.strings.intern(label)),
+                value_node_id: match &element.ty {
+                    results::NamedTupleElementType::Leaf(leaf) => self.encode_leaf(leaf),
+                    results::NamedTupleElementType::Union(leaves) => {
+                        let member_node_ids =
+                            leaves.iter().map(|leaf| self.encode_leaf(leaf)).collect();
+                        self.push_node(graph_type_node::Kind::Union(
+                            verter_protocol::verter::v1::GraphUnion { member_node_ids },
+                        ))
+                    }
+                },
+                optional: element.optional,
+                rest: element.rest,
+            })
+            .collect();
+        self.push_node(graph_type_node::Kind::Tuple(
+            verter_protocol::verter::v1::GraphTuple { elements, readonly },
+        ))
     }
 
     fn encode_param_type(&mut self, ty: &results::NamedParamType) -> u32 {
@@ -655,7 +706,8 @@ pub(crate) fn encode_framework_surfaces_with_unsupported_message(
 }
 
 /// Record the exported node of every named member of an exactly resolved
-/// props, expose, options, slots or model surface. `members` are the wire members just encoded
+/// props, expose, options, slots, model or emits surface; an emits member is
+/// recorded with its occurrence. `members` are the wire members just encoded
 /// from `dtos`, one per named row in the same order.
 fn record_exported_members(
     arena: &mut GraphArena,
@@ -689,15 +741,28 @@ fn record_exported_members(
             .as_ref()
             .map(|surface| surface.bindings.iter().map(|b| b.name.as_str()).collect())
             .unwrap_or_default(),
-        FrameworkSurfaceKind::Emits => return,
+        FrameworkSurfaceKind::Emits => dtos
+            .emit_fields()
+            .iter()
+            .map(|row| row.name.as_str())
+            .collect(),
     };
     if names.len() != members.len() {
         return;
     }
-    for (name, member) in names.into_iter().zip(members) {
+    let occurrences: Vec<Option<verter_type_expr::facts::ResolvedEmitOccurrenceId>> = match kind {
+        FrameworkSurfaceKind::Emits => dtos
+            .emit_fields()
+            .iter()
+            .map(|row| Some(row.id.clone()))
+            .collect(),
+        _ => vec![None; names.len()],
+    };
+    for ((name, occurrence), member) in names.into_iter().zip(occurrences).zip(members) {
         arena.exported.push(ExportedMemberNode {
             kind,
             name: name.to_string(),
+            occurrence,
             type_node_id: member.type_node_id,
         });
     }
@@ -856,10 +921,9 @@ fn encode_kind_members(
             .iter()
             .map(|f| {
                 let name_id = arena.strings.intern(&f.name);
-                // An emit's typed payload is an on-demand LOCATOR
-                // (`AnalyzedEmitField.payload`) — zero-dispatch encoder, so
-                // the value takes the absent/opaque arm (see props above).
-                let type_node_id = arena.encode_member_value(None, 0);
+                // The payload tuple classified at normalize time — this
+                // encoder is ZERO-DISPATCH.
+                let type_node_id = arena.encode_named_member_output(Some(&f.payload_value));
                 wire::FrameworkSurfaceMember {
                     name_id,
                     type_node_id,
@@ -1364,19 +1428,22 @@ mod tests {
     #[test]
     fn absent_origin_hop_fields_stay_absent_across_a_nonempty_table_zero() {
         // DISCRIMINATING (the P0): the encoder is PRESENCE-AWARE — an absent
-        // hop string field is `None`, never id 0. The string table is
-        // zero-based (entry 0 is a real interned string), so an id-0 absent
-        // sentinel would alias entry 0 and fabricate data on decode. This test
-        // forces a NON-EMPTY table[0] (the real encoder never seeds `""` at 0),
-        // encodes a LOCAL hop (no string fields) and an IMPORT hop with NO
+        // hop string field is `None`, never id 0. The encoder reserves `""`
+        // at entry 0, but a table's entry 0 may be a real string, so an id-0
+        // absent sentinel would alias it and fabricate data on decode. This
+        // test forces a NON-EMPTY table[0], encodes a LOCAL hop (no string fields) and an IMPORT hop with NO
         // specifier, and asserts every absent field is `None` while present
         // fields resolve to their interned strings — RED before presence-aware
         // encoding (the old encoder wrote literal 0 for absent fields).
         use crate::typeinfo::framework_surface::results::{OriginHop, PropOrigin};
 
         let mut arena = GraphArena::new();
-        // Intern a distinctive string FIRST so table[0] is a real, non-empty
-        // entry — exactly the layout the real encoder produces.
+        // Seed a distinctive string at table[0] in place of the reserved
+        // empty string, so an id-0 absent field would read real data.
+        arena.strings = StringTableBuilder {
+            entries: vec!["__SENTINEL_ZERO__".to_string()],
+            index: HashMap::from([("__SENTINEL_ZERO__".to_string(), 0)]),
+        };
         let sentinel_zero = arena.strings.intern("__SENTINEL_ZERO__");
         assert_eq!(sentinel_zero, 0, "the sentinel must occupy table index 0");
 
@@ -1638,5 +1705,67 @@ mod tests {
             opaque_message(node_of(5)),
             "member value is structurally unencodable shallowly"
         );
+    }
+
+    /// A tuple member encodes as a `GraphTuple`: a leaf-union element as a
+    /// `GraphUnion` of its leaves, flags carried, and an unlabeled element's
+    /// label id 0 reading the reserved empty string rather than the first
+    /// interned one.
+    #[test]
+    fn tuple_member_encodes_labels_flags_and_union_elements() {
+        use crate::typeinfo::framework_surface::results::{
+            NamedTupleElement, NamedTupleElementType, NamedTypeLeaf,
+        };
+        let mut arena = GraphArena::new();
+        let first = arena.strings.intern("first interned");
+        assert_ne!(first, 0, "entry 0 is reserved");
+        let id = arena.encode_named_member_output(Some(&NamedTypeMemberOutput::Tuple {
+            readonly: true,
+            elements: vec![
+                NamedTupleElement {
+                    label: Some("v".into()),
+                    optional: false,
+                    rest: false,
+                    ty: NamedTupleElementType::Union(vec![
+                        NamedTypeLeaf::Literal(LiteralValue::String("a".into())),
+                        NamedTypeLeaf::Literal(LiteralValue::String("b".into())),
+                    ]),
+                },
+                NamedTupleElement {
+                    label: None,
+                    optional: true,
+                    rest: false,
+                    ty: NamedTupleElementType::Leaf(NamedTypeLeaf::Primitive(
+                        PrimitiveName::Number,
+                    )),
+                },
+            ],
+        }));
+        let Some(graph_type_node::Kind::Tuple(tuple)) = &arena.nodes[id as usize].kind else {
+            panic!("a tuple member encodes as a GraphTuple");
+        };
+        assert!(tuple.readonly);
+        let [labeled, unlabeled] = tuple.elements.as_slice() else {
+            panic!("two elements, got {:?}", tuple.elements);
+        };
+        assert_eq!(arena.strings.entries[labeled.label_name_id as usize], "v");
+        assert!(!labeled.optional && !labeled.rest);
+        let Some(graph_type_node::Kind::Union(union)) =
+            &arena.nodes[labeled.value_node_id as usize].kind
+        else {
+            panic!("a leaf-union element encodes as a GraphUnion");
+        };
+        assert_eq!(union.member_node_ids.len(), 2);
+        assert!(union.member_node_ids.iter().all(|member| matches!(
+            arena.nodes[*member as usize].kind,
+            Some(graph_type_node::Kind::Literal(_))
+        )));
+        assert_eq!(unlabeled.label_name_id, 0);
+        assert_eq!(arena.strings.entries[0], "");
+        assert!(unlabeled.optional);
+        assert!(matches!(
+            arena.nodes[unlabeled.value_node_id as usize].kind,
+            Some(graph_type_node::Kind::Primitive(_))
+        ));
     }
 }

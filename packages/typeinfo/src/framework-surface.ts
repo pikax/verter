@@ -54,6 +54,8 @@ import {
   object,
   primitive,
   ref,
+  tuple,
+  union,
   unknown,
   type FunctionParameter,
   type ObjectProperty,
@@ -385,6 +387,10 @@ function walkMemberType(
       });
       return object(properties);
     }
+    case "union":
+      return union(kind.value.memberNodeIds.map(walk));
+    case "tuple":
+      return tuple(kind.value.elements.map((element) => walk(element.valueNodeId)));
     case "opaque":
       return unknown(opaqueMessage(strings, kind.value.error));
     default:

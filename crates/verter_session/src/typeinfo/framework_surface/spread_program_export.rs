@@ -1,6 +1,6 @@
-//! The production wire serializer for spread-bearing objects: the canonical
-//! source-ordered construction program (tag 33). Split from `graph_export`
-//! so the shallow member-value encoder stays focused.
+//! The legacy spread-bearing object serializer: the canonical
+//! source-ordered construction program (tag 33), reached only from the
+//! test-only `TypeExpr` member encoder that pins the sealed encoder's parity.
 
 use verter_protocol::verter::v1::graph_type_node;
 use verter_type_expr::TypeExpr;

@@ -1197,3 +1197,252 @@ fn expand_around_replays_a_framework_member() {
         "the expansion reaches the member type the surface exported"
     );
 }
+
+/// The framework-surface payload `canonical` answers under the `family`
+/// profile for `kinds`.
+fn framework_payload(
+    host: &VerterHost,
+    canonical: &str,
+    family: &str,
+    kinds: &[verter_protocol::typeinfo::graph::FrameworkSurfaceKind],
+) -> verter_protocol::verter::v1::FrameworkSurfacePayload {
+    let (response, _) = host
+        .resolve_framework_surface_with_audit(framework_envelope_for(
+            host, canonical, family, kinds,
+        ))
+        .into_parts();
+    match response.expect("the framework arm").kind {
+        Some(type_info_graph_response::Kind::FrameworkSurface(payload)) => payload,
+        other => panic!("expected a framework surface, got {other:?}"),
+    }
+}
+
+/// The emits members of `payload` named `name`, in surface order.
+fn emit_members<'p>(
+    payload: &'p verter_protocol::verter::v1::FrameworkSurfacePayload,
+    name: &str,
+) -> Vec<&'p wire::FrameworkSurfaceMember> {
+    let strings = payload
+        .graph
+        .as_ref()
+        .and_then(|graph| graph.strings.as_ref())
+        .map(|table| table.entries.as_slice())
+        .unwrap_or_default();
+    payload
+        .surfaces
+        .iter()
+        .filter(|surface| {
+            surface.kind == verter_protocol::typeinfo::graph::FrameworkSurfaceKind::Emits as i32
+        })
+        .flat_map(|surface| surface.members.iter())
+        .filter(|member| strings.get(member.name_id as usize).map(String::as_str) == Some(name))
+        .collect()
+}
+
+/// The reference `graph` publishes on `node_id`, if any.
+fn published_ref(graph: &SemanticTypeGraph, node_id: u32) -> Option<wire::NodeRef> {
+    graph
+        .node_id_map
+        .iter()
+        .find(|entry| entry.node_id == node_id)
+        .and_then(|entry| entry.node_ref.clone())
+}
+
+/// The tuple `graph` holds at `node_id`.
+fn tuple_at(graph: &SemanticTypeGraph, node_id: u32) -> &verter_protocol::verter::v1::GraphTuple {
+    match graph
+        .nodes
+        .get(node_id as usize)
+        .and_then(|node| node.kind.as_ref())
+    {
+        Some(verter_protocol::verter::v1::graph_type_node::Kind::Tuple(tuple)) => tuple,
+        other => panic!("expected a tuple at node {node_id}, got {other:?}"),
+    }
+}
+
+const OVERLOADED_EMITS_SFC: &str = "/overloaded-emits.vue";
+const OVERLOADED_EMITS_SFC_SOURCE: &str = r#"<script setup lang="ts">
+interface Row { id: number }
+interface Col { key: string }
+defineEmits<{
+  (e: 'change', row: Row): void;
+  (e: 'change', col: Col, index: number): void;
+}>();
+</script>
+<template><div></div></template>
+"#;
+
+/// Two overloads of one event are two emit members: each exports its own
+/// payload tuple and is addressed under its own occurrence, so their role
+/// digests differ, and each reference expands to its own overload's tuple.
+#[test]
+fn duplicate_emit_occurrences_keep_distinct_locators() {
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_standalone(&host, OVERLOADED_EMITS_SFC, OVERLOADED_EMITS_SFC_SOURCE);
+    let payload = framework_payload(
+        &host,
+        OVERLOADED_EMITS_SFC,
+        "vue",
+        &[FrameworkSurfaceKind::Emits],
+    );
+    let graph = payload.graph.as_ref().expect("a surface graph");
+    let changes = emit_members(&payload, "change");
+    assert_eq!(changes.len(), 2, "each overload is its own member");
+    let arities: Vec<usize> = changes
+        .iter()
+        .map(|member| tuple_at(graph, member.type_node_id).elements.len())
+        .collect();
+    assert_eq!(
+        {
+            let mut sorted = arities.clone();
+            sorted.sort_unstable();
+            sorted
+        },
+        vec![1, 2],
+        "each member exports its own overload's payload tuple"
+    );
+
+    let refs: Vec<wire::NodeRef> = changes
+        .iter()
+        .map(|member| {
+            published_ref(graph, member.type_node_id).expect("each overload is addressed")
+        })
+        .collect();
+    assert_ne!(refs[0].role_digest, refs[1].role_digest);
+    let locators: Vec<FrameworkMemberLocator> = refs
+        .iter()
+        .map(|node_ref| {
+            let key = IssuedRefKey::from_wire(node_ref).expect("a well-formed reference");
+            let issued = lookup_issued(&host, &key).expect("the host issued it");
+            member_locator(&issued).clone()
+        })
+        .collect();
+    for locator in &locators {
+        assert_eq!(locator.role, MemberRole::EmitPayload);
+        assert_eq!(&*locator.member_name, "change");
+        assert!(
+            locator.occurrence.is_some(),
+            "an emit payload names its occurrence"
+        );
+    }
+    assert_ne!(locators[0].occurrence, locators[1].occurrence);
+
+    for (node_ref, arity) in refs.into_iter().zip(arities) {
+        let expanded = expand_in(&host, node_ref.clone(), wire::ProjectionMode::Navigate)
+            .unwrap_or_else(|error| panic!("the payload expands, got {error:?}"));
+        assert_eq!(root_node_ref(&expanded), Some(node_ref));
+        assert_eq!(
+            tuple_at(&expanded, expanded.root_ids[0]).elements.len(),
+            arity,
+            "the expansion replays its own overload's tuple"
+        );
+    }
+}
+
+const CLOSED_EMITS_SFC: &str = "/closed-emits.vue";
+const CLOSED_EMITS_SFC_SOURCE: &str = r#"<script setup lang="ts">
+defineEmits<{
+  (e: 'change', v: 'a' | 'b', n?: number): void;
+}>();
+</script>
+<template><div></div></template>
+"#;
+
+/// A closed payload is a complete answer: the emit member exports the whole
+/// tuple (a leaf-union element as a union, labels and optionality carried),
+/// no opaque node, and no reference.
+#[test]
+fn closed_emit_payload_encodes_tuple_without_ref() {
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
+    use verter_protocol::verter::v1::graph_type_node::Kind;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_standalone(&host, CLOSED_EMITS_SFC, CLOSED_EMITS_SFC_SOURCE);
+    let payload = framework_payload(
+        &host,
+        CLOSED_EMITS_SFC,
+        "vue",
+        &[FrameworkSurfaceKind::Emits],
+    );
+    let graph = payload.graph.as_ref().expect("a surface graph");
+    let strings = graph
+        .strings
+        .as_ref()
+        .map(|table| table.entries.as_slice())
+        .unwrap_or_default();
+    let members = emit_members(&payload, "change");
+    let [change] = members.as_slice() else {
+        panic!("one change member");
+    };
+    let tuple = tuple_at(graph, change.type_node_id);
+    let [v, n] = tuple.elements.as_slice() else {
+        panic!("two payload elements, got {:?}", tuple.elements);
+    };
+    assert_eq!(strings[v.label_name_id as usize], "v");
+    assert!(!v.optional && !v.rest);
+    let Some(Kind::Union(union)) = graph.nodes[v.value_node_id as usize].kind.as_ref() else {
+        panic!("a leaf-union element is a union");
+    };
+    assert_eq!(union.member_node_ids.len(), 2);
+    assert!(union
+        .member_node_ids
+        .iter()
+        .all(|member| matches!(graph.nodes[*member as usize].kind, Some(Kind::Literal(_)))));
+    assert_eq!(strings[n.label_name_id as usize], "n");
+    assert!(n.optional && !n.rest);
+
+    assert!(
+        graph
+            .nodes
+            .iter()
+            .all(|node| !matches!(node.kind, Some(Kind::Opaque(_)))),
+        "a closed payload exports no opaque node"
+    );
+    assert!(
+        graph.node_id_map.is_empty(),
+        "a closed payload is not addressed"
+    );
+    assert!(issued_member_names(&host).is_empty());
+}
+
+const SVELTE_EVENTS: &str = "/events.svelte";
+const SVELTE_EVENTS_SOURCE: &str = r#"<script lang="ts">
+  interface Row { id: number }
+  let { onselect }: { onselect: (row: Row) => void } = $props();
+</script>
+"#;
+
+/// A Svelte callback-prop event whose payload replays exports its payload
+/// tuple, addressed under the callback-prop source family, and the
+/// reference expands to that tuple.
+#[test]
+fn svelte_callback_event_exports_its_replayable_payload_tuple() {
+    use crate::typeinfo::framework_surface::plan::SvelteSurfaceSource;
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_standalone(&host, SVELTE_EVENTS, SVELTE_EVENTS_SOURCE);
+    let payload = framework_payload(
+        &host,
+        SVELTE_EVENTS,
+        "svelte",
+        &[FrameworkSurfaceKind::Emits],
+    );
+    let graph = payload.graph.as_ref().expect("a surface graph");
+    let members = emit_members(&payload, "select");
+    let [select] = members.as_slice() else {
+        panic!("one select member");
+    };
+    assert_eq!(tuple_at(graph, select.type_node_id).elements.len(), 1);
+    let node_ref = published_ref(graph, select.type_node_id).expect("the payload is addressed");
+    let key = IssuedRefKey::from_wire(&node_ref).expect("a well-formed reference");
+    let issued = lookup_issued(&host, &key).expect("the host issued it");
+    let locator = member_locator(&issued);
+    assert_eq!(locator.role, MemberRole::EmitPayload);
+    assert_eq!(
+        locator.producer,
+        MemberProducer::Svelte(SvelteSurfaceSource::CallbackPropEvents)
+    );
+    let expanded = expand_in(&host, node_ref, wire::ProjectionMode::Navigate)
+        .unwrap_or_else(|error| panic!("the payload expands, got {error:?}"));
+    assert_eq!(tuple_at(&expanded, expanded.root_ids[0]).elements.len(), 1);
+}
