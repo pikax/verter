@@ -1796,9 +1796,17 @@ non-`Clone` `FlowProductExecution` and advanced only through `&mut`.
 Snapshots (`FlowProductStore`, and the evaluator's `FlowFrameProducts`)
 carry no execution handle; a declaration-bearing read pairs a snapshot with
 its own execution (`FlowProductRead`), and a transfer bundle is validated
-whole before it commits. Retaining the evaluation is still blocked on the
-evaluator's borrowed explicit stacks (`ExprRun`, `RegionEvalFrame`, call
-frames, `NestedStore`) and its shared `Rc` state (the frame execution a
+whole before it commits. Each nested function's activation is its own
+`self_cell` (`NestedActivationCell`): it owns its slice content, parameters
+and binder environment beside the evaluator state and region run that
+borrow them, and reaches the frames around it only through owned snapshots
+(binder environments and products behind `Arc`), so it moves as a unit and
+borrows from no other activation. A stepped read a retained frame waits on
+(an object literal's or a class's member function) keeps its observation as
+an owned `HeldReadObservation`, closed by the driver when the read
+delivers. Retaining the evaluation is still blocked on the root
+activation's borrowed inputs, the nested signature recordings' dispatcher
+guards, the evaluator's shared `Rc` state (the frame execution a
 nested evaluator reaches its enclosing frame's bank through, and the
 evaluation memos), and on the dispatch read helpers the body calls
 (signature discovery, the contextual call executor, type-leaf lowering, the

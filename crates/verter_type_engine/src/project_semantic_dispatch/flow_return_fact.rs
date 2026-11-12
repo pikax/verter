@@ -108,6 +108,25 @@ impl ReadObservationScope<'_> {
     }
 }
 
+/// The observation owner for a stepped read whose waiting frame is kept
+/// between steps: the rails of a [`ReadObservationScope`], borrowing nothing
+/// from the dispatch, so the frame waiting on the read owns it by value
+/// (an evaluator activation retains its frames in its own cell).
+/// [`ProjectSemanticDispatch::finish_held_read_observation`] closes it. Its
+/// request-context rails close themselves if it drops unfinished (only an
+/// unwinding evaluation drops one); the build-local frame it opened is then
+/// the unwinding build's, discarded with it.
+#[must_use = "a held read observation must be finished"]
+pub(super) struct HeldReadObservation {
+    validity: crate::request_context::ExecutionValidityScope,
+    sticky: crate::request_context::DeferredPartialStickyScope,
+    completeness: crate::request_context::ColdComputeCompletenessScope,
+    /// The build-local taint stack's depth with this observation's frame
+    /// on top.
+    frame_depth: usize,
+    degraded_before: u32,
+}
+
 /// An owned return source awaiting a value demand.
 /// Its constructor is confined to the shared signature producer below.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -606,6 +625,67 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 counter: &self.degraded_member_reads,
                 before: self.degraded_member_reads.get(),
             },
+        }
+    }
+
+    /// [`Self::begin_read_observation`] for a read whose waiting frame is
+    /// kept between steps: the same rails, owned by the frame.
+    pub(super) fn hold_read_observation(&self) -> HeldReadObservation {
+        let validity = crate::request_context::ExecutionValidityScope::enter();
+        let sticky = crate::request_context::DeferredPartialStickyScope::enter();
+        let completeness = crate::request_context::ColdComputeCompletenessScope::enter();
+        let frame_depth = {
+            let mut stack = self.build_local_taint.borrow_mut();
+            stack.push(BuildLocalTaint::default());
+            stack.len()
+        };
+        HeldReadObservation {
+            validity,
+            sticky,
+            completeness,
+            frame_depth,
+            degraded_before: self.degraded_member_reads.get(),
+        }
+    }
+
+    /// Close `held`: what the read observed since it was held, taken off
+    /// the enclosing rails exactly as [`ReadObservationScope::finish`]
+    /// takes it.
+    pub(super) fn finish_held_read_observation(
+        &self,
+        held: HeldReadObservation,
+    ) -> ObservedRead<()> {
+        let HeldReadObservation {
+            validity,
+            sticky,
+            completeness,
+            frame_depth,
+            degraded_before,
+        } = held;
+        let degraded_member_reads = self
+            .degraded_member_reads
+            .get()
+            .saturating_sub(degraded_before);
+        let abort = crate::request_context::current_execution_abort();
+        let frame = {
+            let mut stack = self.build_local_taint.borrow_mut();
+            verter_debug_assert!(
+                stack.len() == frame_depth,
+                "a held read observation closes the build-local frame it opened"
+            );
+            stack.pop().unwrap_or_default()
+        };
+        let observed = crate::request_context::current_cold_compute_completeness();
+        completeness.discard();
+        drop(sticky);
+        drop(validity);
+        self.degraded_member_reads.set(degraded_before);
+        ObservedRead {
+            value: (),
+            abort,
+            completeness: observed,
+            frame,
+            degraded_member_reads,
         }
     }
 }

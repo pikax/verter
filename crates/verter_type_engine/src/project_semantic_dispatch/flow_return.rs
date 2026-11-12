@@ -7110,6 +7110,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             binder_env.with_instantiation(&ir.type_parameters, &key.normalized_type_args)
         };
+        // Shared with the nested evaluators' enclosing frames, which outlive
+        // no borrow of this one.
+        let binder_env = Arc::new(binder_env);
         // THE root-identifier gate at the SIGNATURE entrances. Every
         // signature answer the content half minted carries the frame
         // names it references; if the owner scope answers one of them,
@@ -10785,7 +10788,15 @@ pub(super) trait FlowDemandDriver {
     fn observe_read<T>(&self, read: impl FnOnce() -> T)
         -> super::flow_return_fact::ObservedRead<T>;
     fn preserve_read_reuse_evidence<T>(&self, read: &super::flow_return_fact::ObservedRead<T>);
-    fn begin_read_observation(&self) -> super::flow_return_fact::ReadObservationScope<'_>;
+    /// Open the observation of a stepped read its waiting frame owns
+    /// ([`ProjectSemanticDispatch::hold_read_observation`]).
+    fn hold_read_observation(&self) -> super::flow_return_fact::HeldReadObservation;
+    /// Close a held read observation
+    /// ([`ProjectSemanticDispatch::finish_held_read_observation`]).
+    fn finish_held_read_observation(
+        &self,
+        held: super::flow_return_fact::HeldReadObservation,
+    ) -> super::flow_return_fact::ObservedRead<()>;
     fn adopt_read<T>(
         &self,
         read: super::flow_return_fact::ObservedRead<T>,
@@ -11357,8 +11368,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn preserve_read_reuse_evidence<T>(&self, read: &super::flow_return_fact::ObservedRead<T>) {
         read.preserve_reuse_evidence(self);
     }
-    fn begin_read_observation(&self) -> super::flow_return_fact::ReadObservationScope<'_> {
-        ProjectSemanticDispatch::begin_read_observation(self)
+    fn hold_read_observation(&self) -> super::flow_return_fact::HeldReadObservation {
+        ProjectSemanticDispatch::hold_read_observation(self)
+    }
+    fn finish_held_read_observation(
+        &self,
+        held: super::flow_return_fact::HeldReadObservation,
+    ) -> super::flow_return_fact::ObservedRead<()> {
+        ProjectSemanticDispatch::finish_held_read_observation(self, held)
     }
     fn adopt_read<T>(
         &self,
@@ -12309,8 +12326,14 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn preserve_read_reuse_evidence<T>(&self, read: &super::flow_return_fact::ObservedRead<T>) {
         self.driver.preserve_read_reuse_evidence(read);
     }
-    fn begin_read_observation(&self) -> super::flow_return_fact::ReadObservationScope<'_> {
-        self.driver.begin_read_observation()
+    fn hold_read_observation(&self) -> super::flow_return_fact::HeldReadObservation {
+        self.driver.hold_read_observation()
+    }
+    fn finish_held_read_observation(
+        &self,
+        held: super::flow_return_fact::HeldReadObservation,
+    ) -> super::flow_return_fact::ObservedRead<()> {
+        self.driver.finish_held_read_observation(held)
     }
     fn adopt_read<T>(
         &self,
@@ -13216,8 +13239,8 @@ struct FlowEvaluatorState<'b> {
     param_names: &'b [verter_session_query::flow::slice::SliceParam],
     /// The function's OWN binder environment (parameters + body leaves
     /// lower under it).
-    binder_env: &'b FlowBinderEnv,
-    enclosing_frames: EnclosingFrames<'b>,
+    binder_env: &'b Arc<FlowBinderEnv>,
+    enclosing_frames: EnclosingFrames,
     /// The frame's binding-NAME resolution authority: the one place an
     /// authored name becomes a typed [`FlowProductSubject`]. It holds
     /// names, never semantic state, and its two scope layers are two
@@ -14434,27 +14457,27 @@ enum ExprProgress {
 /// added, sharing the rest: copying the whole chain for every nested
 /// function (and dropping it again) cost the square of the nesting.
 #[derive(Clone, Default)]
-struct EnclosingFrames<'b>(Option<std::rc::Rc<EnclosingFrame<'b>>>);
+struct EnclosingFrames(Option<std::rc::Rc<EnclosingFrame>>);
 
 /// One frame around a nested function's evaluator, with `outside` frames
 /// around it.
-struct EnclosingFrame<'b> {
+struct EnclosingFrame {
     function: verter_session_query::function_program::FunctionProgramKey,
-    binder_env: &'b FlowBinderEnv,
+    binder_env: Arc<FlowBinderEnv>,
     products: FlowProductStore,
     /// The product authority `products` advances under: a capture
     /// authority the nested evaluator lowers installs into its bank.
     frame_execution: SharedFlowExecution,
     outside: usize,
-    outer: EnclosingFrames<'b>,
+    outer: EnclosingFrames,
 }
 
-impl<'b> EnclosingFrames<'b> {
+impl EnclosingFrames {
     /// This chain with `function`'s frame added innermost.
     fn with(
         &self,
         function: verter_session_query::function_program::FunctionProgramKey,
-        binder_env: &'b FlowBinderEnv,
+        binder_env: Arc<FlowBinderEnv>,
         products: FlowProductStore,
         frame_execution: SharedFlowExecution,
     ) -> Self {
@@ -14475,7 +14498,7 @@ impl<'b> EnclosingFrames<'b> {
     }
 
     /// The frames, innermost first.
-    fn iter(&self) -> impl Iterator<Item = &EnclosingFrame<'b>> {
+    fn iter(&self) -> impl Iterator<Item = &EnclosingFrame> {
         std::iter::successors(self.0.as_deref(), |frame| frame.outer.0.as_deref())
     }
 }
@@ -14483,7 +14506,7 @@ impl<'b> EnclosingFrames<'b> {
 /// A chain drops from this loop, each frame no other chain shares taken
 /// off in turn: dropping it frame inside frame would take a native level
 /// per enclosing function.
-impl Drop for EnclosingFrames<'_> {
+impl Drop for EnclosingFrames {
     fn drop(&mut self) {
         let mut next = self.0.take();
         while let Some(frame) = next {
@@ -14728,7 +14751,7 @@ enum ObjectEvalAwait<'e> {
         degradation: Option<crate::semantic_query::FlowReturnDegradation>,
         holds_before: usize,
         again: bool,
-        observations: super::flow_return_fact::ReadObservationScope<'e>,
+        observations: super::flow_return_fact::HeldReadObservation,
     },
 }
 
@@ -15032,10 +15055,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     fn drive_object_literal<'e>(
         &mut self,
         frame: &mut ObjectEvalFrame<'e>,
-    ) -> Positional<SemanticNodeId>
-    where
-        'd: 'e,
-    {
+    ) -> Positional<SemanticNodeId> {
         // [`Self::eval_expr`] steps an object literal from its own stack;
         // here the same steps run with each child evaluated in place.
         let mut delivered = None;
@@ -15262,10 +15282,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         &mut self,
         frame: &mut ObjectEvalFrame<'e>,
         delivered: Option<Positional<SemanticNodeId>>,
-    ) -> ObjectEvalStep<'e>
-    where
-        'd: 'e,
-    {
+    ) -> ObjectEvalStep<'e> {
         if let Some(outcome) = delivered {
             self.st.object_first_pass_context = frame.first_pass_context;
             match std::mem::replace(&mut frame.awaiting, ObjectEvalAwait::Nothing) {
@@ -15440,13 +15457,22 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     let value =
                         self.settle_method_cycle(&receiver, member, value, again, degradation);
                     if !again && receiver.forward_read.get() {
-                        if observations.finish(()).discard().is_err() {
+                        if self
+                            .dispatch
+                            .finish_held_read_observation(observations)
+                            .discard()
+                            .is_err()
+                        {
                             return ObjectEvalStep::Done(Positional::Unmodeled);
                         }
                         self.st.degradation = degradation;
                         frame.again.push((position, member));
                     } else {
-                        if self.dispatch.adopt_read(observations.finish(())).is_err() {
+                        if self
+                            .dispatch
+                            .adopt_read(self.dispatch.finish_held_read_observation(observations))
+                            .is_err()
+                        {
                             return ObjectEvalStep::Done(Positional::Unmodeled);
                         }
                         frame.again_progress = true;
@@ -15683,10 +15709,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// accessors evaluate against it, each a child of the literal's step,
     /// retrying forward reads while siblings complete. A stalled round settles
     /// incomplete bodies with their typed degradation; then build the surface.
-    fn object_eval_methods<'e>(&mut self, frame: &mut ObjectEvalFrame<'e>) -> ObjectEvalStep<'e>
-    where
-        'd: 'e,
-    {
+    fn object_eval_methods<'e>(&mut self, frame: &mut ObjectEvalFrame<'e>) -> ObjectEvalStep<'e> {
         self.st.receiver = frame.receiver.clone();
         if frame.receiver.is_some() {
             let (next, again) = if let Some(&next) = frame.deferred.get(frame.deferred_next) {
@@ -15733,7 +15756,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 degradation: self.st.degradation,
                 holds_before: self.st.holds.len(),
                 again,
-                observations: self.dispatch.begin_read_observation(),
+                observations: self.dispatch.hold_read_observation(),
             };
             // A method is typed by the contextual signature its property's
             // contextual type gives it, as a function-valued property is.
@@ -18506,10 +18529,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         walk: &mut ArmWalk<'e>,
         delivered: Option<SemanticNodeId>,
         suspend: bool,
-    ) -> Option<NestedDemand>
-    where
-        'd: 'e,
-    {
+    ) -> Option<NestedDemand> {
         use verter_session_query::flow::slice::{SliceExpr, SliceFreshness};
         if let Some(node) = delivered {
             let part = walk
@@ -18621,10 +18641,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         mut part: ArmPartRun<'e>,
         delivered: Option<Positional<SemanticNodeId>>,
         suspend: bool,
-    ) -> Option<NestedDemand>
-    where
-        'd: 'e,
-    {
+    ) -> Option<NestedDemand> {
         match self.run_expr(&mut part.run, delivered, suspend) {
             ExprProgress::Nested(demand) => {
                 walk.running = Some(part);
@@ -26494,10 +26511,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         &mut self,
         run: &mut RegionRun<'r>,
         mut delivered: Option<RegionDelivery>,
-    ) -> RegionProgress
-    where
-        'd: 'r,
-    {
+    ) -> RegionProgress {
         loop {
             let frame = run.frames.last_mut().expect("the region being evaluated");
             match self.eval_region_statements(frame, delivered.take()) {
@@ -26778,10 +26792,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         &mut self,
         frame: &mut RegionEvalFrame<'r>,
         delivered: Option<RegionDelivery>,
-    ) -> RegionEvalStep<'r>
-    where
-        'd: 'r,
-    {
+    ) -> RegionEvalStep<'r> {
         let region = frame.region;
         let mut contributors = std::mem::take(&mut frame.contributors);
         // The evaluator's own path liveness, refined past the lowering's
@@ -26964,10 +26975,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         frame: &mut RegionEvalFrame<'r>,
         mut contributors: Vec<FlowContribution>,
         mut path_alive: bool,
-    ) -> RegionEvalStep<'r>
-    where
-        'd: 'r,
-    {
+    ) -> RegionEvalStep<'r> {
         let region = frame.region;
         while let Some(statement) = region.statements.get(frame.next) {
             frame.next += 1;
@@ -28279,7 +28287,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// Note that this evaluator read `frame`, one around it, for the
     /// recordings of the evaluations it sits in
     /// ([`nested::NestedResolution::note_frame_read`]).
-    fn note_enclosing_frame_read(&self, frame: &EnclosingFrame<'_>) {
+    fn note_enclosing_frame_read(&self, frame: &EnclosingFrame) {
         self.st
             .resolving_functions
             .borrow_mut()
@@ -28322,12 +28330,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     ) -> Option<SemanticNodeId> {
         let binder_env = if &locator.declaration().defining_function == self.st.bindings.function()
         {
-            Some(self.st.binder_env)
+            Some(Arc::clone(self.st.binder_env))
         } else {
             self.st.enclosing_frames.iter().find_map(|frame| {
                 (frame.function == locator.declaration().defining_function).then(|| {
                     self.note_enclosing_frame_read(frame);
-                    frame.binder_env
+                    Arc::clone(&frame.binder_env)
                 })
             })
         };
@@ -28335,25 +28343,26 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
             return None;
         };
-        let base =
-            if signature_answer_is_frame_shadowed(self.dispatch, binder_env, &authority.declared) {
-                self.record_degradation(
-                    crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
-                );
-                self.unmodeled_position()
-            } else {
-                let mut substitutions = Vec::new();
-                self.dispatch.shallow_lower_type_expr_with_context(
-                    authority.declared.ty(),
-                    &binder_env.env,
-                    &binder_env.scope,
-                    &binder_env.name_resolution,
-                    binder_env.scope_payload.as_ref(),
-                    &binder_env.shadowing,
-                    &mut substitutions,
-                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                )
-            };
+        let base = if signature_answer_is_frame_shadowed(
+            self.dispatch,
+            &binder_env,
+            &authority.declared,
+        ) {
+            self.record_degradation(crate::semantic_query::FlowReturnDegradation::UnresolvedValue);
+            self.unmodeled_position()
+        } else {
+            let mut substitutions = Vec::new();
+            self.dispatch.shallow_lower_type_expr_with_context(
+                authority.declared.ty(),
+                &binder_env.env,
+                &binder_env.scope,
+                &binder_env.name_resolution,
+                binder_env.scope_payload.as_ref(),
+                &binder_env.shadowing,
+                &mut substitutions,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+        };
         let node = match &authority.source {
             verter_session_query::flow::slice::SliceCaptureAuthoritySource::Parameter {
                 key: Some(key),
@@ -29351,10 +29360,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         run: &mut ExprRun<'e>,
         mut delivered: Option<Positional<SemanticNodeId>>,
         suspend: bool,
-    ) -> ExprProgress
-    where
-        'd: 'e,
-    {
+    ) -> ExprProgress {
         use verter_session_query::flow::slice::SliceExpr;
         // An operator form's operands (a `!`, a non-null assertion, an
         // arithmetic operator's operands) and a conditional's branches
@@ -29695,10 +29701,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         mut frame: class_expression::ClassEvalFrame<'e>,
         mut step: class_expression::ClassStep<'e>,
         suspend: bool,
-    ) -> ResumedCall
-    where
-        'd: 'e,
-    {
+    ) -> ResumedCall {
         loop {
             match step {
                 class_expression::ClassStep::Done(value) => return ResumedCall::Value(value),

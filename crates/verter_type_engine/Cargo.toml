@@ -60,6 +60,9 @@ imbl = "7.0.2"
 indexmap = "2.14"
 parking_lot = "0.13.0"
 rustc-hash = { workspace = true }
+# Each nested flow activation owns its slice content beside the evaluator
+# state that borrows it (safe interface; no project-written unsafe).
+self_cell = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 smallvec = "1.16"
