@@ -256,7 +256,7 @@ boundaries, cold and warm, two call sites of one body),
 `wide_arguments_of_queried_and_class_expression_types_print_as_the_checker_abbreviates_them` (wide
 function-query, qualified-query, class-expression and predicate-method objects at their elision and
 clip, cold and warm),
-`deep_chains_report_until_the_checker_relation_stack_overflows` (the relation stack's boundary per
+the `deep_*_report_until_the_checker_relation_stack_overflows` tests (the relation stack's boundary per
 leaf kind, nothing reported past it), `elaborated_and_overloaded_overflows_report_nothing`,
 `call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability` (the explicit-overload
 recovery with a differing return), `a_diagnostic_the_route_cannot_place_is_not_reported`, the `checker_diagnostic::tests` recipe-binding
