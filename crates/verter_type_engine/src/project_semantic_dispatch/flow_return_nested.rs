@@ -13,7 +13,7 @@
 //! the signature composed on the parent ([`FlowEvaluator::finish_nested`]),
 //! and the parent's region resumes with it. The data a nested evaluator
 //! borrows (its parameters, binder environment and slice content) is owned
-//! by its own activation cell ([`NestedActivationCell`]), and the frames
+//! by its own activation cell ([`ActivationCell`]), and the frames
 //! around it are a shared chain of owned snapshots, so no evaluator borrows
 //! from a native frame, or the cell, of the one around it.
 //!
@@ -237,51 +237,56 @@ impl<T: Clone + Eq + std::hash::Hash> WindowedLog<T> {
     }
 }
 
-/// What a nested function's own evaluator borrows: the immutable inputs
-/// of its activation, owned by its [`NestedActivationCell`]. Nothing in it
-/// is borrowed from another activation, so the cell moves as a unit.
-pub(super) struct NestedOwned {
-    content: Arc<verter_session_query::flow::slice::SliceContent>,
-    params: Vec<SemanticNodeId>,
+/// What an evaluator borrows: the immutable inputs of its activation (the
+/// root evaluation's or a nested function's), owned by its
+/// [`ActivationCell`]. Nothing in it is borrowed from another activation,
+/// so the cell moves as a unit.
+pub(super) struct ActivationOwned {
+    pub(super) content: Arc<verter_session_query::flow::slice::SliceContent>,
+    pub(super) params: Vec<SemanticNodeId>,
     /// The function's own binder environment, shared with the enclosing
     /// frames of the activations nested in it.
-    binder_env: Arc<FlowBinderEnv>,
+    pub(super) binder_env: Arc<FlowBinderEnv>,
     /// The root evaluation's canonical source, which every evaluator of it
     /// reads under.
-    canonical: Arc<str>,
+    pub(super) canonical: Arc<str>,
+    /// The flow return the root evaluation computes; `None` for a nested
+    /// function.
+    pub(super) self_slot: Option<FlowReturnKey>,
 }
 
-/// A nested function's evaluator state and region run, borrowing only
-/// their activation's [`NestedOwned`].
-pub(super) struct NestedActivationState<'a> {
-    evaluator: FlowEvaluatorState<'a>,
-    run: RegionRun<'a>,
+/// An evaluator's state and region run, borrowing only their activation's
+/// [`ActivationOwned`].
+pub(super) struct ActivationState<'a> {
+    pub(super) evaluator: FlowEvaluatorState<'a>,
+    pub(super) run: RegionRun<'a>,
 }
 
 self_cell::self_cell!(
-    /// One nested activation: its owned inputs and the evaluator state and
-    /// run that borrow them, in one allocation. Each activation owns its
-    /// own cell; activations reach one another only through owned handles
-    /// (the enclosing frames, the shared memos), never through a borrow of
-    /// another cell, and creating one never rebuilds its parent. Dropping
-    /// it drops the state before the inputs it borrows.
-    pub(super) struct NestedActivationCell {
-        owner: NestedOwned,
+    /// One activation (the root evaluation's or a nested function's): its
+    /// owned inputs and the evaluator state and run that borrow them, in
+    /// one allocation. Each activation owns its own cell; activations reach
+    /// one another only through owned handles (the enclosing frames, the
+    /// root's tables), never through a borrow of another cell, and creating
+    /// one never rebuilds its parent. Dropping it drops the state before the
+    /// inputs it borrows.
+    pub(super) struct ActivationCell {
+        owner: ActivationOwned,
 
         #[not_covariant]
-        dependent: NestedActivationState,
+        dependent: ActivationState,
     }
 );
 
 // An activation is exclusively owned: one evaluation advances it, and it
 // is never duplicated.
-static_assertions::assert_not_impl_any!(NestedActivationCell: Clone);
+static_assertions::assert_not_impl_any!(ActivationCell: Clone);
 
 /// A nested function's body under evaluation by its own evaluator.
 pub(super) struct NestedActivation {
     /// The body's own evaluator state and run, advanced under the drive's
     /// driver.
-    cell: NestedActivationCell,
+    cell: ActivationCell,
     finish: NestedFinish,
 }
 
@@ -455,7 +460,7 @@ pub(super) enum NestedPrepared {
 }
 
 /// How a drive ends.
-enum DriveEnd {
+pub(super) enum DriveEnd {
     /// The region it was started on completed.
     Region((Result<Vec<FlowContribution>, FlowReturnFailure>, bool)),
     /// The nested function it was started on is composed.
@@ -524,84 +529,94 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         mut root: Option<RegionRun<'r>>,
         mut stack: Vec<NestedActivation>,
     ) -> DriveEnd {
-        let dispatch = self.dispatch;
         let mut delivered: Option<RegionDelivery> = None;
         loop {
-            // The evaluator on top runs; a nested function it suspends at is
-            // prepared on it.
-            let prepared = match stack.last_mut() {
-                Some(top) => {
-                    let delivery = delivered.take();
-                    let step =
-                        top.cell.with_dependent_mut(|_, active| {
-                            match FlowEvaluator::over(
+            if let Some(end) = self.drive_step(root.as_mut(), &mut stack, &mut delivered) {
+                return end;
+            }
+        }
+    }
+
+    /// One step of a drive (see [`Self::drive`]): the evaluator on top of
+    /// `stack`, or this evaluator's `root` region when the stack is empty,
+    /// runs with `delivered` until it suspends at a nested function or
+    /// completes. The drive's state lives in its caller between steps;
+    /// `Some` when the drive has ended.
+    pub(super) fn drive_step<'r>(
+        &mut self,
+        root: Option<&mut RegionRun<'r>>,
+        stack: &mut Vec<NestedActivation>,
+        delivered: &mut Option<RegionDelivery>,
+    ) -> Option<DriveEnd> {
+        let dispatch = self.dispatch;
+        // The evaluator on top runs; a nested function it suspends at is
+        // prepared on it.
+        let prepared = match stack.last_mut() {
+            Some(top) => {
+                let delivery = delivered.take();
+                let step = top.cell.with_dependent_mut(|_, active| {
+                    match FlowEvaluator::over(dispatch, &mut active.evaluator, &mut *self.tables)
+                        .run_region(&mut active.run, delivery)
+                    {
+                        RegionProgress::Nested(demand) => {
+                            let own_env = demand.outer_env.clone();
+                            let frame_env: &FlowBinderEnv = active.evaluator.binder_env;
+                            let outer_env = own_env.as_deref().unwrap_or(frame_env);
+                            Ok(FlowEvaluator::over(
                                 dispatch,
                                 &mut active.evaluator,
                                 &mut *self.tables,
                             )
-                            .run_region(&mut active.run, delivery)
-                            {
-                                RegionProgress::Nested(demand) => {
-                                    let own_env = demand.outer_env.clone();
-                                    let frame_env: &FlowBinderEnv = active.evaluator.binder_env;
-                                    let outer_env = own_env.as_deref().unwrap_or(frame_env);
-                                    Ok(FlowEvaluator::over(
-                                        dispatch,
-                                        &mut active.evaluator,
-                                        &mut *self.tables,
-                                    )
-                                    .prepare_nested(demand, outer_env))
+                            .prepare_nested(demand, outer_env))
+                        }
+                        RegionProgress::Done(outcome) => Err(outcome),
+                    }
+                });
+                match step {
+                    Ok(prepared) => Some(prepared),
+                    Err(outcome) => {
+                        let finished = stack.pop().expect("the evaluator on top");
+                        let node = match stack.last_mut() {
+                            Some(parent) => parent.cell.with_dependent_mut(|_, active| {
+                                FlowEvaluator::over(
+                                    dispatch,
+                                    &mut active.evaluator,
+                                    &mut *self.tables,
+                                )
+                                .finish_nested(finished, outcome)
+                            }),
+                            None => {
+                                let node = self.finish_nested(finished, outcome);
+                                if root.is_none() {
+                                    return Some(DriveEnd::Nested(node));
                                 }
-                                RegionProgress::Done(outcome) => Err(outcome),
+                                node
                             }
-                        });
-                    match step {
-                        Ok(prepared) => Some(prepared),
-                        Err(outcome) => {
-                            let finished = stack.pop().expect("the evaluator on top");
-                            let node = match stack.last_mut() {
-                                Some(parent) => parent.cell.with_dependent_mut(|_, active| {
-                                    FlowEvaluator::over(
-                                        dispatch,
-                                        &mut active.evaluator,
-                                        &mut *self.tables,
-                                    )
-                                    .finish_nested(finished, outcome)
-                                }),
-                                None => {
-                                    let node = self.finish_nested(finished, outcome);
-                                    if root.is_none() {
-                                        return DriveEnd::Nested(node);
-                                    }
-                                    node
-                                }
-                            };
-                            delivered = Some(RegionDelivery::Nested(node));
-                            None
-                        }
+                        };
+                        *delivered = Some(RegionDelivery::Nested(node));
+                        None
                     }
                 }
-                None => {
-                    let run = root
-                        .as_mut()
-                        .expect("a drive with no nested evaluator runs its root");
-                    match self.run_region(run, delivered.take()) {
-                        RegionProgress::Nested(demand) => {
-                            let own_env = demand.outer_env.clone();
-                            let frame_env: &FlowBinderEnv = self.st.binder_env;
-                            let outer_env = own_env.as_deref().unwrap_or(frame_env);
-                            Some(self.prepare_nested(demand, outer_env))
-                        }
-                        RegionProgress::Done(outcome) => return DriveEnd::Region(outcome),
-                    }
-                }
-            };
-            match prepared {
-                Some(NestedPrepared::Value(node)) => delivered = Some(RegionDelivery::Nested(node)),
-                Some(NestedPrepared::Child(child)) => stack.push(*child),
-                None => {}
             }
+            None => {
+                let run = root.expect("a drive with no nested evaluator runs its root");
+                match self.run_region(run, delivered.take()) {
+                    RegionProgress::Nested(demand) => {
+                        let own_env = demand.outer_env.clone();
+                        let frame_env: &FlowBinderEnv = self.st.binder_env;
+                        let outer_env = own_env.as_deref().unwrap_or(frame_env);
+                        Some(self.prepare_nested(demand, outer_env))
+                    }
+                    RegionProgress::Done(outcome) => return Some(DriveEnd::Region(outcome)),
+                }
+            }
+        };
+        match prepared {
+            Some(NestedPrepared::Value(node)) => *delivered = Some(RegionDelivery::Nested(node)),
+            Some(NestedPrepared::Child(child)) => stack.push(*child),
+            None => {}
         }
+        None
     }
 
     /// Prepare a nested function value on this evaluator: its slice content
@@ -836,16 +851,17 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             self.st.products.clone(),
             self.st.frame_execution,
         );
-        let owned = NestedOwned {
+        let owned = ActivationOwned {
             content,
             params,
             binder_env: Arc::new(binder_env),
             canonical: Arc::from(self.st.canonical),
+            self_slot: None,
         };
         let capture_context = context;
         let frame_execution = self.tables.open_execution(captured_execution);
         let dispatch = self.dispatch;
-        let cell = NestedActivationCell::new(owned, |owned| {
+        let cell = ActivationCell::new(owned, |owned| {
             let mut evaluator = FlowEvaluatorState {
                 independent_members: None,
                 independent_returns: None,
@@ -853,7 +869,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 constructive_signatures: rustc_hash::FxHashMap::default(),
                 call_receivers: rustc_hash::FxHashMap::default(),
                 call_arguments: Arc::clone(&owned.content.call_arguments),
-                self_slot: None,
+                self_slot: owned.self_slot.as_ref(),
                 canonical: &owned.canonical,
                 owner: self.st.owner,
                 nullability: self.st.nullability,
@@ -942,7 +958,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 child.seed_hoisted_var_declarations(body);
                 child.start_region_run(body)
             };
-            NestedActivationState { evaluator, run }
+            ActivationState { evaluator, run }
         });
         NestedPrepared::Child(Box::new(NestedActivation {
             cell,
@@ -984,7 +1000,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// evaluator state.
     fn finish_nested_body(
         &mut self,
-        owned: &NestedOwned,
+        owned: &ActivationOwned,
         nested_evaluator: &mut FlowEvaluatorState<'_>,
         finish: NestedFinish,
         outcome: (Result<Vec<FlowContribution>, FlowReturnFailure>, bool),
@@ -1666,8 +1682,8 @@ mod activation_cell_contracts {
     #[test]
     fn a_nested_activation_cell_owns_everything_it_borrows() {
         fn owns_everything<T: 'static>() {}
-        owns_everything::<super::NestedActivationCell>();
-        owns_everything::<super::NestedOwned>();
+        owns_everything::<super::ActivationCell>();
+        owns_everything::<super::ActivationOwned>();
     }
 }
 

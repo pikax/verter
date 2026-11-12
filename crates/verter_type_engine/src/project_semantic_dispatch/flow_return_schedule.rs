@@ -85,12 +85,16 @@
 //! before the native stack can run out — the backstop beside the
 //! connected-query depth guard, which bounds nesting through queries.
 //!
-//! The schedule keeps one transaction-local session while any frame is
-//! evaluating: the callee returns it has already settled — evaluated, left
-//! to the body, or abandoned — so a nested frame's schedule never
-//! re-evaluates them, the instantiated demands each uninstantiated frame
-//! made, and the probes in progress. The session is cleared when the
-//! outermost frame finishes.
+//! Each flow root keeps one transaction-local session while it evaluates,
+//! keyed by the root's own flow return: the callee returns it has already
+//! settled — evaluated, left to the body, or abandoned — so a nested
+//! frame's schedule never re-evaluates them, the instantiated demands each
+//! uninstantiated frame made, and the probes in progress. A frame
+//! evaluating beneath the root (a scheduled callee, an inline callee, a
+//! query evaluated in place) reads the session of the innermost root on
+//! the reentry stack below it, so one root's session is never another's.
+//! The root's [`HeldFlowSchedule`] removes its session when the root
+//! finishes.
 
 use std::sync::Arc;
 use verter_session_query::source::demand::ExpressionSourceDemand as _;
@@ -104,17 +108,54 @@ use verter_session_query::function_program::{
 };
 use verter_type_expr::facts::{FlowFunctionReturnIdentity, FunctionPartIdentity};
 
-use super::super::dispatch_txn::{CheckerDispatchTransaction, ObligationIdentity};
+use super::super::dispatch_txn::{
+    CheckerDispatchTransaction, ObligationIdentity, ObligationReentryStack,
+};
 use super::super::ProjectSemanticDispatch;
 use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
 use crate::semantic_query::{FlowReturnKey, FlowReturnStep, SemanticNodeData, SemanticNodeId};
 
-/// The schedule's transaction-local session state (see the module
-/// documentation).
+/// The schedule's transaction-local sessions, one per evaluating flow root
+/// (see the module documentation).
+#[derive(Debug, Default)]
+pub(crate) struct FlowScheduleSessions {
+    /// Each open session, under the flow return of the root that owns it.
+    /// Roots are few, so the sessions are searched in place.
+    sessions: Vec<(FlowReturnKey, FlowScheduleSession)>,
+}
+
+impl FlowScheduleSessions {
+    /// Where the session of the innermost root on `reentry` that owns one
+    /// is kept: the session a frame evaluating there reads.
+    fn position_on(&self, reentry: &ObligationReentryStack) -> Option<usize> {
+        if self.sessions.is_empty() {
+            return None;
+        }
+        (0..reentry.depth())
+            .rev()
+            .filter_map(|index| reentry.frame(index))
+            .filter_map(|frame| frame.identity.as_flow_return())
+            .find_map(|frame| self.sessions.iter().position(|(root, _)| root == frame))
+    }
+}
+
+/// The session a frame evaluating on `txn` now reads, when it evaluates
+/// beneath a root that owns one.
+fn session(txn: &CheckerDispatchTransaction) -> Option<&FlowScheduleSession> {
+    let sessions = &txn.flow.schedule;
+    let at = sessions.position_on(txn.reentry())?;
+    Some(&sessions.sessions[at].1)
+}
+
+/// [`session`], mutably.
+fn session_mut(txn: &mut CheckerDispatchTransaction) -> Option<&mut FlowScheduleSession> {
+    let at = txn.flow.schedule.position_on(txn.reentry())?;
+    Some(&mut txn.flow.schedule.sessions[at].1)
+}
+
+/// One flow root's schedule session state (see the module documentation).
 #[derive(Debug, Default)]
 pub(crate) struct FlowScheduleSession {
-    /// Frames evaluating under an open schedule scope.
-    open: u32,
     /// Callee returns an earlier schedule of this session already settled.
     settled: FxHashSet<FlowReturnKey>,
     /// The instantiated callee returns each uninstantiated frame demanded
@@ -147,25 +188,70 @@ pub(super) enum UnscheduledDemand {
     Scheduled,
 }
 
-/// Keeps a frame's schedule session open for the frame's whole evaluation;
-/// the outermost frame's release clears the session.
+/// A frame's hold on the schedule session it evaluates under. A frame
+/// evaluating beneath no root that owns a session opens its own and owns
+/// it, named by the frame's flow return; one beneath such a root reads that
+/// root's session and owns nothing. It is plain data: only
+/// [`CheckerDispatchTransaction::close_flow_schedule`] removes the session
+/// it owns, and dropping it unclosed leaves the session to the
+/// transaction.
+#[derive(Debug)]
+pub(crate) struct HeldFlowSchedule {
+    owner: Option<FlowReturnKey>,
+}
+
+impl CheckerDispatchTransaction {
+    /// Open the schedule session `frame` evaluates under: the session of
+    /// the innermost root below it on the reentry stack, or a new one that
+    /// `frame` owns.
+    pub(crate) fn open_flow_schedule(&mut self, frame: &FlowReturnKey) -> HeldFlowSchedule {
+        if session(self).is_some() {
+            return HeldFlowSchedule { owner: None };
+        }
+        verter_debug_assert!(
+            !self
+                .flow
+                .schedule
+                .sessions
+                .iter()
+                .any(|(root, _)| root == frame),
+            "a flow root owns one schedule session"
+        );
+        self.flow
+            .schedule
+            .sessions
+            .push((frame.clone(), FlowScheduleSession::default()));
+        HeldFlowSchedule {
+            owner: Some(frame.clone()),
+        }
+    }
+
+    /// Close a hold `open_flow_schedule` gave: the session it owns, if
+    /// any, is removed.
+    pub(crate) fn close_flow_schedule(&mut self, held: HeldFlowSchedule) {
+        if let Some(owner) = held.owner {
+            self.flow
+                .schedule
+                .sessions
+                .retain(|(root, _)| *root != owner);
+        }
+    }
+}
+
+/// Keeps a frame's schedule session open for the frame's whole
+/// evaluation, closing its [`HeldFlowSchedule`] when the frame's
+/// evaluation ends.
 pub(super) struct FlowScheduleScope<'g> {
     txn: &'g verter_execution::sync_cell::SyncRefCell<CheckerDispatchTransaction>,
+    held: Option<HeldFlowSchedule>,
 }
 
 impl Drop for FlowScheduleScope<'_> {
     fn drop(&mut self) {
         // An unwinding evaluation may still hold the transaction; its
         // session dies with the transaction, so nothing is lost by skipping.
-        if let Ok(mut txn) = self.txn.try_borrow_mut() {
-            let session = &mut txn.flow.schedule;
-            session.open = session.open.saturating_sub(1);
-            if session.open == 0 {
-                session.settled.clear();
-                session.demands.clear();
-                session.transferred.clear();
-                session.probes.clear();
-            }
+        if let (Some(held), Ok(mut txn)) = (self.held.take(), self.txn.try_borrow_mut()) {
+            txn.close_flow_schedule(held);
         }
     }
 }
@@ -239,9 +325,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         entry: &FunctionProgramEntry,
         lowered: &FlowSliceIR,
     ) -> FlowScheduleScope<'_> {
-        self.dispatch_txn.borrow_mut().flow.schedule.open += 1;
+        let held = self.dispatch_txn.borrow_mut().open_flow_schedule(frame);
         let scope = FlowScheduleScope {
             txn: &self.dispatch_txn,
+            held: Some(held),
         };
         // Every frame evaluates beneath a fact tracer: an obligation frame
         // is pushed only inside a flow, relation or call-resolution
@@ -307,10 +394,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> UnscheduledDemand {
         let probing = {
             let txn = self.dispatch_txn.borrow();
-            let session = &txn.flow.schedule;
-            if session.open == 0 {
+            let Some(session) = session(&txn) else {
                 return UnscheduledDemand::Runs;
-            }
+            };
             matches!(session.probes.last(), Some(Some(_)))
         };
         if !flow_return_schedule_enabled()
@@ -323,13 +409,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return UnscheduledDemand::Runs;
         }
         if probing {
-            if let Some(Some(recorded)) = self
-                .dispatch_txn
-                .borrow_mut()
-                .flow
-                .schedule
-                .probes
-                .last_mut()
+            if let Some(Some(recorded)) =
+                session_mut(&mut self.dispatch_txn.borrow_mut()).and_then(|s| s.probes.last_mut())
             {
                 push_unique(recorded, key.clone());
             }
@@ -503,7 +584,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if txn.flow.results.contains(key) {
                 return CalleeStanding::Answered;
             }
-            if txn.flow.schedule.settled.contains(key) {
+            if session(&txn).is_some_and(|session| session.settled.contains(key)) {
                 return CalleeStanding::Left;
             }
         }
@@ -518,8 +599,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     fn settle_all<'k>(&self, keys: impl Iterator<Item = &'k FlowReturnKey>) {
         let mut txn = self.dispatch_txn.borrow_mut();
+        let Some(session) = session_mut(&mut txn) else {
+            return;
+        };
         for key in keys {
-            txn.flow.schedule.settled.insert(key.clone());
+            session.settled.insert(key.clone());
         }
     }
 
@@ -538,20 +622,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn evaluate_scheduled_callee(&self, key: &FlowReturnKey, probe: bool) -> ScheduledEvaluation {
         let (step, recorded) = self
             .observe_read(|| {
-                self.dispatch_txn
-                    .borrow_mut()
-                    .flow
-                    .schedule
-                    .probes
-                    .push(probe.then(CalleeKeys::default));
+                if let Some(session) = session_mut(&mut self.dispatch_txn.borrow_mut()) {
+                    session.probes.push(probe.then(CalleeKeys::default));
+                }
                 let step = self.execute_flow_return(key.clone());
-                let recorded = self
-                    .dispatch_txn
-                    .borrow_mut()
-                    .flow
-                    .schedule
-                    .probes
-                    .pop()
+                let recorded = session_mut(&mut self.dispatch_txn.borrow_mut())
+                    .and_then(|session| session.probes.pop())
                     .flatten()
                     .unwrap_or_default();
                 (step, recorded)
@@ -563,7 +639,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // way.
         let reusable = matches!(step, FlowReturnStep::Complete(_)) && {
             let txn = self.dispatch_txn.borrow();
-            txn.flow.results.contains(key) || txn.flow.schedule.transferred.contains(key)
+            txn.flow.results.contains(key)
+                || session(&txn).is_some_and(|session| session.transferred.contains(key))
         };
         ScheduledEvaluation { reusable, recorded }
     }
@@ -903,9 +980,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `key` without evaluating it (see [`FlowScheduleSession`]). Nothing
     /// is recorded while no schedule is open.
     pub(super) fn note_transferred_flow_return(&self, key: &FlowReturnKey) {
-        let mut txn = self.dispatch_txn.borrow_mut();
-        let session = &mut txn.flow.schedule;
-        if session.open > 0 {
+        if let Some(session) = session_mut(&mut self.dispatch_txn.borrow_mut()) {
             session.transferred.insert(key.clone());
         }
     }
@@ -919,7 +994,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return;
         }
         let mut txn = self.dispatch_txn.borrow_mut();
-        if txn.flow.schedule.open == 0 {
+        if session(&txn).is_none() {
             return;
         }
         let reentry = txn.reentry();
@@ -932,7 +1007,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(frame) = frame else {
             return;
         };
-        let demands = txn.flow.schedule.demands.entry(frame).or_default();
+        let Some(session) = session_mut(&mut txn) else {
+            return;
+        };
+        let demands = session.demands.entry(frame).or_default();
         if !demands.contains(key) {
             demands.push(key.clone());
         }
@@ -953,14 +1031,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         entry: &FunctionProgramEntry,
         out: &mut CalleeKeys,
     ) -> bool {
-        let Some(demanded) = self
-            .dispatch_txn
-            .borrow()
-            .flow
-            .schedule
-            .demands
-            .get(&uninstantiated(frame))
-            .cloned()
+        let Some(demanded) = session(&self.dispatch_txn.borrow())
+            .and_then(|session| session.demands.get(&uninstantiated(frame)).cloned())
         else {
             return false;
         };
@@ -1697,4 +1769,68 @@ pub fn disable_flow_return_schedule_for_tests() -> impl Drop {
         }
     }
     Restore(SCHEDULE_DISABLED.replace(true))
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::{session, session_mut, CheckerDispatchTransaction, FlowReturnKey};
+
+    fn root(ordinal: u32) -> FlowReturnKey {
+        let mut key = super::super::super::dispatch_txn::dispatch_txn_tests::flow_return_key();
+        key.function.overload_ordinal = ordinal;
+        key
+    }
+
+    /// Each root owns its own session, named by its flow return: a frame
+    /// beneath a root reads the root's session, and a root whose frame is
+    /// off the stack keeps its session apart from the root evaluating now.
+    #[test]
+    fn a_schedule_session_belongs_to_the_root_that_opened_it() {
+        let (a, nested, c) = (root(1), root(2), root(3));
+        let mut txn = CheckerDispatchTransaction::default();
+        txn.reentry_mut().push_flow_return(a.clone(), 0);
+        let held_a = txn.open_flow_schedule(&a);
+        session_mut(&mut txn)
+            .expect("the root's own session")
+            .settled
+            .insert(a.clone());
+
+        txn.reentry_mut().push_flow_return(nested.clone(), 0);
+        let held_nested = txn.open_flow_schedule(&nested);
+        assert!(
+            session(&txn).is_some_and(|session| session.settled.contains(&a)),
+            "a frame beneath the root reads the root's session"
+        );
+        txn.close_flow_schedule(held_nested);
+        assert!(
+            session(&txn).is_some(),
+            "closing a joined hold keeps the root's session"
+        );
+        txn.reentry_mut().pop();
+        txn.reentry_mut().pop();
+
+        // Root A's frame is off the stack while its session stays open: root
+        // C opens a session of its own.
+        txn.reentry_mut().push_flow_return(c.clone(), 0);
+        let held_c = txn.open_flow_schedule(&c);
+        assert!(
+            session(&txn).is_some_and(|session| session.settled.is_empty()),
+            "another root never reads root A's session"
+        );
+        txn.close_flow_schedule(held_c);
+        assert!(
+            session(&txn).is_none(),
+            "closing root C removes its session"
+        );
+        txn.reentry_mut().pop();
+
+        txn.reentry_mut().push_flow_return(a.clone(), 0);
+        assert!(
+            session(&txn).is_some_and(|session| session.settled.contains(&a)),
+            "root A's session survives root C"
+        );
+        txn.close_flow_schedule(held_a);
+        assert!(session(&txn).is_none());
+        assert!(txn.flow.schedule.sessions.is_empty());
+    }
 }
