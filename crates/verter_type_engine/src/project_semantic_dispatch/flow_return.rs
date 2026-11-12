@@ -47,7 +47,7 @@ use super::flow_return_callee::{
 };
 use super::flow_return_products::{
     FlowBindingLayer, FlowFrameExecution, FlowFrameProducts as FlowProductStore,
-    FlowWriteObservation, SharedFlowExecution,
+    FlowWriteObservation,
 };
 use super::flow_solve::{FlowPartialReason, FlowSolveOutcome, NoValueFlowResult};
 use super::walk::QueryBuildOutput;
@@ -7223,11 +7223,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Ok((mut products, frame_execution)) = FlowProductStore::new(execution, &bound) else {
             return degraded(FlowReturnFailure::Unresolved, self_roots);
         };
-        let frame_execution: SharedFlowExecution =
-            std::rc::Rc::new(std::cell::RefCell::new(frame_execution));
+        let mut tables = FlowTables::default();
+        let frame_execution = tables.open_execution(frame_execution);
         seed_selected_parameters(
             &mut products,
-            &mut frame_execution.borrow_mut(),
+            &mut tables.execution(frame_execution).borrow_mut(),
             &ir.params,
             &params,
             &ir.bindings,
@@ -7265,13 +7265,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             call_receivers: rustc_hash::FxHashMap::default(),
             call_arguments: Arc::clone(&ir.call_arguments),
             self_slot: Some(key),
-            resolving_functions: std::rc::Rc::default(),
-            this_free_values: std::rc::Rc::default(),
-            declared_type_reads: std::rc::Rc::default(),
-            carrier_unwraps: std::rc::Rc::default(),
-            discriminant_members: std::rc::Rc::default(),
-            guard_relations: std::rc::Rc::default(),
-            arm_indexes: std::rc::Rc::default(),
             canonical,
             owner,
             nullability: key.context.policy.nullability,
@@ -7294,7 +7287,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map(|carrier| Arc::clone(&carrier.plan)),
             anchor: frame_anchor,
             products,
-            frame_execution: std::rc::Rc::clone(&frame_execution),
+            frame_execution,
             narrowing_writes: Vec::new(),
             observations: BodyCompletionObservations::none(),
             member_filter,
@@ -7348,7 +7341,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             inherits_contextual_object_receiver: false,
             object_first_pass_context: ObjectFirstPassContext::default(),
         };
-        let mut evaluator = FlowEvaluator::over(&flow_cx, &mut evaluator_state);
+        let mut evaluator = FlowEvaluator::over(&flow_cx, &mut evaluator_state, &mut tables);
         evaluator.bind_explicit_this(ir.declared_this.as_ref());
         let holds;
         let yield_contributions;
@@ -7404,8 +7397,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             call_evidence = std::mem::take(&mut evaluator.st.call_evidence);
             executed_walk = std::mem::take(&mut evaluator.st.executed_walk);
             let finished = evaluator
-                .st
-                .frame_execution
+                .tables
+                .execution(evaluator.st.frame_execution)
                 .borrow_mut()
                 .finish(evaluator.st.plan.as_deref());
             products_finished = finished.is_ok();
@@ -7555,7 +7548,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             bindings: &frame_bindings,
             product_evidence: frame_product_evidence.as_ref(),
             products: &frame_products,
-            frame_execution: &frame_execution,
+            frame_execution: tables.execution(frame_execution),
             constructed_values: &constructed_values,
         };
         let contributors = match contributors {
@@ -10803,13 +10796,13 @@ pub(super) trait FlowDemandDriver {
     ) -> Result<T, crate::semantic_query::ExecutionAbort>;
     /// Begin recording a read the rest of the evaluation may replay
     /// ([`ProjectSemanticDispatch::begin_transaction_read`]).
-    fn begin_transaction_read(&self) -> Option<super::build::TransactionReadRecording<'_>>;
+    fn begin_transaction_read(&self) -> Option<super::build::HeldTransactionReadRecording>;
     /// End `recording`: what replaying it reproduces, when it is reusable
     /// and raised no operation refusal
-    /// ([`super::build::TransactionReadRecording::finish_without_operation_refusals`]).
+    /// ([`ProjectSemanticDispatch::finish_held_transaction_read`]).
     fn finish_transaction_read(
         &self,
-        recording: super::build::TransactionReadRecording<'_>,
+        recording: super::build::HeldTransactionReadRecording,
         complete: bool,
     ) -> Option<(
         verter_session_query::facts::reuse::ReuseClass,
@@ -11288,7 +11281,12 @@ pub(super) trait FlowDemandDriver {
     fn restore_call_relation_observations(&self, count: u64);
     /// Open a window measuring how the undecided relation count moves
     /// ([`super::dispatch_txn::ResolveCallDomainRuntime::open_undecided_window`]).
-    fn open_undecided_relation_window(&self) -> super::dispatch_txn::UndecidedRelationWindow<'_>;
+    fn open_undecided_relation_window(&self) -> super::dispatch_txn::HeldUndecidedRelationWindow;
+    /// Close a window [`Self::open_undecided_relation_window`] opened.
+    fn close_undecided_relation_window(
+        &self,
+        window: super::dispatch_txn::HeldUndecidedRelationWindow,
+    ) -> Option<super::dispatch_txn::UndecidedRelationDelta>;
     /// Move the count as `delta` measured; `false`, moving nothing, when
     /// it holds less than the delta took it down by.
     fn replay_undecided_relation_delta(
@@ -11297,8 +11295,13 @@ pub(super) trait FlowDemandDriver {
     ) -> bool;
     /// Measure the connected demand's charges apart until
     /// [`Self::close_inline_cost`]
-    /// ([`super::connected_demand::ConnectedDemandLedger::open_inline_cost`]).
-    fn open_inline_cost(&self) -> super::connected_demand::InlineCostRecording<'_>;
+    /// ([`super::connected_demand::ConnectedDemandLedger::hold_inline_cost`]).
+    fn open_inline_cost(&self) -> super::connected_demand::HeldInlineCost;
+    /// Close a measurement [`Self::open_inline_cost`] opened.
+    fn close_inline_cost(
+        &self,
+        cost: super::connected_demand::HeldInlineCost,
+    ) -> Option<super::connected_demand::InlineCost>;
     /// Charge a measured cost again, as performing its part again would;
     /// `false`, charging nothing, when the demand lacks the room.
     fn replay_inline_cost(&self, cost: &super::connected_demand::InlineCost) -> bool;
@@ -11383,18 +11386,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     ) -> Result<T, crate::semantic_query::ExecutionAbort> {
         read.adopt(self)
     }
-    fn begin_transaction_read(&self) -> Option<super::build::TransactionReadRecording<'_>> {
-        ProjectSemanticDispatch::begin_transaction_read(self)
+    fn begin_transaction_read(&self) -> Option<super::build::HeldTransactionReadRecording> {
+        ProjectSemanticDispatch::hold_transaction_read(self)
     }
     fn finish_transaction_read(
         &self,
-        recording: super::build::TransactionReadRecording<'_>,
+        recording: super::build::HeldTransactionReadRecording,
         complete: bool,
     ) -> Option<(
         verter_session_query::facts::reuse::ReuseClass,
         super::dispatch_txn::FlowMemberReuse,
     )> {
-        recording.finish_without_operation_refusals(self, complete)
+        ProjectSemanticDispatch::finish_held_transaction_read(self, recording, complete)
     }
     fn replay_transaction_read(
         &self,
@@ -12130,8 +12133,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         let mut txn = self.dispatch_txn.borrow_mut();
         txn.call.undecided_relations = txn.call.undecided_relations.saturating_add(count);
     }
-    fn open_undecided_relation_window(&self) -> super::dispatch_txn::UndecidedRelationWindow<'_> {
-        super::dispatch_txn::UndecidedRelationWindow::open(&self.dispatch_txn)
+    fn open_undecided_relation_window(&self) -> super::dispatch_txn::HeldUndecidedRelationWindow {
+        super::dispatch_txn::HeldUndecidedRelationWindow::open(&self.dispatch_txn)
+    }
+    fn close_undecided_relation_window(
+        &self,
+        window: super::dispatch_txn::HeldUndecidedRelationWindow,
+    ) -> Option<super::dispatch_txn::UndecidedRelationDelta> {
+        window.close(&self.dispatch_txn)
     }
     fn replay_undecided_relation_delta(
         &self,
@@ -12142,8 +12151,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             .call
             .replay_undecided_delta(delta)
     }
-    fn open_inline_cost(&self) -> super::connected_demand::InlineCostRecording<'_> {
-        self.connected_demand().open_inline_cost()
+    fn open_inline_cost(&self) -> super::connected_demand::HeldInlineCost {
+        self.connected_demand().hold_inline_cost()
+    }
+    fn close_inline_cost(
+        &self,
+        cost: super::connected_demand::HeldInlineCost,
+    ) -> Option<super::connected_demand::InlineCost> {
+        self.connected_demand().close_held_inline_cost(cost)
     }
     fn replay_inline_cost(&self, cost: &super::connected_demand::InlineCost) -> bool {
         self.connected_demand().replay_inline_cost(
@@ -12341,12 +12356,12 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     ) -> Result<T, crate::semantic_query::ExecutionAbort> {
         self.driver.adopt_read(read)
     }
-    fn begin_transaction_read(&self) -> Option<super::build::TransactionReadRecording<'_>> {
+    fn begin_transaction_read(&self) -> Option<super::build::HeldTransactionReadRecording> {
         self.driver.begin_transaction_read()
     }
     fn finish_transaction_read(
         &self,
-        recording: super::build::TransactionReadRecording<'_>,
+        recording: super::build::HeldTransactionReadRecording,
         complete: bool,
     ) -> Option<(
         verter_session_query::facts::reuse::ReuseClass,
@@ -13057,8 +13072,14 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn restore_call_relation_observations(&self, count: u64) {
         self.driver.restore_call_relation_observations(count);
     }
-    fn open_undecided_relation_window(&self) -> super::dispatch_txn::UndecidedRelationWindow<'_> {
+    fn open_undecided_relation_window(&self) -> super::dispatch_txn::HeldUndecidedRelationWindow {
         self.driver.open_undecided_relation_window()
+    }
+    fn close_undecided_relation_window(
+        &self,
+        window: super::dispatch_txn::HeldUndecidedRelationWindow,
+    ) -> Option<super::dispatch_txn::UndecidedRelationDelta> {
+        self.driver.close_undecided_relation_window(window)
     }
     fn replay_undecided_relation_delta(
         &self,
@@ -13066,8 +13087,14 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     ) -> bool {
         self.driver.replay_undecided_relation_delta(delta)
     }
-    fn open_inline_cost(&self) -> super::connected_demand::InlineCostRecording<'_> {
+    fn open_inline_cost(&self) -> super::connected_demand::HeldInlineCost {
         self.driver.open_inline_cost()
+    }
+    fn close_inline_cost(
+        &self,
+        cost: super::connected_demand::HeldInlineCost,
+    ) -> Option<super::connected_demand::InlineCost> {
+        self.driver.close_inline_cost(cost)
     }
     fn replay_inline_cost(&self, cost: &super::connected_demand::InlineCost) -> bool {
         self.driver.replay_inline_cost(cost)
@@ -13131,9 +13158,78 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
 }
 
-/// A memo one root evaluation shares with every nested evaluator and drops
-/// with them.
-type SharedEvaluationMemo<K, V> = std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashMap<K, V>>>;
+/// A memo one root evaluation keeps for every activation it advances, and
+/// drops with them.
+type EvaluationMemo<K, V> = std::cell::RefCell<rustc_hash::FxHashMap<K, V>>;
+
+/// A frame's product execution in its root evaluation's [`FlowTables`]:
+/// the frame names it, and the frames nested in it reach it through their
+/// enclosing chain, by this id rather than by a shared handle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ExecutionId(usize);
+
+/// What one root evaluation owns for every activation it advances: the
+/// evaluation's memos and each frame's product execution. The root keeps
+/// it and lends it to one advancement at a time; an activation holds only
+/// ids into it, never a shared handle.
+///
+/// Owner and lifetime: the root evaluation's flow build; request-scoped,
+/// dropped with the evaluation, a cancel or a budget trip included.
+#[derive(Default)]
+struct FlowTables {
+    /// The checker's return-type resolution stack (`pushTypeResolution`)
+    /// and the nested signatures this evaluation composed
+    /// ([`nested::NestedResolution`]).
+    resolving_functions: std::cell::RefCell<nested::NestedResolution>,
+    /// The values an object literal's recursion check has walked and found
+    /// to hold no polymorphic `this` binder at all
+    /// ([`FlowEvaluator::value_mentions_receiver`]). It holds only nodes
+    /// this evaluation walked, so it is bounded by the evaluation's own work.
+    this_free_values: std::cell::RefCell<rustc_hash::FxHashSet<SemanticNodeId>>,
+    /// Every type this evaluation has read as the checker reads a declared
+    /// type ([`FlowEvaluator::declared_positional_read`]), by node: a
+    /// structure entering the flow again is walked once.
+    declared_type_reads: EvaluationMemo<SemanticNodeId, SemanticNodeId>,
+    /// Every identity-carrier unwrap this evaluation's guards read
+    /// ([`FlowEvaluator::carrier_unwrap`]), by node: a chain of guards over
+    /// one subject reads each remaining arm's unwrap once per evaluation
+    /// rather than once per guard.
+    carrier_unwraps: EvaluationMemo<SemanticNodeId, super::relation::IdentityCarrierUnwrap>,
+    /// Every union arm's member a discriminant test has read
+    /// ([`FlowEvaluator::discriminant_member`]), by arm and member name.
+    discriminant_members: EvaluationMemo<(SemanticNodeId, Arc<str>), Option<SemanticNodeId>>,
+    /// Every assignability a guard's narrow asked
+    /// ([`FlowEvaluator::narrowing_assignable`]), by source and target.
+    guard_relations: EvaluationMemo<(SemanticNodeId, SemanticNodeId), Option<bool>>,
+    /// Every union a guard chain indexed ([`arm_index::ArmIndex`]), by the
+    /// node its arms are enumerated from.
+    arm_indexes: EvaluationMemo<SemanticNodeId, Arc<arm_index::ArmIndex>>,
+    /// Each frame's product execution, by [`ExecutionId`]: open from the
+    /// frame's preparation until its function's signature is composed.
+    executions: Vec<Option<std::cell::RefCell<FlowFrameExecution>>>,
+}
+
+impl FlowTables {
+    /// Keep `execution`, a frame's product authority, until
+    /// [`Self::close_execution`].
+    fn open_execution(&mut self, execution: FlowFrameExecution) -> ExecutionId {
+        self.executions
+            .push(Some(std::cell::RefCell::new(execution)));
+        ExecutionId(self.executions.len() - 1)
+    }
+
+    /// The open execution `id` names.
+    fn execution(&self, id: ExecutionId) -> &std::cell::RefCell<FlowFrameExecution> {
+        self.executions[id.0]
+            .as_ref()
+            .expect("a frame's execution is open while the frame is")
+    }
+
+    /// Release the execution `id` names: its frame is done.
+    fn close_execution(&mut self, id: ExecutionId) {
+        self.executions[id.0] = None;
+    }
+}
 
 /// One frame's evaluator as it advances: the driver its reads go through,
 /// lent for this advancement, over the frame's own evaluator state. The
@@ -13142,12 +13238,23 @@ type SharedEvaluationMemo<K, V> = std::rc::Rc<std::cell::RefCell<rustc_hash::FxH
 struct FlowEvaluator<'s, 'd, 'b, D: FlowDemandDriver> {
     dispatch: &'d FlowCx<'d, D>,
     st: &'s mut FlowEvaluatorState<'b>,
+    /// The root evaluation's tables, lent for this advancement.
+    tables: &'s mut FlowTables,
 }
 
 impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
-    /// Advance `st` with `dispatch` as its driver.
-    fn over(dispatch: &'d FlowCx<'d, D>, st: &'s mut FlowEvaluatorState<'b>) -> Self {
-        Self { dispatch, st }
+    /// Advance `st` with `dispatch` as its driver over its root
+    /// evaluation's `tables`.
+    fn over(
+        dispatch: &'d FlowCx<'d, D>,
+        st: &'s mut FlowEvaluatorState<'b>,
+        tables: &'s mut FlowTables,
+    ) -> Self {
+        Self {
+            dispatch,
+            st,
+            tables,
+        }
     }
 }
 
@@ -13178,50 +13285,6 @@ struct FlowEvaluatorState<'b> {
     /// and holding the enclosing frame's key would name the wrong
     /// function. The `Option` is what makes that mistake unexpressible.
     self_slot: Option<&'b FlowReturnKey>,
-    /// The checker's return-type resolution stack (`pushTypeResolution`)
-    /// and the nested signatures this evaluation composed, shared by every
-    /// nested evaluator of one root evaluation and dropped with it
-    /// ([`nested::NestedResolution`]).
-    resolving_functions: std::rc::Rc<std::cell::RefCell<nested::NestedResolution>>,
-    /// The values an object literal's recursion check has walked and found
-    /// to hold no polymorphic `this` binder at all
-    /// ([`FlowEvaluator::value_mentions_receiver`]), shared by every nested
-    /// evaluator of one root evaluation and dropped with it. Request-scoped:
-    /// it holds only nodes this evaluation walked, so it is bounded by the
-    /// evaluation's own work.
-    this_free_values: std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashSet<SemanticNodeId>>>,
-    /// Every type this evaluation has read as the checker reads a declared
-    /// type ([`FlowEvaluator::declared_positional_read`]), by node, shared
-    /// by every nested evaluator of one root evaluation and dropped with
-    /// it. Request-scoped: it holds only nodes this evaluation read, so a
-    /// structure entering the flow again is walked once.
-    declared_type_reads:
-        std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>>>,
-    /// Every identity-carrier unwrap this evaluation's guards read
-    /// ([`FlowEvaluator::carrier_unwrap`]), by node, shared by every nested
-    /// evaluator of one root evaluation and dropped with it. A chain of
-    /// guards over one subject reads each of the subject's remaining arms
-    /// at every guard; this keeps each arm's unwrap to one read per
-    /// evaluation rather than one per guard. Request-scoped: it holds only
-    /// nodes this evaluation read.
-    carrier_unwraps: SharedEvaluationMemo<SemanticNodeId, super::relation::IdentityCarrierUnwrap>,
-    /// Every union arm's member a discriminant test has read
-    /// ([`FlowEvaluator::discriminant_member`]), by arm and member name,
-    /// shared by every nested evaluator of one root evaluation and dropped
-    /// with it: a chain of discriminant tests reads the tested member of
-    /// every remaining arm at every test. Request-scoped: it holds only
-    /// members this evaluation read.
-    discriminant_members: SharedEvaluationMemo<(SemanticNodeId, Arc<str>), Option<SemanticNodeId>>,
-    /// Every assignability a guard's narrow asked
-    /// ([`FlowEvaluator::narrowing_assignable`]), by source and target,
-    /// shared by every nested evaluator of one root evaluation and dropped
-    /// with it. Request-scoped: it holds only pairs this evaluation related.
-    guard_relations: SharedEvaluationMemo<(SemanticNodeId, SemanticNodeId), Option<bool>>,
-    /// Every union a guard chain indexed ([`arm_index::ArmIndex`]), by the
-    /// node its arms are enumerated from, shared by every nested evaluator
-    /// of one root evaluation and dropped with it. Request-scoped: it holds
-    /// only unions this evaluation's guards narrowed.
-    arm_indexes: SharedEvaluationMemo<SemanticNodeId, std::rc::Rc<arm_index::ArmIndex>>,
     canonical: &'b str,
     owner: verter_type_expr::TopLevelOwnerId,
     /// The `null` / `undefined` algebra of the function's own project
@@ -13263,8 +13326,9 @@ struct FlowEvaluatorState<'b> {
     /// The product authority every snapshot of this frame advances under —
     /// its declaration bank, budget, evidence and write sequence. Snapshots
     /// never hold it; a nested evaluator reaches its enclosing frame's
-    /// through [`EnclosingFrame::frame_execution`].
-    frame_execution: SharedFlowExecution,
+    /// through [`EnclosingFrame::frame_execution`]. It is kept in the root
+    /// evaluation's [`FlowTables`].
+    frame_execution: ExecutionId,
     /// The guard facts this frame has WRITTEN, in write order — the
     /// establishment ledger a scoped guard's mark truncates and a
     /// union-of-facts guard reads its per-disjunct contribution from.
@@ -13535,10 +13599,10 @@ struct FlowEvaluatorState<'b> {
     dead_written_log: Vec<FlowProductSubject>,
     /// The class-expression instance `this` reads while the class's members
     /// evaluate (see [`class_expression::ClassReceiver`]).
-    receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
+    receiver: Option<std::sync::Arc<class_expression::ClassReceiver>>,
     /// The marker in the enclosing contextual object, separate from lexical `this`.
     contextual_object_this: Option<SemanticNodeId>,
-    contextual_object_receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
+    contextual_object_receiver: Option<std::sync::Arc<class_expression::ClassReceiver>>,
     /// One-shot eligibility supplied by a literal's direct child descent.
     /// Other expression forms cannot lend its marker or collected members.
     inherits_contextual_object_receiver: bool,
@@ -13649,7 +13713,7 @@ struct FlowExecutionWitness<'w> {
     products: &'w FlowProductStore,
     /// The product authority `products` was produced under, sealed.
     #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
-    frame_execution: &'w SharedFlowExecution,
+    frame_execution: &'w std::cell::RefCell<FlowFrameExecution>,
     /// Successful finite class construction certificates, tied to actual nodes.
     constructed_values: &'w rustc_hash::FxHashMap<SemanticNodeId, ConstructiveValue>,
 }
@@ -14457,7 +14521,7 @@ enum ExprProgress {
 /// added, sharing the rest: copying the whole chain for every nested
 /// function (and dropping it again) cost the square of the nesting.
 #[derive(Clone, Default)]
-struct EnclosingFrames(Option<std::rc::Rc<EnclosingFrame>>);
+struct EnclosingFrames(Option<std::sync::Arc<EnclosingFrame>>);
 
 /// One frame around a nested function's evaluator, with `outside` frames
 /// around it.
@@ -14467,7 +14531,7 @@ struct EnclosingFrame {
     products: FlowProductStore,
     /// The product authority `products` advances under: a capture
     /// authority the nested evaluator lowers installs into its bank.
-    frame_execution: SharedFlowExecution,
+    frame_execution: ExecutionId,
     outside: usize,
     outer: EnclosingFrames,
 }
@@ -14479,9 +14543,9 @@ impl EnclosingFrames {
         function: verter_session_query::function_program::FunctionProgramKey,
         binder_env: Arc<FlowBinderEnv>,
         products: FlowProductStore,
-        frame_execution: SharedFlowExecution,
+        frame_execution: ExecutionId,
     ) -> Self {
-        Self(Some(std::rc::Rc::new(EnclosingFrame {
+        Self(Some(std::sync::Arc::new(EnclosingFrame {
             function,
             binder_env,
             products,
@@ -14510,7 +14574,7 @@ impl Drop for EnclosingFrames {
     fn drop(&mut self) {
         let mut next = self.0.take();
         while let Some(frame) = next {
-            next = match std::rc::Rc::try_unwrap(frame) {
+            next = match std::sync::Arc::try_unwrap(frame) {
                 Ok(mut frame) => frame.outer.0.take(),
                 Err(_) => None,
             };
@@ -14673,7 +14737,7 @@ struct ObjectEvalFrame<'e> {
     assignment_fresh: bool,
     contextual: Option<SemanticNodeId>,
     enclosing_contextual_this: Option<SemanticNodeId>,
-    enclosing_contextual_receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
+    enclosing_contextual_receiver: Option<std::sync::Arc<class_expression::ClassReceiver>>,
     /// Each context-sensitive member reads as the non-inferring `any`
     /// (a call's first inference pass, `SkipContextSensitive`).
     skips_context_sensitive: bool,
@@ -14695,10 +14759,10 @@ struct ObjectEvalFrame<'e> {
     member_effect_positions: rustc_hash::FxHashMap<usize, usize>,
     receiver_ordinals: rustc_hash::FxHashMap<crate::semantic_query::AuthoredPropertyKey, usize>,
     late_bound: class_expression::ComputedIndexKinds,
-    receiver: Option<std::rc::Rc<class_expression::ClassReceiver>>,
+    receiver: Option<std::sync::Arc<class_expression::ClassReceiver>>,
     /// The frame's receiver before the literal's, given back when the
     /// literal completes or fails closed.
-    enclosing_receiver: Option<Option<std::rc::Rc<class_expression::ClassReceiver>>>,
+    enclosing_receiver: Option<Option<std::sync::Arc<class_expression::ClassReceiver>>>,
     deferred: Vec<(
         usize,
         &'e verter_session_query::flow::slice::SliceObjectMember,
@@ -14830,7 +14894,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             } else {
                 self.lower_body_type(declared.ty())
             };
-        self.st.receiver = Some(std::rc::Rc::new(
+        self.st.receiver = Some(std::sync::Arc::new(
             class_expression::ClassReceiver::of_type(binder, Some(binder)).explicit(),
         ));
     }
@@ -15218,7 +15282,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     rustc_hash::FxHashSet::default(),
                     infer_literal_members,
                 );
-                std::rc::Rc::new(
+                std::sync::Arc::new(
                     if contextual.is_some_and(|context| {
                         self.contextual_methods_may_declare_this(context, entries)
                     }) {
@@ -15448,7 +15512,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     observations,
                 } => {
                     let value = self.settle_composite_part(outcome, holds_before);
-                    let receiver = std::rc::Rc::clone(
+                    let receiver = std::sync::Arc::clone(
                         frame
                             .receiver
                             .as_ref()
@@ -16043,7 +16107,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// again for every literal around it.
     fn value_mentions_receiver(&self, value: SemanticNodeId, binder: SemanticNodeId) -> bool {
         let graph = self.dispatch.graph();
-        let mut free = self.st.this_free_values.borrow_mut();
+        let mut free = self.tables.this_free_values.borrow_mut();
         let mut visited: Vec<SemanticNodeId> = Vec::new();
         let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
         let mut holds_a_binder = false;
@@ -17421,9 +17485,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             .flow
             .declared_authority_work
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.st
-            .products
-            .runtime_declared_type(&self.st.frame_execution.borrow(), binding)
+        self.st.products.runtime_declared_type(
+            &self.tables.execution(self.st.frame_execution).borrow(),
+            binding,
+        )
     }
 
     /// Whether `binding` is the checker's AUTO-TYPED variable in this frame
@@ -17476,7 +17541,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             .subjects_in(super::flow_solve::FlowDomain::Narrowing)
         {
             self.st.products.remove(
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 super::flow_solve::FlowDomain::Narrowing,
                 &subject,
             );
@@ -17484,7 +17549,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         for (subject, facts) in mark.facts {
             if let Some(facts) = facts {
                 self.st.products.set_narrowing(
-                    &mut self.st.frame_execution.borrow_mut(),
+                    &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                     &subject,
                     facts,
                 );
@@ -17526,7 +17591,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     ) {
         let written: rustc_hash::FxHashSet<FlowProductSubject> = into
             .writes_since(
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 &entry.write_observation,
             )
             .iter()
@@ -17534,7 +17599,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             .collect();
         for subject in into.subjects_in(super::flow_solve::FlowDomain::Narrowing) {
             into.remove(
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 super::flow_solve::FlowDomain::Narrowing,
                 &subject,
             );
@@ -17550,7 +17615,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             let value = into.reaching(&subject);
             if !written && value == entry.products.reaching(&subject) {
                 into.set_narrowing(
-                    &mut self.st.frame_execution.borrow_mut(),
+                    &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                     &subject,
                     product.clone(),
                 );
@@ -17566,7 +17631,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 }
             }
             into.set_narrowing(
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 &subject,
                 NarrowingProduct::new(kept),
             );
@@ -17619,7 +17684,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         };
         push_narrowing_into(
             &mut self.st.products,
-            &mut self.st.frame_execution.borrow_mut(),
+            &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
             &root,
             &subject.path,
             narrowed.clone(),
@@ -17701,7 +17766,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             nullability: self.st.nullability,
         };
         if incoming.len() == 1 {
-            let mut frame = self.st.frame_execution.borrow_mut();
+            let mut frame = self.tables.execution(self.st.frame_execution).borrow_mut();
             return FlowLayerState {
                 products: FlowProductStore::join(
                     &mut frame,
@@ -17753,7 +17818,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             products
         };
         let joined = {
-            let mut frame = self.st.frame_execution.borrow_mut();
+            let mut frame = self.tables.execution(self.st.frame_execution).borrow_mut();
             FlowLayerState {
                 products: FlowProductStore::join(&mut frame, &products, observation, algebra),
                 write_observation: self.st.products.observe_writes(&frame),
@@ -17865,7 +17930,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         let fresh = (fact.fresh_literal == Some(narrowed))
                             .then_some(WideningMembership::All);
                         products.set_reaching_type(
-                            &mut self.st.frame_execution.borrow_mut(),
+                            &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                             subject,
                             ReachingTypeProduct::of(narrowed).with_widening(fresh),
                         );
@@ -17881,7 +17946,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                             })
                             .unwrap_or_default();
                         products.set_narrowing(
-                            &mut self.st.frame_execution.borrow_mut(),
+                            &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                             subject,
                             NarrowingProduct::new(kept),
                         );
@@ -18167,7 +18232,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let entry_writes = self
             .st
             .products
-            .observe_writes(&self.st.frame_execution.borrow());
+            .observe_writes(&self.tables.execution(self.st.frame_execution).borrow());
         let mut nodes = Vec::with_capacity(2);
         let mut arm_products = Vec::with_capacity(2);
         for (index, arm) in [consequent, alternate].into_iter().enumerate() {
@@ -18237,7 +18302,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         if changed {
             let product = self.evolving_product(elements);
             self.st.products.set_reaching_type(
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 subject,
                 product,
             );
@@ -18254,7 +18319,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     ) {
         self.record_dead_write(binding);
         self.st.products.bind_at(
-            &mut self.st.frame_execution.borrow_mut(),
+            &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
             binding,
             DefiniteAssignmentProduct::assigned()
                 .with_single_path(single_path)
@@ -18316,7 +18381,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     ) {
         if kind != verter_session_query::flow::slice::SliceBindingKind::Var || declared.is_some() {
             self.st.products.set_declared_type(
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 binding,
                 declared,
             );
@@ -18553,10 +18618,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                 if forked {
                                     walk.forks.push(ArmFork {
                                         entry: self.st.products.clone(),
-                                        entry_writes: self
-                                            .st
-                                            .products
-                                            .observe_writes(&self.st.frame_execution.borrow()),
+                                        entry_writes: self.st.products.observe_writes(
+                                            &self
+                                                .tables
+                                                .execution(self.st.frame_execution)
+                                                .borrow(),
+                                        ),
                                         arms: Vec::with_capacity(2),
                                     });
                                     walk.steps.push(ArmStep::JoinFork);
@@ -19080,7 +19147,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 .collect();
             if kept.len() != product.facts().len() {
                 self.st.products.set_narrowing(
-                    &mut self.st.frame_execution.borrow_mut(),
+                    &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                     &root,
                     NarrowingProduct::new(kept),
                 );
@@ -19127,7 +19194,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             } => {
                 let subject = FlowProductSubject::Local(*binding);
                 self.st.products.bind_at(
-                    &mut self.st.frame_execution.borrow_mut(),
+                    &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                     &subject,
                     self.st
                         .products
@@ -19597,13 +19664,15 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         if consequent_falls {
             incoming.push(FlowLayerState {
                 products: consequent.clone(),
-                write_observation: consequent.observe_writes(&self.st.frame_execution.borrow()),
+                write_observation: consequent
+                    .observe_writes(&self.tables.execution(self.st.frame_execution).borrow()),
             });
         }
         if alternate_falls {
             incoming.push(FlowLayerState {
                 products: alternate.clone(),
-                write_observation: entry.observe_writes(&self.st.frame_execution.borrow()),
+                write_observation: entry
+                    .observe_writes(&self.tables.execution(self.st.frame_execution).borrow()),
             });
         }
         if incoming.is_empty() {
@@ -19611,9 +19680,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         }
 
         let joined = self.join_continuations(&incoming, entry, observation);
-        let written = joined
-            .products
-            .writes_since(&mut self.st.frame_execution.borrow_mut(), observation);
+        let written = joined.products.writes_since(
+            &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
+            observation,
+        );
         self.restore_layer_state(joined);
         for subject in written {
             if let Some(root) = self.narrow_root_of(&subject) {
@@ -19669,9 +19739,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             for state in incoming.iter() {
                 if state.products.reaching(&subject).is_none() {
                     defined_on_every_path = false;
-                    let declared = state
-                        .products
-                        .declared_type(&self.st.frame_execution.borrow(), &subject);
+                    let declared = state.products.declared_type(
+                        &self.tables.execution(self.st.frame_execution).borrow(),
+                        &subject,
+                    );
                     never_assigned_declared = Some(match never_assigned_declared {
                         None => declared,
                         // One authority-less predecessor is enough to keep
@@ -19692,7 +19763,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                             None => declared,
                         };
                         joined.products.set_reaching_type(
-                            &mut self.st.frame_execution.borrow_mut(),
+                            &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                             &subject,
                             ReachingTypeProduct::of(folded),
                         );
@@ -19706,7 +19777,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 .assignment(&subject)
                 .with_single_path(single_path);
             joined.products.set_assignment(
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 &subject,
                 assignment,
             );
@@ -19729,11 +19800,13 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     ///   tell an arm's write from an untouched binding. Source declaration
     ///   authority remains installed independently of the control path.
     fn restore_arm_entry(&mut self, entry: &FlowProductStore) {
-        let mut subjects: Vec<FlowProductSubject> =
-            self.st.products.subjects(&self.st.frame_execution.borrow());
+        let mut subjects: Vec<FlowProductSubject> = self
+            .st
+            .products
+            .subjects(&self.tables.execution(self.st.frame_execution).borrow());
         let mut seen: rustc_hash::FxHashSet<FlowProductSubject> =
             subjects.iter().cloned().collect();
-        for subject in entry.subjects(&self.st.frame_execution.borrow()) {
+        for subject in entry.subjects(&self.tables.execution(self.st.frame_execution).borrow()) {
             if seen.insert(subject.clone()) {
                 subjects.push(subject);
             }
@@ -19749,7 +19822,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 held
             };
             self.st.products.restore_reaching_from(
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 &subject,
                 entry,
                 Some(assignment),
@@ -19809,7 +19882,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             && self
                 .st
                 .products
-                .runtime_declared_type(&self.st.frame_execution.borrow(), subject)
+                .runtime_declared_type(
+                    &self.tables.execution(self.st.frame_execution).borrow(),
+                    subject,
+                )
                 .is_none()
     }
 
@@ -19820,7 +19896,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             write_observation: self
                 .st
                 .products
-                .observe_writes(&self.st.frame_execution.borrow()),
+                .observe_writes(&self.tables.execution(self.st.frame_execution).borrow()),
         }
     }
 
@@ -19906,16 +19982,24 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let shadows: Vec<ScopeShadow> = self.st.scope_shadows.split_off(shadow_base);
         for exit in &mut self.st.break_exits[break_base..] {
             Self::close_lexical_scope(
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 &mut exit.state,
                 &shadows,
             );
         }
         for state in &mut self.st.return_edges[return_base..] {
-            Self::close_lexical_scope(&mut self.st.frame_execution.borrow_mut(), state, &shadows);
+            Self::close_lexical_scope(
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
+                state,
+                &shadows,
+            );
         }
         for state in &mut self.st.throw_points[throw_base..] {
-            Self::close_lexical_scope(&mut self.st.frame_execution.borrow_mut(), state, &shadows);
+            Self::close_lexical_scope(
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
+                state,
+                &shadows,
+            );
         }
         shadows
     }
@@ -19948,11 +20032,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         after: &FlowLayerState,
     ) -> FlowExecutedClauseWrites {
         let _ = observation;
-        FlowExecutedClauseWrites(
-            after
-                .products
-                .writes_since(&mut self.st.frame_execution.borrow_mut(), observation),
-        )
+        FlowExecutedClauseWrites(after.products.writes_since(
+            &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
+            observation,
+        ))
     }
 
     /// A dispatch path with no reaching definition retains the existing
@@ -19970,7 +20053,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         for subject in fallthrough_only {
             let flagged = start.products.assignment(&subject).with_single_path(true);
             start.products.set_assignment(
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 &subject,
                 flagged,
             );
@@ -19999,7 +20082,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         for subject in conditionally_defined {
             let flagged = joined.products.assignment(&subject).with_single_path(true);
             joined.products.set_assignment(
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 &subject,
                 flagged,
             );
@@ -20742,13 +20825,16 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// read once per evaluation: every guard of a chain over one subject
     /// asks it again for each arm it passes over.
     fn carrier_unwrap(&self, node: SemanticNodeId) -> super::relation::IdentityCarrierUnwrap {
-        if let Some(unwrap) = self.st.carrier_unwraps.borrow().get(&node) {
+        if let Some(unwrap) = self.tables.carrier_unwraps.borrow().get(&node) {
             return *unwrap;
         }
         let dispatch = self.dispatch;
         let unwrap =
             dispatch.outside_inline_costs(|| dispatch.unwrap_identity_carrier_for_relation(node));
-        self.st.carrier_unwraps.borrow_mut().insert(node, unwrap);
+        self.tables
+            .carrier_unwraps
+            .borrow_mut()
+            .insert(node, unwrap);
         unwrap
     }
 
@@ -24145,13 +24231,16 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             return self.project_segments_navigate(arm, member);
         };
         let key = (arm, Arc::clone(name));
-        if let Some(read) = self.st.discriminant_members.borrow().get(&key) {
+        if let Some(read) = self.tables.discriminant_members.borrow().get(&key) {
             return *read;
         }
         let read = self
             .dispatch
             .outside_inline_costs(|| self.project_segments_navigate(arm, member));
-        self.st.discriminant_members.borrow_mut().insert(key, read);
+        self.tables
+            .discriminant_members
+            .borrow_mut()
+            .insert(key, read);
         read
     }
 
@@ -24231,7 +24320,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             let root = self.narrow_subject(&subject.root);
             push_narrowing_into(
                 &mut state.products,
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 &root,
                 &subject.path,
                 FlowNarrowed::Node(node),
@@ -24248,7 +24337,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 .reaching_type(target)
                 .is_some_and(ReachingTypeProduct::widening_nullish);
             products.set_reaching_type(
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 target,
                 ReachingTypeProduct::of(node)
                     .with_widening(widening)
@@ -24313,7 +24402,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         }
         if changed {
             products.set_narrowing(
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 root,
                 NarrowingProduct::new(kept),
             );
@@ -25385,13 +25474,16 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         // its edges, and a chain of guards asks it again for the arms each
         // guard passes over: the pair is related once per evaluation.
         let pair = (source, target);
-        if let Some(known) = self.st.guard_relations.borrow().get(&pair) {
+        if let Some(known) = self.tables.guard_relations.borrow().get(&pair) {
             return *known;
         }
         let related = self
             .dispatch
             .outside_inline_costs(|| self.assignable(source, target));
-        self.st.guard_relations.borrow_mut().insert(pair, related);
+        self.tables
+            .guard_relations
+            .borrow_mut()
+            .insert(pair, related);
         related
     }
 
@@ -26958,7 +27050,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 throw_base,
             );
             Self::close_lexical_scope(
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 &mut end,
                 &shadows,
             );
@@ -27828,7 +27920,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                 self.st.products.reaching_type(&subject).cloned()
                             {
                                 self.st.products.set_reaching_type(
-                                    &mut self.st.frame_execution.borrow_mut(),
+                                    &mut self
+                                        .tables
+                                        .execution(self.st.frame_execution)
+                                        .borrow_mut(),
                                     &subject,
                                     reaching.declaration_only(),
                                 );
@@ -28288,7 +28383,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// recordings of the evaluations it sits in
     /// ([`nested::NestedResolution::note_frame_read`]).
     fn note_enclosing_frame_read(&self, frame: &EnclosingFrame) {
-        self.st
+        self.tables
             .resolving_functions
             .borrow_mut()
             .note_frame_read(self.st.enclosing_frames.len(), frame.outside);
@@ -28299,21 +28394,15 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     fn capture_source_products(
         &self,
         locator: &verter_session_query::flow::slice::SliceCaptureAuthorityLocator,
-    ) -> Option<(FlowProductStore, SharedFlowExecution, FlowProductSubject)> {
+    ) -> Option<(FlowProductStore, ExecutionId, FlowProductSubject)> {
         let (products, frame_execution) =
             if &locator.declaration().defining_function == self.st.bindings.function() {
-                (
-                    self.st.products.clone(),
-                    std::rc::Rc::clone(&self.st.frame_execution),
-                )
+                (self.st.products.clone(), self.st.frame_execution)
             } else {
                 self.st.enclosing_frames.iter().find_map(|frame| {
                     (frame.function == locator.declaration().defining_function).then(|| {
                         self.note_enclosing_frame_read(frame);
-                        (
-                            frame.products.clone(),
-                            std::rc::Rc::clone(&frame.frame_execution),
-                        )
+                        (frame.products.clone(), frame.frame_execution)
                     })
                 })?
             };
@@ -28751,7 +28840,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     fn enclosing_receiver_of(
         &self,
         capture_context: &verter_session_query::flow::slice::NestedFlowContext,
-    ) -> Option<std::rc::Rc<class_expression::ClassReceiver>> {
+    ) -> Option<std::sync::Arc<class_expression::ClassReceiver>> {
         matches!(
             capture_context.this(),
             Some(
@@ -28975,9 +29064,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         .flatten(),
                     declared: value_demanded
                         .then(|| {
-                            self.st
-                                .products
-                                .declared_type(&self.st.frame_execution.borrow(), &parent)
+                            self.st.products.declared_type(
+                                &self.tables.execution(self.st.frame_execution).borrow(),
+                                &parent,
+                            )
                         })
                         .flatten(),
                     inferred_declared,
@@ -29010,7 +29100,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     source
                         .as_ref()
                         .and_then(|(products, frame_execution, subject)| {
-                            products.declared_type(&frame_execution.borrow(), subject)
+                            products.declared_type(
+                                &self.tables.execution(*frame_execution).borrow(),
+                                subject,
+                            )
                         })
                 {
                     capture_inputs[index].apply_authority(node, locator.source());
@@ -29058,7 +29151,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         if let Some(node) = self.lower_capture_authority(&locator, authority) {
                             if let Some((mut products, frame_execution, subject)) = source {
                                 products.set_declared_type(
-                                    &mut frame_execution.borrow_mut(),
+                                    &mut self.tables.execution(frame_execution).borrow_mut(),
                                     &subject,
                                     Some(node),
                                 );

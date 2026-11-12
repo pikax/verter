@@ -269,7 +269,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             entry_writes: self
                 .st
                 .products
-                .observe_writes(&self.st.frame_execution.borrow()),
+                .observe_writes(&self.tables.execution(self.st.frame_execution).borrow()),
             narrow_mark: self.narrowing_snapshot(),
             bases: self.scope_bases(),
             consequent: None,
@@ -290,7 +290,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let shadows = self.close_scope_since(eval.bases);
         let mut state = self.layer_state();
         Self::close_lexical_scope(
-            &mut self.st.frame_execution.borrow_mut(),
+            &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
             &mut state,
             &shadows,
         );
@@ -826,7 +826,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         if eval.last_falls {
             if let Some(mut end) = eval.last_end.take() {
                 Self::close_lexical_scope(
-                    &mut self.st.frame_execution.borrow_mut(),
+                    &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                     &mut end,
                     &shadows,
                 );
@@ -897,7 +897,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let mut exits: Vec<FlowLayerState> =
             self.drain_break_exits(eval.bases.break_exits, Some(eval.label));
         Self::close_lexical_scope(
-            &mut self.st.frame_execution.borrow_mut(),
+            &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
             &mut end,
             &shadows,
         );
@@ -987,7 +987,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let write_observation = self
             .st
             .products
-            .observe_writes(&self.st.frame_execution.borrow());
+            .observe_writes(&self.tables.execution(self.st.frame_execution).borrow());
         self.restore_layer_state(start.clone());
         let clause = TryClause {
             start: start.clone(),
@@ -1078,7 +1078,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let shadows =
             self.split_scope_shadows_close_exits(shadow_base, break_base, return_base, throw_base);
         Self::close_lexical_scope(
-            &mut self.st.frame_execution.borrow_mut(),
+            &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
             &mut end,
             &shadows,
         );
@@ -1352,7 +1352,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         self.restore_clause_entry_narrowings(&eval.entry, &mut post.products);
         for subject in &finally_writes.executed.0 {
             post.products.apply_executed_write_from(
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 subject,
                 &finally_end.products,
             );
@@ -1422,7 +1422,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     .unwrap_or_else(|| FlowProductSubject::Captured(first.binding.clone()));
                 reestablish_narrowings(
                     &mut self.st.products,
-                    &mut self.st.frame_execution.borrow_mut(),
+                    &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                     &subject,
                     &facts,
                 );
@@ -1433,7 +1433,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 }
                 let cleared = self.st.products.assignment(subject).with_single_path(false);
                 self.st.products.set_assignment(
-                    &mut self.st.frame_execution.borrow_mut(),
+                    &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                     subject,
                     cleared,
                 );
@@ -1707,13 +1707,13 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let carried = &analysis.carried[reference.subject];
         match analysis.references.last_mut() {
             Some(parent) => parent.start.products.restore_head_value_from(
-                &mut self.st.frame_execution.borrow_mut(),
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                 carried,
                 &products,
             ),
             None => {
                 analysis.head.products.restore_head_value_from(
-                    &mut self.st.frame_execution.borrow_mut(),
+                    &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                     carried,
                     &products,
                 );
@@ -1787,7 +1787,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                 .start
                                 .products
                                 .restore_head_value_from(
-                                    &mut self.st.frame_execution.borrow_mut(),
+                                    &mut self
+                                        .tables
+                                        .execution(self.st.frame_execution)
+                                        .borrow_mut(),
                                     &carried,
                                     &products,
                                 );
@@ -1835,7 +1838,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     Some(products) => {
                         let carried = analysis.carried[subject].clone();
                         analysis.head.products.restore_head_value_from(
-                            &mut self.st.frame_execution.borrow_mut(),
+                            &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                             &carried,
                             &products,
                         );
@@ -2023,7 +2026,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 if falls {
                     let mut end = self.layer_state();
                     Self::close_lexical_scope(
-                        &mut self.st.frame_execution.borrow_mut(),
+                        &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                         &mut end,
                         &shadows,
                     );
@@ -2129,7 +2132,11 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         // closes over every state that leaves it.
         let shadows = self.close_scope_since(eval.bases);
         for exit in &mut exits {
-            Self::close_lexical_scope(&mut self.st.frame_execution.borrow_mut(), exit, &shadows);
+            Self::close_lexical_scope(
+                &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
+                exit,
+                &shadows,
+            );
         }
         if exits.is_empty() {
             self.restore_layer_state(entry);
@@ -2139,7 +2146,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         // binding the head already holds conditionally stays conditional.
         let joined = self.join_continuations(&exits, &head.products, &entry.write_observation);
         let written = joined.products.writes_since(
-            &mut self.st.frame_execution.borrow_mut(),
+            &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
             &entry.write_observation,
         );
         self.restore_layer_state(joined);

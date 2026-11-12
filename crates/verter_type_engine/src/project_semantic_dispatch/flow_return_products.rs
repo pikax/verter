@@ -5,8 +5,6 @@
 //! This adapter performs no lattice operations and owns no second semantic
 //! state map.
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use verter_session_query::flow::binding::FlowBindingRef;
 use verter_session_query::flow::flow_graph::FlowNodeId;
 
@@ -105,11 +103,6 @@ impl FlowFrameExecution {
         self.content.same_execution(&products.content)
     }
 }
-
-/// The frame execution an evaluator advances its snapshots under, shared
-/// with the nested evaluators that read or install their enclosing frame's
-/// declarations.
-pub(super) type SharedFlowExecution = Rc<RefCell<FlowFrameExecution>>;
 
 /// A scoped observation of successful transfers at a control entry.
 #[derive(Clone)]

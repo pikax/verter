@@ -2931,42 +2931,33 @@ pub(crate) struct UndecidedWindowMark {
 }
 
 /// A window over the undecided relation count being measured
-/// ([`ResolveCallDomainRuntime::open_undecided_window`]). Dropped unclosed
-/// — an unwind — it closes unmeasured, with the windows opened inside it.
-pub(crate) struct UndecidedRelationWindow<'t> {
-    txn: &'t verter_execution::sync_cell::SyncRefCell<CheckerDispatchTransaction>,
+/// ([`ResolveCallDomainRuntime::open_undecided_window`]): its mark,
+/// borrowing nothing, so a computation retained across its steps owns it
+/// by value. It is closed through the transaction ([`Self::close`]).
+/// Dropped unclosed (only an unwind drops one), it leaves its mark to the
+/// unwinding transaction: a window around it closes it with itself.
+#[must_use = "a held undecided-relation window must be closed"]
+pub(crate) struct HeldUndecidedRelationWindow {
     mark: UndecidedWindowMark,
-    open: bool,
 }
 
-impl<'t> UndecidedRelationWindow<'t> {
+impl HeldUndecidedRelationWindow {
     /// Open a window over `txn`'s count.
     pub(crate) fn open(
-        txn: &'t verter_execution::sync_cell::SyncRefCell<CheckerDispatchTransaction>,
+        txn: &verter_execution::sync_cell::SyncRefCell<CheckerDispatchTransaction>,
     ) -> Self {
-        let mark = txn.borrow_mut().call.open_undecided_window();
         Self {
-            txn,
-            mark,
-            open: true,
+            mark: txn.borrow_mut().call.open_undecided_window(),
         }
     }
 
-    /// Close it: how the count moved, `None` when it cannot be replayed.
-    pub(crate) fn close(mut self) -> Option<UndecidedRelationDelta> {
-        self.open = false;
-        self.txn.borrow_mut().call.close_undecided_window(self.mark)
-    }
-}
-
-impl Drop for UndecidedRelationWindow<'_> {
-    fn drop(&mut self) {
-        if self.open {
-            self.txn
-                .borrow_mut()
-                .call
-                .abandon_undecided_window(self.mark);
-        }
+    /// Close it over `txn`: how the count moved, `None` when it cannot be
+    /// replayed.
+    pub(crate) fn close(
+        self,
+        txn: &verter_execution::sync_cell::SyncRefCell<CheckerDispatchTransaction>,
+    ) -> Option<UndecidedRelationDelta> {
+        txn.borrow_mut().call.close_undecided_window(self.mark)
     }
 }
 
@@ -3003,9 +2994,9 @@ impl ResolveCallDomainRuntime {
         mark
     }
 
-    /// Close the window `opened` marks, the innermost: how the count
-    /// moved, or `None` when a discard inside it asked for more than the
-    /// count held.
+    /// Close the window `opened` marks, with every window left open
+    /// inside it: how the count moved, or `None` when a discard inside it
+    /// asked for more than the count held.
     pub(crate) fn close_undecided_window(
         &mut self,
         opened: UndecidedWindowMark,
@@ -3018,12 +3009,6 @@ impl ResolveCallDomainRuntime {
                 - i64::try_from(opened.count).unwrap_or(i64::MAX),
             depth: opened.count - low.min(opened.count),
         })
-    }
-
-    /// Drop the window `opened` marks unmeasured, with every window
-    /// opened inside it.
-    pub(crate) fn abandon_undecided_window(&mut self, opened: UndecidedWindowMark) {
-        self.undecided_lows.truncate(opened.place);
     }
 
     /// Move the count as `delta` measured, when it holds at least

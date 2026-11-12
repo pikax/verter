@@ -270,16 +270,16 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// cannot answer, is itself; a declaration reference is not unfolded,
     /// as its members enter the flow where a read projects them.
     pub(super) fn declared_positional_read(&mut self, node: SemanticNodeId) -> SemanticNodeId {
-        if let Some(done) = self.st.declared_type_reads.borrow().get(&node) {
+        if let Some(done) = self.tables.declared_type_reads.borrow().get(&node) {
             return *done;
         }
         // The walk starts from every part this evaluation already read, so
         // a nest whose every level enters the flow is walked once overall.
-        let mut read = std::mem::take(&mut *self.st.declared_type_reads.borrow_mut());
+        let mut read = std::mem::take(&mut *self.tables.declared_type_reads.borrow_mut());
         let result = self
             .dispatch
             .outside_inline_costs(|| self.declared_read_within(node, &mut read));
-        let mut shared = self.st.declared_type_reads.borrow_mut();
+        let mut shared = self.tables.declared_type_reads.borrow_mut();
         if shared.is_empty() {
             *shared = read;
         } else {
@@ -1156,7 +1156,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                 let entry_writes = self
                     .st
                     .products
-                    .observe_writes(&self.st.frame_execution.borrow());
+                    .observe_writes(&self.tables.execution(self.st.frame_execution).borrow());
                 let narrow_mark = self.narrowing_snapshot();
                 self.apply_guard_scoped(guard, right_positive);
                 let outcome = self.eval_operand_value(right);
@@ -1209,7 +1209,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         let entry_writes = self
             .st
             .products
-            .observe_writes(&self.st.frame_execution.borrow());
+            .observe_writes(&self.tables.execution(self.st.frame_execution).borrow());
         let narrow_mark = self.narrowing_snapshot();
         let mut applied = 0;
         let steps = spine

@@ -1804,11 +1804,20 @@ borrow them, and reaches the frames around it only through owned snapshots
 borrows from no other activation. A stepped read a retained frame waits on
 (an object literal's or a class's member function) keeps its observation as
 an owned `HeldReadObservation`, closed by the driver when the read
-delivers. Retaining the evaluation is still blocked on the root
-activation's borrowed inputs, the nested signature recordings' dispatcher
-guards, the evaluator's shared `Rc` state (the frame execution a
-nested evaluator reaches its enclosing frame's bank through, and the
-evaluation memos), and on the dispatch read helpers the body calls
+delivers. The root evaluation owns its `FlowTables` (the evaluation
+memos and every frame's product execution) and lends them to one
+advancement at a time; a frame names its execution by `ExecutionId`, so
+no activation holds a shared handle. A nested signature recording owns its
+read recording, undecided-relation window and inline cost measurement as
+capsules that borrow nothing (`HeldTransactionReadRecording`,
+`HeldUndecidedRelationWindow`, `HeldInlineCost`), each closed through
+the driver; one dropped unclosed (only an unwind drops one) is subsumed by
+the recording around it. A class expression's receiver is shared between
+the activations reading `this` behind `Arc` with `sync_cell` interior
+state. Retaining the evaluation is still blocked on the root activation's
+borrowed inputs, on an owned `FlowRead` lifecycle (preparation,
+evaluation, finishing and closing, with abandonment unwinding the
+activations inside out), and on the dispatch read helpers the body calls
 (signature discovery, the contextual call executor, type-leaf lowering, the
 relation entry) being continuations themselves. The relation entry and the
 contextual call executor have the owned interface the body advances
