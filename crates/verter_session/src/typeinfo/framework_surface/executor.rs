@@ -907,7 +907,24 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
                 .iter()
                 .map(|row| (MemberRole::Slot, row.name.as_str(), row.source.present()))
                 .collect(),
-            FrameworkSurfaceKind::Emits | FrameworkSurfaceKind::Model => return,
+            FrameworkSurfaceKind::Model => dtos
+                .model
+                .as_ref()
+                .map(|surface| {
+                    surface
+                        .bindings
+                        .iter()
+                        .map(|binding| {
+                            (
+                                MemberRole::Model,
+                                binding.name.as_str(),
+                                binding.source.as_ref(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            FrameworkSurfaceKind::Emits => return,
         };
         let mut members = self.members.borrow_mut();
         for (role, name, source) in rows {

@@ -177,6 +177,8 @@ pub(crate) enum MemberRole {
     /// A slot's realized callable: the member value read through its
     /// realized callable root, as the slots surface exports it.
     Slot,
+    /// A model binding's value type.
+    Model,
 }
 
 /// The authored owner `source`'s replay is anchored in: the anchor owner of
@@ -291,6 +293,7 @@ const fn member_role_tag(role: MemberRole) -> u32 {
         MemberRole::Exposed => 2,
         MemberRole::OptionsMember => 3,
         MemberRole::Slot => 4,
+        MemberRole::Model => 5,
     }
 }
 
@@ -976,28 +979,52 @@ pub(crate) fn replay_issued_in_view<M: verter_audit::observe::ObserveExec>(
         NativeReplayLocator::FrameworkMember(locator) => {
             // The member's own source, raised under its producing macro's
             // owner: one source, never the component's whole facet.
-            let raised = dispatch
-                .owning()
-                .raise_semantic_type_source_to_hot(
-                    &locator.source,
-                    verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                        scope_canonical_id: &locator.component_canonical,
-                        scope_owner: locator.scope_owner,
-                        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
-                            FRAMEWORK_MEMBER_REPLAY_MODE,
-                        ),
-                        interior_failures: None,
-                    },
-                )
-                .map(|outcome| outcome.at_optional_boundary());
-            let node = (*raised.value()).map(|hot| hot.node());
+            let node = raise_framework_member_source(
+                dispatch,
+                &locator.component_canonical,
+                locator.scope_owner,
+                &locator.source,
+            );
             Ok(match locator.role {
                 // A slot is exported as its realized callable root.
                 MemberRole::Slot => node.map(|node| realized_callable_root(dispatch, node)),
-                MemberRole::Prop | MemberRole::Exposed | MemberRole::OptionsMember => node,
+                MemberRole::Prop
+                | MemberRole::Exposed
+                | MemberRole::OptionsMember
+                | MemberRole::Model => node,
             })
         }
     }
+}
+
+/// Raise a framework member's replayable `source` under `scope_owner`
+/// (the owner its authored anchor is written in), in the navigable
+/// published view a member reference replays under. `None` when it does
+/// not raise. The returned node is rooted only by the caller's construction
+/// scope.
+pub(crate) fn raise_framework_member_source<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    scope_canonical: &str,
+    scope_owner: TopLevelOwnerId,
+    source: &verter_type_expr::facts::SemanticTypeSource,
+) -> Option<SemanticNodeId> {
+    let raised = dispatch
+        .owning()
+        .raise_semantic_type_source_to_hot(
+            source,
+            verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                scope_canonical_id: scope_canonical,
+                scope_owner,
+                context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                    FRAMEWORK_MEMBER_REPLAY_MODE,
+                ),
+                interior_failures: None,
+            },
+        )
+        .map(|outcome| outcome.at_optional_boundary());
+    (*raised.value()).map(|hot| hot.node())
 }
 
 /// The realized callable root of `node`, read as the slots surface reads a
