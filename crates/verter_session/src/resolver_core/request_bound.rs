@@ -793,16 +793,18 @@ pub(crate) trait RequestBoundLifecycle: Sync {
     }
 
     /// The shared type-route policy's publication for this request's
-    /// resolution view: admitted, unretained, or refused.
+    /// resolution view: admitted, unretained, or refused. The request keeps
+    /// the lanes it resolves.
     fn type_dependency_publication(
         &self,
         owner_canonical: &str,
         import_source: &str,
     ) -> verter_workspace::ResolutionPublication<String> {
-        crate::VerterHost::resolve_type_dependency_canonical(
-            self.host(),
+        self.host().resolve_type_dependency_canonical_for_request(
+            None,
             owner_canonical,
             import_source,
+            Some(self.request_view().overlay().type_route_lanes()),
         )
     }
 }

@@ -150,4 +150,9 @@ pub(crate) struct TestForceKnobs {
     /// propagation of a refused edge inside a route walk.
     #[cfg(test)]
     pub(crate) force_type_route_refusal_for_specifier: parking_lot::Mutex<Option<String>>,
+    /// Resolve every delivered type-route target's declaration-companion
+    /// lane again instead of reusing the request's earlier resolution of it,
+    /// so a test compares the reused answers and witnesses with fresh ones.
+    #[cfg(test)]
+    pub(crate) disable_type_route_lane_reuse_for_tests: std::sync::atomic::AtomicBool,
 }

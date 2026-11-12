@@ -321,10 +321,11 @@ impl<M: ObserveExec> RequestBoundLifecycle for SessionRequestLifecycle<'_, M> {
         owner_canonical: &str,
         import_source: &str,
     ) -> verter_workspace::ResolutionPublication<String> {
-        self.inner.resolve_type_dependency_canonical_in(
+        self.inner.resolve_type_dependency_canonical_for_request(
             self.resolution_overlay(),
             owner_canonical,
             import_source,
+            Some(self.request_view.overlay().type_route_lanes()),
         )
     }
 }

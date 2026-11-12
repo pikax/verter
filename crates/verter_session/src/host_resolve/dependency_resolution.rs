@@ -255,6 +255,26 @@ impl VerterHost {
         owner_canonical: &str,
         import_source: &str,
     ) -> verter_workspace::ResolutionPublication<String> {
+        self.resolve_type_dependency_canonical_for_request(
+            overlay,
+            owner_canonical,
+            import_source,
+            None,
+        )
+    }
+
+    /// [`Self::resolve_type_dependency_canonical_in`] for a request that
+    /// keeps the lanes it resolves: a lane (the specifier's `TypeImport` or
+    /// `EsmImport`, or a delivered target's `TypeImport` normalization) the
+    /// request already resolved under the same resolution world is not
+    /// resolved again (see [`TypeRouteLanes`]).
+    pub(crate) fn resolve_type_dependency_canonical_for_request(
+        &self,
+        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
+        owner_canonical: &str,
+        import_source: &str,
+        lanes: Option<&TypeRouteLanes>,
+    ) -> verter_workspace::ResolutionPublication<String> {
         #[cfg(test)]
         if self
             .test_force
@@ -271,21 +291,23 @@ impl VerterHost {
         // answer. A lane answered unretained leaves every answer derived
         // from it unretained.
         let target = self
-            .resolve_dependency_lane(
+            .request_lane(
                 overlay,
                 owner_canonical,
                 import_source,
                 verter_session_query::resolution::ResolveRequestKind::TypeImport,
+                lanes,
             )
             .or_else_publication(|| {
-                self.resolve_dependency_lane(
+                self.request_lane(
                     overlay,
                     owner_canonical,
                     import_source,
                     verter_session_query::resolution::ResolveRequestKind::EsmImport,
+                    lanes,
                 )
             });
-        self.normalize_type_target(overlay, owner_canonical, target)
+        self.normalize_type_target(overlay, owner_canonical, target, lanes)
     }
 
     fn normalize_type_target(
@@ -293,15 +315,17 @@ impl VerterHost {
         overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
         owner_canonical: &str,
         target: verter_workspace::ResolutionPublication<String>,
+        lanes: Option<&TypeRouteLanes>,
     ) -> verter_workspace::ResolutionPublication<String> {
         let Some(Some(runtime_target)) = target.delivered().map(|result| result.cloned()) else {
             return target;
         };
-        let normalized = self.resolve_dependency_lane(
+        let normalized = self.request_lane(
             overlay,
             owner_canonical,
             &runtime_target,
             verter_session_query::resolution::ResolveRequestKind::TypeImport,
+            lanes,
         );
         match normalized {
             verter_workspace::ResolutionPublication::Refused(refusal) => {
@@ -309,6 +333,85 @@ impl VerterHost {
             }
             normalized if normalized.is_some() => normalized.unretained_with(&target),
             missed => target.unretained_with(&missed),
+        }
+    }
+
+    /// One lane of the type-route policy, resolved once per request and
+    /// resolution world when the request keeps its `lanes`.
+    ///
+    /// A kept lane has the effects the resolution itself has at
+    /// [`Self::resolve_for_persistent_state_in`]: its observations are
+    /// recorded into every open witness scope, in the order it recorded
+    /// them, and an unretained answer marks every enclosing compute
+    /// non-cacheable. So the answer and every witness built around it are
+    /// the ones a fresh resolution yields.
+    fn request_lane(
+        &self,
+        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
+        owner_canonical: &str,
+        specifier: &str,
+        kind: verter_session_query::resolution::ResolveRequestKind,
+        lanes: Option<&TypeRouteLanes>,
+    ) -> verter_workspace::ResolutionPublication<String> {
+        let resolve = || self.resolve_dependency_lane(overlay, owner_canonical, specifier, kind);
+        let Some(lanes) = lanes else {
+            return resolve();
+        };
+        #[cfg(test)]
+        if self
+            .test_force
+            .disable_type_route_lane_reuse_for_tests
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return resolve();
+        }
+        let key = TypeRouteLaneKey {
+            overlay: overlay.map_or(0, verter_workspace::ResolutionOverlaySnapshot::id),
+            owner: owner_canonical.to_owned(),
+            specifier: specifier.to_owned(),
+            kind,
+        };
+        let world = self.type_route_world();
+        if let Some(kept) = lanes.get(&key, &world) {
+            crate::host_manage::import_route_witness::replay_resolution_witness(&kept.observed);
+            crate::host_manage::import_route_witness::note_unretained_resolution(&kept.publication);
+            return kept.publication.clone();
+        }
+        let scope = crate::host_manage::import_route_witness::ResolutionWitnessScope::enter();
+        let publication = resolve();
+        let observed = scope.collected();
+        drop(scope);
+        // A refusal is the answer of this attempt only, and a world that
+        // moved while the lane resolved may not be the one it answered for:
+        // neither is kept.
+        let answered = !matches!(
+            publication,
+            verter_workspace::ResolutionPublication::Refused(_)
+        );
+        if answered && self.type_route_world() == world {
+            lanes.insert(
+                key,
+                std::sync::Arc::new(KeptLane {
+                    world,
+                    publication: publication.clone(),
+                    observed,
+                }),
+            );
+        }
+        publication
+    }
+
+    /// The resolution world a kept lane answers for: every dimension a
+    /// load, an edit, a project change or a resolution-visible file-system
+    /// change advances.
+    fn type_route_world(&self) -> TypeRouteWorld {
+        let workspace = self.ws();
+        TypeRouteWorld {
+            published_root: workspace.published_root(),
+            content_generation: workspace.content_generation(),
+            resolution_fact_generation: workspace.resolution_fact_generation(),
+            load_generation: self.current_load_generation(),
+            store_view_epoch: self.store_view_epoch(),
         }
     }
 
@@ -423,3 +526,90 @@ impl VerterHost {
         )
     }
 }
+
+/// A request's resolutions of type-route lanes, kept for the rest of the
+/// request.
+///
+/// Every consumer that resolves an import edge in a request (a callee's
+/// identity, a declaration bundle's dependency edges and witness, a route
+/// walk) runs the whole type-route policy again: one request resolved the
+/// same lane of the same edge about eight times. The request keeps the
+/// lanes it resolves here; the engine's own memo still answers the first
+/// resolution of each.
+///
+/// A kept lane answers only under the resolution world it was resolved in
+/// ([`TypeRouteWorld`]); any advance resolves it again. Owned by the
+/// request's
+/// [`CanonicalCompletionOverlay`](crate::resolver_core::CanonicalCompletionOverlay)
+/// and dropped with it; bounded by the lanes the request resolves.
+#[derive(Default)]
+pub(crate) struct TypeRouteLanes(
+    parking_lot::Mutex<rustc_hash::FxHashMap<TypeRouteLaneKey, std::sync::Arc<KeptLane>>>,
+);
+
+impl TypeRouteLanes {
+    fn get(
+        &self,
+        key: &TypeRouteLaneKey,
+        world: &TypeRouteWorld,
+    ) -> Option<std::sync::Arc<KeptLane>> {
+        self.0
+            .lock()
+            .get(key)
+            .filter(|kept| kept.world == *world)
+            .cloned()
+    }
+
+    fn insert(&self, key: TypeRouteLaneKey, lane: std::sync::Arc<KeptLane>) {
+        self.0.lock().insert(key, lane);
+    }
+}
+
+/// One lane: the owner, the specifier and kind it resolves, and the
+/// resolution overlay snapshot it resolves through (`0`: the workspace's
+/// own view).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TypeRouteLaneKey {
+    overlay: u64,
+    owner: String,
+    specifier: String,
+    kind: verter_session_query::resolution::ResolveRequestKind,
+}
+
+/// What resolving a lane delivered, and every observation it recorded, in
+/// order.
+struct KeptLane {
+    world: TypeRouteWorld,
+    publication: verter_workspace::ResolutionPublication<String>,
+    observed: Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
+}
+
+/// The resolution world a lane was resolved in. The published root is
+/// held, not just compared by address, so a retired root's address cannot
+/// be reused by a new one while the lane is kept.
+struct TypeRouteWorld {
+    published_root: Option<std::sync::Arc<verter_workspace::PublishedRoot>>,
+    content_generation: u64,
+    resolution_fact_generation: u64,
+    load_generation: u64,
+    store_view_epoch: u64,
+}
+
+impl PartialEq for TypeRouteWorld {
+    fn eq(&self, other: &Self) -> bool {
+        let same_root = match (&self.published_root, &other.published_root) {
+            (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        };
+        same_root
+            && self.content_generation == other.content_generation
+            && self.resolution_fact_generation == other.resolution_fact_generation
+            && self.load_generation == other.load_generation
+            && self.store_view_epoch == other.store_view_epoch
+    }
+}
+
+#[cfg(test)]
+#[path = "type_route_lane_reuse_tests.rs"]
+mod type_route_lane_reuse_tests;
