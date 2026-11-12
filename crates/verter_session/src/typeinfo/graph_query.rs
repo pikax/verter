@@ -1,10 +1,12 @@
 #![deny(missing_docs)]
-//! The resolve-symbol typeinfo graph operation executor.
+//! The resolve-symbol and expand-around typeinfo graph operation executor.
 //!
 //! [`VerterHost::resolve_symbol_graph_with_audit`] is the graph-protocol
 //! resolve entry: the operation-DTO envelope in, the typed
 //! [`TypeInfoResult`] out — the answer route graph-protocol consumers
-//! bind instead of the internal `TypeExpr` JSON transit.
+//! bind instead of the internal `TypeExpr` JSON transit. The same audited
+//! entry serves the expand-around operation (OP04), which names its
+//! position by a host-issued `NodeRef`.
 //!
 //! Executor flow:
 //! 1. **Validation first** — the full envelope validator
@@ -16,11 +18,11 @@
 //!    with the typed wire `error` arm and never reaches resolution.
 //!    Unbounded export is therefore structurally rejected: an expanded
 //!    closure without explicit in-range budgets cannot pass validation.
-//! 2. **Operation gate** — this entry serves the resolve-symbol
-//!    operation ONLY. A validated envelope for any other operation is
-//!    refused with a typed `MalformedPayload` (fail-closed: no silent
-//!    re-route to the string-expression evaluator, no dual-running
-//!    authority).
+//! 2. **Operation gate** — this entry serves the resolve-symbol and
+//!    expand-around operations ONLY. A validated envelope for any other
+//!    operation is refused with a typed `MalformedPayload` (fail-closed:
+//!    no silent re-route to the string-expression evaluator, no
+//!    dual-running authority).
 //! 3. **Closure gate** — the resolve-symbol bounded walk serves the
 //!    root-only / one-level / expanded closure kinds. A path policy or
 //!    a projection-required policy names behavior this operation does
@@ -45,7 +47,20 @@
 //! 6. **Issuance** — the exported declaration root's reference is
 //!    registered in the host's private issued-reference index
 //!    (`typeinfo::node_refs`) under the native basis the answer
-//!    observed. The wire answer is unchanged.
+//!    observed, and published on the root's `node_id_map` entry as a
+//!    `NodeRef` (schema 12), whether or not provenance was requested.
+//!
+//! Expand-around flow, after the same validation, operation and closure
+//! gates: the presented `NodeRef` is looked up whole in the issued index
+//! (a tuple the host does not hold is `UnknownNodeRef`); the entry's owner
+//! is materialised and ONE current view captured (no coherent view is
+//! `UnstableState`); the committed basis is admitted under that view (a
+//! changed input is `StaleBasis`); the locator replays through the shared
+//! engine and the replayed node exports under the request's closure
+//! budgets; and a currentness fence re-admits the basis against a fresh
+//! capture before the answer is published (a host that moved meanwhile is
+//! `StaleBasis`, never a superseded answer). The exported root carries the
+//! presented reference.
 
 #[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering;
@@ -239,16 +254,30 @@ impl VerterHost {
         };
         let request = validated.into_inner();
 
-        // OPERATION GATE — this entry serves resolve-symbol only. The
-        // validator proved the operation/payload pair is coherent; a
-        // coherent envelope for a DIFFERENT operation is refused here,
-        // fail-closed, before any resolution.
+        // OPERATION GATE — this entry serves resolve-symbol and
+        // expand-around only. The validator proved the operation/payload
+        // pair is coherent; a coherent envelope for a DIFFERENT operation is
+        // refused here, fail-closed, before any resolution.
+        if request.operation == Operation::ExpandAround as i32 {
+            let Some(type_info_graph_request::Payload::ExpandAround(expand)) = request.payload
+            else {
+                let payload =
+                    TypeInfoGraphPayload::from_validation_error(GraphOperationTag::ExpandAround);
+                return (
+                    error_response(malformed(
+                        "expand-around payload arm missing after validation",
+                    )),
+                    payload,
+                );
+            };
+            return self.execute_expand_around(&expand);
+        }
         if request.operation != Operation::ResolveSymbol as i32 {
             let payload =
                 TypeInfoGraphPayload::from_validation_error(GraphOperationTag::ResolveSymbol);
             return (
                 error_response(malformed(
-                    "this entry serves the resolve-symbol operation only",
+                    "this entry serves the resolve-symbol and expand-around operations only",
                 )),
                 payload,
             );
@@ -377,20 +406,166 @@ impl VerterHost {
                     (SymbolGraphAnswer::Graph(Box::new(graph)), resolved.locator)
                 },
             );
+            let mut answer = answer;
             if let Some(locator) = locator {
-                // The schema-12 cutover publishes the issued key on the
-                // exported root; until then it stays host-internal.
-                let _issued = crate::typeinfo::node_refs::issue_resolve_symbol(
+                let issued = crate::typeinfo::node_refs::issue_resolve_symbol(
                     self,
                     current.view(),
                     &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx),
                     trace,
                     locator,
                 );
+                if let (Ok(key), SymbolGraphAnswer::Graph(graph)) = (issued, &mut answer) {
+                    publish_root_node_ref(graph, &key);
+                }
             }
             answer
         })
     }
+
+    /// The expand-around executor body (OP04), after validation: one
+    /// whole-tuple lookup, one captured view, admission, replay, bounded
+    /// export, and the currentness fence. See the module docs.
+    fn execute_expand_around(
+        &self,
+        expand: &wire::ExpandGraphAroundRequest,
+    ) -> (TypeInfoGraphResponse, TypeInfoGraphPayload) {
+        let rejected = |error: TypeInfoRequestError| {
+            (
+                error_response(error),
+                TypeInfoGraphPayload::from_validation_error(GraphOperationTag::ExpandAround),
+            )
+        };
+        let mode = expand
+            .context
+            .as_ref()
+            .map(|context| wire_projection_mode(context.mode))
+            .unwrap_or(ProjectionMode::Identity);
+        // CLOSURE GATE — the same bounded walk as resolve-symbol.
+        if !matches!(
+            expand.closure.as_ref().and_then(|c| c.kind.as_ref()),
+            Some(graph_closure_policy::Kind::RootOnly(_))
+                | Some(graph_closure_policy::Kind::OneLevel(_))
+                | Some(graph_closure_policy::Kind::Expanded(_))
+        ) {
+            return rejected(malformed(
+                "the expand-around operation serves root-only, one-level, and expanded closure \
+                 policies only",
+            ));
+        }
+        // The validator proved presence and digest lengths.
+        let Some(presented) = expand.node_ref.clone() else {
+            return rejected(malformed("node_ref missing after validation"));
+        };
+        let Some(key) = crate::typeinfo::node_refs::IssuedRefKey::from_wire(&presented) else {
+            return rejected(malformed(
+                "node_ref digest lengths changed after validation",
+            ));
+        };
+        let Some(issued) = crate::typeinfo::node_refs::lookup_issued(self, &key) else {
+            return rejected(TypeInfoRequestError {
+                kind: Some(type_info_request_error::Kind::UnknownNodeRef(
+                    wire::wire_error_unknown_node_ref(presented),
+                )),
+            });
+        };
+        // MODE GATE — a reference names its position under the projection
+        // mode it was issued under; a different mode is a different
+        // question, refused rather than answered under the issued one. The
+        // reduction demand selects no different answer: graph answers are
+        // published, as resolve-symbol's are, whatever demand is named.
+        if mode != issued.replay_mode() {
+            return rejected(malformed(
+                "an expand-around request names the projection mode its node_ref was issued under",
+            ));
+        }
+        let stale = |node_ref: wire::NodeRef| {
+            rejected(TypeInfoRequestError {
+                kind: Some(type_info_request_error::Kind::StaleBasis(
+                    wire::wire_error_stale_basis(node_ref),
+                )),
+            })
+        };
+        let budgets = closure_budgets(expand.closure.as_ref());
+        // The owner is materialised BEFORE the view is captured, exactly as
+        // the issuing request did, so the view vouches for its source.
+        let _ = self.ensure_indexed_ready_serve(issued.entry_canonical());
+        let Some(current) = crate::typeinfo::current_store_view_for_query(self) else {
+            return rejected(TypeInfoRequestError {
+                kind: Some(type_info_request_error::Kind::UnstableState(
+                    wire::wire_error_unstable_state(
+                        u32::try_from(crate::typeinfo::TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS)
+                            .unwrap_or(u32::MAX),
+                    ),
+                )),
+            });
+        };
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let replayed = verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let ctx =
+                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current, overlay);
+            let port = verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx);
+            if crate::typeinfo::node_refs::admit_issued_in_view(current.view(), &port, &issued).is_err() {
+                return stale(presented);
+            }
+            let dispatch = verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+            let _scope = dispatch.enter_construction_scope();
+            match crate::typeinfo::node_refs::replay_issued_in_view(self, &ctx, &dispatch, &issued) {
+                Ok(Some(node)) => {
+                    match crate::typeinfo::raise::project_ordinal_to_semantic_type_graph(&dispatch, node, &budgets) {
+                        Some(mut graph) => {
+                            if expand.include_diagnostics {
+                                if let Some(diagnostic) = crate::typeinfo::raise::checker_diagnostic_in(&dispatch, node) {
+                                    push_checker_diagnostic(&mut graph, diagnostic);
+                                }
+                            }
+                            SymbolGraphAnswer::Graph(Box::new(graph))
+                        }
+                        None => SymbolGraphAnswer::Miss,
+                    }
+                }
+                Ok(None) => SymbolGraphAnswer::Miss,
+                // The admitted inputs no longer reproduce the issued
+                // position: the reference is stale, never re-answered.
+                Err(crate::typeinfo::node_refs::ReplayRefusal::Diverged) => return stale(presented),
+                Err(crate::typeinfo::node_refs::ReplayRefusal::Fault(fault)) => SymbolGraphAnswer::Fault(fault),
+            }
+        });
+        // CURRENTNESS FENCE — the answer publishes only while the issued
+        // basis still describes the host's inputs.
+        if crate::typeinfo::node_refs::admit_issued_in_fresh_view(self, &issued).is_err() {
+            return stale(presented);
+        }
+        let graph = match replayed {
+            SymbolGraphAnswer::Graph(mut graph) => {
+                publish_root_node_ref(&mut graph, &issued.key());
+                *graph
+            }
+            SymbolGraphAnswer::Miss => single_opaque_root_graph(miss_error(), None, None),
+            SymbolGraphAnswer::Fault(fault) => {
+                let (error, detail) = fault_error(&fault);
+                single_opaque_root_graph(error, detail, None)
+            }
+        };
+        let payload = expand_payload(mode, expand, &graph);
+        (graph_response(graph), payload)
+    }
+}
+
+/// Publish `key` on `graph`'s exported root: one `node_id_map` entry
+/// carrying the reference, independent of provenance.
+fn publish_root_node_ref(
+    graph: &mut SemanticTypeGraph,
+    key: &crate::typeinfo::node_refs::IssuedRefKey,
+) {
+    let Some(&root) = graph.root_ids.first() else {
+        return;
+    };
+    graph.node_id_map.push(wire::NodeIdMapEntry {
+        node_id: root,
+        identity: None,
+        node_ref: Some(key.to_wire()),
+    });
 }
 
 /// What one captured view answered for a resolve-symbol graph request.
@@ -723,13 +898,23 @@ fn response_outcome(response: &TypeInfoGraphResponse) -> Result<(), TypeInfoRequ
     }
 }
 
-/// Build the audit payload from the request shape + the produced graph.
-fn graph_payload(
+/// Build the expand-around audit payload from the request shape and the
+/// produced graph.
+fn expand_payload(
     mode: ProjectionMode,
-    resolve: &wire::ResolveSymbolGraphRequest,
+    expand: &wire::ExpandGraphAroundRequest,
     graph: &SemanticTypeGraph,
 ) -> TypeInfoGraphPayload {
-    let closure_tag = match resolve.closure.as_ref().and_then(|c| c.kind.as_ref()) {
+    TypeInfoGraphPayload {
+        operation: GraphOperationTag::ExpandAround,
+        closure: closure_tag(expand.closure.as_ref()),
+        demand: demand_tag(expand.context.as_ref()),
+        ..graph_shape_payload(mode, graph)
+    }
+}
+
+fn closure_tag(closure: Option<&wire::ClosurePolicy>) -> GraphClosurePolicyTag {
+    match closure.and_then(|c| c.kind.as_ref()) {
         Some(graph_closure_policy::Kind::RootOnly(_)) => GraphClosurePolicyTag::RootOnly,
         Some(graph_closure_policy::Kind::Path(_)) => GraphClosurePolicyTag::Path,
         Some(graph_closure_policy::Kind::OneLevel(_)) => GraphClosurePolicyTag::OneLevel,
@@ -738,24 +923,42 @@ fn graph_payload(
             GraphClosurePolicyTag::ProjectionRequired
         }
         None => GraphClosurePolicyTag::RootOnly,
-    };
-    let demand_tag = match resolve.context.as_ref().map(|c| c.demand) {
+    }
+}
+
+fn demand_tag(context: Option<&wire::ProjectionReductionContext>) -> ReductionDemandTag {
+    match context.map(|c| c.demand) {
         x if x == Some(wire::ReductionDemand::StructuralTransit as i32) => {
             ReductionDemandTag::StructuralTransit
         }
         _ => ReductionDemandTag::Published,
-    };
+    }
+}
+
+/// The graph-shape fields every graph operation's audit payload shares.
+fn graph_shape_payload(mode: ProjectionMode, graph: &SemanticTypeGraph) -> TypeInfoGraphPayload {
     TypeInfoGraphPayload {
-        operation: GraphOperationTag::ResolveSymbol,
         mode: ProjectionModeTag::from(mode),
-        demand: demand_tag,
         roots_count: u32::try_from(graph.root_ids.len()).unwrap_or(u32::MAX),
-        closure: closure_tag,
         schema_version: graph.schema_version,
         snapshot_node_count: u32::try_from(graph.nodes.len()).unwrap_or(u32::MAX),
         snapshot_edge_count: u32::try_from(graph.edges.len()).unwrap_or(u32::MAX),
         snapshot_symbol_count: u32::try_from(graph.symbols.len()).unwrap_or(u32::MAX),
         ..TypeInfoGraphPayload::empty()
+    }
+}
+
+/// Build the audit payload from the request shape + the produced graph.
+fn graph_payload(
+    mode: ProjectionMode,
+    resolve: &wire::ResolveSymbolGraphRequest,
+    graph: &SemanticTypeGraph,
+) -> TypeInfoGraphPayload {
+    TypeInfoGraphPayload {
+        operation: GraphOperationTag::ResolveSymbol,
+        closure: closure_tag(resolve.closure.as_ref()),
+        demand: demand_tag(resolve.context.as_ref()),
+        ..graph_shape_payload(mode, graph)
     }
 }
 

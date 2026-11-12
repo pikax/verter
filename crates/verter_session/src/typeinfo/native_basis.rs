@@ -33,8 +33,9 @@
 //! never silently replace it, and any change to a committed observation is
 //! a stale basis.
 //!
-//! The resolve-symbol graph executor is this module's production caller,
-//! through [`crate::typeinfo::node_refs::issue_resolve_symbol`].
+//! The typeinfo graph executors are this module's production callers:
+//! issuance through [`crate::typeinfo::node_refs`], and expand-around
+//! admission of an issued reference.
 
 use std::sync::Arc;
 
@@ -68,9 +69,8 @@ impl NativeFactBasis {
         &self.basis
     }
 
-    /// The fence bound to [`Self::basis`] at commit. The ExpandAround
+    /// The fence bound to [`Self::basis`] at commit. Expand-around
     /// admission is its production reader.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn fence(&self) -> &SnapshotFence {
         &self.fence
     }

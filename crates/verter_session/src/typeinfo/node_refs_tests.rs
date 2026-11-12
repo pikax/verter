@@ -125,6 +125,16 @@ fn envelope(name: &str) -> TypeInfoGraphRequest {
     }
 }
 
+/// The reference `graph` publishes on its first root, if any.
+fn root_node_ref(graph: &SemanticTypeGraph) -> Option<wire::NodeRef> {
+    let root = *graph.root_ids.first()?;
+    graph
+        .node_id_map
+        .iter()
+        .find(|entry| entry.node_id == root)
+        .and_then(|entry| entry.node_ref.clone())
+}
+
 /// The graph the production executor answers for `name`.
 fn answered_graph(host: &VerterHost, name: &str) -> SemanticTypeGraph {
     let (response, _) = host
@@ -194,6 +204,12 @@ fn named_graph_issuance_uses_one_view() {
     assert_eq!(keys.len(), 1, "one declaration root is issued");
     let key = keys[0];
     assert_eq!(key.role, None, "a declaration root carries no role");
+    assert_eq!(
+        root_node_ref(&answered),
+        Some(key.to_wire()),
+        "the answer publishes its issued reference on its root"
+    );
+    answered.node_id_map.clear();
 
     let issued = lookup_issued(&host, &key).expect("the issued tuple is found");
     in_request(&host, |view, ctx, dispatch| {
@@ -868,4 +884,264 @@ fn svelte_props_issue_replayable_member_references() {
     });
     assert!(exported.is_some(), "the item prop exports a member type");
     assert_eq!(replayed_member_type(&host, &issued), exported);
+}
+
+/// An expand-around envelope presenting `node_ref` under `mode` and a
+/// one-level closure.
+fn expand_envelope(node_ref: wire::NodeRef, mode: wire::ProjectionMode) -> TypeInfoGraphRequest {
+    TypeInfoGraphRequest {
+        schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+        operation: Operation::ExpandAround as i32,
+        payload: Some(type_info_graph_request::Payload::ExpandAround(
+            wire::ExpandGraphAroundRequest {
+                node_ref: Some(node_ref),
+                context: Some(wire::ProjectionReductionContext {
+                    mode: mode as i32,
+                    demand: wire::ReductionDemand::Published as i32,
+                }),
+                closure: Some(wire::ClosurePolicy {
+                    kind: Some(graph_closure_policy::Kind::OneLevel(
+                        wire::ClosureOneLevel {},
+                    )),
+                }),
+                display_policy: Some(wire::DisplayPolicy {
+                    qualification: wire::DisplayQualification::Qualified as i32,
+                    branding: wire::DisplayBranding::On as i32,
+                    budgets: Some(wire::DisplayBudgets {
+                        max_string_length: 4096,
+                        max_depth: 16,
+                    }),
+                }),
+                include_provenance: false,
+                include_diagnostics: false,
+            },
+        )),
+    }
+}
+
+/// What the production graph entry answers for an expand-around of
+/// `node_ref` under `mode`: the graph, or the typed refusal.
+fn expand_in(
+    host: &VerterHost,
+    node_ref: wire::NodeRef,
+    mode: wire::ProjectionMode,
+) -> Result<SemanticTypeGraph, verter_protocol::verter::v1::type_info_request_error::Kind> {
+    let (response, _) = host
+        .resolve_symbol_graph_with_audit(expand_envelope(node_ref, mode))
+        .into_parts();
+    let refused = |error: wire::TypeInfoRequestError| Err(error.kind.expect("a typed error"));
+    match response {
+        Ok(wire::TypeInfoGraphResponse {
+            kind: Some(type_info_graph_response::Kind::Graph(graph)),
+        }) => Ok(graph),
+        Ok(wire::TypeInfoGraphResponse {
+            kind: Some(type_info_graph_response::Kind::Error(error)),
+        })
+        | Err(error) => refused(error),
+        Ok(other) => panic!("expected a graph or a typed error, got {other:?}"),
+    }
+}
+
+/// The expanded graph under the resolve-symbol envelope's `Expanded`
+/// context, or a panic naming the refusal.
+fn expanded_graph(host: &VerterHost, node_ref: wire::NodeRef) -> SemanticTypeGraph {
+    expand_in(host, node_ref, wire::ProjectionMode::Expanded)
+        .unwrap_or_else(|error| panic!("expected a graph answer, got {error:?}"))
+}
+
+/// The typed refusal an expand-around of `node_ref` answers under the
+/// resolve-symbol envelope's context.
+fn expand_error(
+    host: &VerterHost,
+    node_ref: wire::NodeRef,
+) -> verter_protocol::verter::v1::type_info_request_error::Kind {
+    match expand_in(host, node_ref, wire::ProjectionMode::Expanded) {
+        Err(error) => error,
+        Ok(graph) => panic!("expected a typed error, got {graph:?}"),
+    }
+}
+
+/// An issued declaration root expands to the very graph its answer
+/// exported, and the expansion carries the same reference on its root. An
+/// expansion issues nothing.
+#[test]
+fn expand_around_replays_an_issued_declaration_root() {
+    let (_workspace, host) = project_host();
+    let mut answered = answered_graph(&host, "A");
+    let node_ref = root_node_ref(&answered).expect("the answer publishes its root reference");
+
+    let expanded = expanded_graph(&host, node_ref.clone());
+    assert_eq!(root_node_ref(&expanded), Some(node_ref));
+    answered.query = None;
+    assert_eq!(
+        expanded, answered,
+        "the expansion is the answer's own root graph"
+    );
+    assert_eq!(
+        issued_keys_for_tests(&host).len(),
+        1,
+        "an expansion issues nothing"
+    );
+}
+
+/// A reference names its position under the mode it was issued under:
+/// asking for another mode is refused, never answered under the issued one.
+/// The reduction demand selects no different answer.
+#[test]
+fn expand_around_refuses_another_projection_context() {
+    use verter_protocol::verter::v1::type_info_request_error::Kind;
+    let (_workspace, host) = project_host();
+    let node_ref = root_node_ref(&answered_graph(&host, "A"))
+        .expect("the answer publishes its root reference");
+    assert!(
+        matches!(
+            expand_in(&host, node_ref.clone(), wire::ProjectionMode::Shallow),
+            Err(Kind::MalformedPayload(_))
+        ),
+        "a Shallow expansion of an Expanded answer is a different question"
+    );
+    let mut transit = expand_envelope(node_ref, wire::ProjectionMode::Expanded);
+    if let Some(type_info_graph_request::Payload::ExpandAround(expand)) = transit.payload.as_mut() {
+        if let Some(context) = expand.context.as_mut() {
+            context.demand = wire::ReductionDemand::StructuralTransit as i32;
+        }
+    }
+    let (response, _) = host.resolve_symbol_graph_with_audit(transit).into_parts();
+    assert!(
+        matches!(
+            response.map(|response| response.kind),
+            Ok(Some(type_info_graph_response::Kind::Graph(_)))
+        ),
+        "the issued mode under another demand expands"
+    );
+}
+
+/// A tuple the host never issued is unknown, whichever part is changed: a
+/// forged basis, a role a declaration root does not carry, or a reference
+/// another host issued.
+#[test]
+fn expand_around_refuses_a_reference_the_host_never_issued() {
+    use verter_protocol::verter::v1::type_info_request_error::Kind;
+    let (_workspace, host) = project_host();
+    let node_ref = root_node_ref(&answered_graph(&host, "A"))
+        .expect("the answer publishes its root reference");
+
+    let mut forged_basis = node_ref.clone();
+    forged_basis.input_basis_digest[0] ^= 1;
+    let mut forged_role = node_ref.clone();
+    forged_role.role_digest = vec![0; wire::NODE_REF_DIGEST_LEN];
+    for forged in [forged_basis, forged_role] {
+        match expand_error(&host, forged.clone()) {
+            Kind::UnknownNodeRef(error) => assert_eq!(error.node_ref, Some(forged)),
+            other => panic!("expected UnknownNodeRef, got {other:?}"),
+        }
+    }
+
+    let (_other_workspace, other_host) = project_host();
+    assert!(
+        matches!(expand_error(&other_host, node_ref), Kind::UnknownNodeRef(_)),
+        "a reference is held only by the host that issued it"
+    );
+}
+
+/// An input edit stales an issued reference: its expansion is refused as
+/// `StaleBasis`, never re-answered under the new inputs. The next answer
+/// issues a new reference, which expands.
+#[test]
+fn expand_around_refuses_a_reference_an_edit_staled() {
+    use verter_protocol::verter::v1::type_info_request_error::Kind;
+    let (workspace, host) = project_host();
+    let node_ref = root_node_ref(&answered_graph(&host, "A"))
+        .expect("the answer publishes its root reference");
+
+    write(
+        &workspace,
+        &host,
+        DEPENDENCY,
+        "export type B = { x: string }\n",
+    );
+    match expand_error(&host, node_ref.clone()) {
+        Kind::StaleBasis(error) => assert_eq!(error.node_ref, Some(node_ref.clone())),
+        other => panic!("expected StaleBasis, got {other:?}"),
+    }
+
+    let fresh =
+        root_node_ref(&answered_graph(&host, "A")).expect("the new answer publishes its reference");
+    assert_ne!(fresh, node_ref, "the new answer is a new basis");
+    assert_eq!(
+        root_node_ref(&expanded_graph(&host, fresh.clone())),
+        Some(fresh)
+    );
+}
+
+/// A framework-surface answer publishes each addressed member's reference
+/// on the member's own type node, and only there: the replayable prop is
+/// addressed, the closed leaf is not. The member reference expands to the
+/// member type the surface exported.
+#[test]
+fn expand_around_replays_a_framework_member() {
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
+    let host = vue_host();
+    let (response, _) = host
+        .resolve_framework_surface_with_audit(framework_envelope(
+            &host,
+            &[FrameworkSurfaceKind::Props],
+        ))
+        .into_parts();
+    let payload = match response.expect("the framework arm").kind {
+        Some(type_info_graph_response::Kind::FrameworkSurface(payload)) => payload,
+        other => panic!("expected a framework surface, got {other:?}"),
+    };
+    let graph = payload.graph.as_ref().expect("a surface graph");
+    let strings = graph
+        .strings
+        .as_ref()
+        .map(|table| table.entries.as_slice())
+        .unwrap_or_default();
+    let member = |name: &str| {
+        payload
+            .surfaces
+            .iter()
+            .flat_map(|surface| surface.members.iter())
+            .find(|member| strings.get(member.name_id as usize).map(String::as_str) == Some(name))
+            .unwrap_or_else(|| panic!("the {name} prop"))
+    };
+    let published = |node_id: u32| {
+        graph
+            .node_id_map
+            .iter()
+            .find(|entry| entry.node_id == node_id)
+            .and_then(|entry| entry.node_ref.clone())
+    };
+    assert_eq!(
+        published(member("count").type_node_id),
+        None,
+        "a closed leaf is an answer, not an address"
+    );
+    let item = member("item");
+    let node_ref = published(item.type_node_id).expect("the replayable prop is addressed");
+    assert_eq!(node_ref, issued_member(&host, "item").key().to_wire());
+
+    // A member's type is read from the navigable published view.
+    let expanded = expand_in(&host, node_ref.clone(), wire::ProjectionMode::Navigate)
+        .unwrap_or_else(|error| panic!("the member expands, got {error:?}"));
+    assert_eq!(root_node_ref(&expanded), Some(node_ref.clone()));
+    assert!(
+        expand_in(&host, node_ref, wire::ProjectionMode::Expanded).is_err(),
+        "a member reference is issued under the navigable view only"
+    );
+    let kind_of = |graph: &SemanticTypeGraph, node_id: u32| {
+        graph
+            .nodes
+            .get(node_id as usize)
+            .and_then(|node| node.kind.as_ref())
+            .map(std::mem::discriminant)
+    };
+    let member_kind = kind_of(graph, item.type_node_id);
+    assert!(member_kind.is_some(), "the member type is exported");
+    assert_eq!(
+        kind_of(&expanded, expanded.root_ids[0]),
+        member_kind,
+        "the expansion reaches the member type the surface exported"
+    );
 }

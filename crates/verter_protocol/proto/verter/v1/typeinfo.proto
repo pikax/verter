@@ -760,6 +760,29 @@ message GraphNodeIdMapEntry {
   // Stable identity carrier — populated only when the request asked
   // for provenance.
   GraphResolvedDeclSlotIdentity identity = 2;
+  // The host-issued address of the exported node (schema 12), independent
+  // of `include_provenance`. Present only where the producer holds an exact
+  // replayable position: a declaration root, or a framework member whose
+  // producer published a replayable source. `node_id` only associates the
+  // address with this graph's node; it is never itself the address.
+  NodeRef node_ref = 3;
+}
+
+// NodeRef — a host-issued address of one exported fact position (schema
+// 12). The tuple is opaque to clients: the host mints it, registers it in a
+// bounded index and admits only the WHOLE tuple it issued. Copying or
+// computing bytes never retargets an address, and a substituted basis
+// names nothing. Every present digest is exactly 32 bytes.
+message NodeRef {
+  // The fact's descriptor-specific query identity digest.
+  bytes query_identity_digest = 1;
+  // The committed native input basis the fact was observed under.
+  bytes input_basis_digest = 2;
+  // The producer's content-free declaration slot.
+  bytes decl_slot_digest = 3;
+  // The producer's typed role of a nested position; empty for a
+  // declaration root.
+  bytes role_digest = 4;
 }
 
 message GraphResolvedDeclSlotIdentity {
@@ -958,9 +981,21 @@ message ContextualTypeRequest {
   bool include_diagnostics = 6;
 }
 
+// ExpandGraphAroundRequest — expand one host-issued position (schema 12,
+// the operation's floor). Schema 12 retired the parent graph handle and
+// the graph-local target (fields 1 and 2, reserved): a position is named
+// only by the `NodeRef` a previous answer published in its
+// `node_id_map`. A tuple the host never issued, has evicted or does not
+// hold whole is `UnknownNodeRef`; an issued tuple whose basis no longer
+// describes the current inputs is `StaleBasis`. The `context.mode` must be
+// the mode the reference was issued under (a resolve-symbol request's mode;
+// NAVIGATE for a framework member's type); any other mode is
+// MalformedPayload. Like resolve-symbol, the answer is published whatever
+// demand is named. The closure policy bounds the expansion.
 message ExpandGraphAroundRequest {
-  GraphHandle parent_graph = 1;
-  GraphTypeNodeRef target = 2;
+  reserved 1, 2;
+  reserved "parent_graph", "target";
+  NodeRef node_ref = 8;
   GraphProjectionReductionContext context = 3;
   GraphClosurePolicy closure = 4;
   GraphDisplayPolicy display_policy = 5;
@@ -1035,18 +1070,6 @@ message GraphProjectionRequest {
   GraphProjectionKind kind = 1;
   // Optional projection-specific options blob — empty when none.
   bytes options_payload = 2;
-}
-
-message GraphHandle {
-  bytes opaque = 1;
-}
-
-message GraphTypeNodeRef {
-  // Within the parent graph's `nodes` arena, when the ref is local.
-  uint32 node_id = 1;
-  // Stable identity carrier when the ref is canonical.
-  GraphResolvedDeclSlotIdentity identity = 2;
-  bool is_canonical = 3;
 }
 
 // A range in the file `canonical_id` names: UTF-8 byte offsets, 0-based
@@ -1763,7 +1786,25 @@ message TypeInfoRequestError {
     TypeInfoRequestErrorMissingProjectPath missing_project_path = 10;
     TypeInfoRequestErrorExpansionBudgetOutOfRange expansion_budget_out_of_range = 12;
     TypeInfoRequestErrorUnknownFrameworkProfile unknown_framework_profile = 13;
+    TypeInfoRequestErrorStaleBasis stale_basis = 14;
+    TypeInfoRequestErrorUnknownNodeRef unknown_node_ref = 15;
   }
+}
+
+// Typed error for an issued `NodeRef` whose committed input basis no
+// longer describes what the host's current view observes (schema 12): a
+// source, dependency, configuration or overlay it read has changed. The
+// position is never re-answered against the newer inputs; the client asks
+// the originating question again for a current address.
+message TypeInfoRequestErrorStaleBasis {
+  NodeRef node_ref = 1;
+}
+
+// Typed error for a well-shaped `NodeRef` the host does not hold (schema
+// 12): never issued, evicted from the bounded index, or differing from an
+// issued tuple in any component.
+message TypeInfoRequestErrorUnknownNodeRef {
+  NodeRef node_ref = 1;
 }
 
 // Typed error for a well-formed `FrameworkProfileRef` (32 bytes) that

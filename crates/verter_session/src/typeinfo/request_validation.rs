@@ -37,7 +37,7 @@ use verter_protocol::typeinfo::graph::{
     FrameworkSurfaceRequest, Operation as WireOperation, ProjectPathGraphRequest, ProjectionMode,
     ProjectionReductionContext, ReductionDemand, ResolveSymbolGraphRequest,
     StructuredTypeExpression, TypeInfoGraphRequest, TypeInfoRequestError,
-    FRAMEWORK_PROFILE_DIGEST_LEN, TYPEINFO_GRAPH_SCHEMA_VERSION,
+    FRAMEWORK_PROFILE_DIGEST_LEN, NODE_REF_DIGEST_LEN, TYPEINFO_GRAPH_SCHEMA_VERSION,
 };
 use verter_protocol::verter::v1::{
     graph_closure_policy, property_key_expr, structured_type_expression as wire_expr,
@@ -125,6 +125,10 @@ pub const SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS: &[u32] = &[
     // Schema 10 remains accepted for the legacy operations: v11 changes only
     // the framework-surface selector, whose operation floor moved to 11.
     10,
+    // Schema 11 remains accepted for every operation but expand-around: v12
+    // adds the add-only `GraphNodeIdMapEntry.node_ref` and moves only the
+    // expand-around request onto a `NodeRef` (floor 12).
+    11,
     TYPEINFO_GRAPH_SCHEMA_VERSION,
 ];
 
@@ -138,6 +142,15 @@ pub const SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS: &[u32] = &[
 /// 3..=10 stay globally supported for the legacy operations, and a v3..v10
 /// framework-surface client could not decode a new error arm).
 pub const FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION: u32 = 11;
+
+/// Minimum schema version the expand-around operation accepts: 12, the
+/// host-issued [`NodeRef`](verter_protocol::typeinfo::graph::NodeRef)
+/// position (TR06, TIF-D02). The retired parent-graph handle and graph-local
+/// target (fields 1 and 2, reserved since v12) never named a position the
+/// host could admit, so an expand-around request below 12 is rejected with
+/// [`TypeInfoRequestError::MalformedPayload`] (NOT `UnknownSchemaVersion`:
+/// 2..=11 stay globally supported for the other operations).
+pub const EXPAND_AROUND_MIN_SCHEMA_VERSION: u32 = 12;
 
 /// First schema version whose framework-surface request carries the facet
 /// demand (`FrameworkSurfaceRequest.requested_kinds`): non-empty, no
@@ -277,9 +290,9 @@ pub fn validate_schema_version_for_operation(
         | WireOperation::EvaluateExpression
         | WireOperation::ProjectPath
         | WireOperation::Relate
-        | WireOperation::ExpandAround
         | WireOperation::FlowNarrowingAt
         | WireOperation::ContextualTypeAt => MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+        WireOperation::ExpandAround => EXPAND_AROUND_MIN_SCHEMA_VERSION,
         WireOperation::FrameworkSurfaces => FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION,
     };
     if version < minimum {
@@ -433,20 +446,51 @@ pub fn validate_contextual_type_request(
 
 /// Validate an `ExpandGraphAroundRequest`.
 ///
+/// Shape only: the `node_ref` must be present, its query, basis and slot
+/// digests exactly [`NODE_REF_DIGEST_LEN`] bytes and its role digest empty
+/// or exactly that length. Whether the host HOLDS that whole tuple, and
+/// whether its basis is still current, is the executor's question
+/// (`UnknownNodeRef` / `StaleBasis`), asked after this validator passes.
+///
 /// # Errors
 ///
-/// As [`validate_resolve_symbol_graph_request`].
+/// As [`validate_resolve_symbol_graph_request`], plus the reference shape.
 pub fn validate_expand_graph_around_request(
     request: &ExpandGraphAroundRequest,
 ) -> Result<(), TypeInfoRequestError> {
-    let _parent = request
-        .parent_graph
+    let node_ref = request
+        .node_ref
         .as_ref()
-        .ok_or_else(malformed_payload_error_with_detail("missing parent graph"))?;
-    let _target = request
-        .target
-        .as_ref()
-        .ok_or_else(malformed_payload_error_with_detail("missing target node"))?;
+        .ok_or_else(malformed_payload_error_with_detail(
+            "node_ref is required (schema 12): name a position a previous answer published",
+        ))?;
+    for (field, digest) in [
+        ("query_identity_digest", &node_ref.query_identity_digest),
+        ("input_basis_digest", &node_ref.input_basis_digest),
+        ("decl_slot_digest", &node_ref.decl_slot_digest),
+    ] {
+        if digest.len() != NODE_REF_DIGEST_LEN {
+            return Err(malformed_payload_error_with_string_detail(format!(
+                "node_ref.{field} must be exactly {NODE_REF_DIGEST_LEN} bytes, got {}",
+                digest.len()
+            )));
+        }
+    }
+    if !node_ref.role_digest.is_empty() && node_ref.role_digest.len() != NODE_REF_DIGEST_LEN {
+        return Err(malformed_payload_error_with_string_detail(format!(
+            "node_ref.role_digest must be empty or exactly {NODE_REF_DIGEST_LEN} bytes, got {}",
+            node_ref.role_digest.len()
+        )));
+    }
+    // The expansion exports through the same bounded route as
+    // resolve-symbol, which carries no stable declaration-slot identities
+    // for node_id_map / symbol_id_map provenance (the node_ref entries are
+    // independent of this flag).
+    if request.include_provenance {
+        return Err(malformed_payload_error_with_detail(
+            "includeProvenance is not supported by the expand-around graph export",
+        )());
+    }
     validate_projection_reduction_context(request.context.as_ref())?;
     validate_closure_policy(request.closure.as_ref())?;
     validate_display_policy(request.display_policy.as_ref())?;

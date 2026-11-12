@@ -43,6 +43,7 @@ import {
   GraphPrimitiveKind,
   type GraphSignature,
   type GraphTypeNode,
+  type NodeRef,
   type SemanticTypeGraph,
   TypeInfoGraphResponseSchema,
   type TypeInfoRequestError,
@@ -157,6 +158,14 @@ export interface FrameworkSurfaceMember {
    * field). A `ref` is the shallow-by-default alias.
    */
   readonly type?: TypeDescriptor;
+  /**
+   * The host-issued address of the member's type (schema 12): present
+   * only when the host can replay the member exactly. Pass it, bytes
+   * unchanged, as an expand-around request's `nodeRef`, with the NAVIGATE
+   * mode it was issued under. It is opaque: it is never computed or
+   * compared by the client.
+   */
+  readonly nodeRef?: NodeRef;
 }
 
 /** A single framework-surface kind's resolved status and members. */
@@ -296,7 +305,12 @@ function decodeMember(
   if (graph === undefined || m.typeNodeId === 0) {
     return member;
   }
-  return { ...member, type: memberTypeFromGraph(graph, m.typeNodeId) };
+  const nodeRef = graph.nodeIdMap.find((entry) => entry.nodeId === m.typeNodeId)?.nodeRef;
+  return {
+    ...member,
+    type: memberTypeFromGraph(graph, m.typeNodeId),
+    ...(nodeRef === undefined ? {} : { nodeRef }),
+  };
 }
 
 /**

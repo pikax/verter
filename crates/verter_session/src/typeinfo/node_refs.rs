@@ -25,12 +25,13 @@
 //! identity, so substituting a basis or a slot can never retarget a
 //! reference.
 //!
-//! A reference is consumed in three steps, each a production function:
-//! [`lookup_issued`] matches the whole tuple, [`admit_issued_in_view`]
-//! validates the committed basis against a current view, and
-//! [`replay_issued_in_view`] replays the locator through the shared
-//! engine under that view. The ExpandAround executor is their production
-//! caller; until it lands they are exercised by their own tests only.
+//! Schema 12 publishes each issued key on its exported node as a wire
+//! `NodeRef` ([`IssuedRefKey::to_wire`]). A reference is consumed in three
+//! steps, each a production function: [`lookup_issued`] matches the whole
+//! tuple, [`admit_issued_in_view`] validates the committed basis against a
+//! current view, and [`replay_issued_in_view`] replays the locator through
+//! the shared engine under that view. The expand-around executor
+//! (`graph_query.rs`) is their production caller.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -81,6 +82,36 @@ pub(crate) struct IssuedRefKey {
     pub(crate) slot: [u8; 32],
     /// Digest of the typed role of a nested position.
     pub(crate) role: Option<[u8; 32]>,
+}
+
+impl IssuedRefKey {
+    /// The wire `NodeRef` this key publishes as: every digest whole, an
+    /// absent role as the empty role digest.
+    pub(crate) fn to_wire(self) -> verter_protocol::typeinfo::graph::NodeRef {
+        verter_protocol::typeinfo::graph::NodeRef {
+            query_identity_digest: self.query.to_vec(),
+            input_basis_digest: self.basis.to_vec(),
+            decl_slot_digest: self.slot.to_vec(),
+            role_digest: self.role.map(|role| role.to_vec()).unwrap_or_default(),
+        }
+    }
+
+    /// The lookup key a presented wire reference names, or `None` when a
+    /// digest has the wrong length. The key is only ever compared against
+    /// issued keys; it is never an identity.
+    pub(crate) fn from_wire(node_ref: &verter_protocol::typeinfo::graph::NodeRef) -> Option<Self> {
+        let digest = |bytes: &[u8]| <[u8; 32]>::try_from(bytes).ok();
+        Some(Self {
+            query: digest(&node_ref.query_identity_digest)?,
+            basis: digest(&node_ref.input_basis_digest)?,
+            slot: digest(&node_ref.decl_slot_digest)?,
+            role: if node_ref.role_digest.is_empty() {
+                None
+            } else {
+                Some(digest(&node_ref.role_digest)?)
+            },
+        })
+    }
 }
 
 /// How to reach an issued position again through the shared engine.
@@ -507,6 +538,8 @@ fn component_facets_query_identity(
 /// component's export in its producing macro's owner, with the captured slot
 /// environment).
 pub(crate) struct ExportedFrameworkMember {
+    /// The exported node of the member's type in the response graph.
+    pub(crate) type_node_id: u32,
     /// The member's replay locator.
     pub(crate) locator: FrameworkMemberLocator,
     /// The component anchor slot.
@@ -514,7 +547,8 @@ pub(crate) struct ExportedFrameworkMember {
 }
 
 /// Commit the basis of a traced component-facets fact and register one
-/// reference per exported, replayable member. A member whose role has no
+/// reference per exported, replayable member, returning each issued key
+/// with the exported node it addresses. A member whose role has no
 /// canonical encoding is not addressed; a fact with no addressable member
 /// registers nothing. Every refusal is counted and leaves the exported
 /// answer unchanged.
@@ -526,18 +560,21 @@ pub(crate) fn issue_component_facets(
     selector: &crate::typeinfo::framework_surface::plan::ResolvedComponentSelector,
     requested: &[verter_protocol::typeinfo::graph::FrameworkSurfaceKind],
     members: Vec<ExportedFrameworkMember>,
-) -> Result<Vec<IssuedRefKey>, IssueRefusal> {
-    let entries: Vec<_> = members
+) -> Result<Vec<(u32, IssuedRefKey)>, IssueRefusal> {
+    let (nodes, entries): (Vec<u32>, Vec<_>) = members
         .into_iter()
         .filter_map(|member| {
             let role = member.locator.role_digest()?;
             Some((
-                *member.anchor.canonical_digest().as_bytes(),
-                Some(role),
-                NativeReplayLocator::FrameworkMember(Box::new(member.locator)),
+                member.type_node_id,
+                (
+                    *member.anchor.canonical_digest().as_bytes(),
+                    Some(role),
+                    NativeReplayLocator::FrameworkMember(Box::new(member.locator)),
+                ),
             ))
         })
-        .collect();
+        .unzip();
     if entries.is_empty() {
         return Ok(Vec::new());
     }
@@ -550,10 +587,13 @@ pub(crate) fn issue_component_facets(
         FactQuery::ComponentFacets(component_facets_query_identity(selector, requested)),
         entries,
     );
-    if let Err(refusal) = issued {
-        host.typeinfo_issued_refs.lock().note_refusal(refusal);
+    match issued {
+        Ok(keys) => Ok(nodes.into_iter().zip(keys).collect()),
+        Err(refusal) => {
+            host.typeinfo_issued_refs.lock().note_refusal(refusal);
+            Err(refusal)
+        }
     }
-    issued
 }
 
 /// One issued address and the locator that replays it.
@@ -726,6 +766,33 @@ impl IssuedRef {
     fn locator(&self) -> &NativeReplayLocator {
         &self.record.entries[self.entry].locator
     }
+
+    /// The canonical the issuing request named: the resolve-symbol entry, or
+    /// the component. A replay materialises it before capturing its view,
+    /// as the issuing request did.
+    pub(crate) fn entry_canonical(&self) -> &str {
+        match self.locator() {
+            NativeReplayLocator::Declaration(locator) => &locator.entry_canonical,
+            NativeReplayLocator::FrameworkMember(locator) => &locator.component_canonical,
+        }
+    }
+
+    /// The key this entry was issued under.
+    pub(crate) fn key(&self) -> IssuedRefKey {
+        self.record.entries[self.entry].key
+    }
+
+    /// The projection mode the reference replays under: the mode the
+    /// resolve-symbol answer ran with, or the navigable view a framework
+    /// member's value is read from. The reference names a position under
+    /// exactly this mode; an expansion asking for another is a different
+    /// question. Both replay under the published demand.
+    pub(crate) fn replay_mode(&self) -> ProjectionMode {
+        match self.locator() {
+            NativeReplayLocator::Declaration(locator) => locator.effective_mode,
+            NativeReplayLocator::FrameworkMember(_) => FRAMEWORK_MEMBER_REPLAY_MODE,
+        }
+    }
 }
 
 /// Commit the basis of a traced resolve-symbol fact and register its
@@ -835,7 +902,6 @@ fn admit_in_fresh_view(host: &VerterHost, basis: &NativeFactBasis) -> Result<(),
 
 /// The issued entry `key` names. A tuple that was never issued, was
 /// evicted, or differs from an issued one in any component names nothing.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn lookup_issued(host: &VerterHost, key: &IssuedRefKey) -> Option<IssuedRef> {
     host.typeinfo_issued_refs.lock().lookup(key)
 }
@@ -843,25 +909,41 @@ pub(crate) fn lookup_issued(host: &VerterHost, key: &IssuedRefKey) -> Option<Iss
 /// Admit `issued` under the request's captured view: its committed basis
 /// must still describe exactly what `view` observes, validated through
 /// `port`, the request's validation port over `view`. Success certifies
-/// the issued basis; it never adopts the view's newer inputs.
-#[cfg_attr(not(test), allow(dead_code))]
+/// the issued basis; it never adopts the view's newer inputs. The entry's key
+/// must also name the identity the basis fence was bound to at commit, so
+/// an entry can never be admitted under another basis.
 pub(crate) fn admit_issued_in_view(
     view: &HostStoreView,
     port: &dyn StoreView,
     issued: &IssuedRef,
 ) -> Result<(), NativeBasisStale> {
-    validate_native_fact_basis(view, port, &issued.record.basis)
+    let basis = &issued.record.basis;
+    if basis.fence().admit(basis.basis()).is_err()
+        || *basis.fence().basis_id().digest().as_bytes() != issued.key().basis
+    {
+        return Err(NativeBasisStale::Facts);
+    }
+    validate_native_fact_basis(view, port, basis)
+}
+
+/// Re-validate `issued`'s committed basis against a fresh capture of
+/// `host`: the currentness fence an answer passes after its export. A
+/// host whose inputs moved while the answer was produced admits nothing.
+pub(crate) fn admit_issued_in_fresh_view(
+    host: &VerterHost,
+    issued: &IssuedRef,
+) -> Result<(), NativeBasisStale> {
+    admit_in_fresh_view(host, &issued.record.basis)
 }
 
 /// Why an admitted reference could not be replayed.
 #[derive(Debug)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum ReplayRefusal {
     /// The replay reached another declaration than the one issued.
     Diverged,
-    /// The replayed resolution faulted. The ExpandAround executor answers
-    /// it as the graph fault arm; nothing reads it before then.
-    Fault(#[allow(dead_code)] TypeResolutionRequestError),
+    /// The replayed resolution faulted. The expand-around executor answers
+    /// it as the graph fault arm.
+    Fault(TypeResolutionRequestError),
 }
 
 /// Replay an admitted reference through the shared engine under `ctx`'s
@@ -869,7 +951,6 @@ pub(crate) enum ReplayRefusal {
 /// root re-runs its ordinary memoized declaration query; the replay must
 /// reach exactly the issued locator, or it is refused rather than answered
 /// with whatever the current inputs resolve.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn replay_issued_in_view<M: verter_audit::observe::ObserveExec>(
     host: &VerterHost,
     ctx: &crate::resolver_core::HostResolverContext<'_, M>,

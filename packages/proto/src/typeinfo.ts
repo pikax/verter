@@ -28,6 +28,9 @@ export {
   FrameworkProfileRefSchema,
   FrameworkProfileAdvertisementSchema,
   TypeInfoRequestErrorUnknownFrameworkProfileSchema,
+  TypeInfoRequestErrorStaleBasisSchema,
+  TypeInfoRequestErrorUnknownNodeRefSchema,
+  NodeRefSchema,
   GraphProjectionRequestSchema,
   // Graph node messages (kept as the prefixed names — the schema is
   // protobuf-authoritative, and the proto-side prefix avoids collision
@@ -57,8 +60,6 @@ export {
   GraphProjectionReductionContextSchema,
   GraphDisplayPolicySchema,
   GraphResolvedDeclSlotIdentitySchema,
-  GraphHandleSchema,
-  GraphTypeNodeRefSchema,
   GraphSpanRefSchema,
   GraphStringTableSchema,
   // Closed enums.
@@ -154,8 +155,9 @@ export type {
   GraphProjectionReductionContext,
   GraphDisplayPolicy,
   GraphResolvedDeclSlotIdentity,
-  GraphHandle,
-  GraphTypeNodeRef,
+  NodeRef,
+  TypeInfoRequestErrorStaleBasis,
+  TypeInfoRequestErrorUnknownNodeRef,
   GraphSpanRef,
   GraphStringTable,
   GraphProjectionRequest,
@@ -193,7 +195,15 @@ export type {
  * (`VerterHost.typeInfoCapabilities`); a well-shaped reference the host does
  * not admit is the `unknownFrameworkProfile` error arm, and the response's
  * selector echo names the admitted profile.
+ * Schema 12 addresses exported positions by host-issued `NodeRef`s:
+ * `GraphNodeIdMapEntry.nodeRef` (field 3, add-only) carries the address of
+ * each exactly replayable exported node, whether or not provenance was
+ * requested. `ExpandGraphAroundRequest` reserves its parent graph handle and
+ * graph-local target (fields 1 and 2) and names its position by `nodeRef`
+ * (field 8); `GraphHandle` and `GraphTypeNodeRef` are deleted. A reference
+ * the host does not hold is the `unknownNodeRef` error arm, one whose basis
+ * no longer describes the current inputs is `staleBasis`.
  * Schema 2 stays accepted for the legacy operations; the framework-surface
- * operation requires 11.
+ * operation requires 11 and the expand-around operation 12.
  */
-export const TYPEINFO_GRAPH_SCHEMA_VERSION = 11;
+export const TYPEINFO_GRAPH_SCHEMA_VERSION = 12;

@@ -201,7 +201,7 @@ fn an_unserved_operation_is_refused_fail_closed() {
     // A VALIDATED evaluate-expression envelope (op and payload arm
     // coherent) reaching THIS entry is refused with a typed malformed
     // error naming the operation gate — this entry serves the
-    // resolve-symbol operation only; it never silently re-routes to the
+    // resolve-symbol and expand-around operations only; it never silently re-routes to the
     // legacy string-expression evaluator (no dual-running authority).
     let envelope = TypeInfoRequest {
         schema_version: TYPEINFO_GRAPH_SCHEMA_VERSION,
@@ -246,7 +246,7 @@ fn an_unserved_operation_is_refused_fail_closed() {
         Some(type_info_request_error::Kind::MalformedPayload(payload)) => {
             let detail = payload.detail;
             assert!(
-                detail.contains("resolve-symbol operation only"),
+                detail.contains("resolve-symbol and expand-around operations only"),
                 "the refusal names the operation gate, got {detail:?}"
             );
         }
