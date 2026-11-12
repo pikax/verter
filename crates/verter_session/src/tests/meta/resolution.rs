@@ -985,7 +985,9 @@ defineProps<{ (): void }>()
         level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
     };
     assert!(
-        host.resolve_vue_macro_surface(&valid).is_some(),
+        host.resolve_vue_macro_surface(&valid)
+            .expect("a settled host")
+            .is_some(),
         "a valid in-range defineProps macro resolves its surface (gate admits it)"
     );
     let out_of_range = crate::typeinfo::types::VueMacroSurfaceRequest {
@@ -993,7 +995,9 @@ defineProps<{ (): void }>()
         ..valid
     };
     assert!(
-        host.resolve_vue_macro_surface(&out_of_range).is_none(),
+        host.resolve_vue_macro_surface(&out_of_range)
+            .expect("a settled host")
+            .is_none(),
         "an out-of-range macro index does NOT resolve a surface — the gate's \
          `None` path (no shape published) keys on exactly this real signal"
     );

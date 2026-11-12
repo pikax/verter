@@ -312,6 +312,7 @@ fn in_place_members_answer_and_refuse_as_member_queries_under_a_request_budget()
         let answer = match outcome {
             Ok(Some(node)) => Some((
                 host.project_node_to_type_expr_json_bytes(&node)
+                    .expect("a settled host")
                     .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
                 node.checker_recovery_code(),
             )),

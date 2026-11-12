@@ -314,7 +314,9 @@ schema 12, served by the graph entry that serves `OP01`.
   order, each candidate with its own provenance. Cancellation, budget, stale
   basis and unsettled input are typed causes. A miss caused by churn or a
   non-current view is `Unavailable { UnsettledInput }`, never the same signal
-  as "no such declaration".
+  as "no such declaration". A request whose view never settles has no basis
+  (`TR23`) and is refused as `UnstableState` before execution; a torn read
+  inside a basis-bound execution is the per-fact `Unavailable{UnsettledInput}`.
 
 ### Caching and invalidation (subblock 6)
 
@@ -412,7 +414,7 @@ production-capable deletion owner, TIF1 (`TIF1-AC1`).
 | `TIF-D02` | `ExpandGraphAroundRequest` names its parent by `GraphHandle.opaque` bytes | replace with a `NodeRef` over a fact result's `(QueryIdentity, InputBasisId)` and decl-slot (`TR06`); a composed container is not a parent — done at schema 12: fields 1 and 2 are reserved, `GraphHandle` and `GraphTypeNodeRef` are deleted, and `node_ref` (field 8) names a host-issued `(query identity, input basis, decl slot, role)` tuple that answers publish on `GraphNodeIdMapEntry.node_ref`. A tuple the host does not hold is `UnknownNodeRef`, a changed input `StaleBasis` |
 | `TIF-D03` | `GraphQueryIdentity` mixes semantic arguments, presentation, serialization, env hashes and versions in one untyped echo; the graph executor fills the env and project fields with empty values and the framework-surface graph has no query | replace with the `QueryIdentity` digest, `PresentationProfileId`, `SerializationProfileId` and basis provenance |
 | `TIF-D04` | Five public entry vocabularies beside the graph envelope: `list_file_symbols`, `resolve_named_symbol(_wire)_with_audit`, `evaluate_type_expression_with_audit`, `resolve_shallow_surface(_for)`, and `resolve_symbol_graph_with_audit` (no production caller) | replace with one `TypeInfoRequest` over `OP01`–`OP12` |
-| `TIF-D05` | `current_store_view_for_query` reports a non-current view as `None`, the same signal as "could not be resolved" | replace with `Unavailable { UnsettledInput }` |
+| `TIF-D05` | `current_store_view_for_query` reports a non-current view as `None`, the same signal as "could not be resolved" | replace with `Unavailable { UnsettledInput }` — done: the helper makes one store-view read and returns `Result<CurrentHostStoreView, UnsettledInput>` (the store-view manager is the only retry authority; `TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS` and its loop are deleted). Every TypeInfo graph route refuses an unsettled request whole as `UnstableState` (resolve-symbol, framework surface, both expand-around reads, where the fence's churn is no longer `StaleBasis`); the audited resolve/evaluate entries answer `Err(UnstableState)`; the host projection and deepen entries return the typed cause |
 | `TIF-D06` | Five operations pass validation and reach no executor; `Relate` is rejected as `MalformedPayload` | replace: one execution owner per row, a typed `Unsupported` for unserved rows |
 
 TIF0 references these routes owned elsewhere. Deletion owner and receiving

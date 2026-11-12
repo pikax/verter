@@ -96,6 +96,7 @@ fn define_slots_normalizer_filters_to_functions_and_extracts_bindings() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineSlots must resolve a surface");
     let fixture_dispatch_0 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -176,6 +177,7 @@ fn define_slots_normalizer_filters_non_function_members_and_preserves_return() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineSlots must resolve a surface");
     let fixture_dispatch_1 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -249,6 +251,7 @@ fn define_slots_normalizer_publishes_union_of_function_slots() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineSlots must resolve a surface");
     let fixture_dispatch_2 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -324,6 +327,7 @@ fn define_slots_normalizer_drops_union_bindings_when_an_arm_has_no_param() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineSlots must resolve a surface");
     let fixture_dispatch_3 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -398,6 +402,7 @@ fn define_slots_normalizer_extracts_pick_bindings() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineSlots with a Pick first-param resolves a surface");
     let fixture_dispatch_4 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -489,6 +494,7 @@ fn define_slots_imported_inline_pick_publishes_symbolic_binding() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineSlots with an imported-inline Pick resolves a surface");
     let fixture_dispatch_5 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -559,6 +565,7 @@ fn define_slots_named_alias_pick_publishes_symbolic_binding() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineSlots with a named-alias Pick first-param resolves a surface");
     let fixture_dispatch_6 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -636,6 +643,7 @@ fn define_slots_userland_pick_shadow_publishes_concrete_not_symbolic() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineSlots with a userland-Pick first-param resolves a surface");
     let fixture_dispatch_7 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -694,6 +702,7 @@ fn define_slots_structural_source_pick_publishes_concrete_not_symbolic() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineSlots with a structural-source Pick resolves a surface");
     let fixture_dispatch_8 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -756,6 +765,7 @@ fn define_slots_nullable_slot_is_intentionally_dropped() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineSlots resolves a surface");
     let fixture_dispatch_9 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -810,6 +820,7 @@ fn define_slots_two_param_callback_binds_first_param_only() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineSlots resolves a surface");
     let fixture_dispatch_10 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -878,6 +889,7 @@ fn slot_return_empty_object_intersection_arm_collapses_to_real_arm() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineSlots resolves a surface");
     let fixture_dispatch_11 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);

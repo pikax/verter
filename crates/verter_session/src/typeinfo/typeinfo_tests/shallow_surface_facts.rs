@@ -302,6 +302,7 @@ fn shallow_surface_request_level_is_noop_for_plain_ts_named_decl() {
             Arc::from("HybridSurface"),
             TypeInfoQueryLevel::PublicType,
         ))
+        .expect("a settled host")
         .expect("HybridSurface resolves at PublicType");
     let full = host
         .resolve_shallow_surface_for(&ShallowSurfaceRequest::new(
@@ -309,6 +310,7 @@ fn shallow_surface_request_level_is_noop_for_plain_ts_named_decl() {
             Arc::from("HybridSurface"),
             TypeInfoQueryLevel::FullMetadata,
         ))
+        .expect("a settled host")
         .expect("HybridSurface resolves at FullMetadata");
 
     // The surfaces are structurally identical — a plain TS named declaration has

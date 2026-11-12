@@ -168,7 +168,8 @@ pub enum TypeInfoDegradationReasonTag {
     BudgetExceededNodes,
     /// Walker exhausted the depth budget.
     BudgetExceededDepth,
-    /// Publication fence ran past `MAX_INFLIGHT_RETRIES`.
+    /// No current store view settled within the store-view manager's
+    /// budget, so the request was refused before semantic execution.
     UnstablePublicationFence,
     /// One or more nodes ended at `Cycle` exactness.
     CycleDetected,
@@ -285,6 +286,20 @@ impl TypeInfoGraphPayload {
             operation,
             degraded: true,
             degradation_reasons: vec![TypeInfoDegradationReasonTag::RequestValidation],
+            ..Self::empty()
+        }
+    }
+
+    /// Construct a payload for a request refused because no current store
+    /// view settled within the manager's budget: degraded, with
+    /// `TypeInfoDegradationReasonTag::UnstablePublicationFence`. Churn is
+    /// not a validation error.
+    #[must_use]
+    pub fn from_unsettled_input(operation: GraphOperationTag) -> Self {
+        Self {
+            operation,
+            degraded: true,
+            degradation_reasons: vec![TypeInfoDegradationReasonTag::UnstablePublicationFence],
             ..Self::empty()
         }
     }

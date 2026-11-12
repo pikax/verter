@@ -734,6 +734,7 @@ fn probe_answer(host: &VerterHost) -> Result<Vec<u8>, String> {
     match outcome {
         Ok(Some(node)) => host
             .project_node_to_type_expr_json_bytes(&node)
+            .expect("a settled host")
             .ok_or_else(|| "the answer did not materialise".to_owned()),
         Ok(None) => Err("miss".to_owned()),
         Err(fault) => Err(format!("{fault:?}")),

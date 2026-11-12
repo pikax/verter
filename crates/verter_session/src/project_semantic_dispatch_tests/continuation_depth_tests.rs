@@ -98,6 +98,7 @@ fn named_chain_answers(
             .expect("the probe exists");
         let wire = host
             .project_node_to_type_expr_json_bytes(&node)
+            .expect("a settled host")
             .expect("the answer projects");
         let answer = serde_json::from_slice(&wire).expect("a wire TypeExpr");
         check(&answer);

@@ -57,6 +57,7 @@ fn member_spans_slice_to_exact_source_tokens() {
 
     let surface = host
         .resolve_shallow_surface(FILE, "HybridSurface")
+        .expect("a settled host")
         .expect("HybridSurface must resolve to a one-level surface");
 
     let named = member(&surface, "named");
@@ -109,6 +110,7 @@ fn optional_member_name_span_excludes_question_mark() {
 
     let surface = host
         .resolve_shallow_surface(FILE, "HybridSurface")
+        .expect("a settled host")
         .expect("HybridSurface must resolve");
     let flag = member(&surface, "flag");
     // `flag?: boolean;`
@@ -140,6 +142,7 @@ fn call_signature_spans_slice_correctly() {
 
     let surface = host
         .resolve_shallow_surface(FILE, "HybridSurface")
+        .expect("a settled host")
         .expect("HybridSurface must resolve");
 
     assert_eq!(
@@ -189,6 +192,7 @@ fn construct_signature_spans_slice_correctly() {
 
     let surface = host
         .resolve_shallow_surface(FILE, "HybridSurface")
+        .expect("a settled host")
         .expect("HybridSurface must resolve");
 
     assert_eq!(surface.construct_signatures.len(), 1);
@@ -231,6 +235,7 @@ fn index_signature_spans_slice_correctly() {
 
     let surface = host
         .resolve_shallow_surface(FILE, "HybridSurface")
+        .expect("a settled host")
         .expect("HybridSurface must resolve");
 
     assert_eq!(surface.index_signatures.len(), 1);
@@ -283,6 +288,7 @@ fn inherited_member_span_references_origin_file_not_consumer() {
 
     let surface = host
         .resolve_shallow_surface(DERIVED, "Derived")
+        .expect("a settled host")
         .expect("Derived must resolve to a one-level surface across the heritage edge");
 
     // The inherited `baseOnly` member originates in BASE — its spans (and
@@ -342,6 +348,7 @@ fn public_accessor_projects_full_surface_with_flags_and_roles() {
     // Interface heritage: `HeritageDerived extends HeritageBase`.
     let surface = host
         .resolve_shallow_surface(FILE, "HeritageDerived")
+        .expect("a settled host")
         .expect("HeritageDerived must resolve");
 
     let names: Vec<&str> = surface
@@ -441,6 +448,7 @@ fn nested_object_member_stays_shallow_reference_not_materialized() {
 
     let surface = host
         .resolve_shallow_surface(NESTED, "Nested")
+        .expect("a settled host")
         .expect("Nested must resolve to a one-level surface");
 
     let graph = { host.project_type_store().semantic_graph() };
@@ -501,6 +509,7 @@ fn member_with_unresolved_value_type_keeps_real_declaration_spans() {
 
     let surface = host
         .resolve_shallow_surface(BROKEN, "Broken")
+        .expect("a settled host")
         .expect("Broken must resolve to a one-level surface despite the unresolved member type");
 
     let present = member(&surface, "present");
@@ -771,6 +780,7 @@ fn member_jsdoc_description_span_slices_to_exact_doc_text() {
 
     let surface = host
         .resolve_shallow_surface(FILE, "DocumentedSurface")
+        .expect("a settled host")
         .expect("DocumentedSurface must resolve to a one-level surface");
 
     // `documented` has `/** the documented field */`.
@@ -811,6 +821,7 @@ fn member_jsdoc_tag_spans_slice_to_exact_tag_tokens() {
 
     let surface = host
         .resolve_shallow_surface(FILE, "DocumentedSurface")
+        .expect("a settled host")
         .expect("DocumentedSurface must resolve");
 
     // `tagged` has a multi-line description AND `@deprecated use somethingElse`.
@@ -866,6 +877,7 @@ fn member_jsdoc_tag_text_span_recovers_multi_line_continuation() {
 
     let surface = host
         .resolve_shallow_surface(FILE, "DocumentedSurface")
+        .expect("a settled host")
         .expect("DocumentedSurface must resolve");
 
     // `multiLineTag` carries a `@deprecated` whose description CONTINUES onto a
@@ -935,6 +947,7 @@ export class C {
 
     let surface = host
         .resolve_shallow_surface(FILE, "C")
+        .expect("a settled host")
         .expect("class `C` must resolve to a one-level surface");
 
     use verter_type_expr::MemberVisibility;

@@ -311,15 +311,21 @@ impl VerterHost {
     /// with no type-based macros — there is no public component surface to
     /// build).
     ///
+    /// # Errors
+    ///
+    /// [`UnsettledInput`](crate::typeinfo::UnsettledInput) when no current
+    /// store view settles; nothing is resolved.
+    ///
     /// `level` is accepted for symmetry with the level-aware request surface;
     /// the public component type IS the [`TypeInfoQueryLevel::PublicType`]
     /// projection, so callers pass `PublicType`.
-    #[must_use]
     pub fn resolve_vue_public_type(
         &self,
         canonical_id: &str,
         level: TypeInfoQueryLevel,
-    ) -> Option<TypeInfoSurface> {
+    ) -> Result<Option<TypeInfoSurface>, crate::typeinfo::UnsettledInput> {
+        // `None` is a miss; `Some(Err)` is an unsettled view.
+        (|| -> Option<Result<TypeInfoSurface, crate::typeinfo::UnsettledInput>> {
         verter_debug_assert_eq!(
             level,
             TypeInfoQueryLevel::PublicType,
@@ -370,9 +376,12 @@ impl VerterHost {
 
         // Query-RETURNER: it returns the public instance surface with no outer
         // publish fence, so it MUST resolve against a PROVEN-CURRENT snapshot.
-        // On sustained churn surface a miss (`None`) rather than a surface
-        // resolved against superseded state. The bounded retry terminates.
-        let current_view = crate::typeinfo::current_store_view_for_query(self)?;
+        // When none settles it answers `UnsettledInput`, never a miss and
+        // never a surface resolved against superseded state.
+        let current_view = match crate::typeinfo::current_store_view_for_query(self) {
+            Ok(current_view) => current_view,
+            Err(unsettled) => return Some(Err(unsettled)),
+        };
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
             let host_ctx =
@@ -419,7 +428,10 @@ impl VerterHost {
                     None,
                 ),
             )
+            .map(Ok)
         })
+        })()
+        .transpose()
     }
 
     /// Resolve a `.vue` macro's type-argument surface to its span-rich
@@ -451,27 +463,29 @@ impl VerterHost {
     /// `declared_in_macro_type_arg = true` and heritage-reached members stay
     /// `false`; structural macros (`DefineEmits` / `DefineSlots`) lower under
     /// [`SurfaceProvenanceContext::Structural`].
-    #[must_use]
     pub fn resolve_vue_macro_surface(
         &self,
         request: &VueMacroSurfaceRequest,
-    ) -> Option<VueMacroSurface> {
+    ) -> Result<Option<VueMacroSurface>, crate::typeinfo::UnsettledInput> {
         // Base-view query-RETURNER (tests, the host-method `vue_macro_dtos`
         // wrapper). It returns the macro surface with no outer publish fence, so
-        // it MUST resolve against a PROVEN-CURRENT snapshot. Overlay-bearing
-        // production callers MUST use `resolve_vue_macro_surface_with_ctx` with
-        // their active session context. The bounded retry terminates.
+        // it MUST resolve against a PROVEN-CURRENT snapshot, and answers
+        // `UnsettledInput` when none settles. Overlay-bearing production
+        // callers MUST use `resolve_vue_macro_surface_with_ctx` with their
+        // active session context.
         let current_view = crate::typeinfo::current_store_view_for_query(self)?;
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            let host_ctx =
-                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
-            resolve_vue_macro_surface_with_ctx(
-                &host_ctx,
-                &ProjectSemanticDispatch::new(&host_ctx),
-                request,
-            )
-        })
+        Ok(
+            verter_audit::specialise!(crate::capture::installed_mode() => M, {
+                let host_ctx =
+                    crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
+                resolve_vue_macro_surface_with_ctx(
+                    &host_ctx,
+                    &ProjectSemanticDispatch::new(&host_ctx),
+                    request,
+                )
+            }),
+        )
     }
 
     /// Context-bound resolution core for [`Self::resolve_vue_macro_surface`].
@@ -520,21 +534,22 @@ impl VerterHost {
     /// # Errors
     ///
     /// [`MacroDtosRefusal`](crate::typeinfo::framework_surface::MacroDtosRefusal)
-    /// when the host does not admit the Vue adapter or the owner is another
-    /// framework's carrier; nothing is computed or cached.
+    /// when the host does not admit the Vue adapter, the owner is another
+    /// framework's carrier, or no current store view settles; nothing is
+    /// computed or cached.
     pub fn vue_macro_dtos(
         &self,
         request: &VueMacroSurfaceRequest,
     ) -> Result<Arc<MacroSurfaceDtos>, crate::typeinfo::framework_surface::MacroDtosRefusal> {
         // Base-view query-RETURNER. It returns AND content-addressed caches the
         // DTO bundle, so it MUST resolve against a PROVEN-CURRENT snapshot — a
-        // non-current execution must never warm the cache. On sustained churn
-        // return the empty "no surface" bundle WITHOUT computing or caching
-        // anything. Overlay-bearing production callers MUST call
+        // non-current execution must never warm the cache. When none settles
+        // it is refused as `UnsettledInput` WITHOUT computing or caching
+        // anything; an unsettled view is never an empty "no surface" bundle.
+        // Overlay-bearing production callers MUST call
         // `vue_macro_dtos_with_ctx` with their active session context.
-        let Some(current_view) = crate::typeinfo::current_store_view_for_query(self) else {
-            return Ok(Arc::new(MacroSurfaceDtos::default()));
-        };
+        let current_view = crate::typeinfo::current_store_view_for_query(self)
+            .map_err(|_| crate::typeinfo::framework_surface::MacroDtosRefusal::UnsettledInput)?;
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
             let host_ctx =

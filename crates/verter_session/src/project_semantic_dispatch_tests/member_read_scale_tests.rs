@@ -123,6 +123,7 @@ fn named_probe(source: &str, probe: &str) -> (BTreeSet<String>, Work) {
     let dispatches = DISPATCH_TRACE.with(|trace| trace.borrow().len()) as u64;
     let bytes = host
         .project_node_to_type_expr_json_bytes(&node)
+        .expect("a settled host")
         .expect("the answer projects");
     let answer: TypeExpr = serde_json::from_slice(&bytes).expect("a wire answer");
     let literal = |expr: &TypeExpr| match expr {

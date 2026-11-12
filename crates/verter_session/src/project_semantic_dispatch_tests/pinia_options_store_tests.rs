@@ -232,6 +232,7 @@ pub(super) fn wire_answer(
 ) -> TypeExpr {
     let wire = host
         .project_node_to_type_expr_json_bytes(node)
+        .expect("a settled host")
         .expect("the answer projects");
     let value: serde_json::Value = serde_json::from_slice(&wire).expect("the wire answer is JSON");
     verter_type_expr::type_expr_from_json(&value).expect("a wire TypeExpr")

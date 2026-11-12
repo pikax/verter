@@ -131,41 +131,48 @@ impl VerterHost {
     /// Materializes the node into a sealed output carrier through the
     /// typeinfo [`OutputProjector`] capability, unwraps it, and serializes
     /// the resulting [`verter_type_expr::TypeExpr`] to UTF-8 JSON bytes.
-    /// Returns `None` when the node id has no current graph entry (the
+    /// Returns `Ok(None)` when the node id has no current graph entry (the
     /// typical "miss" case — e.g. resolution returned a node that has since
     /// been evicted by a generation flip) OR when serialization fails (a
     /// `TypeExpr` is always serializable, so the latter is unreachable in
-    /// practice and collapses to the same miss signal the FFI surface maps
-    /// to `null`).
+    /// practice).
+    ///
+    /// # Errors
+    ///
+    /// [`UnsettledInput`](crate::typeinfo::UnsettledInput) when no current
+    /// store view settles: churn, never the miss above. The FFI reports it on
+    /// its `error` field.
     ///
     /// [`OutputProjector`]: crate::output_sinks::OutputProjector
-    #[must_use]
     pub fn project_node_to_type_expr_json_bytes(
         &self,
         node: &verter_type_engine::semantic_query_memo::node_roots::NodeRoot,
-    ) -> Option<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>, crate::typeinfo::UnsettledInput> {
         // Query-RETURNER: it returns the encoded `TypeExpr` with no outer
         // publish fence, so it MUST raise against a PROVEN-CURRENT
         // snapshot. A known-stale (`ReturnOnly`) read would raise the node
-        // against superseded graph state; on sustained churn surface a
-        // miss (`None`) — the established raise miss signal — rather than
-        // a stale projection. The bounded retry terminates.
+        // against superseded graph state; when no current view settles it
+        // answers `UnsettledInput` rather than a stale projection or a miss.
         let current_view = crate::typeinfo::current_store_view_for_query(self)?;
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            let host_ctx =
-                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
-            let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-            // Mint the typeinfo bytes-facade output capability (constructor
-            // visible only within `crate::typeinfo::raise`): this FFI facade is a
-            // true output sink.
-            let node = owned_projection_subject(&dispatch, node)?;
-            let cap = TypeinfoRaiseOutputCap::new(&dispatch);
-            let type_expr = cap
-                .materialize_output_type_expr(node)?
-                .into_type_expr(cap.authority());
-            serde_json::to_vec(&type_expr).ok()
-        })
+        Ok(
+            verter_audit::specialise!(crate::capture::installed_mode() => M, {
+                let host_ctx =
+                    crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
+                let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+                // Mint the typeinfo bytes-facade output capability (constructor
+                // visible only within `crate::typeinfo::raise`): this FFI facade is a
+                // true output sink.
+                (|| {
+                    let node = owned_projection_subject(&dispatch, node)?;
+                    let cap = TypeinfoRaiseOutputCap::new(&dispatch);
+                    let type_expr = cap
+                        .materialize_output_type_expr(node)?
+                        .into_type_expr(cap.authority());
+                    serde_json::to_vec(&type_expr).ok()
+                })()
+            }),
+        )
     }
 
     /// Demand-time deepen of one published synthetic slot-binding carrier —
@@ -189,86 +196,59 @@ impl VerterHost {
     /// FAIL-CLOSED: a deepen that cannot complete (stale seed, evicted node,
     /// unresolvable value) falls back to the shallow carrier inside the raise
     /// arm; this method maps that fallback — and any unraisable source — to
-    /// `None`, so the caller keeps its typed refusal and never renders a
+    /// `Ok(None)`, so the caller keeps its typed refusal and never renders a
     /// fabricated shape. `scope_canonical_id` is the OWNING child component's
     /// canonical id (the scope the contract row was published under).
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// [`UnsettledInput`](crate::typeinfo::UnsettledInput) when no current
+    /// store view settles; nothing is deepened.
     pub fn deepen_synthetic_slot_binding(
         &self,
         scope_canonical_id: &str,
         key: &std::sync::Arc<verter_type_expr::SyntheticCarrierKey>,
-    ) -> Option<verter_type_expr::TypeExpr> {
+    ) -> Result<Option<verter_type_expr::TypeExpr>, crate::typeinfo::UnsettledInput> {
         let current_view = crate::typeinfo::current_store_view_for_query(self)?;
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            let host_ctx =
-                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
-            let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-            let source = verter_type_expr::facts::SemanticTypeSource::SyntheticSlotBinding(
-                verter_retention::owned::Owned::new((**key).clone()),
-            );
-            let raised = dispatch
-                .owning().raise_semantic_type_source_to_hot(
-                    &source,
-                    verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                        scope_canonical_id,
-                        scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
-                            verter_type_engine::semantic_query::ProjectionMode::Expanded,
-                        ),
-                        interior_failures: None,
-                    },
-                ).map(|outcome| outcome.at_optional_boundary());
-            let hot = (*raised.value())?;
-            // The raise arm's honest degraded answer is the shallow carrier NODE
-            // itself — a refusal to deepen, not a deepened view. Decided on the
-            // NODE-DOMAIN fact (never on a reverse-materialized `TypeExpr` — the
-            // hot-path fence): the materialization below is the ONE terminal-sink
-            // output raise and feeds no semantic decision.
-            if dispatch.node_is_synthetic_binding_carrier(hot.node()) {
-                return None;
-            }
-            let cap = TypeinfoRaiseOutputCap::new(&dispatch);
-            Some(
-                cap.materialize_output_type_expr(hot.node())?
-                    .into_type_expr(cap.authority()),
-            )
-        })
-    }
-
-    /// Project an owned node root to its bounded wire
-    /// [`SemanticTypeGraph`](verter_protocol::typeinfo::graph::SemanticTypeGraph)
-    /// export — the graph-protocol answer for the typeinfo graph
-    /// operations.
-    ///
-    /// Materializes the node into a sealed output carrier through the
-    /// typeinfo [`OutputProjector`] capability (the same sealed path
-    /// [`Self::project_node_to_type_expr_json_bytes`] rides), unwraps
-    /// it, and hands the terminal `TypeExpr` to the pure bounded
-    /// encoder (`verter_protocol::typeinfo::graph_export`). The
-    /// returned graph's `query` identity is left unset — the executing
-    /// operation fills it from its validated request.
-    ///
-    /// Returns `None` on a raise miss (the node id has no current graph
-    /// entry — the established miss signal), which the caller maps to
-    /// its typed miss answer.
-    #[must_use]
-    pub fn project_node_to_semantic_type_graph(
-        &self,
-        node: &verter_type_engine::semantic_query_memo::node_roots::NodeRoot,
-        budgets: &verter_protocol::typeinfo::graph_export::GraphExportBudgets,
-    ) -> Option<verter_protocol::typeinfo::graph::SemanticTypeGraph> {
-        // Query-RETURNER: same proven-current-snapshot contract as the
-        // JSON bytes facade above.
-        let current_view = crate::typeinfo::current_store_view_for_query(self)?;
-        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            let host_ctx =
-                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
-            let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-            let node = owned_projection_subject(&dispatch, node)?;
-            project_ordinal_to_semantic_type_graph(&dispatch, node, budgets)
-        })
+        Ok(
+            verter_audit::specialise!(crate::capture::installed_mode() => M, {
+              (|| {
+                let host_ctx =
+                    crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
+                let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+                let source = verter_type_expr::facts::SemanticTypeSource::SyntheticSlotBinding(
+                    verter_retention::owned::Owned::new((**key).clone()),
+                );
+                let raised = dispatch
+                    .owning().raise_semantic_type_source_to_hot(
+                        &source,
+                        verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+                            scope_canonical_id,
+                            scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                            context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                                verter_type_engine::semantic_query::ProjectionMode::Expanded,
+                            ),
+                            interior_failures: None,
+                        },
+                    ).map(|outcome| outcome.at_optional_boundary());
+                let hot = (*raised.value())?;
+                // The raise arm's honest degraded answer is the shallow carrier NODE
+                // itself — a refusal to deepen, not a deepened view. Decided on the
+                // NODE-DOMAIN fact (never on a reverse-materialized `TypeExpr` — the
+                // hot-path fence): the materialization below is the ONE terminal-sink
+                // output raise and feeds no semantic decision.
+                if dispatch.node_is_synthetic_binding_carrier(hot.node()) {
+                    return None;
+                }
+                let cap = TypeinfoRaiseOutputCap::new(&dispatch);
+                Some(
+                    cap.materialize_output_type_expr(hot.node())?
+                        .into_type_expr(cap.authority()),
+                )
+              })()
+            }),
+        )
     }
 
     /// Fixture sibling of [`Self::project_node_to_type_expr_json_bytes`] for
@@ -300,7 +280,8 @@ impl VerterHost {
         node: SemanticNodeId,
     ) -> Option<verter_type_expr::TypeExpr> {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            let current_view = crate::typeinfo::current_store_view_for_query(self)?;
+            let current_view =
+                crate::typeinfo::current_store_view_for_query(self).expect("a settled host");
             let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
             let host_ctx = crate::resolver_core::HostResolverContext::<
                 '_,

@@ -1414,17 +1414,16 @@ impl WasmVerterHost {
             // Bytes facade: `verter_session` wire-encodes the `TypeExpr` to
             // UTF-8 JSON internally (through the sealed output capability);
             // the WASM adapter only decodes the bytes to a `String`.
-            let type_expr_json = match resolved {
-                Some(node_id) => host
-                    .project_node_to_type_expr_json_bytes(&node_id)
-                    .map(|bytes| {
-                        String::from_utf8(bytes).map_err(|e| {
-                            JsValue::from_str(&format!("type-expr utf-8 decode error: {e}"))
-                        })
+            let (type_expr_bytes, projection_error) =
+                crate::typeinfo::project_resolved_root(&host, resolved);
+            let type_expr_json = type_expr_bytes
+                .map(|bytes| {
+                    String::from_utf8(bytes).map_err(|e| {
+                        JsValue::from_str(&format!("type-expr utf-8 decode error: {e}"))
                     })
-                    .transpose()?,
-                None => None,
-            };
+                })
+                .transpose()?;
+            let error = error.or(projection_error);
             let audit_json = crate::typeinfo::encode_stored_audit_record(&record)?;
             let result = crate::typeinfo::WasmTypeInfoResolveResult {
                 type_expr: type_expr_json,
@@ -1453,17 +1452,16 @@ impl WasmVerterHost {
             // Bytes facade: `verter_session` wire-encodes the `TypeExpr` to
             // UTF-8 JSON internally (through the sealed output capability);
             // the WASM adapter only decodes the bytes to a `String`.
-            let type_expr_json = match resolved {
-                Some(node_id) => host
-                    .project_node_to_type_expr_json_bytes(&node_id)
-                    .map(|bytes| {
-                        String::from_utf8(bytes).map_err(|e| {
-                            JsValue::from_str(&format!("type-expr utf-8 decode error: {e}"))
-                        })
+            let (type_expr_bytes, projection_error) =
+                crate::typeinfo::project_resolved_root(&host, resolved);
+            let type_expr_json = type_expr_bytes
+                .map(|bytes| {
+                    String::from_utf8(bytes).map_err(|e| {
+                        JsValue::from_str(&format!("type-expr utf-8 decode error: {e}"))
                     })
-                    .transpose()?,
-                None => None,
-            };
+                })
+                .transpose()?;
+            let error = error.or(projection_error);
             let audit_json = crate::typeinfo::encode_stored_audit_record(&record)?;
             let result = crate::typeinfo::WasmTypeInfoResolveResult {
                 type_expr: type_expr_json,

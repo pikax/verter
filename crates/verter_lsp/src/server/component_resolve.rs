@@ -1359,7 +1359,10 @@ impl VerterLanguageServer {
                 // RANK-MATCHED slot's synthetic-carrier bindings only (other
                 // slots never deepen), through the one sanctioned session
                 // route. A binding that fails to deepen keeps its published
-                // form — the typed refusal (fail-closed, never fabricated).
+                // form — the typed refusal (fail-closed, never fabricated). An
+                // unsettled view stops the loop: every remaining binding
+                // keeps its published form rather than paying another
+                // store-view handoff against the same churn.
                 let mut deepened =
                     crate::features::hover_slot_deepen::SlotBindingDeepenView::default();
                 for (binding_name, key) in
@@ -1368,12 +1371,16 @@ impl VerterLanguageServer {
                         &target.slot_name,
                     )
                 {
-                    if let Some(view) = self
+                    match self
                         .documents
                         .host()
                         .deepen_synthetic_slot_binding(&child.canonical_id, key)
                     {
-                        deepened.insert(std::sync::Arc::clone(binding_name), view);
+                        Ok(Some(view)) => {
+                            deepened.insert(std::sync::Arc::clone(binding_name), view);
+                        }
+                        Ok(None) => {}
+                        Err(_unsettled) => break,
                     }
                 }
                 Ok(hover::build_child_slot_hover(

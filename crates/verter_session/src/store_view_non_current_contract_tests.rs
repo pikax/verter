@@ -12,12 +12,15 @@
 //! epoch on every build attempt so `base_view` exhausts its bounded
 //! retry — and assert the contract holds:
 //!
-//! 1. a typeinfo query-returner (`resolve_named_symbol`) resolves
-//!    against a proven-current view or, under sustained churn, MISSES
-//!    (returns `None`) rather than resolving against superseded state
-//!    and returning a stale node;
+//! 1. a typeinfo query-returner (`resolve_named_symbol_with_audit`)
+//!    resolves against a proven-current view or, under sustained churn,
+//!    answers the typed `UnstableState` fault — never a miss and never a
+//!    node resolved against superseded state (churn is not a miss);
+//!    every TypeInfo graph route (resolve-symbol, framework
+//!    surface, the expand-around fence) refuses the request whole as
+//!    `UnstableState` and publishes nothing;
 //! 2. a cacheable typeinfo evaluation (`evaluate_type_expression`)
-//!    under sustained churn returns `None`, does NOT warm the
+//!    under sustained churn answers `UnstableState`, does NOT warm the
 //!    host-owned scratch cache from a non-current execution, and fully
 //!    removes the scratch it upserted before the proven-current
 //!    acquisition (the scratch never gained an LRU owner, so leaving it
@@ -75,9 +78,8 @@ fn host_with_decl() -> (Arc<VerterHost>, String) {
 /// Run `f` on a watchdog thread and assert it returns within `secs`.
 ///
 /// The non-current store-view path is bounded (the manager's
-/// `base_view` retry cap plus the typeinfo current-view retry cap), so
-/// a regression that re-loops a never-coherent build forever would hang
-/// here. The watchdog turns that hang into a deterministic failure
+/// `base_view` retry cap is the only retry), so a regression that
+/// re-loops a never-coherent build forever would hang here. The watchdog turns that hang into a deterministic failure
 /// instead of stalling the suite.
 fn run_with_watchdog<T, F>(secs: u64, f: F) -> T
 where
@@ -100,53 +102,72 @@ where
     }
 }
 
+/// The typed outcome a churned typeinfo query-returner must answer.
+fn is_unstable_state<T: std::fmt::Debug>(
+    outcome: &Result<T, crate::host_resolve_type_audit::TypeResolutionRequestError>,
+) -> bool {
+    matches!(
+        outcome,
+        Err(crate::host_resolve_type_audit::TypeResolutionRequestError::UnstableState { .. })
+    )
+}
+
 #[test]
-fn resolve_named_symbol_misses_under_sustained_non_current_view() {
+fn resolve_named_symbol_is_unstable_state_under_sustained_non_current_view() {
     // Control: a quiescent host resolves the declaration to a node.
     let (host, canonical) = host_with_decl();
-    let quiescent = host.resolve_named_symbol(&canonical, "Widget", None);
-    assert!(
-        quiescent.is_some(),
-        "control: a quiescent host must resolve `Widget` to a semantic node"
-    );
+    let quiescent = host
+        .resolve_named_symbol_with_audit(&canonical, "Widget", None)
+        .into_result();
+    let root = match quiescent {
+        Ok(Some(root)) => root,
+        other => panic!("control: a quiescent host must resolve `Widget`, got {other:?}"),
+    };
 
     // Force sustained validation-token churn so every base-view read on
-    // this thread is a known-stale `ReturnOnly`. The typeinfo
-    // query-returner builds its dispatch context from
-    // `resolver_store_view`; pre-contract it resolved against the stale
-    // view and returned a node anyway, post-contract it acquires a
-    // proven-current view via a bounded retry and, finding none, MISSES.
+    // this thread is a known-stale `ReturnOnly`. The query-returner takes
+    // one view, finds it non-current, and answers the typed fault: churn is
+    // not "no such declaration". In the same window the projection of the
+    // control's root (its own second view) is unsettled too, never a miss.
     let host_for_query = Arc::clone(&host);
     let canonical_for_query = canonical.clone();
-    let resolved_under_churn = run_with_watchdog(10, move || {
+    let (resolved_under_churn, projected_under_churn) = run_with_watchdog(10, move || {
         HostStoreView::arm_supersede_always_for_tests();
         // Invalidate any manager-cached `Current` entry the control
         // resolution warmed so the query's view read must REBUILD — the
-        // sustained churn knob then supersedes every rebuild, deterministically
-        // forcing the bounded-retry-then-miss path.
+        // sustained churn knob then supersedes every rebuild.
         host_for_query.bump_store_view_epoch();
-        let resolved = host_for_query.resolve_named_symbol(&canonical_for_query, "Widget", None);
+        let resolved = host_for_query
+            .resolve_named_symbol_with_audit(&canonical_for_query, "Widget", None)
+            .into_result();
+        let projected = host_for_query.project_node_to_type_expr_json_bytes(&root);
         HostStoreView::disarm_supersede_always_for_tests();
-        resolved
+        (resolved, projected)
     });
     assert!(
-        resolved_under_churn.is_none(),
-        "under sustained non-current churn `resolve_named_symbol` MUST miss (return \
-         None) rather than resolve `Widget` against a known-stale snapshot and return \
-         a node — the query-returner must resolve against a proven-current view"
+        is_unstable_state(&resolved_under_churn),
+        "under sustained non-current churn `resolve_named_symbol_with_audit` MUST answer \
+         `UnstableState` rather than a miss or a node resolved against a known-stale \
+         snapshot, got {resolved_under_churn:?}"
+    );
+    assert!(
+        projected_under_churn.is_err(),
+        "an unsettled projection view is `UnsettledInput`, never a silent miss: \
+         {projected_under_churn:?}"
     );
 
-    // After the churn is disarmed a fresh resolution succeeds again — the
-    // miss was the transient non-current outcome, not a permanent break.
-    let recovered = host.resolve_named_symbol(&canonical, "Widget", None);
+    // After the churn is disarmed a fresh resolution succeeds again.
+    let recovered = host
+        .resolve_named_symbol_with_audit(&canonical, "Widget", None)
+        .into_result();
     assert!(
-        recovered.is_some(),
+        matches!(recovered, Ok(Some(_))),
         "a quiescent resolution after the churn is disarmed must resolve `Widget` again"
     );
 }
 
 #[test]
-fn evaluate_type_expression_does_not_cache_from_non_current_view() {
+fn evaluate_type_expression_is_unstable_state_under_sustained_non_current_view() {
     use crate::typeinfo::types::EvaluateTypeExpressionRequest;
     use verter_type_engine::semantic_query::ProjectionMode;
 
@@ -167,10 +188,9 @@ fn evaluate_type_expression_does_not_cache_from_non_current_view() {
         cacheable: true,
     };
 
-    // Under sustained churn the cacheable evaluation must (a) miss and
-    // (b) NOT warm the host-owned scratch cache from a non-current
-    // execution. Pre-contract `evaluate_inner` resolved against the stale
-    // view and inserted the result into `scratch_cache`.
+    // Under sustained churn the cacheable evaluation must (a) answer the
+    // typed `UnstableState` fault and (b) NOT warm the host-owned scratch
+    // cache from a non-current execution.
     let host_for_eval = Arc::clone(&host);
     let req_for_eval = req.clone();
     let audited = run_with_watchdog(10, move || {
@@ -179,13 +199,11 @@ fn evaluate_type_expression_does_not_cache_from_non_current_view() {
         HostStoreView::disarm_supersede_always_for_tests();
         result
     });
-    // A non-current execution is a non-fault miss (`Ok(None)`); a fault
-    // also yields no resolution. Both collapse to "no node".
-    let resolved = audited.into_result().ok().flatten();
+    let outcome = audited.into_result();
     assert!(
-        resolved.is_none(),
-        "under sustained non-current churn `evaluate_type_expression` MUST miss rather \
-         than evaluate against a known-stale snapshot"
+        is_unstable_state(&outcome),
+        "under sustained non-current churn `evaluate_type_expression` MUST answer \
+         `UnstableState` rather than a miss, got {outcome:?}"
     );
     assert_eq!(
         host.scratch_cache().lock().len(),
@@ -255,19 +273,18 @@ fn evaluate_type_expression_removes_orphan_scratch_on_non_current_miss() {
         let mut last = None;
         for _ in 0..4 {
             host_for_eval.bump_store_view_epoch();
-            let node = host_for_eval
+            let outcome = host_for_eval
                 .evaluate_type_expression_with_audit(req_for_eval.clone())
-                .into_result()
-                .ok()
-                .flatten();
-            last = Some(node);
+                .into_result();
+            last = Some(outcome);
         }
         HostStoreView::disarm_supersede_always_for_tests();
         last.expect("the loop runs at least once")
     });
     assert!(
-        resolved.is_none(),
-        "under sustained non-current churn the cacheable evaluation MUST miss"
+        is_unstable_state(&resolved),
+        "under sustained non-current churn the cacheable evaluation MUST answer \
+         `UnstableState`, got {resolved:?}"
     );
 
     // The scratch cache stays empty — a non-current execution never warms it,
@@ -925,9 +942,7 @@ fn evaluate_type_expression_cleanup_preserves_concurrently_owned_scratch() {
         host_clean.bump_store_view_epoch();
         let out = host_clean
             .evaluate_type_expression_with_audit(req_clean)
-            .into_result()
-            .ok()
-            .flatten();
+            .into_result();
         HostStoreView::disarm_supersede_always_for_tests();
         out
     });
@@ -958,8 +973,9 @@ fn evaluate_type_expression_cleanup_preserves_concurrently_owned_scratch() {
     let cleaner_out =
         run_with_watchdog(15, move || cleaner.join().expect("cleaner must not panic"));
     assert!(
-        cleaner_out.is_none(),
-        "the cleaning evaluation runs under sustained churn and MUST miss (return None)"
+        is_unstable_state(&cleaner_out),
+        "the cleaning evaluation runs under sustained churn and MUST be UnstableState: \
+         {cleaner_out:?}"
     );
     test_interleave::clear();
 
@@ -1006,4 +1022,502 @@ fn evaluate_type_expression_cleanup_preserves_concurrently_owned_scratch() {
         "a repeat cacheable evaluation must hit the surviving cache entry and resolve the \
          owner's node — a removed host file behind a live cache entry would not"
     );
+}
+
+// ---------------------------------------------------------------------
+// An unsettled view is `UnstableState` on every TypeInfo graph route:
+// churn is never answered as a miss. These live here, not under
+// `tests/cases`, because the `arm_supersede_always_for_tests` knob is
+// `cfg(test)` and thread-local.
+// ---------------------------------------------------------------------
+
+mod unsettled_view_refusal {
+    use std::sync::Arc;
+
+    use verter_protocol::typeinfo::graph::{self as wire, Operation, TypeInfoGraphRequest};
+    use verter_protocol::verter::v1::{
+        graph_closure_policy, graph_query_error, graph_type_node, type_info_graph_request,
+        type_info_graph_response, type_info_request_error, FrameworkSurfaceKindSupport,
+        SemanticTypeGraph,
+    };
+    use verter_workspace::{
+        MemoryOptions, MemoryWorkspace, ProjectGraph, ProjectRank, VfsProjectConfig,
+    };
+
+    use super::run_with_watchdog;
+    use crate::resolver_store::{HostStoreView, HOST_STORE_VIEW_FROM_HOST_BUILDS};
+    use crate::typeinfo::node_refs::{
+        admit_issued_in_fresh_view, issuance_counters_for_tests, issued_keys_for_tests,
+        lookup_issued, FreshAdmission, IssuedRefKey,
+    };
+    use crate::types::{HostConfig, UpsertRequest};
+    use crate::VerterHost;
+
+    const ROOT: &str = "/proj";
+    const ENTRY: &str = "/proj/a.ts";
+    const DEPENDENCY: &str = "/proj/b.ts";
+    const SFC: &str = "/comp.vue";
+    const SFC_SOURCE: &str =
+        "<script setup lang=\"ts\">\nconst props = defineProps<{ a: string }>()\n</script>\n";
+
+    fn upsert(host: &VerterHost, canonical: &str, source: &str) {
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical.to_string()),
+                input_id: canonical.to_string(),
+                source: Arc::from(source),
+                file_language: crate::LanguageRegistry::global()
+                    .classify_static(canonical)
+                    .static_resolution(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert");
+    }
+
+    /// A configured project host whose `A` resolves through an import, so
+    /// a resolve-symbol answer commits a basis and issues a reference.
+    fn project_host() -> Arc<VerterHost> {
+        let workspace = Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+        workspace.set_project_graph(ProjectGraph::from_configs(vec![VfsProjectConfig {
+            root: ROOT.to_string(),
+            rank: ProjectRank::Explicit,
+            tsconfig_path: Some(format!("{ROOT}/tsconfig.json")),
+            root_files: vec![],
+            extensions: vec![".ts".to_string()],
+            workspace_root: ROOT.to_string(),
+            workspace_aliases: vec![],
+            compiler_options: Default::default(),
+            references: vec![],
+            membership: verter_workspace::configured_membership_match_all_under_root(
+                &verter_workspace::CanonicalPath::new(ROOT),
+            ),
+        }]));
+        let host = Arc::new(VerterHost::new(
+            HostConfig {
+                audit_enabled: false,
+                ..HostConfig::default()
+            },
+            Arc::clone(&workspace) as Arc<dyn verter_workspace::WorkspaceAccess>,
+        ));
+        for (canonical, source) in [
+            (DEPENDENCY, "export type B = { x: number }\n"),
+            (
+                ENTRY,
+                "import type { B } from './b'\nexport type A = { b: B }\n",
+            ),
+        ] {
+            workspace.inject_file(canonical.to_string(), Arc::from(source));
+            upsert(&host, canonical, source);
+        }
+        host
+    }
+
+    fn one_level() -> Option<wire::ClosurePolicy> {
+        Some(wire::ClosurePolicy {
+            kind: Some(graph_closure_policy::Kind::OneLevel(
+                wire::ClosureOneLevel {},
+            )),
+        })
+    }
+
+    fn display() -> Option<wire::DisplayPolicy> {
+        Some(wire::DisplayPolicy {
+            qualification: wire::DisplayQualification::Qualified as i32,
+            branding: wire::DisplayBranding::On as i32,
+            budgets: Some(wire::DisplayBudgets {
+                max_string_length: 4096,
+                max_depth: 16,
+            }),
+        })
+    }
+
+    fn expanded() -> Option<wire::ProjectionReductionContext> {
+        Some(wire::ProjectionReductionContext {
+            mode: wire::ProjectionMode::Expanded as i32,
+            demand: wire::ReductionDemand::Published as i32,
+        })
+    }
+
+    fn resolve_envelope(name: &str) -> TypeInfoGraphRequest {
+        TypeInfoGraphRequest {
+            schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+            operation: Operation::ResolveSymbol as i32,
+            payload: Some(type_info_graph_request::Payload::ResolveSymbol(
+                wire::ResolveSymbolGraphRequest {
+                    canonical_id: ENTRY.to_string(),
+                    name: name.to_string(),
+                    context: expanded(),
+                    closure: one_level(),
+                    display_policy: display(),
+                    include_provenance: false,
+                    include_diagnostics: false,
+                    include_projection: vec![],
+                    include_degraded: false,
+                },
+            )),
+        }
+    }
+
+    fn expand_envelope(node_ref: wire::NodeRef) -> TypeInfoGraphRequest {
+        TypeInfoGraphRequest {
+            schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+            operation: Operation::ExpandAround as i32,
+            payload: Some(type_info_graph_request::Payload::ExpandAround(
+                wire::ExpandGraphAroundRequest {
+                    node_ref: Some(node_ref),
+                    context: expanded(),
+                    closure: one_level(),
+                    display_policy: display(),
+                    include_provenance: false,
+                    include_diagnostics: false,
+                },
+            )),
+        }
+    }
+
+    fn framework_envelope(host: &VerterHost) -> TypeInfoGraphRequest {
+        let profile = host
+            .typeinfo_capabilities(&wire::TypeInfoCapabilityHandshakeRequest {
+                client_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+            })
+            .framework_profiles
+            .into_iter()
+            .find(|advertised| advertised.family == "vue")
+            .and_then(|advertised| advertised.profile)
+            .expect("the host advertises a vue profile");
+        TypeInfoGraphRequest {
+            schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+            operation: Operation::FrameworkSurfaces as i32,
+            payload: Some(type_info_graph_request::Payload::FrameworkSurface(
+                wire::FrameworkSurfaceRequest {
+                    selector: Some(wire::ComponentSelector {
+                        canonical_id: SFC.to_string(),
+                        export_name: String::new(),
+                        has_export_name: false,
+                        framework_profile: Some(profile),
+                    }),
+                    context: expanded(),
+                    closure: one_level(),
+                    display_policy: display(),
+                    include_provenance: false,
+                    include_diagnostics: false,
+                    include_projection: vec![],
+                    schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+                    requested_kinds: vec![wire::FrameworkSurfaceKind::Props as i32],
+                },
+            )),
+        }
+    }
+
+    /// A response's arm: the answer, or the typed request error.
+    fn answer_or_error(
+        (response, _): (
+            Result<wire::TypeInfoGraphResponse, wire::TypeInfoRequestError>,
+            verter_audit::RequestAuditRecord,
+        ),
+    ) -> Result<type_info_graph_response::Kind, type_info_request_error::Kind> {
+        match response {
+            Ok(wire::TypeInfoGraphResponse {
+                kind: Some(type_info_graph_response::Kind::Error(error)),
+            })
+            | Err(error) => Err(error.kind.expect("a typed error")),
+            Ok(wire::TypeInfoGraphResponse { kind: Some(kind) }) => Ok(kind),
+            Ok(other) => panic!("a response carries an arm, got {other:?}"),
+        }
+    }
+
+    fn graph_of(kind: type_info_graph_response::Kind) -> SemanticTypeGraph {
+        match kind {
+            type_info_graph_response::Kind::Graph(graph) => graph,
+            other => panic!("expected a graph answer, got {other:?}"),
+        }
+    }
+
+    fn root_node_ref(graph: &SemanticTypeGraph) -> Option<wire::NodeRef> {
+        let root = *graph.root_ids.first()?;
+        graph
+            .node_id_map
+            .iter()
+            .find(|entry| entry.node_id == root)
+            .and_then(|entry| entry.node_ref.clone())
+    }
+
+    /// The unresolved-name answer: the graph arm with an opaque root whose
+    /// error is the `Miss` arm or the engine's `semanticMiss` text carried
+    /// in the `Other` arm (how resolve-symbol encodes a name the engine
+    /// cannot find). Either way it is a graph answer, never the request
+    /// error arm that churn takes.
+    fn is_unresolved_name_root(graph: &SemanticTypeGraph) -> bool {
+        let Some(&root) = graph.root_ids.first() else {
+            return false;
+        };
+        let Some(graph_type_node::Kind::Opaque(opaque)) = graph
+            .nodes
+            .get(root as usize)
+            .and_then(|node| node.kind.as_ref())
+        else {
+            return false;
+        };
+        match opaque.error.as_ref().and_then(|error| error.kind.as_ref()) {
+            Some(graph_query_error::Kind::Miss(_)) => true,
+            Some(graph_query_error::Kind::Other(other)) => graph
+                .strings
+                .as_ref()
+                .and_then(|table| table.entries.get(other.message_name_id as usize))
+                .is_some_and(|text| text == "semanticMiss"),
+            _ => false,
+        }
+    }
+
+    /// Run `f` on a watchdog thread with the store view forced
+    /// non-current, after an epoch bump that makes the next read rebuild.
+    fn churned<T, F>(host: &Arc<VerterHost>, f: F) -> T
+    where
+        T: Send + 'static,
+        F: FnOnce(&VerterHost) -> T + Send + 'static,
+    {
+        let host = Arc::clone(host);
+        run_with_watchdog(10, move || {
+            HostStoreView::arm_supersede_always_for_tests();
+            host.bump_store_view_epoch();
+            let value = f(&host);
+            HostStoreView::disarm_supersede_always_for_tests();
+            value
+        })
+    }
+
+    fn host_reads() -> u64 {
+        HOST_STORE_VIEW_FROM_HOST_BUILDS.with(std::cell::Cell::get)
+    }
+
+    /// Churn is not a miss: a resolve-symbol request whose view never
+    /// settles is refused whole as `UnstableState` — distinguishable on the
+    /// wire from an unresolved name — after exactly one store-view read,
+    /// with nothing issued; the next settled request is answered fresh.
+    #[test]
+    fn resolve_symbol_under_churn_is_unstable_state_not_miss() {
+        let host = project_host();
+        let control = graph_of(
+            answer_or_error(
+                host.resolve_symbol_graph_with_audit(resolve_envelope("A"))
+                    .into_parts(),
+            )
+            .expect("control: a quiescent request answers"),
+        );
+        assert!(
+            root_node_ref(&control).is_some(),
+            "control: the resolved root is addressed"
+        );
+        let missing = graph_of(
+            answer_or_error(
+                host.resolve_symbol_graph_with_audit(resolve_envelope("Nope"))
+                    .into_parts(),
+            )
+            .expect("an unresolved name is a graph answer"),
+        );
+        assert!(
+            is_unresolved_name_root(&missing),
+            "an unresolved name is answered as an opaque miss root: {missing:?}"
+        );
+
+        let keys_before = issued_keys_for_tests(&host).len();
+        let counters_before = issuance_counters_for_tests(&host);
+        let (outcome, reads) = churned(&host, |host| {
+            let before = host_reads();
+            let outcome = answer_or_error(
+                host.resolve_symbol_graph_with_audit(resolve_envelope("A"))
+                    .into_parts(),
+            );
+            (outcome, host_reads() - before)
+        });
+        let expected_attempts =
+            u32::try_from(crate::resolver_store::STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS)
+                .expect("a small budget");
+        match outcome {
+            Err(type_info_request_error::Kind::UnstableState(unstable)) => assert_eq!(
+                unstable.attempts, expected_attempts,
+                "the refusal reports the manager's own budget"
+            ),
+            other => panic!("churn must be the UnstableState error arm, never a graph: {other:?}"),
+        }
+        assert_eq!(
+            reads, 1,
+            "the route takes exactly one store-view read before refusing; the manager is the \
+             only retry authority"
+        );
+        assert_eq!(
+            issued_keys_for_tests(&host).len(),
+            keys_before,
+            "nothing is registered under churn"
+        );
+        assert_eq!(
+            issuance_counters_for_tests(&host),
+            counters_before,
+            "no issuance outcome is recorded under churn"
+        );
+
+        let recovered = graph_of(
+            answer_or_error(
+                host.resolve_symbol_graph_with_audit(resolve_envelope("A"))
+                    .into_parts(),
+            )
+            .expect("a settled request answers"),
+        );
+        assert_eq!(
+            recovered, control,
+            "the settled answer is the fresh control answer"
+        );
+    }
+
+    /// A framework-surface request whose view never settles is refused as
+    /// `UnstableState`, never answered as supported-empty kinds; the Vue
+    /// macro DTO read in the same window is the typed `UnsettledInput`
+    /// refusal, folded as unstable state rather than a query fault.
+    #[test]
+    fn framework_surface_under_churn_is_unstable_state_not_supported_empty() {
+        use verter_session_query::analysis::types::AnalyzedMacroKind;
+        use verter_type_engine::semantic_query::PartialReasonSet;
+
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        upsert(&host, SFC, SFC_SOURCE);
+        let control = answer_or_error(
+            host.resolve_framework_surface_with_audit(framework_envelope(&host))
+                .into_parts(),
+        )
+        .expect("control: a quiescent request answers");
+        let type_info_graph_response::Kind::FrameworkSurface(payload) = &control else {
+            panic!("expected a framework surface, got {control:?}");
+        };
+        let strings = payload
+            .graph
+            .as_ref()
+            .and_then(|graph| graph.strings.as_ref())
+            .map(|table| table.entries.as_slice())
+            .unwrap_or_default();
+        let props = payload
+            .surfaces
+            .iter()
+            .find(|surface| surface.kind == wire::FrameworkSurfaceKind::Props as i32)
+            .expect("the props kind");
+        assert_eq!(
+            props.status.as_ref().map(|status| status.support),
+            Some(FrameworkSurfaceKindSupport::Supported as i32),
+            "control: props are supported"
+        );
+        let names: Vec<&str> = props
+            .members
+            .iter()
+            .filter_map(|member| strings.get(member.name_id as usize).map(String::as_str))
+            .collect();
+        assert_eq!(names, ["a"], "control: the one prop");
+
+        let indexed = host.ensure_indexed_ready(SFC).expect("indexed");
+        let macro_index = indexed
+            .snapshot
+            .macros
+            .iter()
+            .position(|mac| mac.kind == AnalyzedMacroKind::DefineProps)
+            .expect("a defineProps macro");
+        let dtos_request = crate::typeinfo::VueMacroSurfaceRequest {
+            owner_canonical: Arc::from(SFC),
+            macro_index,
+            macro_kind: AnalyzedMacroKind::DefineProps,
+            root_identity: indexed.whole_hash,
+            level: crate::typeinfo::TypeInfoQueryLevel::FullMetadata,
+        };
+
+        let envelope = framework_envelope(&host);
+        let (outcome, dtos) = churned(&host, move |host| {
+            (
+                answer_or_error(
+                    host.resolve_framework_surface_with_audit(envelope)
+                        .into_parts(),
+                ),
+                host.vue_macro_dtos(&dtos_request),
+            )
+        });
+        assert!(
+            matches!(
+                outcome,
+                Err(type_info_request_error::Kind::UnstableState(_))
+            ),
+            "churn is the UnstableState error arm, never supported-empty kinds: {outcome:?}"
+        );
+        let Err(refusal) = dtos else {
+            panic!("an unsettled view computes no DTO bundle");
+        };
+        assert_eq!(
+            refusal,
+            crate::typeinfo::framework_surface::MacroDtosRefusal::UnsettledInput
+        );
+        let read = refusal.into_partial_read();
+        assert!(read
+            .completeness
+            .reasons()
+            .contains(PartialReasonSet::UNSTABLE_STATE));
+        assert!(
+            !read
+                .completeness
+                .reasons()
+                .contains(PartialReasonSet::SEMANTIC_QUERY_FAULT),
+            "churn is not a query fault"
+        );
+
+        let recovered = answer_or_error(
+            host.resolve_framework_surface_with_audit(framework_envelope(&host))
+                .into_parts(),
+        )
+        .expect("a settled request answers");
+        assert_eq!(
+            recovered, control,
+            "the settled answer is the fresh control answer"
+        );
+    }
+
+    /// The fresh-view admission under churn: a view that never settles is
+    /// `FreshAdmission::Unsettled`, not a stale basis, and an expand-around
+    /// request in the same window answers `UnstableState` — churn never
+    /// declares a live reference dead. (The knob supersedes every build, so
+    /// that request refuses at its first read; the fence's own verdict
+    /// mapping is pinned by `graph_query`'s
+    /// `an_unsettled_expand_fence_is_unstable_state_and_only_moved_inputs_are_stale`.)
+    #[test]
+    fn fresh_fence_under_churn_is_unsettled_not_stale() {
+        let host = project_host();
+        let answered = graph_of(
+            answer_or_error(
+                host.resolve_symbol_graph_with_audit(resolve_envelope("A"))
+                    .into_parts(),
+            )
+            .expect("a quiescent request answers"),
+        );
+        let node_ref = root_node_ref(&answered).expect("the root is addressed");
+        let key = IssuedRefKey::from_wire(&node_ref).expect("a well-shaped reference");
+        assert!(
+            lookup_issued(&host, &key).is_some(),
+            "the reference is held"
+        );
+
+        let (fence, outcome) = churned(&host, move |host| {
+            let issued = lookup_issued(host, &key).expect("the reference is still held");
+            (
+                admit_issued_in_fresh_view(host, &issued),
+                answer_or_error(
+                    host.resolve_symbol_graph_with_audit(expand_envelope(node_ref))
+                        .into_parts(),
+                ),
+            )
+        });
+        assert!(
+            matches!(fence, Err(FreshAdmission::Unsettled(_))),
+            "an unsettled fence is Unsettled, never Stale: {fence:?}"
+        );
+        assert!(
+            matches!(
+                outcome,
+                Err(type_info_request_error::Kind::UnstableState(_))
+            ),
+            "churn answers UnstableState, never StaleBasis: {outcome:?}"
+        );
+    }
 }

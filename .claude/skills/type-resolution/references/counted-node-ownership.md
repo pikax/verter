@@ -376,9 +376,8 @@ table and their roots share one `Arc`, so every clone owns them. Public results
 that hand out a surface or a terminal node deliver owning carriers:
 `resolve_typeinfo_surface` returns a `SurfaceLease`, and the host typeinfo entry
 points (`resolve_named_symbol*`, `evaluate_type_expression_with_audit`) return
-`NodeRoot`s that `project_node_to_type_expr_json_bytes` /
-`project_node_to_semantic_type_graph` validate against the host graph before
-projecting. The NAPI and WASM two-call projections carry that root between the
+`NodeRoot`s that `project_node_to_type_expr_json_bytes` validates against the
+host graph before projecting. The NAPI and WASM two-call projections carry that root between the
 calls. The task inventory
 [`SKR-OWN-PUBLIC.md`](../../../../crates/verter_type_engine/observe-inventory/SKR-OWN-PUBLIC.md)
 lists every carrier, its route, its rule and its proof.

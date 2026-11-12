@@ -566,6 +566,7 @@ fn mapped_index_wire_answer(
     let node = outcome.expect("resolution succeeds").expect("type exists");
     let bytes = host
         .project_node_to_type_expr_json_bytes(&node)
+        .expect("a settled host")
         .unwrap_or_else(|| panic!("{name} must survive JSON projection"));
     serde_json::from_slice(&bytes).expect("valid TypeExpr JSON")
 }

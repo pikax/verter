@@ -428,9 +428,10 @@ fn evaluate_inner(
     // against a PROVEN-CURRENT snapshot — read AFTER the scratch upsert
     // above so the snapshot reflects the synthesised scratch content. A
     // known-stale (`ReturnOnly`) read would resolve against superseded
-    // dependency state; on sustained churn surface a miss and drop the
-    // scratch WITHOUT warming `scratch_cache` (a non-current execution
-    // must never populate the cache). The bounded retry terminates.
+    // dependency state; when no current view settles it answers the typed
+    // `UnstableState` fault and drops the scratch WITHOUT warming
+    // `scratch_cache` (a non-current execution must never populate the
+    // cache).
     //
     // The scratch is now upserted but NOT yet in `scratch_cache` (the
     // cache is warmed only on the success path below), so THIS request
@@ -440,11 +441,15 @@ fn evaluate_inner(
     // `remove_scratch` is ownership-aware: it skips removal only if a
     // concurrent sibling request for the same content-addressed URI
     // already owns it in `scratch_cache`.
-    let Some(current_view) = crate::typeinfo::current_store_view_for_query(host) else {
-        // A non-current settle is a non-fault miss (`Ok(None)`); drop the
-        // orphan (ownership-aware) without warming `scratch_cache`.
-        remove_scratch(host, scratch_uri);
-        return (Ok(None), false);
+    let current_view = match crate::typeinfo::current_store_view_for_query(host) {
+        Ok(current_view) => current_view,
+        Err(unsettled) => {
+            // An unsettled view is churn, not a miss: answer `UnstableState`
+            // and drop the orphan (ownership-aware) without warming
+            // `scratch_cache`.
+            remove_scratch(host, scratch_uri);
+            return (Err(unsettled.into()), false);
+        }
     };
     // Every partiality the resolution below observes — a stopped
     // instantiation, or a closed operator whose read stopped while the

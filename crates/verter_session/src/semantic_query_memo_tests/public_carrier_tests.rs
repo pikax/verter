@@ -413,6 +413,7 @@ fn a_resolved_root_projects_after_its_request_and_caches_are_gone() {
     );
     let bytes = host
         .project_node_to_type_expr_json_bytes(&root)
+        .expect("a settled host")
         .expect("the owned root projects");
     assert!(
         String::from_utf8(bytes).unwrap().contains("base"),
@@ -428,7 +429,10 @@ fn a_resolved_root_projects_after_its_request_and_caches_are_gone() {
         "premise: the twin's equal ordinal is live"
     );
     assert!(
-        other.project_node_to_type_expr_json_bytes(&root).is_none(),
+        other
+            .project_node_to_type_expr_json_bytes(&root)
+            .expect("a settled host")
+            .is_none(),
         "a root minted by another graph is foreign"
     );
 }

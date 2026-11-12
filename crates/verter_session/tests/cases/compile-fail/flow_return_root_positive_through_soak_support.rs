@@ -7,7 +7,7 @@ use verter_type_engine::semantic_query::FlowReturnResult;
 
 fn materialize(host: &VerterHost, result: &FlowReturnResult) -> Option<Vec<u8>> {
     let root = result.return_root().ok()?;
-    host.project_node_to_type_expr_json_bytes(&root)
+    host.project_node_to_type_expr_json_bytes(&root).expect("a settled host")
 }
 
 fn main() {}

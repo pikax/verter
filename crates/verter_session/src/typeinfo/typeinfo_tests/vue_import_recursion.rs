@@ -85,6 +85,7 @@ fn make_host_with_files(files: &[(&str, &str)]) -> Arc<VerterHost> {
 fn public_member_names(host: &VerterHost, canonical_id: &str) -> Vec<String> {
     let surface = host
         .resolve_vue_public_type(canonical_id, TypeInfoQueryLevel::PublicType)
+        .expect("a settled host")
         .unwrap_or_else(|| panic!("{canonical_id} must have a public component type"));
     let mut names: Vec<String> = surface
         .members
@@ -543,6 +544,7 @@ fn vue_userland_default_is_not_treated_as_synthesized_instance() {
     // ...and the public-type API agrees: no synthesized public component type.
     assert!(
         host.resolve_vue_public_type(FILE, TypeInfoQueryLevel::PublicType)
+            .expect("a settled host")
             .is_none(),
         "resolve_vue_public_type must return None for a userland-default .vue"
     );
@@ -593,6 +595,7 @@ fn plain_ts_userland_default_has_no_synthesized_instance() {
     // And the public-type API returns None.
     assert!(
         host.resolve_vue_public_type(FILE, TypeInfoQueryLevel::PublicType)
+            .expect("a settled host")
             .is_none(),
         "a plain .ts file has no .vue public component type"
     );

@@ -460,6 +460,7 @@
           "PartialReasonSet::PROPAGATED",
           "PartialReasonSet::SEMANTIC_QUERY_FAULT",
           "PartialReasonSet::UNDECIDED_CONDITIONAL",
+          "PartialReasonSet::UNSTABLE_STATE",
           "PartialReasonSet::contains",
           "PartialReasonSet::empty",
           "PartialReasonSet::is_empty",

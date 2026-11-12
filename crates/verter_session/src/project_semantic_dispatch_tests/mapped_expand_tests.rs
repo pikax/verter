@@ -138,6 +138,7 @@ fn named_answer_in_union_order(
     let stats = host.project_type_store().semantic_graph().stats_snapshot();
     let wire = host
         .project_node_to_type_expr_json_bytes(&node)
+        .expect("a settled host")
         .expect("the answer projects");
     let mut decoder = serde_json::Deserializer::from_slice(&wire);
     decoder.disable_recursion_limit();

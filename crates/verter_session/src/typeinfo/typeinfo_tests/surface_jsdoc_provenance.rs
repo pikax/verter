@@ -93,6 +93,7 @@ fn generic_inherited_member_jsdoc_origin_resolves_to_base_declaration_file() {
 
     let surface = host
         .resolve_shallow_surface(DERIVED, "Derived")
+        .expect("a settled host")
         .expect("Derived must resolve to a one-level surface across the generic heritage edge");
 
     let x = member(&surface, "x");
@@ -159,6 +160,7 @@ fn duplicate_name_same_value_jsdoc_disambiguates_by_declaration_span() {
 
     let surface = host
         .resolve_shallow_surface(FILE, "Real")
+        .expect("a settled host")
         .expect("Real must resolve to a one-level surface");
 
     let field = member(&surface, "field");
@@ -225,6 +227,7 @@ fn class_definite_assignment_field_carries_jsdoc_via_declaration_span() {
 
     let surface = host
         .resolve_shallow_surface(FILE, "WithDefinite")
+        .expect("a settled host")
         .expect("WithDefinite must resolve to a one-level surface");
 
     // POSITIVE: the definite-assignment field `foo!: string` is present on the

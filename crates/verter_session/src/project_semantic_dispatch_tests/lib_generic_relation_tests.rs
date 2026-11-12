@@ -309,6 +309,7 @@ fn resolve_alias(source: &str, name: &str) -> Result<TypeExpr, String> {
         .ok_or_else(|| "the probe resolved no type".to_owned())?;
     let bytes = host
         .project_node_to_type_expr_json_bytes(&node)
+        .expect("a settled host")
         .ok_or_else(|| "the answer does not project".to_owned())?;
     Ok(serde_json::from_slice(&bytes).expect("a wire answer"))
 }

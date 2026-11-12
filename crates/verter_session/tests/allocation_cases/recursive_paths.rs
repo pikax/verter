@@ -122,6 +122,7 @@ fn cold_paths_demand(count: usize, groups: usize) -> ColdPathsDemand {
     let node = outcome.expect("the demand resolves").expect("Probe exists");
     let bytes = host
         .project_node_to_type_expr_json_bytes(&node)
+        .expect("a settled host")
         .expect("Probe projects");
     let answer: TypeExpr = serde_json::from_slice(&bytes).expect("valid TypeExpr JSON");
     let TypeExpr::Union(paths) = &answer else {
