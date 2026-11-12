@@ -366,6 +366,13 @@ pub(crate) struct SemanticExecution<P: Program> {
     demands: Vec<DemandRecord<P>>,
     index: FxHashMap<P::Demand, DemandId>,
     frames: Vec<ArenaSlot<P>>,
+    /// Freed arena slots, a LIFO stack. Only the chain's tip completes, so a
+    /// freed slot is the largest live one and smaller than every slot
+    /// already free: every free slot is larger than every live one, and the
+    /// stack ascends from its top. A frame allocated from it (or fresh, at
+    /// the arena's end) therefore takes a slot larger than every live frame,
+    /// so slots ascend along the chain from the root to its tip.
+    /// [`Self::abandon`] relies on that order.
     free_frames: Vec<u32>,
     live_frames: usize,
     ready: VecDeque<ContinuationId>,
@@ -582,6 +589,15 @@ impl<P: Program> SemanticExecution<P> {
             Start::Answer(outcome) => self.complete(program, id, outcome, root),
             Start::Produce(frame) => {
                 let frame = self.alloc_frame(frame, id);
+                // Slots ascend along the chain: the producer lies above the
+                // frame that needs it (the root's has none).
+                verter_debug_assert!(
+                    self.demands[id.0 as usize]
+                        .waiters
+                        .first()
+                        .is_none_or(|waiter| frame.slot > waiter.slot),
+                    "a produced frame takes a slot above its waiter's"
+                );
                 self.demands[id.0 as usize].state = DemandState::Runnable(frame);
                 self.ready.push_back(frame);
             }
@@ -639,6 +655,10 @@ impl<P: Program> SemanticExecution<P> {
                     value: None,
                 });
                 let frame = self.alloc_frame(frame, child);
+                verter_debug_assert!(
+                    frame.slot > id.slot,
+                    "a spawned child takes a slot above its parent's"
+                );
                 self.demands[child.0 as usize].state = DemandState::Runnable(frame);
                 self.ready.push_back(frame);
             }
@@ -867,7 +887,9 @@ impl<P: Program> SemanticExecution<P> {
     fn abandon(&mut self, program: &mut P) {
         self.ready.clear();
         // Innermost first: a frame is released before the frames that wait
-        // on it, as the drive would have unwound them.
+        // on it, as the drive would have unwound them. Slots ascend along
+        // the one chain (see `free_frames`, asserted where frames are
+        // allocated), so descending slot order is that order.
         for slot in self.frames.drain(..).rev() {
             if let Some(record) = slot.record {
                 program.abandon(record.frame);

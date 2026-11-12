@@ -1068,3 +1068,106 @@ fn a_bound_request_context_is_installed_for_each_step_on_any_thread() {
     assert_eq!(outside_steps, None, "the resuming thread's TLS is restored");
     assert_eq!(program.seen_requests, vec![Some(77); 4]);
 }
+
+/// A program whose demand `n` needs `edges(n)` in order, whose demand
+/// `OUTSIDE` an outside producer owns and never resolves, and which records
+/// the order it abandons frames in.
+struct AbandonOrder {
+    edges: fn(u64) -> &'static [u64],
+    abandoned: Vec<u64>,
+}
+
+const OUTSIDE: u64 = 99;
+
+impl Program for AbandonOrder {
+    type Demand = u64;
+    type Frame = ChainFrame;
+    type Value = u64;
+    type Failure = ();
+    type Role = ();
+    type Subscription = ();
+
+    fn start(&mut self, demand: &u64) -> Start<Self> {
+        if *demand == OUTSIDE {
+            return Start::Subscribe(());
+        }
+        Start::Produce(ChainFrame {
+            n: *demand,
+            needs: (self.edges)(*demand).to_vec(),
+            next: 0,
+            total: 0,
+            _alive: None,
+        })
+    }
+
+    fn step(&mut self, frame: &mut ChainFrame, _: Option<Outcome<Self>>) -> EvalStep<Self> {
+        if let Some(&demand) = frame.needs.get(frame.next) {
+            frame.next += 1;
+            return EvalStep::Need { demand, role: () };
+        }
+        EvalStep::Complete(frame.n)
+    }
+
+    fn close_cycle(&mut self, _: &u64, _: ()) -> Outcome<Self> {
+        unreachable!("the chain has no cycle")
+    }
+
+    fn reusable(&self, _: &u64, _: &u64) -> bool {
+        false
+    }
+
+    fn poll_subscription(&mut self, _: &mut (), _: &Waker) -> Poll<External<Self>> {
+        Poll::Pending
+    }
+
+    fn stop(&self) -> Option<()> {
+        None
+    }
+
+    fn wake_on_stop(&mut self, _: &Waker) {}
+
+    fn abandon(&mut self, frame: ChainFrame) {
+        self.abandoned.push(frame.n);
+    }
+}
+
+/// Releasing a pending execution abandons its frames innermost first along
+/// the chain, even after completed frames freed slots that later frames
+/// reuse: root(0) → A(1) → B(2) → C(3); C then B complete; A needs D(4),
+/// which needs E(5), each in a reused slot; E waits on an outside producer.
+#[test]
+fn a_released_chain_is_abandoned_innermost_first_across_reused_slots() {
+    const ROOT: u64 = 0;
+    const A: u64 = 1;
+    const B: u64 = 2;
+    const C: u64 = 3;
+    const D: u64 = 4;
+    const E: u64 = 5;
+    fn edges(n: u64) -> &'static [u64] {
+        match n {
+            ROOT => &[A],
+            A => &[B, D],
+            B => &[C],
+            D => &[E],
+            E => &[OUTSIDE],
+            _ => &[],
+        }
+    }
+    let mut program = AbandonOrder {
+        edges,
+        abandoned: Vec::new(),
+    };
+    let mut execution = SemanticExecution::new();
+    let waker = Waker::from(std::sync::Arc::new(CountingWaker::default()));
+    assert!(execution
+        .poll(&mut program, Some(ROOT), &waker)
+        .is_pending());
+    assert_eq!(execution.live_frames(), 4);
+    assert_eq!(
+        execution.counters().peak_frames,
+        4,
+        "D and E reused the slots C and B freed"
+    );
+    execution.release(&mut program);
+    assert_eq!(program.abandoned, [E, D, A, ROOT]);
+}
