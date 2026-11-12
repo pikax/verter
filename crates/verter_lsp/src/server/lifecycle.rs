@@ -566,21 +566,19 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
             kind: watch_kind,
         },
     ]);
-    let _ = server
-        .client
-        .register_capability(vec![Registration {
-            id: "verter-file-watcher".to_string(),
-            method: "workspace/didChangeWatchedFiles".to_string(),
-            register_options: serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
-                watchers,
-            })
-            .ok(),
-        }])
-        .await;
+    let watcher_registration = server.client.register_capability(vec![Registration {
+        id: "verter-file-watcher".to_string(),
+        method: "workspace/didChangeWatchedFiles".to_string(),
+        register_options: serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
+            watchers,
+        })
+        .ok(),
+    }]);
 
     // E. Register every dynamically registrable method the participation
-    // mask admits (COX0).
-    server.reconcile_registrations().await;
+    // mask admits (COX0), without waiting for the watcher reply: these
+    // methods have no static advertisement to fall back on meanwhile.
+    let _ = tokio::join!(watcher_registration, server.reconcile_registrations());
 }
 
 pub(super) async fn handle_shutdown(server: &VerterLanguageServer) -> Result<()> {

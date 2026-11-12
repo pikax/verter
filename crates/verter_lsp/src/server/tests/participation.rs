@@ -484,6 +484,25 @@ async fn dynamic_registration_follows_the_mask() {
         .await
         .expect("valid input");
     assert!(hover_registered(), "other profiles still admit it");
+
+    // A request with no document needs every served profile, so one
+    // withdrawn profile withdraws the method from the client.
+    let workspace_client: ClientCapabilities = serde_json::from_value(serde_json::json!({
+        "workspace": { "symbol": { "dynamicRegistration": true } }
+    }))
+    .expect("client capabilities");
+    let symbols =
+        DynamicRegistrations::negotiate(&workspace_client, &mut host_server_capabilities(true));
+    assert!(!symbols
+        .desired(&server.documents)
+        .contains("workspace/symbol"));
+    server
+        .update_participation(input(serde_json::json!({ "version": 1, "presets": [] })))
+        .await
+        .expect("valid input");
+    assert!(symbols
+        .desired(&server.documents)
+        .contains("workspace/symbol"));
 }
 
 /// Every code-action kind is its own cell: a request no kind admits is

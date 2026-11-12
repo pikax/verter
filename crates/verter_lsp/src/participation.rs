@@ -227,6 +227,30 @@ pub(crate) fn admitted_anywhere(
         .any(|profile| state.mask().may_admit_interactive(&profile, operation))
 }
 
+/// Whether a demand of `operation` with no document is admitted: every
+/// served profile admits it profile-wide, as [`admit`] requires of a
+/// workspace-wide request.
+pub(crate) fn admitted_workspace_wide(
+    documents: &DocumentRegistry,
+    operation: CapabilityOperation,
+) -> bool {
+    let state = documents.participation().state();
+    served_profiles(documents.host())
+        .into_iter()
+        .all(|profile| {
+            state
+                .mask()
+                .admit(&AdmissionRequest {
+                    capability: &CapabilityId::new(profile, operation),
+                    site: RequestSite::default(),
+                    purpose: DemandPurpose::Interactive,
+                    provider: ProviderRequirement::NotRequired,
+                    catalog: CatalogSupport::Supported,
+                })
+                .is_ok()
+        })
+}
+
 /// Whether no facet of this document's scope is `Full`: the scope admits at
 /// most explicitly demanded workspace semantics, so no eager open, edit,
 /// provider or publication work is owed to it (DEM0 `DEM-D06`).

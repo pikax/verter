@@ -241,16 +241,20 @@ impl DynamicRegistrations {
         }
     }
 
-    /// The methods the current mask keeps registered: those with some cell
-    /// some served profile admits for an interactive demand.
+    /// The methods the current mask keeps registered: a document method
+    /// with some cell some served profile admits for an interactive demand,
+    /// and a workspace-wide method every served profile admits.
     pub(crate) fn desired(&self, documents: &DocumentRegistry) -> BTreeSet<&'static str> {
         self.methods
             .iter()
             .filter(|(method, _)| {
-                method
-                    .operations
-                    .iter()
-                    .any(|&operation| crate::participation::admitted_anywhere(documents, operation))
+                method.operations.iter().any(|&operation| {
+                    if method.document_scoped {
+                        crate::participation::admitted_anywhere(documents, operation)
+                    } else {
+                        crate::participation::admitted_workspace_wide(documents, operation)
+                    }
+                })
             })
             .map(|(method, _)| method.method)
             .collect()
