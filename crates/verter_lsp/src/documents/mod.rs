@@ -52,6 +52,10 @@ pub struct DocumentRegistry {
     /// request, publication and eager document task admits its capability
     /// cell here first.
     participation: Arc<verter_session::participation::ParticipationService>,
+    /// Open documents whose scope disables every cell: their bytes are
+    /// retained, but nothing was parsed, projected or published for them
+    /// (COX0, PC04). Keyed by URI.
+    retained: dashmap::DashSet<String>,
     /// Map from document URI to document state.
     documents: DashMap<String, DocumentState>,
     /// Shared with the outbound writer, which re-checks a publication's epoch
@@ -605,6 +609,7 @@ impl DocumentRegistry {
             host,
             language_classifier,
             participation: Arc::default(),
+            retained: dashmap::DashSet::new(),
             documents: DashMap::new(),
             diagnostics_state: Arc::new(parking_lot::Mutex::new(
                 diagnostics::DiagnosticsState::default(),
@@ -1042,6 +1047,13 @@ impl DocumentRegistry {
         let submitted_source: Arc<str> = Arc::from(params.text.as_str());
 
         let file_language = self.document_file_language(&params.language_id, &canonical_id);
+        // A scope that disables every cell retains the bytes only (COX0,
+        // PC04): no upsert, parse, projection or overlay until it admits a
+        // cell again ([`Self::materialize_retained`]).
+        if crate::participation::language_disables_every_cell(self, &file_language, &canonical_id) {
+            return self.retain(params, canonical_id, submitted_source);
+        }
+        self.retained.remove(&uri_str);
         // Every framework CARRIER (Vue OR Svelte) projects an IDE TSX file +
         // source map — the compile + position-mapper paths are carrier-general.
         let is_carrier = file_language.is_framework_carrier();
@@ -1154,9 +1166,116 @@ impl DocumentRegistry {
         })
     }
 
+    /// Retain an opened document's bytes and nothing else.
+    fn retain(
+        &self,
+        params: &TextDocumentItem,
+        canonical_id: String,
+        source: Arc<str>,
+    ) -> HostUpdateResult {
+        let uri_str = params.uri.as_str().to_string();
+        let shared = Arc::clone(&source);
+        let state = DocumentState {
+            canonical_id: canonical_id.clone(),
+            version: params.version,
+            document_revision: self.next_document_revision(),
+            line_index: Arc::new(LineIndex::new(&source, self.encoding())),
+            feature_snapshot: None,
+            progressive_analysis: None,
+            source,
+            projection: None,
+            language_id: params.language_id.clone(),
+            virtual_source_uri: None,
+        };
+        self.documents.insert(uri_str.clone(), state);
+        self.retained.insert(uri_str);
+        self.registration.signal();
+        self.share_retained_bytes(&canonical_id, &params.language_id, shared);
+        HostUpdateResult::no_change(canonical_id)
+    }
+
+    /// Keep a retained document's newest bytes visible to independently
+    /// admitted consumers, such as an importer composing its child contract:
+    /// the workspace overlay holds them (a signal, no parse), so a demanded
+    /// load reads the open buffer rather than disk. When such a consumer
+    /// already loaded the document into the host, the host's content is
+    /// replaced too, so its freshness fences advance with the edit. A
+    /// document nothing loaded is never parsed here.
+    fn share_retained_bytes(&self, canonical_id: &str, language_id: &str, source: Arc<str>) {
+        // Overlay first: a load that begins after this reads these bytes,
+        // and one that committed before the check below is replaced.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.host().notify_upsert(canonical_id, Arc::clone(&source));
+        if self.host().get_source(canonical_id).is_some() {
+            let file_language = self.document_file_language(language_id, canonical_id);
+            if let Err(error) = self.host().upsert(UpsertRequest {
+                canonical_id: Some(canonical_id.to_owned()),
+                input_id: canonical_id.to_owned(),
+                source,
+                file_language,
+                aliases: vec![],
+            }) {
+                tracing::error!("retained upsert failed for {canonical_id}: {error:?}");
+            }
+        }
+    }
+
+    /// Whether `uri` is open with its bytes retained only.
+    pub fn is_retained(&self, uri: &Uri) -> bool {
+        self.retained.contains(uri.as_str())
+    }
+
+    /// Every open document whose bytes are retained only.
+    pub fn retained_uris(&self) -> Vec<Uri> {
+        self.retained
+            .iter()
+            .filter_map(|uri| uri.key().parse().ok())
+            .collect()
+    }
+
+    /// Run the open a retained document was owed, on its current bytes, once
+    /// its scope admits a cell again. `None` when it was not retained.
+    pub fn materialize_retained(&self, uri: &Uri) -> Option<HostUpdateResult> {
+        self.retained.remove(uri.as_str())?;
+        let item = {
+            let document = self.documents.get(uri.as_str())?;
+            TextDocumentItem {
+                uri: uri.clone(),
+                language_id: document.language_id.clone(),
+                version: document.version,
+                text: document.source.to_string(),
+            }
+        };
+        Some(self.did_open(&item))
+    }
+
     /// Handle a document being changed.
     ///
     pub fn did_change(&self, uri: &Uri, version: i32, text: &str) -> HostUpdateResult {
+        // A retained document keeps its newest bytes and nothing else.
+        if self.retained.contains(uri.as_str()) {
+            if let Some(mut entry) = self.documents.get_mut(uri.as_str()) {
+                let source: Arc<str> = Arc::from(text);
+                entry.version = version;
+                entry.document_revision = entry.document_revision.edited();
+                entry.line_index = Arc::new(LineIndex::new(&source, self.encoding()));
+                let shared = Arc::clone(&source);
+                entry.source = source;
+                let canonical_id = entry.canonical_id.clone();
+                let language_id = entry.language_id.clone();
+                drop(entry);
+                // Its scope admits a cell again (a transition whose
+                // materialization was cancelled): run the open it was owed,
+                // on these newest bytes.
+                if !crate::participation::document_disables_every_cell(self, uri) {
+                    if let Some(result) = self.materialize_retained(uri) {
+                        return result;
+                    }
+                }
+                self.share_retained_bytes(&canonical_id, &language_id, shared);
+                return HostUpdateResult::no_change(canonical_id);
+            }
+        }
         let uri_str = uri.as_str().to_string();
         tracing::info!(
             "DocumentRegistry::did_change UPSERT_START v{version} thread={:?}",
@@ -1462,6 +1581,7 @@ impl DocumentRegistry {
         self.host().notify_close(&canonical_id);
 
         self.documents.remove(uri.as_str());
+        self.retained.remove(uri.as_str());
         self.semantic_snapshots.remove(&canonical_id);
         self.failed_carrier_ide_content_verdicts
             .remove(&canonical_id);

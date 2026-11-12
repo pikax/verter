@@ -505,6 +505,117 @@ async fn dynamic_registration_follows_the_mask() {
         .contains("workspace/symbol"));
 }
 
+/// PC04: a cold open and edits in a scope that disables every cell retain
+/// the bytes only, and nothing reaches the host. Re-admission runs the open
+/// the document was owed, on its newest bytes.
+#[tokio::test]
+async fn disabled_scope_retains_bytes_only() {
+    const EDITED: &str = "<template>\n  <p>{{ msg }}</p>\n</template>\n<script setup lang=\"ts\">\nconst msg = 'edited'\n</script>\n";
+    let service = service();
+    let server = service.inner();
+    server
+        .update_participation(everywhere("disabled"))
+        .await
+        .expect("valid input");
+    let uri: Uri = "file:///cox0/Retained.vue".parse().expect("uri");
+    let canonical = uri_to_canonical_id(&uri);
+    server
+        .did_open(DidOpenTextDocumentParams {
+            text_document: TextDocumentItem {
+                uri: uri.clone(),
+                language_id: "vue".to_owned(),
+                version: 1,
+                text: APP.to_owned(),
+            },
+        })
+        .await;
+    server
+        .did_change(DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: uri.clone(),
+                version: 2,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: EDITED.to_owned(),
+            }],
+        })
+        .await;
+    let host_source = || {
+        server
+            .documents
+            .host()
+            .get_source(&canonical)
+            .map(|source| source.to_string())
+    };
+    assert!(server.documents.is_retained(&uri));
+    assert_eq!(host_source(), None, "nothing was parsed or upserted");
+    assert_eq!(
+        server
+            .documents
+            .get(&uri)
+            .map(|document| document.source.to_string()),
+        Some(EDITED.to_owned()),
+        "the newest bytes are retained"
+    );
+
+    // An independently admitted consumer (an importer composing its child
+    // contract) that loads the document reads the open buffer, not disk,
+    // and later retained edits keep what it loaded current.
+    server.documents.host().ensure_loaded(&canonical);
+    assert_eq!(
+        host_source(),
+        Some(EDITED.to_owned()),
+        "the buffer, not disk"
+    );
+    server
+        .did_change(DidChangeTextDocumentParams {
+            text_document: VersionedTextDocumentIdentifier {
+                uri: uri.clone(),
+                version: 3,
+            },
+            content_changes: vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: APP.to_owned(),
+            }],
+        })
+        .await;
+    assert!(server.documents.is_retained(&uri));
+    assert_eq!(
+        host_source(),
+        Some(APP.to_owned()),
+        "a loaded copy follows edits"
+    );
+
+    server
+        .update_participation(everywhere("full"))
+        .await
+        .expect("valid input");
+    assert!(!server.documents.is_retained(&uri));
+    assert_eq!(host_source(), Some(APP.to_owned()));
+}
+
+/// PC04 with a narrower re-admission: a region declaration that lifts one
+/// region of an otherwise disabled scope keeps the document materialized,
+/// so the region's positional demands are classified and served.
+#[tokio::test]
+async fn region_readmission_keeps_the_document_materialized() {
+    let service = service();
+    let server = service.inner();
+    server
+        .update_participation(input(serde_json::json!({ "version": 1, "presets": [
+            { "target": { "kind": "all" }, "selector": { "kind": "all" }, "preset": "disabled" },
+            { "target": { "kind": "operation", "operation": "hover" },
+              "selector": { "kind": "regionRole", "role": "style" }, "preset": "full" }
+        ]})))
+        .await
+        .expect("valid input");
+    let uri = open_test_vue(server, "/cox0/Styled.vue", APP);
+    assert!(!server.documents.is_retained(&uri));
+}
+
 /// Every code-action kind is its own cell: a request no kind admits is
 /// refused, and produced actions are attributed by their LSP kind.
 #[tokio::test]
@@ -710,7 +821,7 @@ async fn workspace_scope_open_schedules_no_eager_work() {
         .contains(&uri_to_canonical_id(&uri)));
 }
 
-/// A positional request is admitted against the cell of
+/// PC09 at the server: a positional request is admitted against the cell of
 /// the region it lands in, so a stylesheet-region overlap refuses a hover in
 /// `<style>` while template hover is still served.
 #[tokio::test]

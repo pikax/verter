@@ -187,6 +187,16 @@ impl SelectorScope {
         }
     }
 
+    /// Whether this selector addresses a region inside `site`'s unit: the
+    /// declarations a document-wide site (no region role) does not match.
+    fn addresses_a_region_of(&self, site: &RequestSite<'_>) -> bool {
+        match self {
+            Self::RegionRole(_) => true,
+            Self::UnitRegion { unit, .. } => site.unit == Some(unit),
+            Self::AllSources | Self::Unit(_) => false,
+        }
+    }
+
     fn matches(&self, site: &RequestSite<'_>) -> bool {
         match self {
             Self::AllSources => true,
@@ -700,6 +710,27 @@ impl CapabilityOwnershipMask {
                     ParticipationPreset::Auto | ParticipationPreset::Full
                 )
         })
+    }
+
+    /// Whether every facet of `profile` is explicitly `Disabled` at `site`
+    /// and no region declaration may lift a region inside it. Such a scope
+    /// admits no demand of any purpose anywhere in its unit, so a host
+    /// retains its bytes only and owes it no parse, projection or
+    /// contribution. Conservative: any non-`Disabled` declaration addressing
+    /// a region of the unit keeps the unit materialized, even when a more
+    /// specific declaration disables that region again.
+    pub fn disables_every_cell(&self, profile: &ProfileRef, site: RequestSite<'_>) -> bool {
+        let every_facet = CapabilityOperation::ALL.iter().all(|&operation| {
+            self.preset_of(profile, operation, site) == ParticipationPreset::Disabled
+        });
+        every_facet
+            && !self.presets.iter().any(|declaration| {
+                declaration.preset != ParticipationPreset::Disabled
+                    && declaration.selector.addresses_a_region_of(&site)
+                    && CapabilityOperation::ALL
+                        .iter()
+                        .any(|&operation| declaration.target.covers_parts(profile, operation))
+            })
     }
 
     fn overlapping<'m>(
