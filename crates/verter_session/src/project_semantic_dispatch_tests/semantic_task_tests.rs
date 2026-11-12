@@ -1973,6 +1973,36 @@ fn a_contextual_call_released_while_suspended_leaves_nothing_open() {
     }
 }
 
+/// The body census counts the reads a root flow read's own body makes at
+/// its own depth, each under the site that made it: the contextual body's
+/// read of its callee's signatures (the read its frame joins another
+/// task's producer through) is counted, under a driver method.
+#[test]
+fn the_flow_body_census_counts_each_body_read_under_its_site() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::census;
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    const PHASES: [&str; 5] = ["prepare", "prelude", "body", "finish", "close"];
+    let host = contextual_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let _ = census::take();
+    let _ = dispatch.execute_via_cold_build_helper(contextual_return_key(&dispatch));
+    let cold = census::take();
+    let signatures: Vec<_> = cold
+        .iter()
+        .filter(|((_, _, family), _)| *family == SemanticQueryKeyTag::SignaturesOfType)
+        .collect();
+    assert!(
+        !signatures.is_empty(),
+        "the body's signature read is counted: {cold:?}"
+    );
+    assert!(
+        signatures
+            .iter()
+            .all(|((_, site, _), _)| !PHASES.contains(site) && *site != "<unattributed>"),
+        "it is counted under the driver method that made it: {signatures:?}"
+    );
+}
+
 /// A receipt's whole structure below its identity, which is an allocation
 /// of the host that computed it: its own logical usage and footprint, then
 /// each prerequisite it consumed, in order, with how it was consumed and

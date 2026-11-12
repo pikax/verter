@@ -2934,6 +2934,21 @@ pub(crate) struct UndecidedWindowMark {
     place: usize,
 }
 
+/// Where the request-side state a root flow read pushes on stood when the
+/// read opened: the reentry stack, the pending ledger, the build-local
+/// taint stack, the schedule's sessions and the undecided windows. Each is
+/// a stack the read's evaluation pushes on and pops back by the time the
+/// read finishes, its own frame, schedule session and undecided window
+/// included; a finished read is checked to stand exactly here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FlowReadMark {
+    reentry_frames: usize,
+    pending_len: usize,
+    taint_len: usize,
+    schedule_sessions: usize,
+    undecided_windows: usize,
+}
+
 /// A window over the undecided relation count being measured
 /// ([`ResolveCallDomainRuntime::open_undecided_window`]): its mark,
 /// borrowing nothing, so a computation retained across its steps owns it
@@ -2991,6 +3006,11 @@ impl ResolveCallDomainRuntime {
         if let Some(low) = self.undecided_lows.last_mut() {
             *low = (*low).min(value);
         }
+    }
+
+    /// How many windows are open on the count.
+    pub(crate) fn open_undecided_windows(&self) -> usize {
+        self.undecided_lows.len()
     }
 
     /// Open a window measuring how the count moves.
@@ -3337,6 +3357,18 @@ pub enum ReturnEquationFailure {
 impl CheckerDispatchTransaction {
     pub(crate) fn reentry(&self) -> &ObligationReentryStack {
         self.obligations.stack()
+    }
+
+    /// Where the request-side stacks a root flow read pushes on stand now,
+    /// with `taint_len` entries on the build-local taint stack.
+    pub(crate) fn flow_read_mark(&self, taint_len: usize) -> FlowReadMark {
+        FlowReadMark {
+            reentry_frames: self.reentry().depth(),
+            pending_len: self.obligations.pending().pending_len(),
+            taint_len,
+            schedule_sessions: self.flow.schedule.open(),
+            undecided_windows: self.call.open_undecided_windows(),
+        }
     }
 
     pub fn reentry_mut(&mut self) -> &mut ObligationReentryStack {

@@ -125,6 +125,11 @@ pub(crate) struct FlowScheduleSessions {
 }
 
 impl FlowScheduleSessions {
+    /// How many sessions are open.
+    pub(crate) fn open(&self) -> usize {
+        self.sessions.len()
+    }
+
     /// Where the session of the innermost root on `reentry` that owns one
     /// is kept: the session a frame evaluating there reads.
     fn position_on(&self, reentry: &ObligationReentryStack) -> Option<usize> {

@@ -1052,6 +1052,8 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let mut contextual = super::super::call_resolve::ContextualCallState::default();
         let relations_before = self.dispatch.call_undecided_relations();
         let read = self.dispatch.observe_read(|| {
+            #[cfg(any(test, feature = "test-support"))]
+            let _stage = census::enter_call_stage("execute_contextual_call");
             self.dispatch
                 .execute_contextual_call(key.clone(), &mut contextual)
         });
@@ -1197,6 +1199,8 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 .discard_call_relation_observations(finish.undecided_relations);
             let relations_before = self.dispatch.call_undecided_relations();
             let read = self.dispatch.observe_read(|| {
+                #[cfg(any(test, feature = "test-support"))]
+                let _stage = census::enter_call_stage("resume_contextual_call");
                 self.dispatch.resume_contextual_call(
                     &mut finish.key,
                     &finish.args,

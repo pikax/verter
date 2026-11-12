@@ -23,6 +23,15 @@
 //! (ReturnOnly), and every no-value shape is a typed `FlowReturnFailure`
 //! through `ReturnOnly` (never admitted, never `never`).
 
+/// Attribute the reads made until the enclosing block ends to `$site` in
+/// the body census ([`census`]); nothing outside test-support builds.
+macro_rules! census_site {
+    ($site:literal) => {
+        #[cfg(any(test, feature = "test-support"))]
+        let _census_site = census::enter_site($site);
+    };
+}
+
 use std::sync::Arc;
 use verter_session_query::source::demand::ExpressionSourceDemand as _;
 use verter_type_expr::OwnedStr;
@@ -3810,16 +3819,38 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: &FlowReturnKey,
     ) -> QueryBuildOutput<SemanticQueryValue> {
         verter_audit::attribute_scope!(FlowGraphBuild);
+        // A frame that closes as the root opens only at the bottom: under
+        // an open obligation frame of any domain, a flow return evaluates
+        // inline (`execute_flow_return_inline`).
+        verter_debug_assert!(
+            self.dispatch_txn.borrow().obligations.decides_root(),
+            "a root flow read opens under no open obligation frame"
+        );
         let fence = self.project_generation_signature();
+        // The read's own place on the request: what it pushes, it pops by
+        // the time it finishes. Its undecided relation window opens with
+        // it, so what its subtree takes off the count lands in its own
+        // window.
+        let mark = self.flow_read_mark();
+        let undecided = super::dispatch_txn::HeldUndecidedRelationWindow::open(&self.dispatch_txn);
         let idx = self.flow_frame_open(key);
-        self.prepare_flow_return_demand(key, idx);
+        // The root read's own body runs at the frame it opened: what it
+        // reads there itself, the census counts by site.
+        #[cfg(any(test, feature = "test-support"))]
+        let _body = census::open_body(&self.dispatch_txn.borrow());
+        {
+            census_site!("prepare");
+            self.prepare_flow_return_demand(key, idx);
+        }
         let evaluated = self.evaluate_flow_return(key);
         #[cfg(any(test, feature = "test-support"))]
         self.inject_unproven_flow_member_for_tests(idx);
+        census_site!("close");
+        let closed = self.flow_frame_close_root(idx, evaluated);
+        let _ = undecided.close(&self.dispatch_txn);
+        self.check_flow_read_at_mark(mark);
         #[allow(unused_mut)]
-        let mut built: QueryBuildOutput<SemanticQueryValue> = match self
-            .flow_frame_close_root(idx, evaluated)
-        {
+        let mut built: QueryBuildOutput<SemanticQueryValue> = match closed {
             FlowRootClose::EvaluatedValue(root) => {
                 let EvaluatedFlowRoot {
                     result,
@@ -4024,6 +4055,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     // ──────────────────────────────────────────────────────────────────
     // Frames and the tagged SCC close
     // ──────────────────────────────────────────────────────────────────
+
+    /// Where the request-side stacks a root flow read pushes on stand now.
+    fn flow_read_mark(&self) -> super::dispatch_txn::FlowReadMark {
+        let taint_len = self.build_local_taint.borrow().len();
+        self.dispatch_txn.borrow().flow_read_mark(taint_len)
+    }
+
+    /// Check, in checked builds, that a finished root flow read popped
+    /// everything it pushed: the request-side stacks stand at `mark` again.
+    fn check_flow_read_at_mark(&self, mark: super::dispatch_txn::FlowReadMark) {
+        let now = self.flow_read_mark();
+        verter_debug_assert_eq!(
+            now,
+            mark,
+            "a finished root flow read leaves the request where it opened"
+        );
+    }
 
     /// Push a flow-return frame for `key`, claiming the ordinary family
     /// flight for a non-root inline evaluation.
@@ -6774,6 +6822,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: &FlowReturnKey,
     ) -> FlowEvaluationOutcome {
         verter_audit::attribute_scope!(FlowSliceCompute);
+        census_site!("prelude");
         use crate::semantic_query::demand::{MaterializedPoint, MaterializedSet};
         // The frame's installed demand carrier (installed by
         // `prepare_flow_return_demand` at frame open): the report at the
@@ -7361,7 +7410,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             nested::ActivationState { evaluator, run }
         });
         let mut read = read::FlowRead::new(tables, root);
-        let (outcome, body_falls_through) = read.evaluate(&flow_cx);
+        let (outcome, body_falls_through) = {
+            census_site!("body");
+            read.evaluate(&flow_cx)
+        };
+        census_site!("finish");
         // What finishing the value reads from the root's evaluator.
         struct RootEvaluated {
             holds: Vec<HeldCallee>,
@@ -10777,6 +10830,9 @@ mod class_expression;
 mod branches;
 #[path = "flow_return_call_stack.rs"]
 mod call_stack;
+#[cfg(any(test, feature = "test-support"))]
+#[path = "flow_return_census.rs"]
+pub mod census;
 #[path = "flow_return_nested.rs"]
 mod nested;
 #[path = "flow_return_rails.rs"]
@@ -11440,24 +11496,29 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         node: SemanticNodeId,
         substitution: &crate::semantic_query::CanonicalTypeSubstitution,
     ) -> SemanticNodeId {
+        census_site!("substitute_canonical");
         ProjectSemanticDispatch::substitute_canonical(self, node, substitution)
     }
     fn probe_optional<T>(&self, probe: impl FnOnce() -> Option<T>) -> Option<T> {
+        census_site!("probe_optional");
         ProjectSemanticDispatch::probe_optional(self, probe)
     }
     fn observe_read<T>(
         &self,
         read: impl FnOnce() -> T,
     ) -> super::flow_return_fact::ObservedRead<T> {
+        census_site!("observe_read");
         ProjectSemanticDispatch::observe_read(self, read)
     }
     fn preserve_read_reuse_evidence<T>(&self, read: &super::flow_return_fact::ObservedRead<T>) {
+        census_site!("preserve_read_reuse_evidence");
         read.preserve_reuse_evidence(self);
     }
     fn hold_read_observation(
         &self,
         rails: rails::ObservationRail,
     ) -> super::flow_return_fact::HeldReadObservation {
+        census_site!("hold_read_observation");
         ProjectSemanticDispatch::hold_read_observation(self, rails)
     }
     fn finish_held_read_observation(
@@ -11465,17 +11526,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         held: super::flow_return_fact::HeldReadObservation,
         closed: rails::ClosedObservation,
     ) -> super::flow_return_fact::ObservedRead<()> {
+        census_site!("finish_held_read_observation");
         ProjectSemanticDispatch::finish_held_read_observation(self, held, closed)
     }
     fn adopt_read<T>(
         &self,
         read: super::flow_return_fact::ObservedRead<T>,
     ) -> Result<T, crate::semantic_query::ExecutionAbort> {
+        census_site!("adopt_read");
         read.adopt(self)
     }
     fn held_transaction_read_policy(
         &self,
     ) -> Option<(verter_session_query::facts::policy::FactPolicy, u64)> {
+        census_site!("held_transaction_read_policy");
         ProjectSemanticDispatch::held_transaction_read_policy(self)
     }
     fn hold_transaction_read(
@@ -11483,6 +11547,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         rails: rails::RecordingRail,
         evidence_epoch: u64,
     ) -> super::build::HeldTransactionReadRecording {
+        census_site!("hold_transaction_read");
         ProjectSemanticDispatch::hold_transaction_read(self, rails, evidence_epoch)
     }
     fn finish_transaction_read(
@@ -11494,6 +11559,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         verter_session_query::facts::reuse::ReuseClass,
         super::dispatch_txn::FlowMemberReuse,
     )> {
+        census_site!("finish_transaction_read");
         ProjectSemanticDispatch::finish_held_transaction_read(self, recording, closed, complete)
     }
     fn replay_transaction_read(
@@ -11501,6 +11567,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         reuse: &verter_session_query::facts::reuse::ReuseClass,
         replay: &super::dispatch_txn::FlowMemberReuse,
     ) {
+        census_site!("replay_transaction_read");
         ProjectSemanticDispatch::replay_transaction_read(self, reuse, replay);
     }
     type Caps = C;
@@ -11508,6 +11575,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         &self,
         key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
     ) -> Option<verter_session_query::flow::bundle::SkeletonRef> {
+        census_site!("flow_slice_skeleton");
         self.flow_slice_driver().skeleton_for(key)
     }
     fn flow_slice_lowered(
@@ -11517,18 +11585,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
         >,
     ) -> Option<verter_session_query::flow::flow_ir::SharedFlowSliceIR> {
+        census_site!("flow_slice_lowered");
         self.flow_slice_driver().lookup_lowered(key, planned)
     }
     fn flow_slice_hash(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceHashKey,
     ) -> Option<crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome> {
+        census_site!("flow_slice_hash");
         self.flow_slice_driver().lookup_hash(key)
     }
     fn flow_bound_graph_for(
         &self,
         key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
     ) -> Option<verter_session_query::flow::bundle::BoundFlowGraph> {
+        census_site!("flow_bound_graph_for");
         self.binding.flow_slice.bound_graph_for(key)
     }
     fn first_signature_param_occurrence(
@@ -11536,6 +11607,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         params: &[crate::semantic_query::FunctionParam],
         name: &str,
     ) -> Option<u32> {
+        census_site!("first_signature_param_occurrence");
         ProjectSemanticDispatch::first_signature_param_occurrence(self, params, name)
     }
     fn instantiate_clause_at_base_constraints<'n>(
@@ -11545,6 +11617,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         constraint_spelling: crate::semantic_query::ClauseSpelling,
         spelling: crate::semantic_query::ClauseSpelling,
     ) -> SemanticNodeId {
+        census_site!("instantiate_clause_at_base_constraints");
         ProjectSemanticDispatch::instantiate_clause_at_base_constraints(
             self,
             clause,
@@ -11559,17 +11632,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         extracted: SemanticNodeId,
         spelling: crate::semantic_query::ClauseSpelling,
     ) -> SemanticNodeId {
+        census_site!("instantiate_clause_params_at_call");
         ProjectSemanticDispatch::instantiate_clause_params_at_call(
             self, params, extracted, spelling,
         )
     }
     fn unresolved_head_is_authored_import(&self, scope: &NodeScopeId, name: &str) -> bool {
+        census_site!("unresolved_head_is_authored_import");
         ProjectSemanticDispatch::unresolved_head_is_authored_import(self, scope, name)
     }
     fn top_level_literals(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        census_site!("top_level_literals");
         top_level_literal_nodes_in(self.graph().store(), node)
     }
     fn widened_literal(&self, node: SemanticNodeId) -> SemanticNodeId {
+        census_site!("widened_literal");
         ProjectSemanticDispatch::widened_literal(self, node)
     }
     fn literal_of_contextual_type(
@@ -11577,6 +11654,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         candidate: SemanticNodeId,
         contextual: SemanticNodeId,
     ) -> bool {
+        census_site!("literal_of_contextual_type");
         ProjectSemanticDispatch::literal_of_contextual_type(self, candidate, contextual, &[])
     }
     fn subtype_reduced_union(
@@ -11584,6 +11662,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         members: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite {
+        census_site!("subtype_reduced_union");
         ProjectSemanticDispatch::subtype_reduced_union(self, members, nullability)
     }
     fn attach_function_kind_wrap(
@@ -11594,6 +11673,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         binder_env: &FlowBinderEnv,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> FlowReturnResult {
+        census_site!("attach_function_kind_wrap");
         ProjectSemanticDispatch::attach_function_kind_wrap(
             self,
             result,
@@ -11608,6 +11688,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         result: FlowReturnResult,
         predicate: Option<crate::semantic_query::SignaturePredicate>,
     ) -> FlowReturnResult {
+        census_site!("attach_inferred_predicate");
         ProjectSemanticDispatch::attach_inferred_predicate(self, result, predicate)
     }
     fn authored_signatures_of(
@@ -11615,9 +11696,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         subject: SemanticNodeId,
         kind: SignatureKind,
     ) -> AuthoredSignatures {
+        census_site!("authored_signatures_of");
         ProjectSemanticDispatch::authored_signatures_of(self, subject, kind)
     }
     fn awaited_normalize_for_flow(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        census_site!("awaited_normalize_for_flow");
         ProjectSemanticDispatch::awaited_normalize_for_flow(self, node)
     }
     fn bind_callee_receiver(
@@ -11625,18 +11708,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         callee: SemanticNodeId,
         receiver: SemanticNodeId,
     ) -> SemanticNodeId {
+        census_site!("bind_callee_receiver");
         ProjectSemanticDispatch::bind_callee_receiver(self, callee, receiver)
     }
     fn bind_this_receiver(&self, node: SemanticNodeId, receiver: SemanticNodeId) -> SemanticNodeId {
+        census_site!("bind_this_receiver");
         ProjectSemanticDispatch::bind_this_receiver(self, node, receiver)
     }
     fn canonical_is_module(&self, canonical: &str) -> bool {
+        census_site!("canonical_is_module");
         ProjectSemanticDispatch::canonical_is_module(self, canonical)
     }
     fn class_heritage_ancestry(
         &self,
         root: &crate::semantic_query::DeclIdentity,
     ) -> Arc<ClassAncestryReading> {
+        census_site!("class_heritage_ancestry");
         ProjectSemanticDispatch::class_heritage_ancestry(self, root)
     }
     fn class_member_source(
@@ -11647,21 +11734,25 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         args: &[SemanticNodeId],
         name: &str,
     ) -> Option<SemanticNodeId> {
+        census_site!("class_member_source");
         ProjectSemanticDispatch::class_member_source(self, canonical, owner, class, args, name)
     }
     fn classify_truthiness_domain_read(
         &self,
         subject: SemanticNodeId,
     ) -> crate::semantic_query::CacheRead<crate::semantic_query::TruthinessDomain> {
+        census_site!("classify_truthiness_domain_read");
         ProjectSemanticDispatch::classify_truthiness_domain_read(self, subject)
     }
     fn connected_demand_tripped(&self) -> bool {
+        census_site!("connected_demand_tripped");
         ProjectSemanticDispatch::connected_demand_tripped(self)
     }
     fn construct_signature_visibility(
         &self,
         signature: SemanticNodeId,
     ) -> Option<verter_type_expr::MemberVisibility> {
+        census_site!("construct_signature_visibility");
         ProjectSemanticDispatch::construct_signature_visibility(self, signature)
     }
 
@@ -11672,6 +11763,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
         ordered: bool,
     ) -> Option<DistributedIntersection> {
+        census_site!("distribute_intersection");
         ProjectSemanticDispatch::distribute_intersection(
             self,
             factors,
@@ -11685,6 +11777,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         node: SemanticNodeId,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> SemanticNodeId {
+        census_site!("erase_nullable_members");
         ProjectSemanticDispatch::erase_nullable_members(self, node, nullability)
     }
     fn evaluate_indexed_value(
@@ -11694,6 +11787,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         expression: &verter_type_expr::IndexedValueExpression,
         hold_flow_result: bool,
     ) -> Option<IndexedValue> {
+        census_site!("evaluate_indexed_value");
         ProjectSemanticDispatch::evaluate_indexed_value(
             self,
             canonical,
@@ -11703,6 +11797,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         )
     }
     fn execute_flow_return(&self, key: FlowReturnKey) -> FlowReturnStep {
+        census_site!("execute_flow_return");
         ProjectSemanticDispatch::execute_flow_return(self, key)
     }
     fn execute_function_return_source(
@@ -11710,9 +11805,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         source: &verter_type_expr::facts::FunctionReturnSource,
         scope_canonical_id: &str,
     ) -> FunctionReturnNode {
+        census_site!("execute_function_return_source");
         ProjectSemanticDispatch::execute_function_return_source(self, source, scope_canonical_id)
     }
     fn materialize_returned_callable(&self, node: SemanticNodeId) -> SemanticNodeId {
+        census_site!("materialize_returned_callable");
         ProjectSemanticDispatch::materialize_returned_callable(self, node)
     }
     fn apply_signature_return_source(
@@ -11720,9 +11817,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         carrier: &crate::semantic_query::SignatureReturnCarrier,
         value: SemanticNodeId,
     ) -> SemanticNodeId {
+        census_site!("apply_signature_return_source");
         ProjectSemanticDispatch::apply_signature_return_source(self, carrier, value)
     }
     fn execute_relate_pair(&self, source: SemanticNodeId, target: SemanticNodeId) -> RelationStep {
+        census_site!("execute_relate_pair");
         ProjectSemanticDispatch::execute_relate_pair(self, source, target)
     }
     fn execute_contextual_call(
@@ -11733,6 +11832,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         ResolveCallStep,
         Option<super::call_resolve::DeclaredCallResult>,
     ) {
+        census_site!("execute_contextual_call");
+        #[cfg(any(test, feature = "test-support"))]
+        let _stage = census::enter_call_stage("execute_contextual_call");
         // The call computation a non-blocking evaluator advances, driven
         // in place.
         let mut call = super::helper_continuation::CallRead::begin(key, std::mem::take(state));
@@ -11750,12 +11852,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         ResolveCallStep,
         Option<super::call_resolve::DeclaredCallResult>,
     ) {
+        census_site!("resume_contextual_call");
+        #[cfg(any(test, feature = "test-support"))]
+        let _stage = census::enter_call_stage("resume_contextual_call");
         ProjectSemanticDispatch::resume_contextual_call(self, key, args, position, state)
     }
     fn demand_type_node(
         &self,
         key: SemanticQueryKey,
     ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
+        census_site!("demand_type_node");
         SemanticQueryApi::execute_type_node(self, key)
     }
     fn finalize_evolving_array(
@@ -11763,6 +11869,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         elements: &[super::flow_products::EvolvingElement],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite {
+        census_site!("finalize_evolving_array");
         ProjectSemanticDispatch::finalize_evolving_array(self, elements, nullability)
     }
     fn flow_binder_env(
@@ -11773,6 +11880,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         outer: Option<&FlowBinderEnv>,
         nested_at: Option<u32>,
     ) -> FlowBinderEnv {
+        census_site!("flow_binder_env");
         ProjectSemanticDispatch::flow_binder_env(
             self,
             canonical,
@@ -11786,6 +11894,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         &self,
         identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
     ) -> FlowReturnKey {
+        census_site!("flow_return_key_for");
         ProjectSemanticDispatch::flow_return_key_for(self, identity)
     }
     fn flow_slice_demand_site(
@@ -11795,6 +11904,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         FlowSliceDemandSite<<C as crate::resolver_core::ResolverCapabilities>::ExpressionDemand>,
         FlowSliceDemandSiteError,
     > {
+        census_site!("flow_slice_demand_site");
         ProjectSemanticDispatch::flow_slice_demand_site(self, key)
     }
     fn function_augmentations(
@@ -11803,12 +11913,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         decl_name: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<AugmentationContributions> {
+        census_site!("function_augmentations");
         ProjectSemanticDispatch::function_augmentations(self, decl_canonical, decl_name, context)
     }
     fn transaction_indexed_record(
         &self,
         canonical: &str,
     ) -> Option<Arc<verter_session_query::inputs::indexed::IndexedInputRecord>> {
+        census_site!("transaction_indexed_record");
         ProjectSemanticDispatch::transaction_indexed_record(self, canonical)
     }
     fn global_named_type(
@@ -11817,9 +11929,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         owner: verter_type_expr::TopLevelOwnerId,
         name: &'static str,
     ) -> Option<SemanticNodeId> {
+        census_site!("global_named_type");
         ProjectSemanticDispatch::global_named_type(self, canonical, owner, name)
     }
     fn instance_member_read_widens(&self, instance: SemanticNodeId, member: &str) -> bool {
+        census_site!("instance_member_read_widens");
         ProjectSemanticDispatch::instance_member_read_widens(self, instance, member)
     }
     fn instantiate_call_candidate(
@@ -11827,6 +11941,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         signature: SemanticNodeId,
         type_args: &[SemanticNodeId],
     ) -> Option<SemanticNodeId> {
+        census_site!("instantiate_call_candidate");
         ProjectSemanticDispatch::instantiate_call_candidate(self, signature, type_args)
     }
     fn intern_normalized_union(
@@ -11834,6 +11949,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         members: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> SemanticNodeId {
+        census_site!("intern_normalized_union");
         ProjectSemanticDispatch::intern_normalized_union(self, members, nullability)
     }
     fn intern_normalized_union_or_intersection(
@@ -11841,15 +11957,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         members: &[SemanticNodeId],
         is_union: bool,
     ) -> SemanticNodeId {
+        census_site!("intern_normalized_union_or_intersection");
         ProjectSemanticDispatch::intern_normalized_union_or_intersection(self, members, is_union)
     }
     fn is_enum_object_of(&self, node: SemanticNodeId, literal: &EnumLiteralType) -> bool {
+        census_site!("is_enum_object_of");
         ProjectSemanticDispatch::is_enum_object_of(self, node, literal)
     }
     fn is_function_global_identity(&self, identity: &crate::semantic_query::DeclIdentity) -> bool {
+        census_site!("is_function_global_identity");
         ProjectSemanticDispatch::is_function_global_identity(self, identity)
     }
     fn is_lib_environment_canonical(&self, canonical: &str) -> bool {
+        census_site!("is_lib_environment_canonical");
         ProjectSemanticDispatch::is_lib_environment_canonical(self, canonical)
     }
     fn join_flow_return_contributors(
@@ -11862,6 +11982,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         empty_completion: verter_session_query::flow::slice::EmptyCompletion,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
+        census_site!("join_flow_return_contributors");
         ProjectSemanticDispatch::join_flow_return_contributors(
             self,
             contributors,
@@ -11881,6 +12002,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         args: Arc<[SemanticNodeId]>,
         context: ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
+        census_site!("lower_lib_global");
         ProjectSemanticDispatch::lower_lib_global(
             self,
             scope_canonical_id,
@@ -11897,6 +12019,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         expr: &verter_type_expr::TypeExpr,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
+        census_site!("lower_type_expr_in_owner_scope_with_context");
         let _type_node = self
             .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         ProjectSemanticDispatch::lower_type_expr_in_owner_scope_with_context(
@@ -11908,12 +12031,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         )
     }
     fn materialize_flow_return_wrap(&self, result: FlowReturnResult) -> FlowReturnResult {
+        census_site!("materialize_flow_return_wrap");
         ProjectSemanticDispatch::materialize_flow_return_wrap(self, result)
     }
     fn mentions_node(&self, node: SemanticNodeId, target: SemanticNodeId) -> bool {
+        census_site!("mentions_node");
         ProjectSemanticDispatch::mentions_node(self, node, target)
     }
     fn nodes_comparable(&self, a: SemanticNodeId, b: SemanticNodeId) -> ComparabilityVerdict {
+        census_site!("nodes_comparable");
         ProjectSemanticDispatch::nodes_comparable(self, a, b)
     }
     fn normalize_node_for_structural_fact_demand(
@@ -11921,12 +12047,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> StructuralFactDemandOutcome {
+        census_site!("normalize_node_for_structural_fact_demand");
         ProjectSemanticDispatch::normalize_node_for_structural_fact_demand(self, node, context)
     }
     fn declared_call_return_read(
         &self,
         node: SemanticNodeId,
     ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>> {
+        census_site!("declared_call_return_read");
         self.indexed_call_return_key(node)
             .and_then(|key| self.read_declared_call_return(key))
     }
@@ -11936,18 +12064,23 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         canonical: &str,
         call_span: verter_span::Span,
     ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        census_site!("bind_checker_recovery");
         ProjectSemanticDispatch::bind_checker_recovery(self, node, canonical, call_span)
     }
     fn print_checker_type(&self, node: SemanticNodeId) -> Option<String> {
+        census_site!("print_checker_type");
         self.print_diagnostic_type(node)
     }
     fn print_checker_type_clipped(&self, node: SemanticNodeId) -> String {
+        census_site!("print_checker_type_clipped");
         self.print_diagnostic_type_clipped(node)
     }
     fn global_object_declares(&self, name: &str, canonical: &str) -> bool {
+        census_site!("global_object_declares");
         ProjectSemanticDispatch::global_object_declares(self, name, canonical)
     }
     fn apparent_wrapper_settles(&self, node: SemanticNodeId, canonical: &str) -> bool {
+        census_site!("apparent_wrapper_settles");
         ProjectSemanticDispatch::apparent_wrapper_settles(self, node, canonical)
     }
     fn class_proves_member_absent(
@@ -11958,14 +12091,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         args: &[SemanticNodeId],
         name: &str,
     ) -> bool {
+        census_site!("class_proves_member_absent");
         ProjectSemanticDispatch::class_proves_member_absent(
             self, canonical, owner, class, args, name,
         )
     }
     fn mark_return_cycle(&self, target: &FlowReturnKey) {
+        census_site!("mark_return_cycle");
         ProjectSemanticDispatch::mark_return_cycle(self, target);
     }
     fn take_return_cycle(&self, key: &FlowReturnKey) -> bool {
+        census_site!("take_return_cycle");
         self.dispatch_txn.borrow_mut().circular_returns.remove(key)
     }
     fn normalize_expression_tuple_spread(
@@ -11973,6 +12109,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         elements: &[crate::semantic_query::TupleElement],
         readonly: bool,
     ) -> NormalizedTupleShape {
+        census_site!("normalize_expression_tuple_spread");
         ProjectSemanticDispatch::normalize_expression_tuple_spread(self, elements, readonly)
     }
     fn admit_expression_tuple_splice(
@@ -11980,12 +12117,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         prefix: usize,
         incoming: usize,
     ) -> super::build::ExpressionSplice {
+        census_site!("admit_expression_tuple_splice");
         ProjectSemanticDispatch::admit_expression_tuple_splice(self, prefix, incoming)
     }
     fn opaque(&self, err: QueryError) -> SemanticNodeId {
+        census_site!("opaque");
         ProjectSemanticDispatch::opaque(self, err)
     }
     fn receiver_this_types(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        census_site!("receiver_this_types");
         ProjectSemanticDispatch::receiver_this_types(self, node)
     }
     fn contextual_object_this_type(
@@ -11993,12 +12133,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         node: SemanticNodeId,
         canonical: &str,
     ) -> Option<SemanticNodeId> {
+        census_site!("contextual_object_this_type");
         ProjectSemanticDispatch::contextual_object_this_type(self, node, canonical)
     }
     fn contextual_carrier_view(&self, node: SemanticNodeId) -> SemanticNodeId {
+        census_site!("contextual_carrier_view");
         ProjectSemanticDispatch::contextual_carrier_view(self, node)
     }
     fn contextual_error_type(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        census_site!("contextual_error_type");
         ProjectSemanticDispatch::contextual_error_type(self, node)
     }
     fn contextual_undeclared_names(
@@ -12006,6 +12149,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         node: SemanticNodeId,
         canonical: &str,
     ) -> Vec<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        census_site!("contextual_undeclared_names");
         ProjectSemanticDispatch::contextual_undeclared_names(self, node, canonical)
     }
     fn contextual_object_member(
@@ -12014,6 +12158,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         name: &str,
         value: Option<SemanticNodeId>,
     ) -> Result<Option<SemanticNodeId>, ResolveCallFailure> {
+        census_site!("contextual_object_member");
         ProjectSemanticDispatch::contextual_object_member(self, state, name, value)
     }
     fn contextual_object_order(
@@ -12022,6 +12167,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         names: &[Option<Arc<str>>],
         canonical: &str,
     ) -> Vec<usize> {
+        census_site!("contextual_object_order");
         ProjectSemanticDispatch::contextual_object_order(self, state, names, canonical)
     }
     fn reduce_arms_to_supertypes(
@@ -12029,6 +12175,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         arms: &[ReductionArm],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> ReunionReduction {
+        census_site!("reduce_arms_to_supertypes");
         ProjectSemanticDispatch::reduce_arms_to_supertypes(self, arms, nullability)
     }
     fn reduce_template_literal_nodes(
@@ -12037,18 +12184,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
+        census_site!("reduce_template_literal_nodes");
         ProjectSemanticDispatch::reduce_template_literal_nodes(self, quasis, args, eval_context)
     }
     fn relation_nominal_identity(
         &self,
         node: SemanticNodeId,
     ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
+        census_site!("relation_nominal_identity");
         ProjectSemanticDispatch::relation_nominal_identity(self, node)
     }
     fn resolve_call_context_for(
         &self,
         canonical: &str,
     ) -> crate::semantic_query::ResolveCallContext {
+        census_site!("resolve_call_context_for");
         ProjectSemanticDispatch::resolve_call_context_for(self, canonical)
     }
     fn print_relation_operands(
@@ -12056,6 +12206,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) -> Option<(String, String)> {
+        census_site!("print_relation_operands");
         ProjectSemanticDispatch::print_relation_operands(self, source, target)
     }
     fn checker_relation_failure(
@@ -12065,6 +12216,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         head: crate::semantic_query::CheckerDiagnostic,
         site: &verter_type_expr::IndexedReportSite,
     ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>> {
+        census_site!("checker_relation_failure");
         ProjectSemanticDispatch::checker_relation_failure(self, source, target, head, site)
     }
     fn resolve_closed_signature_utility(
@@ -12072,6 +12224,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         node: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
+        census_site!("resolve_closed_signature_utility");
         ProjectSemanticDispatch::resolve_closed_signature_utility(self, node, context)
     }
     fn resolve_signature_source_carrier(
@@ -12079,6 +12232,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         node: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
+        census_site!("resolve_signature_source_carrier");
         ProjectSemanticDispatch::resolve_signature_source_carrier(self, node, context)
     }
     fn resolve_typeinfo_surface_view(
@@ -12086,9 +12240,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         base: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<crate::semantic_query::SurfaceView> {
+        census_site!("resolve_typeinfo_surface_view");
         ProjectSemanticDispatch::resolve_typeinfo_surface_view(self, base, context)
     }
     fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId {
+        census_site!("resolved_reduction_view");
         ProjectSemanticDispatch::resolved_reduction_view(self, view)
     }
     fn contextual_tuple(
@@ -12096,6 +12252,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         node: SemanticNodeId,
         elements: &[crate::semantic_query::TupleElement],
     ) -> super::contextual_tuple::ContextualTuple {
+        census_site!("contextual_tuple");
         ProjectSemanticDispatch::contextual_tuple(self, node, elements)
     }
     fn tuple_element_context(
@@ -12104,9 +12261,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         index: usize,
         shape: super::call_resolve::ArrayLiteralShape,
     ) -> super::contextual_tuple::TupleElementContext {
+        census_site!("tuple_element_context");
         ProjectSemanticDispatch::tuple_element_context(self, tuple, index, shape)
     }
     fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        census_site!("self_reference_declaration");
         ProjectSemanticDispatch::self_reference_declaration(self, node)
     }
     fn shallow_lower_type_expr_with_context(
@@ -12120,6 +12279,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         reduction_context: ProjectionReductionContext,
     ) -> SemanticNodeId {
+        census_site!("shallow_lower_type_expr_with_context");
         let _type_node = self
             .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         ProjectSemanticDispatch::shallow_lower_type_expr_with_context(
@@ -12138,6 +12298,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         &self,
         subject: SemanticNodeId,
     ) -> Result<(Vec<SemanticNodeId>, Vec<SemanticNodeId>), IncompleteReason> {
+        census_site!("shared_signature_buckets");
         ProjectSemanticDispatch::shared_signature_buckets(self, subject)
     }
     fn shared_signature_nodes(
@@ -12145,6 +12306,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         subject: SemanticNodeId,
         kind: GraphSignatureKind,
     ) -> SharedSignatureNodes {
+        census_site!("shared_signature_nodes");
         ProjectSemanticDispatch::shared_signature_nodes(self, subject, kind)
     }
     fn substitute_semantic_type_param(
@@ -12153,6 +12315,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         parameter_node: SemanticNodeId,
         arg: SemanticNodeId,
     ) -> SemanticNodeId {
+        census_site!("substitute_semantic_type_param");
         ProjectSemanticDispatch::substitute_semantic_type_param(self, node, parameter_node, arg)
     }
     fn this_binder(
@@ -12162,12 +12325,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         class: &Arc<str>,
         instance: Option<SemanticNodeId>,
     ) -> SemanticNodeId {
+        census_site!("this_binder");
         ProjectSemanticDispatch::this_binder(self, canonical, owner, class, instance)
     }
     fn type_parameter_apparent_receiver(&self, receiver: SemanticNodeId) -> SemanticNodeId {
+        census_site!("type_parameter_apparent_receiver");
         ProjectSemanticDispatch::type_parameter_apparent_receiver(self, receiver)
     }
     fn union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
+        census_site!("union_arms_of");
         ProjectSemanticDispatch::union_arms_of(self, node)
     }
     fn assignability_refuting_keys(
@@ -12175,21 +12341,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         target: SemanticNodeId,
         canonical: &str,
     ) -> Option<Vec<Arc<str>>> {
+        census_site!("assignability_refuting_keys");
         ProjectSemanticDispatch::assignability_refuting_keys(self, target, canonical)
     }
     fn closed_object_own_string_keys(&self, source: SemanticNodeId) -> Option<Vec<Arc<str>>> {
+        census_site!("closed_object_own_string_keys");
         ProjectSemanticDispatch::closed_object_own_string_keys(self, source)
     }
     fn unique_symbol_identity_for_typeof_node(
         &self,
         node: SemanticNodeId,
     ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
+        census_site!("unique_symbol_identity_for_typeof_node");
         ProjectSemanticDispatch::unique_symbol_identity_for_typeof_node(self, node)
     }
     fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap {
+        census_site!("unwrap_identity_carrier_for_relation");
         ProjectSemanticDispatch::unwrap_identity_carrier_for_relation(self, id)
     }
     fn regularized_empty_object_program(&self, node: SemanticNodeId) -> SemanticNodeId {
+        census_site!("regularized_empty_object_program");
         ProjectSemanticDispatch::regularized_empty_object_program(self, node)
     }
     fn value_read_widens(
@@ -12198,6 +12369,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         owner: verter_type_expr::TopLevelOwnerId,
         path: &[String],
     ) -> bool {
+        census_site!("value_read_widens");
         ProjectSemanticDispatch::value_read_widens(self, canonical, owner, path)
     }
     fn resolve_scoped_argument_literal_provenance(
@@ -12210,72 +12382,88 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             verter_span::Span,
         ) -> super::call_resolve::ArgumentReadLiterals,
     ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>> {
+        census_site!("resolve_scoped_argument_literal_provenance");
         ProjectSemanticDispatch::resolve_scoped_argument_literal_provenance(
             self, canonical, owner, authored, reads,
         )
     }
     fn arena(&self) -> super::arena_ops::ArenaOps<'_, C::Observe> {
+        census_site!("arena");
         super::arena_ops::ArenaOps::new(self.graph())
     }
     fn call_undecided_relations(&self) -> u64 {
+        census_site!("call_undecided_relations");
         self.dispatch_txn.borrow().call.undecided_relations
     }
     fn discard_call_relation_observations(&self, count: u64) {
+        census_site!("discard_call_relation_observations");
         self.dispatch_txn
             .borrow_mut()
             .call
             .discard_undecided_relations(count);
     }
     fn restore_call_relation_observations(&self, count: u64) {
+        census_site!("restore_call_relation_observations");
         let mut txn = self.dispatch_txn.borrow_mut();
         txn.call.undecided_relations = txn.call.undecided_relations.saturating_add(count);
     }
     fn open_undecided_relation_window(&self) -> super::dispatch_txn::HeldUndecidedRelationWindow {
+        census_site!("open_undecided_relation_window");
         super::dispatch_txn::HeldUndecidedRelationWindow::open(&self.dispatch_txn)
     }
     fn close_undecided_relation_window(
         &self,
         window: super::dispatch_txn::HeldUndecidedRelationWindow,
     ) -> Option<super::dispatch_txn::UndecidedRelationDelta> {
+        census_site!("close_undecided_relation_window");
         window.close(&self.dispatch_txn)
     }
     fn replay_undecided_relation_delta(
         &self,
         delta: super::dispatch_txn::UndecidedRelationDelta,
     ) -> bool {
+        census_site!("replay_undecided_relation_delta");
         self.dispatch_txn
             .borrow_mut()
             .call
             .replay_undecided_delta(delta)
     }
     fn open_inline_cost(&self) -> super::connected_demand::HeldInlineCost {
+        census_site!("open_inline_cost");
         self.connected_demand().hold_inline_cost()
     }
     fn close_inline_cost(
         &self,
         cost: super::connected_demand::HeldInlineCost,
     ) -> Option<super::connected_demand::InlineCost> {
+        census_site!("close_inline_cost");
         self.connected_demand().close_held_inline_cost(cost)
     }
     fn replay_inline_cost(&self, cost: &super::connected_demand::InlineCost) -> bool {
+        census_site!("replay_inline_cost");
         self.connected_demand().replay_inline_cost(
             cost,
             crate::request_context::current_request_budget().as_deref(),
         )
     }
     fn outside_inline_costs<T>(&self, part: impl FnOnce() -> T) -> T {
+        census_site!("outside_inline_costs");
         self.connected_demand().outside_inline_costs(part)
     }
     fn open_contextual_window(&self) -> bool {
+        census_site!("open_contextual_window");
         ProjectSemanticDispatch::open_contextual_window(self)
     }
     fn close_contextual_window(&self) {
+        census_site!("close_contextual_window");
         ProjectSemanticDispatch::close_contextual_window(self);
     }
     fn contextual_window_waits(&self) -> bool {
+        census_site!("contextual_window_waits");
         ProjectSemanticDispatch::contextual_window_waits(self)
     }
     fn contextual_window_open(&self) -> bool {
+        census_site!("contextual_window_open");
         ProjectSemanticDispatch::contextual_window_open(self)
     }
     fn contextual_delivery_waits(
@@ -12283,15 +12471,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         state: &super::call_resolve::ContextualCallState,
         typed: SemanticNodeId,
     ) -> bool {
+        census_site!("contextual_delivery_waits");
         ProjectSemanticDispatch::contextual_delivery_waits(self, state, typed)
     }
     fn hold_contextual_route(&self, route: HeldContextualRoute) {
+        census_site!("hold_contextual_route");
         ProjectSemanticDispatch::hold_contextual_route(self, route);
     }
     fn take_held_contextual_route(&self, asked: &ResolveCallKey) -> Option<HeldContextualRoute> {
+        census_site!("take_held_contextual_route");
         ProjectSemanticDispatch::take_held_contextual_route(self, asked)
     }
     fn pending_obligation_count(&self) -> usize {
+        census_site!("pending_obligation_count");
         self.dispatch_txn
             .borrow()
             .obligations
@@ -12299,12 +12491,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             .pending_len()
     }
     fn enter_lexical_demand(&self, canonical: Arc<str>) -> super::LexicalDemandScopeGuard<'_> {
+        census_site!("enter_lexical_demand");
         super::LexicalDemandScopeGuard::push(&self.lexical_demand_scope, canonical)
     }
     fn presence_intersection_for_flow(
         &self,
         members: &[Vec<crate::semantic_query::SurfaceMember>],
     ) -> Vec<crate::semantic_query::SurfaceMember> {
+        census_site!("presence_intersection_for_flow");
         let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
         let result = super::walk::presence_intersection_members(
             self.graph(),
@@ -12323,6 +12517,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         super::flow_products::LiteralProvenanceResult,
         verter_session_query::flow::policy::FlowGap,
     > {
+        census_site!("flow_literal_provenance");
         let (membership, evidence) = super::canonical_algebra::inspect_literal_provenance(
             self.graph().store(),
             inputs,
@@ -12341,6 +12536,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         members: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite {
+        census_site!("flow_canonical_union");
         let composite = super::canonical_algebra::intern_ordered_union_charged(
             self.graph(),
             members,
