@@ -313,6 +313,10 @@ fn project_error_kind(error: &TypeInfoRequestError) -> serde_json::Value {
                 .as_ref()
                 .map(|profile| profile_digest_hex(&profile.digest)),
         }),
+        // The framework-surface operation never answers these: they reject
+        // an expand-around reference.
+        Kind::StaleBasis(_) => serde_json::json!({ "case": "staleBasis" }),
+        Kind::UnknownNodeRef(_) => serde_json::json!({ "case": "unknownNodeRef" }),
     }
 }
 

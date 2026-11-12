@@ -134,6 +134,8 @@ fn err_label(err: &wire::TypeInfoRequestError) -> &'static str {
         type_info_request_error::Kind::MissingProjectPath(_) => "MissingProjectPath",
         type_info_request_error::Kind::ExpansionBudgetOutOfRange(_) => "ExpansionBudgetOutOfRange",
         type_info_request_error::Kind::UnknownFrameworkProfile(_) => "UnknownFrameworkProfile",
+        type_info_request_error::Kind::StaleBasis(_) => "StaleBasis",
+        type_info_request_error::Kind::UnknownNodeRef(_) => "UnknownNodeRef",
     }
 }
 
@@ -329,10 +331,12 @@ fn every_closure_variant_has_concrete_resource_bound() {
 
 // ───────────────── static: error union consistency across sections ────────
 
-/// The closed `TypeInfoRequestError` union — exactly these 12 active
+/// The closed `TypeInfoRequestError` union — exactly these 14 active
 /// variant selectors (proto field 11 / `missing_relate_endpoint` is
 /// retired via `reserved`; field 13 / `unknown_framework_profile` is the
-/// schema-11 typed rejection of an unadmitted framework profile).
+/// schema-11 typed rejection of an unadmitted framework profile; fields 14
+/// and 15 / `stale_basis` and `unknown_node_ref` are the schema-12
+/// expand-around rejections of a node reference).
 const REQUEST_ERROR_VARIANTS: &[&str] = &[
     "missing_projection_context",
     "missing_display_policy",
@@ -346,6 +350,8 @@ const REQUEST_ERROR_VARIANTS: &[&str] = &[
     "missing_project_path",
     "expansion_budget_out_of_range",
     "unknown_framework_profile",
+    "stale_basis",
+    "unknown_node_ref",
 ];
 
 #[test]
@@ -391,7 +397,7 @@ fn typeinfo_request_error_union_is_consistent_across_sections() {
     expected.sort();
     assert_eq!(
         proto_arms, expected,
-        "the proto TypeInfoRequestError oneof must carry exactly the 12 closed \
+        "the proto TypeInfoRequestError oneof must carry exactly the 14 closed \
          error selectors",
     );
 
@@ -409,8 +415,8 @@ fn typeinfo_request_error_union_is_consistent_across_sections() {
     // here ties the validator surface to the proto count.
     assert_eq!(
         REQUEST_ERROR_VARIANTS.len(),
-        12,
-        "the validator-side error union mirror must list exactly 12 variants",
+        14,
+        "the validator-side error union mirror must list exactly 14 variants",
     );
 }
 

@@ -23,10 +23,10 @@ use verter_session::typeinfo::request_validation::{
     validate_expand_graph_around_request, validate_flow_narrowing_request,
     validate_framework_surface_request, validate_project_path_graph_request,
     validate_resolve_symbol_graph_request, validate_schema_version_for_operation,
-    validate_type_info_graph_request, FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION,
-    FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION, MAX_EXPANSION_DEPTH_BUDGET,
-    MAX_EXPANSION_NODE_BUDGET, MAX_STRUCTURED_EXPRESSION_DEPTH, MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
-    SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
+    validate_type_info_graph_request, EXPAND_AROUND_MIN_SCHEMA_VERSION,
+    FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION, FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION,
+    MAX_EXPANSION_DEPTH_BUDGET, MAX_EXPANSION_NODE_BUDGET, MAX_STRUCTURED_EXPRESSION_DEPTH,
+    MIN_TYPEINFO_GRAPH_SCHEMA_VERSION, SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
 };
 
 fn prim_string_expr() -> wire::StructuredTypeExpression {
@@ -97,6 +97,30 @@ fn err_variant_label(err: &wire::TypeInfoRequestError) -> &'static str {
         type_info_request_error::Kind::MissingProjectPath(_) => "MissingProjectPath",
         type_info_request_error::Kind::ExpansionBudgetOutOfRange(_) => "ExpansionBudgetOutOfRange",
         type_info_request_error::Kind::UnknownFrameworkProfile(_) => "UnknownFrameworkProfile",
+        type_info_request_error::Kind::StaleBasis(_) => "StaleBasis",
+        type_info_request_error::Kind::UnknownNodeRef(_) => "UnknownNodeRef",
+    }
+}
+
+/// A well-shaped node reference: 32-byte query, basis and slot digests and
+/// an empty (declaration-root) role.
+fn well_shaped_node_ref() -> wire::NodeRef {
+    wire::NodeRef {
+        query_identity_digest: vec![1; 32],
+        input_basis_digest: vec![2; 32],
+        decl_slot_digest: vec![3; 32],
+        role_digest: Vec::new(),
+    }
+}
+
+fn expand_around_request_with(node_ref: Option<wire::NodeRef>) -> wire::ExpandGraphAroundRequest {
+    wire::ExpandGraphAroundRequest {
+        node_ref,
+        context: Some(default_context()),
+        closure: Some(one_level_closure()),
+        display_policy: Some(default_display_policy()),
+        include_provenance: false,
+        include_diagnostics: false,
     }
 }
 
@@ -500,22 +524,90 @@ fn contextual_type_well_formed_passes() {
 
 #[test]
 fn expand_around_well_formed_passes() {
-    let request = wire::ExpandGraphAroundRequest {
-        parent_graph: Some(wire::Handle {
-            opaque: vec![1, 2, 3],
-        }),
-        target: Some(wire::TypeNodeRef {
-            node_id: 3,
-            identity: None,
-            is_canonical: false,
-        }),
-        context: Some(default_context()),
-        closure: Some(one_level_closure()),
-        display_policy: Some(default_display_policy()),
-        include_provenance: false,
-        include_diagnostics: false,
+    validate_expand_graph_around_request(&expand_around_request_with(Some(well_shaped_node_ref())))
+        .expect("a declaration-root reference must validate");
+    let nested = wire::NodeRef {
+        role_digest: vec![4; 32],
+        ..well_shaped_node_ref()
     };
-    validate_expand_graph_around_request(&request).expect("expand-around request must validate");
+    validate_expand_graph_around_request(&expand_around_request_with(Some(nested)))
+        .expect("a nested-role reference must validate");
+}
+
+/// The reference's shape is validated before the host's index is consulted:
+/// a missing reference, a query, basis or slot digest of any length but 32,
+/// a role digest neither empty nor 32 bytes, and the unsupported provenance
+/// flag are each a MalformedPayload.
+#[test]
+fn expand_around_node_ref_shape_is_validated() {
+    let mut malformed = vec![("missing", expand_around_request_with(None))];
+    for (field, node_ref) in [
+        (
+            "query",
+            wire::NodeRef {
+                query_identity_digest: vec![1; 31],
+                ..well_shaped_node_ref()
+            },
+        ),
+        (
+            "basis",
+            wire::NodeRef {
+                input_basis_digest: Vec::new(),
+                ..well_shaped_node_ref()
+            },
+        ),
+        (
+            "slot",
+            wire::NodeRef {
+                decl_slot_digest: vec![3; 33],
+                ..well_shaped_node_ref()
+            },
+        ),
+        (
+            "role",
+            wire::NodeRef {
+                role_digest: vec![4; 5],
+                ..well_shaped_node_ref()
+            },
+        ),
+    ] {
+        malformed.push((field, expand_around_request_with(Some(node_ref))));
+    }
+    malformed.push((
+        "provenance",
+        wire::ExpandGraphAroundRequest {
+            include_provenance: true,
+            ..expand_around_request_with(Some(well_shaped_node_ref()))
+        },
+    ));
+    for (case, request) in malformed {
+        let err = validate_expand_graph_around_request(&request).unwrap_err();
+        assert_eq!(err_variant_label(&err), "MalformedPayload", "{case}");
+    }
+}
+
+/// Expand-around's floor is schema 12: every globally supported version
+/// below it is a MalformedPayload for this operation, 12 validates.
+#[test]
+fn expand_around_operation_requires_schema_twelve() {
+    assert_eq!(EXPAND_AROUND_MIN_SCHEMA_VERSION, 12);
+    validate_type_info_graph_request(&legacy_envelope(
+        wire::Operation::ExpandAround,
+        EXPAND_AROUND_MIN_SCHEMA_VERSION,
+    ))
+    .expect("a v12 expand-around request must validate");
+    for version in [MIN_TYPEINFO_GRAPH_SCHEMA_VERSION, 3, 10, 11] {
+        let err = validate_type_info_graph_request(&legacy_envelope(
+            wire::Operation::ExpandAround,
+            version,
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err_variant_label(&err),
+            "MalformedPayload",
+            "a v{version} expand-around request is a MalformedPayload"
+        );
+    }
 }
 
 /// A well-shaped profile reference: a 32-byte digest. Validation checks the
@@ -666,23 +758,9 @@ fn legacy_envelope(operation: wire::Operation, schema_version: u32) -> wire::Typ
                 include_diagnostics: false,
             })
         }
-        wire::Operation::ExpandAround => {
-            wire_request::Payload::ExpandAround(wire::ExpandGraphAroundRequest {
-                parent_graph: Some(wire::Handle {
-                    opaque: vec![1, 2, 3],
-                }),
-                target: Some(wire::TypeNodeRef {
-                    node_id: 3,
-                    identity: None,
-                    is_canonical: false,
-                }),
-                context: Some(default_context()),
-                closure: Some(one_level_closure()),
-                display_policy: Some(default_display_policy()),
-                include_provenance: false,
-                include_diagnostics: false,
-            })
-        }
+        wire::Operation::ExpandAround => wire_request::Payload::ExpandAround(
+            expand_around_request_with(Some(well_shaped_node_ref())),
+        ),
         wire::Operation::Relate | wire::Operation::FrameworkSurfaces => {
             panic!("legacy_envelope covers the six legacy graph-payload operations only")
         }
@@ -694,17 +772,17 @@ fn legacy_envelope(operation: wire::Operation, schema_version: u32) -> wire::Typ
     }
 }
 
-/// The six legacy graph-payload operations, asserted OP-BY-OP (not
+/// The five legacy graph-payload operations, asserted OP-BY-OP (not
 /// sampled). `Relate` rides a dedicated request shape outside this
 /// envelope; its op-minimum is pinned through the direct
-/// `validate_schema_version_for_operation` walk below.
+/// `validate_schema_version_for_operation` walk below. Expand-around left
+/// this set at schema 12 (`expand_around_operation_requires_schema_twelve`).
 const LEGACY_GRAPH_PAYLOAD_OPERATIONS: &[wire::Operation] = &[
     wire::Operation::ResolveSymbol,
     wire::Operation::EvaluateExpression,
     wire::Operation::ProjectPath,
     wire::Operation::FlowNarrowingAt,
     wire::Operation::ContextualTypeAt,
-    wire::Operation::ExpandAround,
 ];
 
 #[test]
@@ -726,10 +804,10 @@ fn every_legacy_operation_accepts_schema_two_and_three_op_by_op() {
 }
 
 #[test]
-fn schema_versions_one_and_twelve_are_rejected_with_typed_errors() {
-    // 1 is below the floor; 12 is the first version ABOVE the current supported
-    // set ([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]). Both are outside the closed set and rejected.
-    for version in [1u32, 12u32] {
+fn schema_versions_one_and_thirteen_are_rejected_with_typed_errors() {
+    // 1 is below the floor; 13 is the first version ABOVE the current supported
+    // set ([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]). Both are outside the closed set and rejected.
+    for version in [1u32, 13u32] {
         let err = validate_type_info_graph_request(&legacy_envelope(
             wire::Operation::ResolveSymbol,
             version,
@@ -839,7 +917,7 @@ fn framework_surface_envelope_payload_version_mismatch_is_malformed_payload() {
 }
 
 #[test]
-fn supported_schema_version_set_is_exactly_two_through_eleven() {
+fn supported_schema_version_set_is_exactly_two_through_twelve() {
     assert_eq!(
         SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
         &[
@@ -852,6 +930,7 @@ fn supported_schema_version_set_is_exactly_two_through_eleven() {
             8,
             9,
             10,
+            11,
             TYPEINFO_GRAPH_SCHEMA_VERSION
         ],
         "the supported set holds every version some operation still accepts: \
@@ -861,11 +940,13 @@ fn supported_schema_version_set_is_exactly_two_through_eleven() {
          schema 7 (the canonical object-spread-program node), schema 8 (the \
          compiler-intrinsic application node), schema 9 (the stated UTF-8 byte \
          unit of every span), schema 10 (the framework-surface facet demand \
-         `requested_kinds`) and schema 11 (current — the typed \
-         `ComponentSelector.framework_profile`)",
+         `requested_kinds`), schema 11 (the typed \
+         `ComponentSelector.framework_profile`) and schema 12 (current — \
+         host-issued `NodeRef` positions)",
     );
     assert_eq!(MIN_TYPEINFO_GRAPH_SCHEMA_VERSION, 2);
-    assert_eq!(TYPEINFO_GRAPH_SCHEMA_VERSION, 11);
+    assert_eq!(TYPEINFO_GRAPH_SCHEMA_VERSION, 12);
+    assert_eq!(EXPAND_AROUND_MIN_SCHEMA_VERSION, 12);
     assert_eq!(FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION, 11);
     assert_eq!(FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION, 10);
 }
@@ -874,13 +955,13 @@ fn supported_schema_version_set_is_exactly_two_through_eleven() {
 /// error payload's `server_supported_versions`, populated from
 /// `SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS` via
 /// `wire_error_unknown_schema_version` — the single advertisement
-/// source. It reports `[2, 3, 4, 5, 6, 7, 8, 9, 10, 11]`.
+/// source. It reports `[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]`.
 #[test]
-fn unknown_schema_version_error_advertises_two_through_eleven() {
-    // Version 12 is the first version OUTSIDE the supported set — it triggers
-    // the UnknownSchemaVersion rejection (11 is now supported).
+fn unknown_schema_version_error_advertises_two_through_twelve() {
+    // Version 13 is the first version OUTSIDE the supported set — it triggers
+    // the UnknownSchemaVersion rejection (12 is now supported).
     let err =
-        validate_type_info_graph_request(&legacy_envelope(wire::Operation::ResolveSymbol, 12))
+        validate_type_info_graph_request(&legacy_envelope(wire::Operation::ResolveSymbol, 13))
             .unwrap_err();
     let payload = match err.kind.as_ref().expect("error kind") {
         type_info_request_error::Kind::UnknownSchemaVersion(p) => p,
@@ -888,8 +969,8 @@ fn unknown_schema_version_error_advertises_two_through_eleven() {
     };
     assert_eq!(
         payload.server_supported_versions,
-        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
-        "the advertisement surface must report exactly [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]",
+        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        "the advertisement surface must report exactly [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]",
     );
     assert_eq!(
         payload.server_supported_versions,
@@ -899,13 +980,13 @@ fn unknown_schema_version_error_advertises_two_through_eleven() {
 
     // The constructor itself is the single advertisement source.
     let wire_payload = wire::wire_error_unknown_schema_version(
-        12,
+        13,
         TYPEINFO_GRAPH_SCHEMA_VERSION,
         SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
     );
     assert_eq!(
         wire_payload.server_supported_versions,
-        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        vec![2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     );
 }
 
@@ -924,9 +1005,9 @@ fn op_minimum_gate_walks_every_operation_discriminant() {
             | wire::Operation::EvaluateExpression
             | wire::Operation::ProjectPath
             | wire::Operation::Relate
-            | wire::Operation::ExpandAround
             | wire::Operation::FlowNarrowingAt
             | wire::Operation::ContextualTypeAt => MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+            wire::Operation::ExpandAround => EXPAND_AROUND_MIN_SCHEMA_VERSION,
             wire::Operation::FrameworkSurfaces => FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION,
         }
     }
@@ -977,8 +1058,8 @@ fn op_minimum_gate_walks_every_operation_discriminant() {
 
         // Outside the global set: UnknownSchemaVersion regardless of
         // the operation (global membership runs first). 1 is below the
-        // floor; 12 is the first version above the current set ([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]).
-        for version in [1u32, 12u32] {
+        // floor; 13 is the first version above the current set ([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).
+        for version in [1u32, 13u32] {
             let err = validate_schema_version_for_operation(operation, version).unwrap_err();
             assert_eq!(
                 err_variant_label(&err),

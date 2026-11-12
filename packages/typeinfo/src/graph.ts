@@ -208,8 +208,11 @@ function closureInit(closure: GraphClosureSpec): GraphClosurePolicy {
  * COMPLETE graph — every identity, provenance, and completeness field the
  * wire declares: the query identity (`query`), origin `edges`, per-node
  * `exactness`, `diagnostics`, the provenance maps (`nodeIdMap` /
- * `symbolIdMap`, populated only when the request asked for provenance),
- * and the `relationProofs` table. Nothing on the wire answer is dropped.
+ * `symbolIdMap`; their identity carriers are populated only when the
+ * request asked for provenance, while a `nodeIdMap` entry's schema-12
+ * `nodeRef`, the host-issued address of an exactly replayable node such as
+ * the resolved declaration root, is published regardless), and the
+ * `relationProofs` table. Nothing on the wire answer is dropped.
  */
 export interface SemanticTypeGraphView {
   readonly schemaVersion: number;

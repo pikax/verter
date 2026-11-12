@@ -183,7 +183,7 @@ not copy an owner or a receiving acceptance.
 | `OP01` | `ResolveSymbol` | FileName, ProjectName, WorkspaceName | whole operation | Native | `ProjectSemanticDispatch` | yes |
 | `OP02` | `ProjectPath` | FileName, ProjectName, NodeRef | whole operation | Native | `ProjectSemanticDispatch` | validated, no executor |
 | `OP03` | `EvaluateTypeExpression` | FileName | whole operation | Native | `ProjectSemanticDispatch` | serde entry only |
-| `OP04` | `ExpandAround` | NodeRef | whole operation | Native | `ProjectSemanticDispatch` | validated, no executor |
+| `OP04` | `ExpandAround` | NodeRef | whole operation | Native | `ProjectSemanticDispatch` | yes, schema 12 (`resolve_symbol_graph_with_audit`) |
 | `OP05` | `FlowNarrowingAt` | Position | whole operation | Native | `ProjectSemanticDispatch` (flow substrate) | validated, no executor |
 | `OP06` | `ContextualTypeAt` | Position | whole operation | Native | `ProjectSemanticDispatch` | validated, no executor |
 | `OP07` | `Relate` | NodeRef, FileName | whole operation | Native | `ProjectSemanticDispatch` (relation oracle) | rejected as `MalformedPayload` |
@@ -276,8 +276,9 @@ Because those predicates are complements, every accepted input matches
 exactly one region, and that region has exactly one route class and one
 execution owner. Every composed child does too, so the charter's abort
 condition ("an operation lacks exactly one ratified execution owner") does
-not fire. Five rows are validated today without an executor; that is
-displaced route `TIF-D06`, not a missing owner.
+not fire. Four rows are validated today without an executor; that is
+displaced route `TIF-D06`, not a missing owner. `OP04` left that set at
+schema 12, served by the graph entry that serves `OP01`.
 
 ### Result DTOs (subblock 5)
 
@@ -408,7 +409,7 @@ production-capable deletion owner, TIF1 (`TIF1-AC1`).
 | Route | Unit | Disposition |
 | ----- | ---- | ----------- |
 | `TIF-D01` | Path-string selectors: every request arm and host entry names its subject by a canonical path string and a bare name (`ResolveSymbolGraphRequest.canonical_id`, `scope_canonical`, `ComponentSelector.canonical_id`, `resolve_named_symbol(canonical_id, name)`, …) | replace with the typed selectors of `TR06`–`TR12` |
-| `TIF-D02` | `ExpandGraphAroundRequest` names its parent by `GraphHandle.opaque` bytes | replace with a `NodeRef` over a fact result's `(QueryIdentity, InputBasisId)` and decl-slot (`TR06`); a composed container is not a parent |
+| `TIF-D02` | `ExpandGraphAroundRequest` names its parent by `GraphHandle.opaque` bytes | replace with a `NodeRef` over a fact result's `(QueryIdentity, InputBasisId)` and decl-slot (`TR06`); a composed container is not a parent — done at schema 12: fields 1 and 2 are reserved, `GraphHandle` and `GraphTypeNodeRef` are deleted, and `node_ref` (field 8) names a host-issued `(query identity, input basis, decl slot, role)` tuple that answers publish on `GraphNodeIdMapEntry.node_ref`. A tuple the host does not hold is `UnknownNodeRef`, a changed input `StaleBasis` |
 | `TIF-D03` | `GraphQueryIdentity` mixes semantic arguments, presentation, serialization, env hashes and versions in one untyped echo; the graph executor fills the env and project fields with empty values and the framework-surface graph has no query | replace with the `QueryIdentity` digest, `PresentationProfileId`, `SerializationProfileId` and basis provenance |
 | `TIF-D04` | Five public entry vocabularies beside the graph envelope: `list_file_symbols`, `resolve_named_symbol(_wire)_with_audit`, `evaluate_type_expression_with_audit`, `resolve_shallow_surface(_for)`, and `resolve_symbol_graph_with_audit` (no production caller) | replace with one `TypeInfoRequest` over `OP01`–`OP12` |
 | `TIF-D05` | `current_store_view_for_query` reports a non-current view as `None`, the same signal as "could not be resolved" | replace with `Unavailable { UnsettledInput }` |

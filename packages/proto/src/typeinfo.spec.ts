@@ -589,8 +589,12 @@ describe("typeinfo proto TS bindings", () => {
         payload: {
           case: "expandAround",
           value: {
-            parentGraph: { opaque: new Uint8Array([1, 2, 3]) },
-            target: { nodeId: 3, isCanonical: false },
+            nodeRef: {
+              queryIdentityDigest: new Uint8Array(32).fill(1),
+              inputBasisDigest: new Uint8Array(32).fill(2),
+              declSlotDigest: new Uint8Array(32).fill(3),
+              roleDigest: new Uint8Array(32).fill(4),
+            },
             context: {
               mode: GraphProjectionMode.EXPANDED,
               demand: GraphReductionDemand.PUBLISHED,
@@ -673,9 +677,34 @@ describe("typeinfo proto TS bindings", () => {
           value: { profile: { digest: Uint8Array.from({ length: 32 }, (_, i) => i) } },
         },
       },
+      {
+        kind: {
+          case: "staleBasis",
+          value: {
+            nodeRef: {
+              queryIdentityDigest: new Uint8Array(32).fill(1),
+              inputBasisDigest: new Uint8Array(32).fill(2),
+              declSlotDigest: new Uint8Array(32).fill(3),
+            },
+          },
+        },
+      },
+      {
+        kind: {
+          case: "unknownNodeRef",
+          value: {
+            nodeRef: {
+              queryIdentityDigest: new Uint8Array(32).fill(5),
+              inputBasisDigest: new Uint8Array(32).fill(6),
+              declSlotDigest: new Uint8Array(32).fill(7),
+              roleDigest: new Uint8Array(32).fill(8),
+            },
+          },
+        },
+      },
     ];
 
-    expect(variants.length).toBe(12);
+    expect(variants.length).toBe(14);
 
     for (const init of variants) {
       const err = create(TypeInfoRequestErrorSchema, init);
@@ -836,8 +865,9 @@ describe("typeinfo proto TS bindings", () => {
     // canonical source-ordered object-spread program; schema 8 adds tag 34,
     // the applied compiler intrinsic (`Awaited<T>`), carrying a closed op
     // enum and operand node ids rather than a declaration symbol. Schema 11
-    // types the framework-surface selector's profile.
-    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(11);
+    // types the framework-surface selector's profile; schema 12 addresses
+    // exported positions by host-issued node references.
+    expect(TYPEINFO_GRAPH_SCHEMA_VERSION).toBe(12);
   });
 
   it("SemanticTypeGraph roundtrips the payload-side relation_proofs table (field 13)", () => {

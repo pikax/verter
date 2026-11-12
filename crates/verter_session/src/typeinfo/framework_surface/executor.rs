@@ -435,7 +435,7 @@ impl VerterHost {
                                     adapter.normalize(&ctx, resolved)
                                 },
                             );
-                            let encoded = encode_framework_surfaces(
+                            let mut encoded = encode_framework_surfaces(
                                 &normalized,
                                 requested,
                                 registration.descriptor.supported_surfaces,
@@ -446,10 +446,9 @@ impl VerterHost {
                                 resolve_ctx.members.into_inner(),
                                 &encoded.exported_members,
                             );
-                            // The schema-12 cutover publishes the issued keys on
-                            // the exported member nodes; until then they stay
-                            // host-internal.
-                            let _issued = crate::typeinfo::node_refs::issue_component_facets(
+                            // Each issued key is published on its exported member
+                            // node (schema 12), independent of provenance.
+                            let issued = crate::typeinfo::node_refs::issue_component_facets(
                                 self,
                                 current_view.view(),
                                 &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&host_ctx),
@@ -458,6 +457,9 @@ impl VerterHost {
                                 requested,
                                 members,
                             );
+                            if let Ok(issued) = issued {
+                                publish_member_node_refs(&mut encoded.graph, issued);
+                            }
                             let payload = framework_payload(&encoded.surfaces);
                             let response = framework_surface_response(
                                 framework_request.schema_version,
@@ -570,6 +572,24 @@ struct MemberSource {
     source: verter_type_expr::facts::SemanticTypeSource,
 }
 
+/// Publish each issued member key on its exported node: one
+/// `node_id_map` entry per addressed member, in node order.
+fn publish_member_node_refs(
+    graph: &mut verter_protocol::verter::v1::SemanticTypeGraph,
+    mut issued: Vec<(u32, crate::typeinfo::node_refs::IssuedRefKey)>,
+) {
+    issued.sort_by_key(|(node, _)| *node);
+    graph
+        .node_id_map
+        .extend(issued.into_iter().map(|(node_id, key)| {
+            verter_protocol::typeinfo::graph::NodeIdMapEntry {
+                node_id,
+                identity: None,
+                node_ref: Some(key.to_wire()),
+            }
+        }));
+}
+
 /// The exported members a response can address: each exported props,
 /// expose, options or slots member whose name exactly one producer contributed a
 /// replayable source for. A name contributed twice, or exported twice, is
@@ -605,8 +625,16 @@ fn exported_framework_members<M: verter_audit::observe::ObserveExec>(
             exported_count(source.surface, &source.name) == 1
                 && contributed_count(source.surface, &source.name) == 1
         })
+        .filter_map(|source| {
+            let type_node_id = exported
+                .iter()
+                .find(|node| node.kind == source.surface && node.name == source.name)?
+                .type_node_id;
+            Some((type_node_id, source))
+        })
         .map(
-            |source| crate::typeinfo::node_refs::ExportedFrameworkMember {
+            |(type_node_id, source)| crate::typeinfo::node_refs::ExportedFrameworkMember {
+                type_node_id,
                 anchor: dispatch.type_slot_for(
                     Arc::clone(&selector.canonical),
                     source.scope_owner,

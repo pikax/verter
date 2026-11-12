@@ -68,6 +68,7 @@ pub use wire::FrameworkSurfaceOriginHop;
 pub use wire::FrameworkSurfaceOriginHopKind;
 pub use wire::FrameworkSurfacePayload;
 pub use wire::FrameworkSurfaceRequest;
+pub use wire::NodeRef;
 pub use wire::ProjectPathGraphRequest;
 pub use wire::ResolveSymbolGraphRequest;
 
@@ -178,9 +179,7 @@ pub use wire::GraphQueryIdentity as QueryIdentity;
 pub use wire::GraphSubstitutionBinding as SubstitutionBinding;
 pub use wire::GraphTypePathSegment as TypePathSegment;
 
-pub use wire::GraphHandle as Handle;
 pub use wire::GraphSpanRef as SpanRef;
-pub use wire::GraphTypeNodeRef as TypeNodeRef;
 
 // -------------------------------------------------------------------------
 // Closed enums — re-exported.
@@ -360,12 +359,28 @@ pub use wire::UniqueSymbolKeyExpr;
 /// request below 11 is a `MalformedPayload`, and the response echoes the
 /// typed selector built from the admitted identity. v10 stays accepted for
 /// every other operation.
-pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 11;
+///
+/// v12 addresses exported positions by host-issued [`NodeRef`]s (TR06,
+/// TIF-D02): `GraphNodeIdMapEntry.node_ref` (field 3, add-only) publishes
+/// the address of each exactly replayable exported node, independent of
+/// `include_provenance`. `ExpandGraphAroundRequest` reserves its parent
+/// graph handle and graph-local target (fields 1 and 2) and names its
+/// position by `node_ref` (field 8); `GraphHandle` and `GraphTypeNodeRef`
+/// are deleted. The expand-around operation's floor is 12, and its two new
+/// rejections are the `StaleBasis` (tag 14) and `UnknownNodeRef` (tag 15)
+/// error arms. v11 stays accepted for every other operation.
+pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 12;
 
 /// Byte length of a [`FrameworkProfileRef::digest`]: the canonical digest
 /// of a `FrameworkProfileId`. A reference of any other length is a
 /// `MalformedPayload` before admission is consulted.
 pub const FRAMEWORK_PROFILE_DIGEST_LEN: usize = 32;
+
+/// Byte length of every present [`NodeRef`] digest. A reference whose query,
+/// basis or slot digest has any other length, or whose role digest is
+/// neither empty nor this length, is a `MalformedPayload` before the host's
+/// index is consulted.
+pub const NODE_REF_DIGEST_LEN: usize = 32;
 
 // -------------------------------------------------------------------------
 // Typed constructor helpers for the request-error variants. The
@@ -426,6 +441,24 @@ pub fn wire_error_unknown_framework_profile(
     wire::TypeInfoRequestErrorUnknownFrameworkProfile {
         profile: Some(profile),
     }
+}
+
+/// Build a `StaleBasis` error variant payload echoing the issued reference
+/// whose basis no longer describes the host's current inputs.
+pub fn wire_error_stale_basis(node_ref: NodeRef) -> Box<wire::TypeInfoRequestErrorStaleBasis> {
+    Box::new(wire::TypeInfoRequestErrorStaleBasis {
+        node_ref: Some(node_ref),
+    })
+}
+
+/// Build an `UnknownNodeRef` error variant payload echoing the well-shaped
+/// reference the host does not hold.
+pub fn wire_error_unknown_node_ref(
+    node_ref: NodeRef,
+) -> Box<wire::TypeInfoRequestErrorUnknownNodeRef> {
+    Box::new(wire::TypeInfoRequestErrorUnknownNodeRef {
+        node_ref: Some(node_ref),
+    })
 }
 
 /// Build an `OmittedRoots` error variant payload.

@@ -92,6 +92,7 @@ fn semantic_type_graph_roundtrip_preserves_envelope_shape() {
         node_id_map: vec![g::NodeIdMapEntry {
             node_id: 0,
             identity: Some(sample_decl_identity()),
+            node_ref: Some(sample_node_ref()),
         }],
         symbol_id_map: vec![g::SymbolIdMapEntry {
             symbol_id: 0,
@@ -243,11 +244,13 @@ fn type_info_request_error_roundtrip_covers_every_variant() {
         Kind::UnknownFrameworkProfile(
             g::wire_error_unknown_framework_profile(sample_profile_ref()),
         ),
+        Kind::StaleBasis(g::wire_error_stale_basis(sample_node_ref())),
+        Kind::UnknownNodeRef(g::wire_error_unknown_node_ref(sample_node_ref())),
     ];
     assert_eq!(
         variants.len(),
-        12,
-        "TypeInfoRequestError covers exactly 12 closed variants (field 11 reserved)",
+        14,
+        "TypeInfoRequestError covers exactly 14 closed variants (field 11 reserved)",
     );
 
     for (idx, kind) in variants.into_iter().enumerate() {
@@ -1315,16 +1318,19 @@ fn sample_contextual_type_request() -> g::ContextualTypeRequest {
     }
 }
 
+/// A host-issued reference with a nested role: every digest whole.
+fn sample_node_ref() -> g::NodeRef {
+    g::NodeRef {
+        query_identity_digest: vec![1; 32],
+        input_basis_digest: vec![2; 32],
+        decl_slot_digest: vec![3; 32],
+        role_digest: vec![4; 32],
+    }
+}
+
 fn sample_expand_around_request() -> g::ExpandGraphAroundRequest {
     g::ExpandGraphAroundRequest {
-        parent_graph: Some(g::Handle {
-            opaque: vec![1, 2, 3],
-        }),
-        target: Some(g::TypeNodeRef {
-            node_id: 3,
-            identity: None,
-            is_canonical: false,
-        }),
+        node_ref: Some(sample_node_ref()),
         context: Some(g::ProjectionReductionContext {
             mode: g::ProjectionMode::Expanded as i32,
             demand: g::ReductionDemand::Published as i32,
