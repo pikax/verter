@@ -22,9 +22,9 @@
 //! remaining arms, and steps aside (`None`) wherever it cannot prove that:
 //! the general narrow then runs over the built remainder.
 
-use std::cell::{OnceCell, RefCell};
-use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+use verter_execution::sync_cell::SyncRefCell;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -88,11 +88,11 @@ pub(super) struct ArmIndex {
     /// Whether every subset of the arms builds a union enumerating back to
     /// exactly that subset, which is what lets a remainder stand for the
     /// union the general narrow would build ([`FlowEvaluator::arm_index_is_exact`]).
-    exact: OnceCell<bool>,
-    heritage: OnceCell<Option<Rc<HeritageArms>>>,
-    own_keys: OnceCell<Rc<OwnKeyArms>>,
-    tags: RefCell<FxHashMap<Arc<str>, Option<Rc<StringArms>>>>,
-    literals: OnceCell<Option<Rc<StringArms>>>,
+    exact: OnceLock<bool>,
+    heritage: OnceLock<Option<Arc<HeritageArms>>>,
+    own_keys: OnceLock<Arc<OwnKeyArms>>,
+    tags: SyncRefCell<FxHashMap<Arc<str>, Option<Arc<StringArms>>>>,
+    literals: OnceLock<Option<Arc<StringArms>>>,
 }
 
 impl ArmIndex {
@@ -105,7 +105,7 @@ impl ArmIndex {
 /// A guard subject's current union, read through its index: the arms the
 /// standing guards left.
 pub(super) struct IndexedArms {
-    index: Rc<ArmIndex>,
+    index: Arc<ArmIndex>,
     remainder: FlowArmRemainder,
 }
 
@@ -229,9 +229,9 @@ pub(super) fn string_literal_text<M: verter_audit::observe::ObserveExec>(
 
 impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// The index of `node`'s union arms, enumerated once per evaluation.
-    fn arm_index(&self, node: SemanticNodeId) -> Rc<ArmIndex> {
-        if let Some(index) = self.st.arm_indexes.borrow().get(&node) {
-            return Rc::clone(index);
+    fn arm_index(&self, node: SemanticNodeId) -> Arc<ArmIndex> {
+        if let Some(index) = self.tables.arm_indexes.borrow().get(&node) {
+            return Arc::clone(index);
         }
         let mut arms = Vec::new();
         let mut expanded = FxHashSet::default();
@@ -244,21 +244,21 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         for (position, arm) in arms.iter().enumerate() {
             positions.entry(*arm).or_insert(position as u32);
         }
-        let index = Rc::new(ArmIndex {
+        let index = Arc::new(ArmIndex {
             base: node,
             arms: Arc::from(arms.into_boxed_slice()),
             positions,
             gapped,
-            exact: OnceCell::new(),
-            heritage: OnceCell::new(),
-            own_keys: OnceCell::new(),
-            tags: RefCell::new(FxHashMap::default()),
-            literals: OnceCell::new(),
+            exact: OnceLock::new(),
+            heritage: OnceLock::new(),
+            own_keys: OnceLock::new(),
+            tags: SyncRefCell::new(FxHashMap::default()),
+            literals: OnceLock::new(),
         });
-        self.st
+        self.tables
             .arm_indexes
             .borrow_mut()
-            .insert(node, Rc::clone(&index));
+            .insert(node, Arc::clone(&index));
         index
     }
 
@@ -345,9 +345,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
 
     /// The heritage index of `arms`, prepared once per evaluation, its
     /// ancestry observations folded into this frame's self-roots.
-    fn heritage_arms(&mut self, index: &ArmIndex) -> Rc<HeritageArms> {
+    fn heritage_arms(&mut self, index: &ArmIndex) -> Arc<HeritageArms> {
         let heritage = match index.heritage.get() {
-            Some(Some(heritage)) => Rc::clone(heritage),
+            Some(Some(heritage)) => Arc::clone(heritage),
             _ => self.dispatch.outside_inline_costs(|| {
                 note_index_preparation(index.arms.len());
                 let mut heritage = HeritageArms {
@@ -408,8 +408,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                     }
                     heritage.readings.push(Some((identity, reading)));
                 }
-                let heritage = Rc::new(heritage);
-                let _ = index.heritage.set(Some(Rc::clone(&heritage)));
+                let heritage = Arc::new(heritage);
+                let _ = index.heritage.set(Some(Arc::clone(&heritage)));
                 heritage
             }),
         };
@@ -525,8 +525,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     }
 
     /// The own-key index of `arms`, prepared once per evaluation.
-    fn own_key_arms(&self, index: &ArmIndex) -> Rc<OwnKeyArms> {
-        Rc::clone(index.own_keys.get_or_init(|| {
+    fn own_key_arms(&self, index: &ArmIndex) -> Arc<OwnKeyArms> {
+        Arc::clone(index.own_keys.get_or_init(|| {
             self.dispatch.outside_inline_costs(|| {
                 note_index_preparation(index.arms.len());
                 let mut own = OwnKeyArms {
@@ -552,7 +552,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                         }
                     }
                 }
-                Rc::new(own)
+                Arc::new(own)
             })
         }))
     }
@@ -679,7 +679,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// The arms of `index` by the string literal each one's member `name`
     /// reads ([`Self::discriminant_member`]), when every arm's reads one,
     /// each distinct.
-    fn tag_arms(&mut self, index: &ArmIndex, name: &Arc<str>) -> Option<Rc<StringArms>> {
+    fn tag_arms(&mut self, index: &ArmIndex, name: &Arc<str>) -> Option<Arc<StringArms>> {
         if let Some(tags) = index.tags.borrow().get(name) {
             return tags.clone();
         }
@@ -697,7 +697,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                 break;
             }
         }
-        let tags = tags.map(|()| Rc::new(StringArms { by_text }));
+        let tags = tags.map(|()| Arc::new(StringArms { by_text }));
         index
             .tags
             .borrow_mut()
@@ -707,7 +707,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
 
     /// The arms of `index` by their own text, when every arm is a distinct
     /// string literal.
-    fn literal_arms(&self, index: &ArmIndex) -> Option<Rc<StringArms>> {
+    fn literal_arms(&self, index: &ArmIndex) -> Option<Arc<StringArms>> {
         index
             .literals
             .get_or_init(|| {
@@ -720,7 +720,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                         return None;
                     }
                 }
-                Some(Rc::new(StringArms { by_text }))
+                Some(Arc::new(StringArms { by_text }))
             })
             .clone()
     }

@@ -6,6 +6,8 @@
 
 use std::sync::Arc;
 
+use verter_execution::sync_cell::SyncRefCell;
+
 use super::{
     signature_answer_is_frame_shadowed, FlowBinderEnv, FlowDemandDriver, FlowEvaluator,
     FlowProductSubject, Positional,
@@ -24,15 +26,15 @@ pub(super) struct ClassReceiver {
     /// The class's polymorphic `this`.
     pub(super) binder: SemanticNodeId,
     /// The instance members evaluated so far, in evaluation order.
-    pub(super) members: std::cell::RefCell<Vec<SurfaceMember>>,
+    pub(super) members: SyncRefCell<Vec<SurfaceMember>>,
     /// Every statically named instance member the class declares.
-    pub(super) declared: std::cell::RefCell<rustc_hash::FxHashSet<Arc<str>>>,
+    pub(super) declared: SyncRefCell<rustc_hash::FxHashSet<Arc<str>>>,
     /// The base instance, when the class extends one.
     pub(super) base: Option<SemanticNodeId>,
     /// Literal members supply only the contextual receiver's inferred part.
     pub(super) infer_literal_members: bool,
     /// Set when a member body read a declared member not evaluated yet.
-    pub(super) forward_read: std::cell::Cell<bool>,
+    pub(super) forward_read: verter_execution::sync_cell::SyncBool,
     /// The member reads made while a nested function's evaluation records
     /// what it read off this receiver.
     pub(super) reads: ReceiverReadLog,
@@ -45,11 +47,11 @@ pub(super) struct ClassReceiver {
     /// The reads of a member this receiver proves absent, each with its
     /// name's position: the checker reports them with the receiver's final
     /// type, which its literal has once its members are evaluated.
-    pub(super) absent_reads: std::cell::RefCell<Vec<(Arc<str>, verter_span::Span)>>,
+    pub(super) absent_reads: SyncRefCell<Vec<(Arc<str>, verter_span::Span)>>,
     /// The members whose returns are the checker's circular return. A body
     /// reading one requires its return through the message that made it
     /// circular, which prints every member of this receiver.
-    pub(super) circular_members: std::cell::RefCell<rustc_hash::FxHashSet<Arc<str>>>,
+    pub(super) circular_members: SyncRefCell<rustc_hash::FxHashSet<Arc<str>>>,
 }
 
 /// What a read of member `name` off a receiver's evaluated members found
@@ -100,8 +102,13 @@ impl std::borrow::Borrow<str> for ReceiverRead {
 /// reused nested signature logs the reads it stands on again, so the log
 /// holds every way a recorded evaluation observed the receiver's growing
 /// state.
-#[derive(Default)]
-pub(super) struct ReceiverReadLog(std::cell::RefCell<super::nested::WindowedLog<ReceiverRead>>);
+pub(super) struct ReceiverReadLog(SyncRefCell<super::nested::WindowedLog<ReceiverRead>>);
+
+impl Default for ReceiverReadLog {
+    fn default() -> Self {
+        Self(SyncRefCell::new(super::nested::WindowedLog::default()))
+    }
+}
 
 impl ReceiverReadLog {
     /// Open a recording window: the position later reads are logged from.
@@ -141,13 +148,13 @@ impl ClassReceiver {
     ) -> Self {
         Self {
             binder,
-            members: std::cell::RefCell::new(Vec::new()),
-            declared: std::cell::RefCell::new(declared),
+            members: SyncRefCell::new(Vec::new()),
+            declared: SyncRefCell::new(declared),
             base,
             infer_literal_members,
-            forward_read: std::cell::Cell::new(false),
-            absent_reads: std::cell::RefCell::default(),
-            circular_members: std::cell::RefCell::default(),
+            forward_read: verter_execution::sync_cell::SyncBool::new(false),
+            absent_reads: SyncRefCell::new(Vec::new()),
+            circular_members: SyncRefCell::new(rustc_hash::FxHashSet::default()),
             reads: ReceiverReadLog::default(),
             explicit_this: false,
         }
@@ -173,10 +180,10 @@ pub(super) struct ClassEvalFrame<'e> {
     class: &'e SliceClass,
     class_env: Option<Arc<FlowBinderEnv>>,
     base: Option<ClassBase>,
-    receiver: Option<std::rc::Rc<ClassReceiver>>,
+    receiver: Option<std::sync::Arc<ClassReceiver>>,
     /// The frame's receiver before the class's, given back when the class
     /// completes.
-    enclosing_receiver: Option<Option<std::rc::Rc<ClassReceiver>>>,
+    enclosing_receiver: Option<Option<std::sync::Arc<ClassReceiver>>>,
     order: Vec<usize>,
     next: usize,
     again: Vec<usize>,
@@ -502,7 +509,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// Open the class's receiver and order its members.
     fn class_begin_members(&mut self, frame: &mut ClassEvalFrame<'_>) {
         let class = frame.class;
-        let receiver = std::rc::Rc::new(
+        let receiver = std::sync::Arc::new(
             ClassReceiver::new(
                 self.dispatch
                     .this_binder(self.st.canonical, self.st.owner, &class.name, None),

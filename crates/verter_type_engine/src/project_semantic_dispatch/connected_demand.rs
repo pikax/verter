@@ -141,7 +141,7 @@ pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: u64 =
         + (512 << 20);
 
 /// The cost of an inline part of a computation, measured apart from the
-/// rest of it ([`ConnectedDemandLedger::open_inline_cost`]): the usage it
+/// rest of it ([`ConnectedDemandLedger::hold_inline_cost`]): the usage it
 /// charged itself, its longest tail run, and the results it consumed. A
 /// consumer that skips performing the part again charges it with
 /// [`ConnectedDemandLedger::replay_inline_cost`].
@@ -153,45 +153,15 @@ pub(crate) struct InlineCost {
 }
 
 /// An inline measurement being taken
-/// ([`ConnectedDemandLedger::open_inline_cost`]). Dropped unclosed — an
-/// unwind — it ends unmeasured, with the recordings opened above it, each
-/// abandoned into the one below.
-pub(crate) struct InlineCostRecording<'l> {
-    ledger: &'l dyn InlineCostLedger,
+/// ([`ConnectedDemandLedger::hold_inline_cost`]): the place of its
+/// recording, borrowing nothing, so a computation retained across its steps
+/// owns it by value. It is closed through the ledger
+/// ([`ConnectedDemandLedger::close_held_inline_cost`]). Dropped unclosed
+/// (only an unwind drops one), it leaves its recording to the unwinding
+/// demand: a measurement below it then closes nothing.
+#[must_use = "a held inline measurement must be closed"]
+pub(crate) struct HeldInlineCost {
     place: usize,
-    open: bool,
-}
-
-impl InlineCostRecording<'_> {
-    /// Close it: what it measured, kept by the computation below. `None`
-    /// when it is not the recording on top.
-    pub(crate) fn close(mut self) -> Option<InlineCost> {
-        self.open = false;
-        self.ledger.close_at(self.place)
-    }
-}
-
-impl Drop for InlineCostRecording<'_> {
-    fn drop(&mut self) {
-        if self.open {
-            self.ledger.abandon_at(self.place);
-        }
-    }
-}
-
-/// The ledger operations an [`InlineCostRecording`] ends itself with.
-trait InlineCostLedger {
-    fn close_at(&self, place: usize) -> Option<InlineCost>;
-    fn abandon_at(&self, place: usize);
-}
-
-impl InlineCostLedger for ConnectedDemandLedger<'_> {
-    fn close_at(&self, place: usize) -> Option<InlineCost> {
-        self.close_inline_cost(place)
-    }
-    fn abandon_at(&self, place: usize) {
-        self.abandon_inline_cost(place);
-    }
 }
 
 /// The identity of an inline measurement, which is never sealed.
@@ -1423,29 +1393,22 @@ impl ConnectedDemandLedger<'_> {
     }
 
     /// Open the measurement of an inline part of the computation on top:
-    /// until it closes ([`InlineCostRecording::close`]), the charges the
+    /// until it closes ([`Self::close_held_inline_cost`]), the charges the
     /// demand takes and the results it consumes are measured apart, and
     /// stay the computation's own.
-    pub(crate) fn open_inline_cost(&self) -> InlineCostRecording<'_> {
+    pub(crate) fn hold_inline_cost(&self) -> HeldInlineCost {
         let place = self.recording_depth();
         self.open_cost_scope(CostIdentity::of_key(InlineCostKey));
-        InlineCostRecording {
-            ledger: self,
-            place,
-            open: true,
-        }
+        HeldInlineCost { place }
     }
 
-    /// End the measurement at `place` unmeasured, with every recording
-    /// opened above it: each is abandoned into the one below it.
-    fn abandon_inline_cost(&self, place: usize) {
-        // bounded-loop: at most the recordings open above `place`.
-        while self.recording_depth() > place {
-            self.abandon_cost_scope();
-        }
+    /// Close a measurement: what it measured, kept by the computation
+    /// below. `None` when it is not the recording on top.
+    pub(crate) fn close_held_inline_cost(&self, held: HeldInlineCost) -> Option<InlineCost> {
+        self.close_inline_cost(held.place)
     }
 
-    /// Close the measurement [`Self::open_inline_cost`] opened at `place`:
+    /// Close the measurement [`Self::hold_inline_cost`] opened at `place`:
     /// what it measured goes to the computation below exactly as if it had
     /// been charged there — its usage added, its tail runs joined, each
     /// result it consumed a prerequisite of its own — and is returned.
@@ -2453,15 +2416,19 @@ mod inline_cost_tests {
     #[test]
     fn a_measurement_replays_what_its_part_charged_and_no_shared_part() {
         with_ledger(|ledger| {
-            let outer = ledger.open_inline_cost();
+            let outer = ledger.hold_inline_cost();
             ledger.charge().unwrap();
-            let inner = ledger.open_inline_cost();
+            let inner = ledger.hold_inline_cost();
             ledger.charge().unwrap();
             ledger.outside_inline_costs(|| {
                 ledger.charge_units(5).unwrap();
             });
-            let inner = inner.close().expect("the inner measurement is on top");
-            let outer = outer.close().expect("the outer measurement is on top");
+            let inner = ledger
+                .close_held_inline_cost(inner)
+                .expect("the inner measurement is on top");
+            let outer = ledger
+                .close_held_inline_cost(outer)
+                .expect("the outer measurement is on top");
             assert_eq!((inner.exclusive.work, outer.exclusive.work), (1, 2));
             let computation = ledger.suspend_cost_scope().unwrap();
             assert_eq!(computation.exclusive.work, 7);
@@ -2476,21 +2443,18 @@ mod inline_cost_tests {
         });
     }
 
-    /// Measurements dropped unclosed, the outer first as an unwinding
-    /// stack of them drops, end with every recording opened above them,
-    /// each abandoned into the one below: the computation keeps every
-    /// charge and is on top again.
+    /// A measurement under one left open (an unwound one) closes nothing
+    /// and keeps its recording: no cost is measured past a recording that
+    /// never ended.
     #[test]
-    fn measurements_dropped_unclosed_leave_the_computation_on_top() {
+    fn a_measurement_under_one_left_open_closes_nothing() {
         with_ledger(|ledger| {
-            let mut measurements = vec![ledger.open_inline_cost()];
+            let outer = ledger.hold_inline_cost();
             ledger.charge().unwrap();
-            measurements.push(ledger.open_inline_cost());
+            let _left_open = ledger.hold_inline_cost();
             ledger.charge().unwrap();
-            drop(measurements);
-            assert_eq!(ledger.recording_depth(), 1);
-            let computation = ledger.suspend_cost_scope().unwrap();
-            assert_eq!(computation.exclusive.work, 2);
+            assert!(ledger.close_held_inline_cost(outer).is_none());
+            assert_eq!(ledger.recording_depth(), 3);
         });
     }
 }

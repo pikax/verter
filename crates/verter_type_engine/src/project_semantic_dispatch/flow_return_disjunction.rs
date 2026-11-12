@@ -296,12 +296,12 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
             note_entry();
             match mark.products.narrowing(&root) {
                 Some(product) => self.st.products.set_narrowing(
-                    &mut self.st.frame_execution.borrow_mut(),
+                    &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                     &root,
                     product.clone(),
                 ),
                 None => self.st.products.remove(
-                    &mut self.st.frame_execution.borrow_mut(),
+                    &mut self.tables.execution(self.st.frame_execution).borrow_mut(),
                     FlowDomain::Narrowing,
                     &root,
                 ),

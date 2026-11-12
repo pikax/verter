@@ -278,17 +278,16 @@ self_cell::self_cell!(
 static_assertions::assert_not_impl_any!(NestedActivationCell: Clone);
 
 /// A nested function's body under evaluation by its own evaluator.
-pub(super) struct NestedActivation<'d, D: FlowDemandDriver> {
+pub(super) struct NestedActivation {
     /// The body's own evaluator state and run, advanced under the drive's
     /// driver.
     cell: NestedActivationCell,
-    finish: NestedFinish<'d>,
-    driver: std::marker::PhantomData<fn(&'d D)>,
+    finish: NestedFinish,
 }
 
 /// What composing a nested function's signature needs once its body has
 /// been evaluated.
-pub(super) struct NestedFinish<'d> {
+pub(super) struct NestedFinish {
     circular: bool,
     declared_return_none: bool,
     report_name: Option<(verter_span::Span, Arc<str>)>,
@@ -297,7 +296,7 @@ pub(super) struct NestedFinish<'d> {
     contextual: Option<ContextualSignature>,
     /// The recording that admits the composed signature to the root
     /// evaluation's [`NestedSignatureMemo`], when its inputs are reusable.
-    recording: Option<Box<NestedSignatureRecording<'d>>>,
+    recording: Option<Box<NestedSignatureRecording>>,
 }
 
 /// One composed nested signature the root evaluation may reuse. It is
@@ -362,22 +361,22 @@ const NESTED_RECORDING_DEPTH: usize = 4;
 
 /// A nested function's evaluation being recorded for the memo, from its
 /// slice content's read to its signature's composition.
-pub(super) struct NestedSignatureRecording<'d> {
+pub(super) struct NestedSignatureRecording {
     function: verter_session_query::function_program::FunctionProgramKey,
     inputs: verter_identity::identity::InputBasisId,
     context: Arc<verter_session_query::flow::slice::NestedFlowContext>,
-    reads: super::super::build::TransactionReadRecording<'d>,
+    reads: super::super::build::HeldTransactionReadRecording,
     /// The enclosing receiver the body reads `this` through, and where
     /// its read log stood when the recording began.
-    receiver: Option<(std::rc::Rc<class_expression::ClassReceiver>, usize)>,
+    receiver: Option<(std::sync::Arc<class_expression::ClassReceiver>, usize)>,
     /// Where the resolution stack's lookup log stood, and how many returns
     /// had been found circular, when the recording began.
     probes_start: usize,
     circular_marks: u64,
     /// The window measuring how the undecided relation count moves.
-    undecided: super::super::dispatch_txn::UndecidedRelationWindow<'d>,
+    undecided: super::super::dispatch_txn::HeldUndecidedRelationWindow,
     /// The measurement of its cost to the connected demand.
-    cost: super::super::connected_demand::InlineCostRecording<'d>,
+    cost: super::super::connected_demand::HeldInlineCost,
     /// The enclosing evaluator's degradation when the recording began,
     /// given back, first-recorded first, when it ends.
     degradation_before: Option<crate::semantic_query::FlowReturnDegradation>,
@@ -448,11 +447,11 @@ pub(super) enum NestedSignatureStep {
 }
 
 /// A nested function prepared for evaluation.
-pub(super) enum NestedPrepared<'d, D: FlowDemandDriver> {
+pub(super) enum NestedPrepared {
     /// Its signature, with nothing to evaluate.
     Value(SemanticNodeId),
     /// Its body, to evaluate on its own evaluator.
-    Child(Box<NestedActivation<'d, D>>),
+    Child(Box<NestedActivation>),
 }
 
 /// How a drive ends.
@@ -523,7 +522,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     fn drive<'r>(
         &mut self,
         mut root: Option<RegionRun<'r>>,
-        mut stack: Vec<NestedActivation<'d, D>>,
+        mut stack: Vec<NestedActivation>,
     ) -> DriveEnd {
         let dispatch = self.dispatch;
         let mut delivered: Option<RegionDelivery> = None;
@@ -535,15 +534,23 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     let delivery = delivered.take();
                     let step =
                         top.cell.with_dependent_mut(|_, active| {
-                            match FlowEvaluator::over(dispatch, &mut active.evaluator)
-                                .run_region(&mut active.run, delivery)
+                            match FlowEvaluator::over(
+                                dispatch,
+                                &mut active.evaluator,
+                                &mut *self.tables,
+                            )
+                            .run_region(&mut active.run, delivery)
                             {
                                 RegionProgress::Nested(demand) => {
                                     let own_env = demand.outer_env.clone();
                                     let frame_env: &FlowBinderEnv = active.evaluator.binder_env;
                                     let outer_env = own_env.as_deref().unwrap_or(frame_env);
-                                    Ok(FlowEvaluator::over(dispatch, &mut active.evaluator)
-                                        .prepare_nested(demand, outer_env))
+                                    Ok(FlowEvaluator::over(
+                                        dispatch,
+                                        &mut active.evaluator,
+                                        &mut *self.tables,
+                                    )
+                                    .prepare_nested(demand, outer_env))
                                 }
                                 RegionProgress::Done(outcome) => Err(outcome),
                             }
@@ -554,8 +561,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                             let finished = stack.pop().expect("the evaluator on top");
                             let node = match stack.last_mut() {
                                 Some(parent) => parent.cell.with_dependent_mut(|_, active| {
-                                    FlowEvaluator::over(dispatch, &mut active.evaluator)
-                                        .finish_nested(finished, outcome)
+                                    FlowEvaluator::over(
+                                        dispatch,
+                                        &mut active.evaluator,
+                                        &mut *self.tables,
+                                    )
+                                    .finish_nested(finished, outcome)
                                 }),
                                 None => {
                                     let node = self.finish_nested(finished, outcome);
@@ -600,7 +611,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         &mut self,
         demand: NestedDemand,
         outer_env: &FlowBinderEnv,
-    ) -> NestedPrepared<'d, D> {
+    ) -> NestedPrepared {
         let NestedDemand {
             function,
             context,
@@ -692,7 +703,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 )
             });
             let reentered = self
-                .st
+                .tables
                 .resolving_functions
                 .borrow_mut()
                 .probe(function)
@@ -751,16 +762,16 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         // circular return: every return from the re-entered one inward is
         // `any` (`getReturnTypeOfSignature` when `popTypeResolution`
         // fails). A declared return is never resolved from the body.
-        let reentered = self.st.resolving_functions.borrow_mut().probe(function);
+        let reentered = self.tables.resolving_functions.borrow_mut().probe(function);
         if let Some(position) = reentered {
-            self.st
+            self.tables
                 .resolving_functions
                 .borrow_mut()
                 .mark_circular_from(position);
         }
         let circular = reentered.is_some() && content.declared_return.is_none();
         if !circular {
-            self.st
+            self.tables
                 .resolving_functions
                 .borrow_mut()
                 .push(function.clone());
@@ -823,7 +834,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             self.st.bindings.function().clone(),
             Arc::clone(self.st.binder_env),
             self.st.products.clone(),
-            std::rc::Rc::clone(&self.st.frame_execution),
+            self.st.frame_execution,
         );
         let owned = NestedOwned {
             content,
@@ -832,6 +843,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             canonical: Arc::from(self.st.canonical),
         };
         let capture_context = context;
+        let frame_execution = self.tables.open_execution(captured_execution);
         let dispatch = self.dispatch;
         let cell = NestedActivationCell::new(owned, |owned| {
             let mut evaluator = FlowEvaluatorState {
@@ -842,13 +854,6 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 call_receivers: rustc_hash::FxHashMap::default(),
                 call_arguments: Arc::clone(&owned.content.call_arguments),
                 self_slot: None,
-                resolving_functions: std::rc::Rc::clone(&self.st.resolving_functions),
-                this_free_values: std::rc::Rc::clone(&self.st.this_free_values),
-                declared_type_reads: std::rc::Rc::clone(&self.st.declared_type_reads),
-                carrier_unwraps: std::rc::Rc::clone(&self.st.carrier_unwraps),
-                discriminant_members: std::rc::Rc::clone(&self.st.discriminant_members),
-                guard_relations: std::rc::Rc::clone(&self.st.guard_relations),
-                arm_indexes: std::rc::Rc::clone(&self.st.arm_indexes),
                 canonical: &owned.canonical,
                 owner: self.st.owner,
                 nullability: self.st.nullability,
@@ -870,7 +875,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 plan,
                 anchor,
                 products: captured_products,
-                frame_execution: std::rc::Rc::new(std::cell::RefCell::new(captured_execution)),
+                frame_execution,
                 narrowing_writes: Vec::new(),
                 observations: BodyCompletionObservations::none(),
                 // A nested function value always evaluates its WHOLE
@@ -926,13 +931,13 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 )
             {
                 if let Some(binder) = contextual.as_ref().and_then(|signature| signature.receiver) {
-                    evaluator.receiver = Some(std::rc::Rc::new(
+                    evaluator.receiver = Some(std::sync::Arc::new(
                         class_expression::ClassReceiver::of_type(binder, Some(binder)).explicit(),
                     ));
                 }
             }
             let run = {
-                let mut child = FlowEvaluator::over(dispatch, &mut evaluator);
+                let mut child = FlowEvaluator::over(dispatch, &mut evaluator, &mut *self.tables);
                 child.bind_explicit_this(owned.content.declared_this.as_ref());
                 child.seed_hoisted_var_declarations(body);
                 child.start_region_run(body)
@@ -941,7 +946,6 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         });
         NestedPrepared::Child(Box::new(NestedActivation {
             cell,
-            driver: std::marker::PhantomData,
             finish: NestedFinish {
                 circular,
                 declared_return_none,
@@ -958,20 +962,22 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// from its body's evaluation, `outcome`, and release its activation.
     fn finish_nested(
         &mut self,
-        activation: NestedActivation<'d, D>,
+        activation: NestedActivation,
         outcome: (Result<Vec<FlowContribution>, FlowReturnFailure>, bool),
     ) -> SemanticNodeId {
-        let NestedActivation {
-            mut cell,
-            finish,
-            driver: _,
-        } = activation;
-        cell.with_dependent_mut(|owned, active| {
+        let NestedActivation { mut cell, finish } = activation;
+        let (node, execution) = cell.with_dependent_mut(|owned, active| {
             // The body's run is over: its frames go before the signature is
             // composed.
             drop(std::mem::take(&mut active.run.frames));
-            self.finish_nested_body(owned, &mut active.evaluator, finish, outcome)
-        })
+            let execution = active.evaluator.frame_execution;
+            (
+                self.finish_nested_body(owned, &mut active.evaluator, finish, outcome),
+                execution,
+            )
+        });
+        self.tables.close_execution(execution);
+        node
     }
 
     /// [`Self::finish_nested`] over the activation's owned inputs and its
@@ -980,7 +986,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         &mut self,
         owned: &NestedOwned,
         nested_evaluator: &mut FlowEvaluatorState<'_>,
-        finish: NestedFinish<'d>,
+        finish: NestedFinish,
         outcome: (Result<Vec<FlowContribution>, FlowReturnFailure>, bool),
     ) -> SemanticNodeId {
         let NestedFinish {
@@ -1015,7 +1021,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             let mut independently_typed_return = false;
             let (contributors, nested_body_falls_through) = {
                 let (outcome, nested_body_falls_through) = outcome;
-                FlowEvaluator::over(self.dispatch, nested_evaluator)
+                FlowEvaluator::over(self.dispatch, nested_evaluator, &mut *self.tables)
                     .promote_pending_statement_gap();
                 nested_yield_contributions =
                     std::mem::take(&mut nested_evaluator.yield_contributions);
@@ -1058,8 +1064,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                             .map(|proof| (values[0].node, proof))
                     })
                     .filter(|_| source_complete);
-                let finished = nested_evaluator
-                .frame_execution
+                let finished = self
+                .tables
+                .execution(nested_evaluator.frame_execution)
                 .borrow_mut()
                 .finish(nested_evaluator.plan.as_deref())
                 .and_then(|evidence| {
@@ -1127,12 +1134,16 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 let finished_ok = finished.is_ok();
                 if let Err(failure) = finished {
                     if matches!(failure, FlowProductFailure::BudgetExceeded(_)) {
-                        self.st.frame_execution.borrow_mut().failure = Some(failure);
+                        self.tables
+                            .execution(self.st.frame_execution)
+                            .borrow_mut()
+                            .failure = Some(failure);
                         nested_evaluator.executed_walk.aborted = true;
                     }
-                    FlowEvaluator::over(self.dispatch, nested_evaluator).record_degradation(
-                        crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
-                    );
+                    FlowEvaluator::over(self.dispatch, nested_evaluator, &mut *self.tables)
+                        .record_degradation(
+                            crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
+                        );
                 }
                 if finished_ok && !nested_evaluator.executed_walk.aborted {
                     independently_typed_return = source_complete
@@ -1303,7 +1314,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 is_abstract: false,
             })
         };
-        FlowEvaluator::over(self.dispatch, nested_evaluator)
+        FlowEvaluator::over(self.dispatch, nested_evaluator, &mut *self.tables)
             .report_receiver_reads(owned.content.receiver_reads.as_ref());
         for diagnostic in nested_evaluator.checker_diagnostics.drain(..) {
             self.record_checker_diagnostic(diagnostic);
@@ -1364,7 +1375,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     ) {
         let found_circular = !circular
             && self
-                .st
+                .tables
                 .resolving_functions
                 .borrow_mut()
                 .pop()
@@ -1409,8 +1420,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             return None;
         }
         let receiver = self.enclosing_receiver_of(context);
-        let resolution = std::rc::Rc::clone(&self.st.resolving_functions);
-        let mut resolution = resolution.borrow_mut();
+        let mut resolution = self.tables.resolving_functions.borrow_mut();
         let entry = resolution
             .signatures
             .by_function
@@ -1496,12 +1506,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         function: &verter_session_query::function_program::FunctionProgramKey,
         inputs: verter_identity::identity::InputBasisId,
         context: &Arc<verter_session_query::flow::slice::NestedFlowContext>,
-    ) -> Option<Box<NestedSignatureRecording<'d>>> {
-        let dispatch: &'d FlowCx<'d, D> = self.dispatch;
+    ) -> Option<Box<NestedSignatureRecording>> {
+        let dispatch = self.dispatch;
         // Every fact a body reads reaches each recording open around it, so
         // only the outermost few nested evaluations around a read record it:
         // a nest of any depth keeps each read a bounded number of times.
-        if self.st.resolving_functions.borrow().frame_windows.len() >= NESTED_RECORDING_DEPTH {
+        if self.tables.resolving_functions.borrow().frame_windows.len() >= NESTED_RECORDING_DEPTH {
             return None;
         }
         let reads = dispatch.begin_transaction_read()?;
@@ -1510,7 +1520,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             (receiver, start)
         });
         let (probes_start, circular_marks) = {
-            let mut resolution = self.st.resolving_functions.borrow_mut();
+            let mut resolution = self.tables.resolving_functions.borrow_mut();
             resolution
                 .frame_windows
                 .push((self.st.enclosing_frames.len(), false));
@@ -1533,10 +1543,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     }
 
     /// End `recording` (when one began) without keeping a signature.
-    fn end_nested_signature_recording(
-        &mut self,
-        recording: Option<Box<NestedSignatureRecording<'d>>>,
-    ) {
+    fn end_nested_signature_recording(&mut self, recording: Option<Box<NestedSignatureRecording>>) {
         if let Some(recording) = recording {
             self.admit_nested_signature(*recording, None, None);
         }
@@ -1557,7 +1564,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// are replayable.
     fn admit_nested_signature(
         &mut self,
-        recording: NestedSignatureRecording<'d>,
+        recording: NestedSignatureRecording,
         signature: Option<SemanticNodeId>,
         body: Option<NestedBodyEffects>,
     ) {
@@ -1575,14 +1582,14 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         } = recording;
         let degradation = self.st.degradation.take();
         self.st.degradation = degradation_before.or(degradation);
-        let cost = cost.close();
-        let undecided = undecided.close();
+        let cost = self.dispatch.close_inline_cost(cost);
+        let undecided = self.dispatch.close_undecided_relation_window(undecided);
         let receiver_reads = match receiver {
             Some((receiver, start)) => receiver.reads.finish(start),
             None => Some(Vec::new()),
         };
         let (probes, marks_now, frames_read) = {
-            let mut resolution = self.st.resolving_functions.borrow_mut();
+            let mut resolution = self.tables.resolving_functions.borrow_mut();
             let (_, frames_read) = resolution.frame_windows.pop().unwrap_or((0, true));
             (
                 resolution.probes.finish(probes_start, |_, _| true),
@@ -1625,7 +1632,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         else {
             return;
         };
-        self.st
+        self.tables
             .resolving_functions
             .borrow_mut()
             .signatures
