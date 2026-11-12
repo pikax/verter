@@ -95,6 +95,26 @@ pub enum GlobalWrapper {
     Unsettled,
 }
 
+impl GlobalWrapper {
+    /// The wrapper an interface's instantiation read answered.
+    pub(super) fn of_read(read: QueryResult<SemanticNodeId>) -> Self {
+        match read {
+            QueryResult::Value(surface) => Self::Surface(surface),
+            QueryResult::Recursive(_) | QueryResult::Error(_) => Self::Unsettled,
+        }
+    }
+}
+
+/// Where a global wrapper read stands before its interface's instantiation
+/// ([`ProjectSemanticDispatch::global_wrapper_read`]).
+pub(super) enum WrapperRead {
+    /// Settled without reading: no project, or no such declaration.
+    Settled(GlobalWrapper),
+    /// The interface's instantiation, whose answer is the wrapper
+    /// ([`GlobalWrapper::of_read`]).
+    Read(SemanticQueryKey),
+}
+
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     construction_ordinal_seam! {
         /// The global wrapper interface `name` (`String`, `Number`, `Array`, …)
@@ -140,30 +160,70 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         canonical: &str,
         context: ProjectionReductionContext,
     ) -> GlobalWrapper {
+        match self.global_wrapper_read_in(name, args, canonical, context) {
+            WrapperRead::Settled(settled) => settled,
+            WrapperRead::Read(key) => GlobalWrapper::of_read(self.execute_read(key).value),
+        }
+    }
+
+    /// [`Self::global_wrapper_surface`] up to its interface's
+    /// instantiation, which a path hop reads as its own transition: the
+    /// global lookup is answered here, in place, as a port.
+    pub(super) fn global_wrapper_read(
+        &self,
+        name: &str,
+        args: &[SemanticNodeId],
+        canonical: &str,
+    ) -> WrapperRead {
+        self.global_wrapper_read_in(
+            name,
+            args,
+            canonical,
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Shallow),
+        )
+    }
+
+    /// The instantiation a member read off the global wrapper `name` over
+    /// `args` reads in `canonical`'s project: `None` when it settles
+    /// without one.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn global_wrapper_read_for_tests(
+        &self,
+        name: &str,
+        args: &[SemanticNodeId],
+        canonical: &str,
+    ) -> Option<SemanticQueryKey> {
+        match self.global_wrapper_read(name, args, canonical) {
+            WrapperRead::Read(key) => Some(key),
+            WrapperRead::Settled(_) => None,
+        }
+    }
+
+    fn global_wrapper_read_in(
+        &self,
+        name: &str,
+        args: &[SemanticNodeId],
+        canonical: &str,
+        context: ProjectionReductionContext,
+    ) -> WrapperRead {
         if self.project_stable_key_for_canonical(canonical).is_none() {
-            return GlobalWrapper::Unsettled;
+            return WrapperRead::Settled(GlobalWrapper::Unsettled);
         }
         let Some(declaration) = self.first_global_declaration(canonical, name) else {
-            return GlobalWrapper::Absent;
+            return WrapperRead::Settled(GlobalWrapper::Absent);
         };
         let slot = self.type_slot_for(
             declaration.canonical_id.clone(),
             declaration.owner,
             Arc::from(name),
         );
-        match self
-            .execute_read(SemanticQueryKey::Instantiate(
-                crate::semantic_query::InstantiateKey::new(
-                    slot,
-                    Arc::from(args.to_vec().into_boxed_slice()),
-                    self.instantiate_context_for(declaration.canonical_id.as_ref(), context),
-                ),
-            ))
-            .value
-        {
-            QueryResult::Value(surface) => GlobalWrapper::Surface(surface),
-            _ => GlobalWrapper::Unsettled,
-        }
+        WrapperRead::Read(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                slot,
+                Arc::from(args.to_vec().into_boxed_slice()),
+                self.instantiate_context_for(declaration.canonical_id.as_ref(), context),
+            ),
+        ))
     }
 
     /// The global interface declaration a runtime nominal's builtin
@@ -573,26 +633,33 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         /// demand-scope witness. A rootless base with NO demand site on the
         /// stack fails closed.
         fn apparent_type_of(&self, base: SemanticNodeId) -> Option<SemanticNodeId> {
-            let (canonical, demand_scope) = match self.callable_anchor(base) {
-                CallableAnchor::NotCallable | CallableAnchor::Undecided => return None,
-                CallableAnchor::Authored(canonical) => (canonical, ApparentDemandScope::Anchored),
-                CallableAnchor::Rootless => {
-                    let canonical = self.lexical_demand_scope.borrow().last().cloned()?;
-                    (
-                        canonical.clone(),
-                        ApparentDemandScope::Rootless { canonical },
-                    )
-                }
-            };
-            let key = SemanticQueryKey::ApparentType {
-                base,
-                context: self.apparent_type_context_scoped(canonical.as_ref(), demand_scope),
-            };
+            let key = self.apparent_type_key(base)?;
             self.probe_optional(|| match self.execute_type_node(key) {
                 QueryResult::Value(SemanticQueryOutput { value, .. }) => Some(value),
                 QueryResult::Recursive(_) | QueryResult::Error(_) => None,
             })
         }
+    }
+
+    /// The `ApparentType` key [`Self::apparent_type_of`] reads for `base`:
+    /// `None` for a node that is no callable, or a rootless one with no
+    /// demand site on the stack. A path hop reads it as its own transition.
+    pub(super) fn apparent_type_key(&self, base: SemanticNodeId) -> Option<SemanticQueryKey> {
+        let (canonical, demand_scope) = match self.callable_anchor(base) {
+            CallableAnchor::NotCallable | CallableAnchor::Undecided => return None,
+            CallableAnchor::Authored(canonical) => (canonical, ApparentDemandScope::Anchored),
+            CallableAnchor::Rootless => {
+                let canonical = self.lexical_demand_scope.borrow().last().cloned()?;
+                (
+                    canonical.clone(),
+                    ApparentDemandScope::Rootless { canonical },
+                )
+            }
+        };
+        Some(SemanticQueryKey::ApparentType {
+            base,
+            context: self.apparent_type_context_scoped(canonical.as_ref(), demand_scope),
+        })
     }
 
     /// Production constructor for the env-bearing [`ApparentTypeContext`]:

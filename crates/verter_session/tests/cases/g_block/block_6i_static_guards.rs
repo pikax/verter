@@ -296,7 +296,23 @@ fn pathwalker_does_not_resolve_mapped_through_build_mapped_type() {
         .find("SemanticNodeData::TypeOf")
         .map(|i| mapped_arm_idx + i)
         .expect("guard F.1: TypeOf arm must follow the Mapped arm in walk.rs");
-    let arm_body = &src[mapped_arm_idx..arm_end_idx];
+    // The arm hands its hop to `PathWalker::mapped_hop`, whose selected
+    // key finishes in `finish_mapped_key` (the hop may suspend at the
+    // key's read between them): the narrowing is those two bodies.
+    assert!(
+        src[mapped_arm_idx..arm_end_idx].contains("self.mapped_hop("),
+        "guard F.1: `PathWalker`'s Mapped arm must hand its hop to `mapped_hop`",
+    );
+    let hop_idx = src
+        .find("    fn mapped_hop(")
+        .expect("guard F.1: `PathWalker::mapped_hop` must exist in walk.rs");
+    let finish_idx = src
+        .find("    fn finish_mapped_key(")
+        .expect("guard F.1: `PathWalker::finish_mapped_key` must exist in walk.rs");
+    let finish_end = src[finish_idx + 1..]
+        .find("\n    fn ")
+        .map_or(src.len(), |i| finish_idx + 1 + i);
+    let arm_body = &src[hop_idx.min(finish_idx)..finish_end.max(hop_idx)];
 
     // (1) The narrowing path must per-key materialise via the
     // shared `materialize_selected_key_mapped_value_with_node`

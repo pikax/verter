@@ -272,15 +272,14 @@ impl FamilyBuild {
     /// Whether the queries this build reads are counted as dispatch intents
     /// where a driver reads them in place: an apparent type's reads are
     /// consumer entries, each counted once whichever driver makes it, as a
-    /// frame's need is counted at its entry. A path walk's carrier
-    /// resolution counts its reads but its `typeof` value's, as the
-    /// carrier's consumers always counted them.
+    /// frame's need is counted at its entry. A path walk counts what its
+    /// in-place reads always counted: a carrier resolution's reads but its
+    /// `typeof` value's, and a callable's apparent-type probe
+    /// ([`super::walk::WalkState::counts_awaited_intent`]).
     fn counts_need_intent(&self, key: &SemanticQueryKey) -> bool {
         match self {
             Self::ApparentType(_) => true,
-            Self::ProjectPath(build) => {
-                build.walk.awaits_carrier_read() && !matches!(key, SemanticQueryKey::TypeOf { .. })
-            }
+            Self::ProjectPath(build) => build.walk.counts_awaited_intent(key),
             _ => false,
         }
     }
@@ -776,11 +775,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    fn complete_family_in_place(&self, mut step: FamilyStep) -> FamilyStep {
+    /// The queries `key`'s family build names as its needs, in order, its
+    /// build driven in place outside the memo: what a test holds to
+    /// suspend the build at each of its reads, under one connected demand
+    /// as a cold build drives it. Empty for a family that does not build as
+    /// a continuation.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn family_needs_for_tests(&self, key: &SemanticQueryKey) -> Vec<SemanticQueryKey> {
+        let (_demand, _) = self.enter_connected_demand(false);
+        let mut needs = Vec::new();
+        if let Some(step) = self.begin_family_build(key) {
+            let _ = self.complete_family_in_place_naming(step, &mut |key| {
+                needs.push(key.clone());
+            });
+        }
+        needs
+    }
+
+    fn complete_family_in_place(&self, step: FamilyStep) -> FamilyStep {
+        self.complete_family_in_place_naming(step, &mut |_| {})
+    }
+
+    fn complete_family_in_place_naming(
+        &self,
+        mut step: FamilyStep,
+        named: &mut dyn FnMut(&SemanticQueryKey),
+    ) -> FamilyStep {
         loop {
             match step {
                 done @ (FamilyStep::Done(_) | FamilyStep::Value(_)) => return done,
                 FamilyStep::Need(key, build) => {
+                    named(&key);
                     step = self.resume_family_need_in_place(key, *build);
                 }
                 FamilyStep::Load(canonical, build) => {
