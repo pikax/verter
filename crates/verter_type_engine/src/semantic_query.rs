@@ -6624,6 +6624,17 @@ pub struct SemanticGraphStats {
     /// starts, outside every charge and its rollback, so a reduction run
     /// again counts again.
     pub relation_reductions: u64,
+    /// Candidates call resolutions began checking, wherever they ran: one
+    /// per candidate whose parameters, arity and receiver the check read
+    /// before relating its arguments. Counted where the check begins,
+    /// outside every charge and its rollback, so a candidate begun again —
+    /// a walk resumed from its root — counts again.
+    pub call_candidates_begun: u64,
+    /// Argument relations call resolutions' first inference pass ran,
+    /// wherever they ran: one per argument related to its parameter.
+    /// Counted where the relation runs, outside every charge and its
+    /// rollback, so an argument related again counts again.
+    pub call_arguments_related: u64,
     /// Stages query entries computed admitting their keys, wherever they
     /// ran: one per stage of an entry's sugar, carrier, apparent-wrapper and
     /// signature-subject normalization, counted where the stage runs,
@@ -13060,6 +13071,8 @@ mod tests {
             "projection_hops_walked",
             "relation_roots_opened",
             "relation_reductions",
+            "call_candidates_begun",
+            "call_arguments_related",
             "admission_stages_walked",
             "deferred_steps_evaluated",
         ];

@@ -93,6 +93,13 @@ impl ContextualCallState {
         self.active.as_ref()?.pending_target
     }
 
+    /// A call answered without naming a callback: nothing of its candidate
+    /// waits on the consumer.
+    pub(in crate::project_semantic_dispatch) fn settle(&mut self) {
+        self.active = None;
+        self.resume_at = None;
+    }
+
     pub(super) fn was_context_sensitive(&self, index: usize) -> bool {
         self.original
             .as_ref()
@@ -393,13 +400,29 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .0
     }
 
-    /// The same call authority, with a route-owned contextual continuation.
-    /// Nesting restores the enclosing route's state after the inner call.
+    /// The same call authority, with a route-owned contextual continuation:
+    /// the call's owned computation ([`super::super::helper_continuation::CallRead`])
+    /// driven in place.
     pub(in crate::project_semantic_dispatch) fn execute_contextual_call(
         &self,
         key: ResolveCallKey,
         state: &mut ContextualCallState,
     ) -> (ResolveCallStep, Option<DeclaredCallResult>) {
+        let mut read =
+            super::super::helper_continuation::CallRead::begin(key, std::mem::take(state));
+        let answer = self.drive_call_in_place(&mut read);
+        *state = read.into_contextual();
+        answer
+    }
+
+    /// Run `body` with `state` installed as the transaction's contextual
+    /// call continuation for `key`, the enclosing route's restored after.
+    pub(in crate::project_semantic_dispatch) fn with_contextual_call<R>(
+        &self,
+        key: &ResolveCallKey,
+        state: &mut ContextualCallState,
+        body: impl FnOnce() -> R,
+    ) -> R {
         state.owner = Some(key.point.clone());
         let outer = self
             .dispatch_txn
@@ -407,7 +430,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .call
             .contextual
             .replace(std::mem::take(state));
-        let (step, proof) = self.execute_resolve_call_with_declared_result(key);
+        let out = body();
         *state = self
             .dispatch_txn
             .borrow_mut()
@@ -416,16 +439,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .take()
             .expect("installed contextual call");
         self.dispatch_txn.borrow_mut().call.contextual = outer;
-        if !matches!(
-            step,
-            ResolveCallStep::Degraded(ResolveCallFailure::ContextSensitiveInference {
-                contextual: Some(_)
-            })
-        ) {
-            state.active = None;
-            state.resume_at = None;
-        }
-        (step, proof)
+        out
     }
 
     /// A callback delivery advances only its suspended candidate. Full call

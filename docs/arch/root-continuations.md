@@ -1428,15 +1428,25 @@ computation it advances
   runtime) and hands the delivery back (`helper_delivery`). The
   synchronous driver (`HelperDrive::InPlace`) makes each read in place, so
   the helper never stops. A consumer that stops while its helper waits
-  releases it (`release_relation_read`), closing what the helper holds
-  open.
+  releases it (`release_relation_read`, `release_call_read`), closing what
+  the helper holds open.
 
 `HelperRequest`, `HelperAwait` and `HelperDelivery` are opaque, owned and
 `Send`; the helpers are `Send` and neither `Clone` nor `Copy`. A delivery
 is the complete `QueryDelivery`, never a node narrowed out of it. The
 request kinds grow as a helper's internal stages are converted, behind the
 same opaque types and frame glue, so its consumers keep driving it the same
-way. The synchronous entries already drive these computations in place:
+way. Besides query reads, a call has one request its consumer answers
+itself: the callback exchange. A contextual call whose candidate names a
+context-sensitive argument for the consumer to type requests it
+(`HelperRequest::callback_at`: the argument's position and its contextual
+type); the call keeps the candidate's collector in its continuation while
+the consumer types it (`CallRead::contextual_mut` lends the continuation
+for an object or array literal typed member by member), and the typed
+arguments (`HelperDelivery::callback`) resume that collector. The
+synchronous adapter (`drive_call_in_place`) answers the exchange as the
+executor's step naming the argument, as before. The synchronous entries
+already drive these computations in place:
 `execute_relate_pair`, `execute_relate_pair_kind`, the call walk's
 binding applicability relation and the flow evaluator's contextual call.
 The memoized callable reads stay ordinary query keys a consumer needs:
@@ -1475,9 +1485,48 @@ and a drive per root costs more than the reads it could suspend at. Its
 reduction, inference, SCC discharge and a call's resolution still run in
 place ([Boundaries that still block](#boundaries-that-still-block)).
 
+A call's executor walk converts at its own seams
+(`call_resolve.rs`, `CallWalk`). The walk is an owned computation
+(`advance_call_walk`): it substitutes its callee, reads its candidate
+lists and acquires its arguments once (`PlanStage`), then checks its
+candidates in list order under each pass (`CandidateWalk`: the pass and
+position, the contextual resume point, the explicit-type-argument
+recovery and the sole or recovered candidate, by position). A candidate's
+check reads its parameters, type parameters, receiver, rest shape and arity
+once, as it begins (`CandidatePrologue`). Driven by a frame
+(`HelperDrive::Frame`), the walk's candidate list is a request when the
+memo does not serve it warm and its entry admits no subject, its delivery
+read where it was asked. The runtime produces that read outside the
+demand scope the walk pushes for its call site, so the list is a request
+only when the scope beneath it (the enclosing demand site, else the
+request's file) is the call site's: a primitive or collection callee's
+list looks its apparent global up in that scope's project, and under any
+other scope the walk reads the list where it stands. Before each
+first-pass argument relation the operands' first instantiations are
+demanded (`OperandDemand`, as for a relation root). One that must be
+computed stops the candidate there,
+before the relation records anything: the candidate is retained
+(`SuspendedCandidate`: its prologue, the arguments it relates, its
+collecting session taken out of the transaction, its checkpoint, the next
+argument, the failure it met, its SCC deferral and skipped generic-function
+arguments, and the pending argument's mapped parameter type, mapping
+evidence and demand). The delivery enters that argument's demand; with its
+operands answered the relation runs in place over the deliveries, and the
+walk continues — no earlier candidate is checked again, the candidate's
+prologue is not read again, and no earlier argument relates again. Driven
+in place, the walk never stops. A machinery-root call's frame
+(`FrameBuild::Call`) drives its walk this way under the executor frame it
+opened; `CallRead` drives an inline call's walk the same way under its
+executor frame on a consumer's frame, and resolves a machinery-root call
+through its family memo in place. The answer-cache re-entry the call frame
+used before — re-running the walk from its root over the frame's answers,
+skipping to the stopped candidate — is gone.
+
 Graph counters measure the physical work: `relation_roots_opened` (one per
-root obligation frame a machinery root opens) and `relation_reductions`
-(one per structural reduction), counted where the work runs, outside every
+root obligation frame a machinery root opens), `relation_reductions`
+(one per structural reduction), `call_candidates_begun` (one per candidate
+check whose prologue runs) and `call_arguments_related` (one per
+first-pass argument relation), counted where the work runs, outside every
 charge and its rollback.
 
 Behaviour, in the session's `semantic_poll_contract` group:
@@ -1495,6 +1544,19 @@ included, with the synchronous entry's absolute work (one root opened).
 `a_relation_root_released_while_its_operand_is_held_leaves_nothing_open`
 and `a_relation_root_is_woken_by_its_requests_cancellation_while_its_operand_is_held`
 drop or cancel the waiting root.
+`a_call_root_waiting_on_its_second_argument_resumes_without_beginning_its_candidate_again`
+and `a_call_root_waiting_on_its_candidate_list_resumes_to_the_synchronous_read`
+poll `pick(1, box)`'s result while another task produces the instantiation
+its second argument's relation names (after its candidate began and its
+first argument deposited) or its candidate list (before any candidate
+began). Each first poll answers `Pending` at exactly that point; a repoll
+under a forbidding probe and a poll on another thread do no work; released,
+the call resumes elsewhere to the synchronous entry's read, receipt tree
+included, with its absolute work (one candidate begun, two arguments
+related). `a_call_root_is_woken_by_its_requests_cancellation_while_its_operand_is_held`
+cancels the waiting call, and
+`a_call_released_while_suspended_with_its_inference_open_leaves_nothing_open`
+releases it.
 
 ### Frame entry loads
 
@@ -1748,16 +1810,23 @@ signature-list roots over such subjects still enter the synchronous cold
 admission, since those families do not build as continuations yet.
 
 A helper computation ([Helper continuations](#helper-continuations))
-suspends only at a relation's operand demands. Below that point it runs in
-place, inventoried for conversion by its owner:
+suspends only at a relation's operand demands, a call walk's candidate
+lists and argument operand demands, and a contextual call's callback
+exchange. Below those points it runs in place, inventoried for conversion
+by its owner:
 
 - the relation reduction (`reduce_relation` and the structural,
   signature, variance, excess-property and explanation helpers it calls),
   its inference collection and fixation, and the SCC discharge and
   re-discharge at its frame's close;
-- the call executor: candidate preparation, both applicability passes and
-  the relations they make, contextual typing exchanges, final checks,
-  diagnostics, recovery, return solving and the call's SCC discharge;
+- the call executor below its walk's seams: argument acquisition (an
+  argument's program expression evaluates in place), contextual candidate
+  preparation, the relations both applicability passes make (inside each
+  relation), fixation, the post-fixation checks, the selected candidate's
+  return (its declared recipe or its body's flow return), diagnostics,
+  recovery, return solving and the call's SCC discharge; a contextual call
+  completed by its last callback re-enters the executor over its kept
+  continuation;
 - a relation driven in place (inside an open obligation, a binding root,
   a re-discharge) and a relation a seam joined below a drive's root, which
   demand nothing first.
