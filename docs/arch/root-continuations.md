@@ -1586,13 +1586,54 @@ through its family memo in place. The answer-cache re-entry the call frame
 used before — re-running the walk from its root over the frame's answers,
 skipping to the stopped candidate — is gone.
 
+On a consumer's frame a contextual call's callback round continues that walk
+instead of executing the call again. When a candidate's preparation names a
+callback, the call keeps its walk (`CallState::Callback` holds the
+`CallWalk`: the candidate lists, the acquired arguments and the passes, and
+no session); the executor frame closes while the consumer types the
+argument, so the callback body never runs under the call's frame. The typed
+arguments re-open the frame for the typed call key, after its
+answer-at-entry, and the kept walk continues
+(`ProjectSemanticDispatch::continue_call_read`): the typed argument is
+acquired alone and replaces the plan's arguments authored at its position
+(`enter_delivered_argument`), the walk's cursor is derived as a new walk
+derives it, so the `resume_at` skip passes over the earlier candidates with
+no work, and the suspended candidate's preparation resumes inside the walk
+under the executor frame. The callee is not substituted again, the candidate
+lists are not read again and no other argument is acquired again. A
+callback beside a spread argument or in a generic rest tail holds no
+collector, so its candidates are checked again over the kept plan, since
+the typed argument changes their inference. The preparation's contextual
+mapping reads the signature lists of its parameter types through one read
+point (`contextual_signature_nodes`), the same request the walk makes for a
+candidate list: a list the memo does not serve warm is the walk's request,
+and its delivery is read where it was asked. The mapping keeps what it
+computed across the request (`CandidateMapping`: fixation, widening and the
+two mappers run once; the resumable contextual type walk keeps a callable
+leaf's substituted targets), and the walk records the waiting candidate
+(`CandidateWalk::preparing`) and re-enters its preparation with the
+delivery. Released while it waits, the call pops its executor frame
+undecided and abandons the held collector. Driven in place, a callback
+round still resumes through `resume_contextual_call` and executes the call
+again, unchanged.
+
 Graph counters measure the physical work: `relation_roots_opened` (one per
 root obligation frame a machinery root opens), `relation_reductions`
 (one per structural reduction), `relation_members_related` (one per
 property pair an object comparison relates), `call_candidates_begun` (one
-per candidate check whose prologue runs) and `call_arguments_related` (one
-per first-pass argument relation), counted where the work runs, outside
-every charge and its rollback.
+per candidate check whose prologue runs), `call_arguments_related` (one
+per first-pass argument relation) and `call_walks_begun` (one per executor
+walk whose callee is substituted and whose plan is acquired, so a call
+executed again counts again), counted where the work runs, outside every
+charge and its rollback.
+
+The callback rounds are driven through a test-support probe on a call's
+frame and compared with the synchronous rounds:
+`a_contextual_call_waiting_on_a_signature_list_its_resumed_candidate_reads_keeps_its_collector_and_does_not_walk_again`,
+`a_contextual_call_on_a_frame_walks_once_across_its_callback_rounds_to_the_synchronous_answer`,
+`a_contextual_call_released_while_its_resumed_candidate_waits_leaves_nothing_open`
+and
+`a_callback_beside_a_spread_argument_is_rechecked_over_the_retained_plan_without_walking_again`.
 
 Behaviour, in the session's `semantic_poll_contract` group:
 `a_relation_root_whose_source_operand_is_held_yields_with_its_root_frame_open`
@@ -1898,8 +1939,9 @@ admission, since those families do not build as continuations yet.
 A helper computation ([Helper continuations](#helper-continuations))
 suspends only at a relation's operand demands, the operand demands of a
 sub-relation its worklist or an object comparison's property pair reaches,
-a call walk's candidate lists and argument operand demands, and a
-contextual call's callback exchange. Below those points it runs in place,
+a call walk's candidate lists and argument operand demands, a contextual
+candidate preparation's signature lists, and a contextual call's callback
+exchange. Below those points it runs in place,
 inventoried for conversion by its owner:
 
 - the relation reduction's prefix (but for the object comparison its
@@ -1911,12 +1953,20 @@ inventoried for conversion by its owner:
   re-discharge at a frame's close;
 - the call executor below its walk's seams: argument acquisition (an
   argument's program expression evaluates in place), contextual candidate
-  preparation, the relations both applicability passes make (inside each
+  preparation below its signature lists (substitution, including its
+  intersection and template-literal reductions, fixation, the lists a
+  composite candidate's signature results read, a list read under a
+  non-ambient scope or through an entry that admits its subject, and a
+  delivered list an epoch change retired before it was read), the
+  relations both applicability passes make (inside each
   relation), fixation, the post-fixation checks, the selected candidate's
   return (its declared recipe or its body's flow return), diagnostics,
-  recovery, return solving and the call's SCC discharge; a contextual call
-  completed by its last callback re-enters the executor over its kept
-  continuation;
+  recovery, return solving and the call's SCC discharge; driven in place, a
+  contextual call completed by its last callback re-enters the executor
+  over its kept continuation; at the consumer's depth on both drivers, an
+  object or array literal typed member by member into the call's collector
+  (`contextual_object_member`) and a machinery-root call's synchronous
+  resume;
 - a relation driven in place (inside an open obligation, a binding root,
   a re-discharge) and a relation a seam joined below a drive's root, which
   demand nothing first.

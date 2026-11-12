@@ -36,8 +36,11 @@
 //! unwrapping its operands, and an inline call's executor walk at its
 //! candidate lists and at each first-pass argument relation's operand
 //! instantiations; on either driver a contextual call exchanges its
-//! callbacks with its consumer. A pair or member relation computes in
-//! place on either driver.
+//! callbacks with its consumer. On a frame, the round a callback's typed
+//! arguments begin continues the call's executor walk over the plan it
+//! retained, and a contextual candidate's preparation suspends at the
+//! signature lists its mapping reads. A pair or member relation computes
+//! in place on either driver.
 
 use super::call_resolve::{CallWalk, ContextualCallState, DeclaredCallResult, ResolveCallStep};
 use super::dispatch_txn::{InferenceOccurrence, RelationStep};
@@ -354,7 +357,13 @@ impl RelationRead {
 /// queries ([`ProjectSemanticDispatch::advance_call_walk`]); on either
 /// driver, a call naming a context-sensitive argument for its consumer to
 /// type is a callback exchange ([`HelperRequest::callback_at`]), answered
-/// with the typed arguments ([`HelperDelivery::callback`]).
+/// with the typed arguments ([`HelperDelivery::callback`]). On a frame, a
+/// contextual candidate's preparation reads the signature lists its
+/// mapping stops at as queries, and the round a callback's typed
+/// arguments begin continues the executor walk the call kept: the typed
+/// argument enters its retained plan and the walk goes on from its first
+/// candidate, without substituting the callee or reading the candidate
+/// lists again.
 pub(super) struct CallRead {
     state: CallState,
     contextual: ContextualCallState,
@@ -371,9 +380,13 @@ enum CallState {
         walk: Box<CallWalk>,
     },
     /// The call named the argument at `position` for its consumer to type.
+    /// `walk` is the executor walk a round on a frame kept between its
+    /// candidates, which the typed arguments continue; `None` for a round
+    /// run in place or through the machinery root.
     Callback {
         key: ResolveCallKey,
         position: usize,
+        walk: Option<Box<CallWalk>>,
     },
     /// The answer was delivered, or the call was released.
     Finished,
@@ -385,7 +398,9 @@ pub(super) type CallAnswer = (ResolveCallStep, Option<DeclaredCallResult>);
 
 /// Where a call stands after one stage.
 enum CallStep {
-    Answered(CallAnswer),
+    /// The call's answer, and the executor walk a round on a frame kept
+    /// when the answer names a callback.
+    Answered(CallAnswer, Option<Box<CallWalk>>),
     /// The answer of a contextual round its callback's delivery resumed.
     Resumed(CallAnswer),
     Walking {
@@ -414,6 +429,20 @@ impl CallRead {
             "a call's continuation is lent while it waits on its callback"
         );
         &mut self.contextual
+    }
+
+    /// The deposits of the candidate collector the call holds: the one its
+    /// contextual continuation keeps, else the one its walk stopped inside
+    /// a candidate with.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn held_collector_for_tests(&self) -> Option<usize> {
+        if let Some((_, deposits)) = self.contextual.held_collector_for_tests() {
+            return Some(deposits);
+        }
+        match &self.state {
+            CallState::Walk { walk, .. } => walk.held_collector_for_tests(),
+            _ => None,
+        }
     }
 
     /// The contextual continuation the resolution left, for the consumer's
@@ -728,7 +757,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let step = self.with_contextual_call(&key, &mut read.contextual, || {
                     match self.advance_resolve_call_inline(&key, frame, &mut walk, delivery, drive)
                     {
-                        HelperStep::Done(answer) => CallStep::Answered(answer),
+                        HelperStep::Done(answer) => CallStep::Answered(answer, Some(walk)),
                         HelperStep::Request(request) => CallStep::Walking {
                             frame,
                             walk,
@@ -738,15 +767,39 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 });
                 (key, step)
             }
-            CallState::Callback { mut key, position } => {
+            CallState::Callback {
+                mut key,
+                position,
+                walk,
+            } => {
                 let args = delivery
                     .expect("a callback exchange resumes with its typed arguments")
                     .into_callback();
-                // The resumed round settles the continuation itself when it
-                // answers the call again.
-                let answer =
-                    self.resume_contextual_call(&mut key, &args, position, &mut read.contextual);
-                (key, CallStep::Resumed(answer))
+                match (walk, drive) {
+                    // On a frame, the round continues the walk the call
+                    // kept, under its contextual continuation.
+                    (Some(walk), HelperDrive::Frame { .. }) => {
+                        key.args = args;
+                        let step = self.with_contextual_call(&key, &mut read.contextual, || {
+                            self.continue_call_read(&key, walk, position, drive)
+                        });
+                        (key, step)
+                    }
+                    // In place, the round resumes the candidate's collector
+                    // and executes the call again over the typed arguments;
+                    // a kept walk is plain data and is dropped. The resumed
+                    // round settles the continuation itself when it answers
+                    // the call again.
+                    _ => {
+                        let answer = self.resume_contextual_call(
+                            &mut key,
+                            &args,
+                            position,
+                            &mut read.contextual,
+                        );
+                        (key, CallStep::Resumed(answer))
+                    }
+                }
             }
             CallState::Finished => unreachable!("a call delivers its answer once"),
         };
@@ -759,7 +812,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 read.state = CallState::Walk { key, frame, walk };
                 HelperStep::Request(request)
             }
-            CallStep::Answered(answer) => {
+            CallStep::Answered(answer, walk) => {
                 if let ResolveCallStep::Degraded(ResolveCallFailure::ContextSensitiveInference {
                     contextual: Some((position, contextual)),
                 }) = &answer.0
@@ -767,9 +820,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     read.state = CallState::Callback {
                         key,
                         position: *position as usize,
+                        walk: walk.filter(|walk| walk.awaits_callback()),
                     };
                     return HelperStep::Request(HelperRequest::callback(*position, *contextual));
                 }
+                // A continued round can answer before it reaches the
+                // candidate whose collector the continuation holds.
+                self.release_contextual_collector(&mut read.contextual);
                 read.contextual.settle();
                 HelperStep::Done(answer)
             }
@@ -781,6 +838,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     read.state = CallState::Callback {
                         key,
                         position: *position as usize,
+                        walk: None,
                     };
                     return HelperStep::Request(HelperRequest::callback(*position, *contextual));
                 }
@@ -795,23 +853,56 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// a frame — the inline call's walk begun under its executor frame.
     fn begin_call_read(&self, key: &ResolveCallKey, drive: HelperDrive) -> CallStep {
         if let Some(answer) = self.resolve_call_answer_at_entry(key) {
-            return CallStep::Answered(answer);
+            return CallStep::Answered(answer, None);
         }
         if self.dispatch_txn.borrow().obligations.decides_root() {
-            return CallStep::Answered((self.execute_resolve_call_root(key.clone()), None));
+            return CallStep::Answered((self.execute_resolve_call_root(key.clone()), None), None);
         }
         if drive == HelperDrive::InPlace {
             return CallStep::Answered(
                 self.execute_resolve_call_inline_with_declared_result(key.clone()),
+                None,
             );
         }
         let frame = match self.begin_resolve_call_inline(key) {
             Ok(frame) => frame,
-            Err(answer) => return CallStep::Answered(*answer),
+            Err(answer) => return CallStep::Answered(*answer, None),
         };
         let mut walk = Box::new(CallWalk::new(key.clone()));
         match self.advance_resolve_call_inline(key, frame, &mut walk, None, drive) {
-            HelperStep::Done(answer) => CallStep::Answered(answer),
+            HelperStep::Done(answer) => CallStep::Answered(answer, Some(walk)),
+            HelperStep::Request(request) => CallStep::Walking {
+                frame,
+                walk,
+                request,
+            },
+        }
+    }
+
+    /// The round a callback's typed arguments begin on a frame, under the
+    /// call's contextual continuation: `key` is the call with the argument
+    /// at `position` typed. The authority's answer-before-execute steps run
+    /// for the typed call, its executor frame re-opens, and the walk the
+    /// previous round kept continues over its retained plan with the typed
+    /// argument entered into it.
+    fn continue_call_read(
+        &self,
+        key: &ResolveCallKey,
+        mut walk: Box<CallWalk>,
+        position: usize,
+        drive: HelperDrive,
+    ) -> CallStep {
+        if let Some(answer) = self.resolve_call_answer_at_entry(key) {
+            return CallStep::Answered(answer, None);
+        }
+        let frame = match self.begin_resolve_call_inline(key) {
+            Ok(frame) => frame,
+            Err(answer) => return CallStep::Answered(*answer, None),
+        };
+        walk = Box::new(CallWalk::new(key.clone()));
+        let _ = position;
+        match self.advance_resolve_call_inline(key, frame, &mut walk, None, drive) {
+            HelperStep::Done(answer) => CallStep::Answered(answer, Some(walk)),
             HelperStep::Request(request) => CallStep::Walking {
                 frame,
                 walk,
@@ -867,6 +958,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             read.state = CallState::Callback {
                 position: *position as usize,
                 key,
+                walk: None,
             };
         } else {
             read.contextual.settle();
@@ -876,16 +968,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Release a call its consumer stopped before it answered: a walk that
     /// waited releases its candidate's collector and pops its executor
-    /// frame undecided; a contextual collector waiting on its callback is
-    /// abandoned.
+    /// frame undecided; a contextual collector waiting on its callback, or
+    /// on a signature list its candidate's mapping reads, is abandoned.
     #[allow(dead_code)] // interface for the flow evaluator's retained call frames
     pub(super) fn release_call_read(&self, mut read: CallRead) {
-        if let CallState::Walk { key, frame, walk } =
-            std::mem::replace(&mut read.state, CallState::Finished)
-        {
-            self.with_contextual_call(&key, &mut read.contextual, || {
-                self.abandon_resolve_call_inline(frame, *walk);
-            });
+        match std::mem::replace(&mut read.state, CallState::Finished) {
+            CallState::Walk { key, frame, walk } => {
+                self.with_contextual_call(&key, &mut read.contextual, || {
+                    self.abandon_resolve_call_inline(frame, *walk);
+                });
+            }
+            // A walk kept between rounds holds no session and no frame: it
+            // is plain data, dropped with the read.
+            CallState::Callback {
+                walk: Some(walk), ..
+            } => {
+                verter_debug_assert!(
+                    walk.awaits_callback(),
+                    "a walk kept for a callback round holds no candidate"
+                );
+            }
+            _ => {}
         }
         self.release_contextual_collector(&mut read.contextual);
     }

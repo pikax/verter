@@ -1936,6 +1936,12 @@ impl SemanticGraphStore {
             .call_arguments_related
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped once per executor walk a call resolution begins.
+    pub fn record_call_walk_begun(&self) {
+        self.stats
+            .call_walks_begun
+            .fetch_add(1, Ordering::Relaxed);
+    }
     /// Bumped once per property pair an object comparison relates.
     pub fn record_relation_member_related(&self) {
         self.stats
