@@ -1149,18 +1149,45 @@ and retains its position and what it computed before the read
   observation retained (`HopSite::Carrier`, `CarrierAt::Hop`) and the
   carrier left on the normalization record until it settles or the walk
   is released;
-- the instantiation of the global wrapper a member read off an array, a
-  tuple, a primitive or literal, or a runtime nominal declaration reads
-  (`HopSite::Wrapper`): the subject's origin file first, then the file
-  that demands it;
-- a mapped type's homomorphic source (`MappedHomomorphic`), an identity
-  mapper's selected-key access (`MappedKey`) and the mapping's whole
-  surface (`MappedWhole`);
+- the global wrapper a member read off an array, a tuple, a primitive or
+  literal, or a runtime nominal declaration reads (`HopSite::Wrapper`):
+  its global lookup stepped as the walk's own transitions — the lib files
+  as a port, each lib source as a load, each pending contributor as an
+  index wait, then the populated lookup as a port
+  (`WrapperStage::Lookup`) — and then the instantiation of the declaration
+  it found, the subject's origin file first, then the file that demands
+  it. The same read answers a composite arm's view of a numeric key
+  through the global `Array` (`WrapperUse::ArmView`);
+- the global `Object` that a member an object's surface does not declare
+  is read past (`WrapperUse::ObjectMember`), and the one an intersection
+  join decides a named key from once its arms declare none, the join's
+  decision retained across the read (`WrapperUse::CompositeObject`,
+  `CompositeDecision`);
+- a spread program's projection for each candidate key a member read
+  tries, the key and then its element-access equivalent
+  (`HopSite::Spread`);
+- a mapped type's source carrier chain, resolved as the hop's own
+  sub-continuation (`HopSite::MappedSource`, `SourceCarrierRead`) — its
+  deferred evaluation, then each carrier's instantiation and the answer
+  evaluated again — once to decide whether the mapping maps an array or
+  tuple whole and once to admit a selected key against the source's
+  shallow surface, the normalized key carried across the read
+  (`MappedResume::Admission`); the homomorphic mapping
+  (`MappedHomomorphic`), an identity mapper's selected-key access
+  (`MappedKey`), a computed mapper's selected value evaluated as a
+  mapped member's on the shared deferred evaluator
+  (`HopSite::MappedValue`), and the mapping's whole surface
+  (`MappedWhole`);
 - the terminal (`HopSite::Terminal`): an `Expanded` path's terminal
   carrier resolved one level — its `typeof` value, declaration,
   instantiation or carrier resolution, each read of that resolution
   `CarrierAt::ExpandedTerminal` — and a `Navigate` path's terminal
-  reference identity (`CarrierAt::NavigateTerminal`).
+  reference identity (`CarrierAt::NavigateTerminal`);
+- an `Expanded` terminal's expansion worklist (`PathWalker::run_expansion`):
+  each declaration placeholder's instantiation and each `Mapped` shell's
+  materialization a frame reads (`HopSite::Expand`), and each carrier a
+  non-empty path's frame resolves one level (`TerminalThen::Expanding`),
+  with the frames left and the arms already expanded retained.
 
 The build resumes that hop with the answer (`PathWalker::resume_walk`),
 never its step or the walk from its root. The in-place driver
@@ -1425,13 +1452,31 @@ against the reads the walk names on a scratch host
 `a_carrier_reached_mid_walk_yields_at_each_read_of_its_resolution_and_resumes_there`
 (the anchor or the instantiation, after the alias and the carrier's hop),
 `an_expanded_terminal_waiting_on_its_carriers_instantiation_resumes_without_walking_again`,
-`an_array_member_waiting_on_its_wrapper_resumes_without_walking_again` and
-`a_mapped_key_waiting_on_its_selected_value_resumes_without_walking_again`.
+`an_array_member_waiting_on_its_wrapper_resumes_without_walking_again`,
+`a_mapped_key_waiting_on_its_selected_value_resumes_without_walking_again`,
+`a_mapped_sources_carrier_chain_waiting_on_its_instantiation_resumes_there`
+(either of the source's instantiations, after the mapping's),
+`a_computed_mapped_value_waiting_on_its_evaluation_resumes_there`,
+`an_object_member_waiting_on_the_global_object_resumes_without_walking_again`,
+`an_intersection_join_waiting_on_its_arms_wrappers_resumes_at_the_held_read`
+(the array arm's wrapper or the `Object` the join reads),
+`a_union_arm_view_waiting_on_its_array_wrapper_resumes_without_walking_again`,
+`a_spread_member_waiting_on_its_projection_resumes_without_walking_again`
+(a program read first, and one reached behind an instantiation) and
+`an_expansion_waiting_on_a_placeholders_instantiation_resumes_its_worklist`
+(either arm of a union of placeholders, the first arm expanded before the
+second's read).
 Each requires `Pending` after exactly the hops before the read, a pending
 repoll and poll elsewhere that compute nothing, and — released — the
 synchronous entry's read with each hop, admission stage and evaluator step
 computed once; each also drops the path while held and requires nothing
 open.
+`a_wrapper_lookup_reached_mid_walk_yields_at_its_contributors_load_and_resumes_there`
+edits the global `String`'s contributor and holds its shard: a walk
+reaching `string` behind an instantiation returns `Pending` at the
+contributor's load under a probe that forbids every wait, after exactly
+the hops before it, and released, resumes there to the synchronous read
+with each hop walked once.
 
 ### Helper continuations
 
@@ -1815,18 +1860,16 @@ A path projection is suspendable only at the hops listed under
 made in place inside a stage:
 
 - the prelude's union-index distribution;
-- the member and index reads of object, spread-program and heritage
-  intersection surfaces, and a mapped surface's remapped-key admission,
-  signature-source carrier and selected-key value materialization;
-- the global wrapper's declaration lookup (`first_global_declaration`)
-  and a composite's apparent wrapper view;
+- the member reads of heritage intersection surfaces (a declinable
+  `observe_read` probe), a remapping mapper's key-preimage narrowing
+  (each producing key's value), and the type arguments a mapped source's
+  carrier evaluates before its instantiation;
 - a callable's apparent type: a declinable probe whose failed answer's
   partiality must stay inside its observation, which a frame need, computed
   outside that observation, cannot keep from the request;
 - a `ReturnType` flow member hop;
-- the reads inside composite joins;
-- the shallow and expansion worklists of terminal synthesis, and a
-  `Shallow` terminal;
+- a composite join's key-assignability check, a relation its owner reads;
+- the shallow worklist of terminal synthesis, and a `Shallow` terminal;
 - the deferred evaluations its other hops and its terminal drive in place
   (the deferred object of a hop's indexed access is a sub-continuation;
   above), and what the evaluator still answers in place inside a step.
