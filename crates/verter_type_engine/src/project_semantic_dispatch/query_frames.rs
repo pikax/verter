@@ -359,6 +359,11 @@ pub(super) struct CallBuild {
     awaiting: Option<HelperAwait>,
     /// The claim the awaited read entered with, until the runtime takes it.
     claim: Option<ClaimAttempt>,
+    /// The contextual call a test drives on this frame in place of the
+    /// frame's own resolution ([`drive_contextual_call_here_for_tests`]),
+    /// and its owned computation once begun.
+    #[cfg(any(test, feature = "test-support"))]
+    probe: Option<Box<(ContextualCallProbe, Option<super::helper_continuation::CallRead>)>>,
 }
 
 /// What a frame's build did in one step.
@@ -2357,6 +2362,14 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
 
     fn abandon(&mut self, frame: QueryFrame<'p, 'a, C>) {
         let QueryFrame::Instantiate(mut frame) = frame;
+        // A probed contextual call stopped between its steps is released
+        // before the frame's own executor frame beneath it closes.
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(FrameBuild::Call(build)) = frame.build.as_mut() {
+            if let Some(read) = build.probe.take().and_then(|probe| probe.1) {
+                self.dispatch.release_call_read(read);
+            }
+        }
         // A call stopped between its steps releases the collector its walk
         // held and closes the executor frame it opened.
         if let Some(FrameBuild::Call(build)) = frame.build.as_mut() {
@@ -3882,6 +3895,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     else {
                         unreachable!("the build was just inserted")
                     };
+                    #[cfg(any(test, feature = "test-support"))]
+                    {
+                        build.probe = CONTEXTUAL_CALL_PROBE_HERE
+                            .with(std::cell::Cell::take)
+                            .map(|probe| Box::new((probe, None)));
+                    }
                     self.drain_call(frame_key, build, None, depth + 1)
                 }
             },
@@ -4101,6 +4120,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Err(refusal) => return FramePoll::Done(refusal),
             },
         };
+        #[cfg(any(test, feature = "test-support"))]
+        if build.probe.is_some() {
+            return self.drain_contextual_call_probe(idx, build, delivery, depth);
+        }
         let delivered = delivery.map(|delivery| {
             let awaiting = build
                 .awaiting
@@ -4129,6 +4152,76 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 build.frame = None;
                 build.walk = None;
                 FramePoll::Done(output)
+            }
+        }
+    }
+
+    /// Carry a probed contextual call on beneath the frame's own executor
+    /// frame `idx`, as a consumer on the continuation runtime drives it: its
+    /// owned computation advances on the frame with the delivery of the read
+    /// it stood at; a callback it names is typed at once with the probe's
+    /// argument for that position; a query it reads is the frame's need.
+    /// Its answer closes the frame's executor frame undecided and is the
+    /// frame's output, never published for the frame's key.
+    #[cfg(any(test, feature = "test-support"))]
+    fn drain_contextual_call_probe(
+        &self,
+        idx: usize,
+        build: &mut CallBuild,
+        delivery: Option<QueryDelivery>,
+        depth: u32,
+    ) -> FramePoll<'a> {
+        let mut delivered = delivery.map(|delivery| {
+            let awaiting = build
+                .awaiting
+                .take()
+                .expect("a delivery answers the read the probed call waited on");
+            self.helper_delivery(awaiting, delivery)
+        });
+        let (probe, read) = &mut **build.probe.as_mut().expect("an armed probe");
+        let read = read.get_or_insert_with(|| {
+            super::helper_continuation::CallRead::begin(probe.call.clone(), Default::default())
+        });
+        loop {
+            match self.advance_call_read(read, delivered.take(), HelperDrive::Frame { depth }) {
+                HelperStep::Request(request) => {
+                    if let Some((position, _)) = request.callback_at() {
+                        let position = position as usize;
+                        let mut args = probe.call.args.to_vec();
+                        args[position] = probe.typed[position].clone();
+                        probe.call.args = Arc::from(args);
+                        delivered = Some(HelperDelivery::callback(Arc::clone(&probe.call.args)));
+                        CALL_CALLBACKS_TYPED_HERE.with(|typed| typed.set(typed.get() + 1));
+                        continue;
+                    }
+                    if let Some(collected_candidates) = read.held_collector_for_tests() {
+                        CALL_SUSPENSIONS_FOR_TESTS.with(|observed| {
+                            observed.borrow_mut().push(CallSuspensionForTests {
+                                needs: vec![request.query_key_for_tests().clone()],
+                                collected_candidates,
+                            })
+                        });
+                    }
+                    return self.helper_request_poll(request, &mut build.awaiting, &mut build.claim);
+                }
+                HelperStep::Done((step, _)) => {
+                    build.probe = None;
+                    build.frame = None;
+                    self.abandon_resolve_call_build(idx, None);
+                    let result = match step {
+                        super::call_resolve::ResolveCallStep::Complete(result) => {
+                            QueryResult::Value(SemanticQueryValue::ResolveCall(
+                                verter_session_query::retention::owned::Owned::new(result),
+                            ))
+                        }
+                        _ => QueryResult::Error(QueryError::Miss),
+                    };
+                    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput<
+                        SemanticQueryValue,
+                    > = (result, self.project_generation_signature()).into();
+                    output.cache_suppress = true;
+                    return FramePoll::Done(Box::new(output));
+                }
             }
         }
     }
@@ -4718,6 +4811,42 @@ thread_local! {
 #[cfg(any(test, feature = "test-support"))]
 pub fn hold_call_needs_here_for_tests(filter: Option<HeldCallNeeds>) {
     HELD_CALL_NEEDS_HERE.with(|held| held.set(filter));
+}
+
+/// A contextual call a test drives on a call frame: the call, and the
+/// argument its consumer types each callback position with. Test-only.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub struct ContextualCallProbe {
+    /// The call, its callbacks still context-sensitive.
+    pub call: crate::semantic_query::ResolveCallKey,
+    /// The typed argument for each position, read at the positions the
+    /// call names.
+    pub typed: Vec<crate::semantic_query::CallArgKey>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static CONTEXTUAL_CALL_PROBE_HERE: std::cell::Cell<Option<ContextualCallProbe>> =
+        const { std::cell::Cell::new(None) };
+    static CALL_CALLBACKS_TYPED_HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Have the next call frame begun on this thread drive `probe`'s call as
+/// a consumer on the continuation runtime does, instead of resolving its
+/// own key; `None` disarms. Arming resets
+/// [`call_callbacks_typed_here_for_tests`]. Test-only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn drive_contextual_call_here_for_tests(probe: Option<ContextualCallProbe>) {
+    CONTEXTUAL_CALL_PROBE_HERE.with(|armed| armed.set(probe));
+    CALL_CALLBACKS_TYPED_HERE.with(|typed| typed.set(0));
+}
+
+/// The callbacks probed calls named and had typed on this thread since the
+/// probe was armed. Test-only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn call_callbacks_typed_here_for_tests() -> usize {
+    CALL_CALLBACKS_TYPED_HERE.with(std::cell::Cell::get)
 }
 
 /// What a call frame's walk held when it suspended. Test-only.
