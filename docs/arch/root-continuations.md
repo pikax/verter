@@ -1142,7 +1142,25 @@ and retains its position and what it computed before the read
   object;
 - each branch of an open conditional, with the true branch's answer kept
   while the false branch is read;
-- a `typeof` carrier's value, then its pending member.
+- a `typeof` carrier's value, then its pending member;
+- each read the resolution of a `BareRef` or `ImportType` carrier the
+  walk reaches mid-walk names — its anchor declaration, then the
+  instantiation it routes through — with the resolution and its held
+  observation retained (`HopSite::Carrier`, `CarrierAt::Hop`) and the
+  carrier left on the normalization record until it settles or the walk
+  is released;
+- the instantiation of the global wrapper a member read off an array, a
+  tuple, a primitive or literal, or a runtime nominal declaration reads
+  (`HopSite::Wrapper`): the subject's origin file first, then the file
+  that demands it;
+- a mapped type's homomorphic source (`MappedHomomorphic`), an identity
+  mapper's selected-key access (`MappedKey`) and the mapping's whole
+  surface (`MappedWhole`);
+- the terminal (`HopSite::Terminal`): an `Expanded` path's terminal
+  carrier resolved one level — its `typeof` value, declaration,
+  instantiation or carrier resolution, each read of that resolution
+  `CarrierAt::ExpandedTerminal` — and a `Navigate` path's terminal
+  reference identity (`CarrierAt::NavigateTerminal`).
 
 The build resumes that hop with the answer (`PathWalker::resume_walk`),
 never its step or the walk from its root. The in-place driver
@@ -1400,6 +1418,20 @@ path resumes elsewhere to the synchronous entry's read, receipt tree
 included, with each evaluator step and hop computed once (absolute
 counts). `a_path_released_while_its_deferred_operand_is_held_leaves_nothing_open`
 drops the path at either read and requires no open cost recording.
+Each new hop site is held over the sites module
+(`/semantic-task/projection-sites.ts`), the held keys checked first
+against the reads the walk names on a scratch host
+(`family_needs_for_tests`):
+`a_carrier_reached_mid_walk_yields_at_each_read_of_its_resolution_and_resumes_there`
+(the anchor or the instantiation, after the alias and the carrier's hop),
+`an_expanded_terminal_waiting_on_its_carriers_instantiation_resumes_without_walking_again`,
+`an_array_member_waiting_on_its_wrapper_resumes_without_walking_again` and
+`a_mapped_key_waiting_on_its_selected_value_resumes_without_walking_again`.
+Each requires `Pending` after exactly the hops before the read, a pending
+repoll and poll elsewhere that compute nothing, and — released — the
+synchronous entry's read with each hop, admission stage and evaluator step
+computed once; each also drops the path while held and requires nothing
+open.
 
 ### Helper continuations
 
@@ -1783,14 +1815,18 @@ A path projection is suspendable only at the hops listed under
 made in place inside a stage:
 
 - the prelude's union-index distribution;
-- the member and index reads of object, spread-program, heritage
-  intersection, mapped, tuple and array surfaces;
-- apparent-member, apparent-wrapper and apparent-type reads;
-- carrier resolution inside a hop (the walker's own `resolve_carrier_subject_fact`
-  read of a nested carrier);
+- the member and index reads of object, spread-program and heritage
+  intersection surfaces, and a mapped surface's remapped-key admission,
+  signature-source carrier and selected-key value materialization;
+- the global wrapper's declaration lookup (`first_global_declaration`)
+  and a composite's apparent wrapper view;
+- a callable's apparent type: a declinable probe whose failed answer's
+  partiality must stay inside its observation, which a frame need, computed
+  outside that observation, cannot keep from the request;
 - a `ReturnType` flow member hop;
 - the reads inside composite joins;
-- terminal expansion and shallow synthesis;
+- the shallow and expansion worklists of terminal synthesis, and a
+  `Shallow` terminal;
 - the deferred evaluations its other hops and its terminal drive in place
   (the deferred object of a hop's indexed access is a sub-continuation;
   above), and what the evaluator still answers in place inside a step.

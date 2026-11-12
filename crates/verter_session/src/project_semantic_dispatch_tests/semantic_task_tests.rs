@@ -7238,7 +7238,15 @@ mod semantic_poll_contract {
     fn poll_root_holding(
         keys: impl FnOnce(&crate::VerterHost, &HostDispatch<'_>) -> (SemanticQueryKey, SemanticQueryKey),
     ) -> (Arc<crate::VerterHost>, HeldRead) {
-        let host = projection_host();
+        poll_root_holding_on(projection_host, keys)
+    }
+
+    /// The same, on a fresh host `host` makes.
+    fn poll_root_holding_on(
+        host: fn() -> Arc<crate::VerterHost>,
+        keys: impl FnOnce(&crate::VerterHost, &HostDispatch<'_>) -> (SemanticQueryKey, SemanticQueryKey),
+    ) -> (Arc<crate::VerterHost>, HeldRead) {
+        let host = host();
         let mut dispatch = ProjectSemanticDispatch::new(&*host);
         let scope = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
@@ -7310,7 +7318,15 @@ mod semantic_poll_contract {
     fn synchronous_root(
         keys: impl FnOnce(&crate::VerterHost, &HostDispatch<'_>) -> SemanticQueryKey,
     ) -> (ReadSummary, Work) {
-        let host = projection_host();
+        synchronous_root_on(projection_host, keys)
+    }
+
+    /// The same, on a fresh host `host` makes.
+    fn synchronous_root_on(
+        host: fn() -> Arc<crate::VerterHost>,
+        keys: impl FnOnce(&crate::VerterHost, &HostDispatch<'_>) -> SemanticQueryKey,
+    ) -> (ReadSummary, Work) {
+        let host = host();
         let dispatch = ProjectSemanticDispatch::new(&*host);
         let _scope = dispatch.enter_construction_scope();
         let root = keys(&host, &dispatch);
@@ -8797,6 +8813,412 @@ mod semantic_poll_contract {
             let read = dispatch.execute_via_cold_build_helper(path);
             assert_eq!(read_summary(&dispatch, &read).0, synchronous.0);
         }
+    }
+
+    /// The file whose declarations the walker's hop sites are exercised
+    /// over: aliases a path walks through, a homomorphic mapping and the
+    /// global interface a member read off an array widens to.
+    const SITES_FILE: &str = "/semantic-task/projection-sites.ts";
+
+    const SITES: &str = "declare global {\n\
+                           interface Array<T> { readonly marker: \"arr\"; }\n\
+                         }\n\
+                         type Box<T> = { value: T };\n\
+                         type Pair<T> = { inner: Box<T> };\n\
+                         type List<T> = { items: T[] };\n\
+                         type Mapped<T> = { [K in keyof T]: T[K] };\n";
+
+    fn sites_host() -> Arc<crate::VerterHost> {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            SITES_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(SITES),
+            crate::FileLanguage::script_ts(),
+        );
+        host.ensure_indexed_ready(SITES_FILE)
+            .expect("the declarations have indexed input before a hop is held");
+        host
+    }
+
+    fn sites_scope(host: &crate::VerterHost) -> verter_type_engine::semantic_query::NodeScopeId {
+        verter_type_engine::semantic_query::NodeScopeId::File {
+            canonical_id: SITES_FILE.into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: host
+                .shallow_file_state(SITES_FILE)
+                .expect("the declarations are indexed")
+                .whole_hash,
+            local_scope: None,
+        }
+    }
+
+    fn sites_literal(
+        dispatch: &HostDispatch<'_>,
+        text: &str,
+    ) -> verter_type_engine::semantic_query::SemanticNodeId {
+        dispatch.graph_arc().intern_node(SemanticNodeData::Literal(
+            verter_type_engine::semantic_query::LiteralValue::String(text.into()),
+        ))
+    }
+
+    /// `alias<arg>` written in the sites file: the walk's subject, scoped
+    /// to the file it is read in.
+    fn sites_application(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+        alias: &str,
+        arg: verter_type_engine::semantic_query::SemanticNodeId,
+    ) -> verter_type_engine::semantic_query::SemanticNodeId {
+        use verter_type_engine::semantic_query::{DeclIdentity, PayloadArray};
+        dispatch.graph_arc().intern_node_with_scope(
+            SemanticNodeData::InstantiationRef {
+                base: DeclIdentity {
+                    canonical_id: SITES_FILE.into(),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    whole_hash: host
+                        .shallow_file_state(SITES_FILE)
+                        .expect("the declarations are indexed")
+                        .whole_hash,
+                    decl_name: alias.into(),
+                },
+                args: PayloadArray::from(vec![arg]),
+            },
+            sites_scope(host),
+        )
+    }
+
+    /// `alias<args>` instantiated in the sites file under `context`.
+    fn sites_instantiation(
+        dispatch: &HostDispatch<'_>,
+        alias: &str,
+        args: &[verter_type_engine::semantic_query::SemanticNodeId],
+        context: ProjectionReductionContext,
+    ) -> SemanticQueryKey {
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+            dispatch.type_slot_for(
+                SITES_FILE,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                alias,
+            ),
+            Arc::from(args.to_vec().into_boxed_slice()),
+            dispatch.instantiate_context_for(SITES_FILE, context),
+        ))
+    }
+
+    fn member_path(
+        names: &[&str],
+    ) -> verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment> {
+        use verter_type_engine::semantic_query::{PathSegment, PropertyKey};
+        verter_type_expr::OwnedSlice::from(
+            names
+                .iter()
+                .map(|name| PathSegment::Member(PropertyKey::identifier(*name)))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        )
+    }
+
+    /// A path whose walk reaches a hop site, and the reads its walk names
+    /// up to and including that site's, in order.
+    type SiteKeys<'k> = &'k dyn Fn(&crate::VerterHost, &HostDispatch<'_>) -> SiteRead;
+
+    /// A path and the reads its walk names, in order.
+    type SiteRead = (SemanticQueryKey, Vec<SemanticQueryKey>);
+
+    /// `Alias(Pair<"deep">)["inner"]["value"]` in `Expanded`, its `Pair` an
+    /// unresolved reference the walk reaches behind an alias, not as its
+    /// subject: the walk resolves the carrier mid-walk, reading its anchor
+    /// declaration and then the instantiation it routes through.
+    fn mid_walk_carrier(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> (SemanticQueryKey, Vec<SemanticQueryKey>) {
+        let graph = dispatch.graph_arc();
+        let deep = sites_literal(dispatch, "deep");
+        let scope = sites_scope(host);
+        let carrier = graph.intern_node_with_scope(
+            SemanticNodeData::new_bare_ref(Arc::from("Pair"), scope.clone(), Arc::from([deep])),
+            scope,
+        );
+        let base = graph.intern_node(SemanticNodeData::Alias(carrier));
+        let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+        let root = SemanticQueryKey::ProjectPath {
+            base,
+            path: member_path(&["inner", "value"]),
+            context,
+        };
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let anchor =
+            SemanticQueryKey::ResolveDecl(verter_type_engine::semantic_query::ResolveDeclKey {
+                scope: ScopeId::file(SITES_FILE, owner),
+                name: "Pair".into(),
+            });
+        let instantiation = sites_instantiation(dispatch, "Pair", &[deep], context);
+        (root, vec![anchor, instantiation])
+    }
+
+    /// `Pair<"deep">["inner"]` in `Expanded`: the walk instantiates its
+    /// base, reads `inner` off it, and resolves the terminal `Box<"deep">`
+    /// one level under the caller's mode before expanding it.
+    fn expanded_terminal(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> (SemanticQueryKey, Vec<SemanticQueryKey>) {
+        let deep = sites_literal(dispatch, "deep");
+        let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+        let root = SemanticQueryKey::ProjectPath {
+            base: sites_application(host, dispatch, "Pair", deep),
+            path: member_path(&["inner"]),
+            context,
+        };
+        let base = sites_instantiation(
+            dispatch,
+            "Pair",
+            &[deep],
+            context.into_structural_transit_with_mode(ProjectionMode::Navigate),
+        );
+        let terminal = sites_instantiation(dispatch, "Box", &[deep], context);
+        (root, vec![base, terminal])
+    }
+
+    /// `List<"deep">["items"]["marker"]` in `Navigate`: the walk
+    /// instantiates its base, reads the array `items`, and reads `marker`
+    /// off the array's apparent wrapper, the global `Array` over its
+    /// element, in the file the subject was written in.
+    fn array_wrapper(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> (SemanticQueryKey, Vec<SemanticQueryKey>) {
+        let deep = sites_literal(dispatch, "deep");
+        let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
+        let root = SemanticQueryKey::ProjectPath {
+            base: sites_application(host, dispatch, "List", deep),
+            path: member_path(&["items", "marker"]),
+            context,
+        };
+        let base = sites_instantiation(
+            dispatch,
+            "List",
+            &[deep],
+            context.into_structural_transit_with_mode(ProjectionMode::Navigate),
+        );
+        let wrapper = dispatch
+            .global_wrapper_read_for_tests("Array", &[deep], SITES_FILE)
+            .expect("the sites file declares the global `Array`");
+        (root, vec![base, wrapper])
+    }
+
+    /// `Mapped<Box<"deep">>["value"]` in `Navigate`: the walk instantiates
+    /// the mapping and narrows it to the selected key, whose value an
+    /// identity mapper reads off its source: `Box<"deep">["value"]`.
+    fn mapped_key(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> (SemanticQueryKey, Vec<SemanticQueryKey>) {
+        let deep = sites_literal(dispatch, "deep");
+        let boxed = sites_application(host, dispatch, "Box", deep);
+        let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
+        let root = SemanticQueryKey::ProjectPath {
+            base: sites_application(host, dispatch, "Mapped", boxed),
+            path: member_path(&["value"]),
+            context,
+        };
+        let base = sites_instantiation(
+            dispatch,
+            "Mapped",
+            &[boxed],
+            context.into_structural_transit_with_mode(ProjectionMode::Navigate),
+        );
+        let value = sites_literal(dispatch, "value");
+        let selected = SemanticQueryKey::IndexedAccess {
+            base: boxed,
+            index: verter_type_engine::semantic_query::IndexKey::Computed(value),
+            mode: ProjectionMode::Navigate,
+        };
+        (root, vec![base, selected])
+    }
+
+    /// The reads `keys`'s path names, its build driven in place on a
+    /// scratch host: the case's reads must be exactly its first ones.
+    fn assert_site_reads(keys: SiteKeys<'_>, label: &str) -> Vec<SemanticQueryKey> {
+        let host = sites_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let (root, reads) = keys(&host, &dispatch);
+        let needs = dispatch.family_needs_for_tests(&root);
+        assert!(
+            needs.len() >= reads.len() && needs[..reads.len()] == reads[..],
+            "{label}: the walk names the case's reads first\nnamed: {needs:#?}\nexpected: {reads:#?}"
+        );
+        needs
+    }
+
+    /// The case's path polled while another task produces its read
+    /// `held`: it yields there instead of waiting the producer out, a
+    /// repoll and a poll elsewhere compute nothing, and released, it
+    /// resumes on another thread to exactly what the synchronous entry
+    /// reads — answer, rails, diagnostics and receipt tree — computing each
+    /// hop, admission stage and evaluator step once (absolute counts). The
+    /// work the first poll computed is returned.
+    fn assert_site_suspends(keys: SiteKeys<'_>, held: usize, label: &str) -> Work {
+        let (synchronous, synchronous_work) =
+            synchronous_root_on(sites_host, |host, dispatch| keys(host, dispatch).0);
+        assert!(
+            !synchronous.3 && synchronous.5.is_some(),
+            "{label}: premise: a complete, priced answer: {synchronous:?}"
+        );
+        let (host, run) = poll_root_holding_on(sites_host, |host, dispatch| {
+            let (root, reads) = keys(host, dispatch);
+            (root, reads[held].clone())
+        });
+        assert!(
+            run.yielded,
+            "{label}: the path yields at its held read {held}"
+        );
+        assert!(
+            run.repolled_pending,
+            "{label}: a repoll while held enters no wait"
+        );
+        assert_eq!(run.pending_elsewhere, Some(true), "{label}");
+        assert_eq!(
+            run.repoll, NO_WORK,
+            "{label}: a pending repoll computes nothing"
+        );
+        assert!(run.woken, "{label}: the producer going away wakes the path");
+        assert_eq!(
+            run.total, synchronous_work,
+            "{label}: nothing completed before the wait is computed again"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous, "{label}");
+        run.at_hold
+    }
+
+    /// The case's path released while it waits on its held read `held`
+    /// withdraws its wait and leaves nothing open — no wait edge, no open
+    /// cost recording, no carrier left on the normalization record — and
+    /// the dispatcher reads it afterwards as the synchronous entry does.
+    fn assert_site_releases(keys: SiteKeys<'_>, held: usize, label: &str) {
+        let (synchronous, _) =
+            synchronous_root_on(sites_host, |host, dispatch| keys(host, dispatch).0);
+        let host = sites_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let (root, reads) = keys(&host, &dispatch);
+        let (other, lease) = hold_producer(&host, graph, reads[held].clone());
+        let mut entry = dispatch.poll_query(root.clone());
+        let pending = while_held(lease, || {
+            let pending = entry.poll(Waker::noop()).is_pending();
+            drop(entry);
+            pending
+        });
+        assert!(
+            pending,
+            "{label}: the path yields while read {held} is held"
+        );
+        assert_eq!(
+            dispatch.open_request_state_for_tests(),
+            NOTHING_OPEN,
+            "{label}"
+        );
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0, "{label}");
+        drop(other);
+        let read = dispatch.execute_via_cold_build_helper(root);
+        assert_eq!(read_summary(&dispatch, &read).0, synchronous.0, "{label}");
+    }
+
+    /// A walk that reaches an unresolved-reference carrier behind an alias
+    /// resolves it as a hop of its own: each read the carrier's resolution
+    /// names — its anchor declaration, then the instantiation it routes
+    /// through — is the path's dependency, with the resolution and what it
+    /// observed retained. Held at either read, the path yields having
+    /// walked only the alias and the carrier's hop; released, it resumes
+    /// the resolution at the held read — the anchor is not read again —
+    /// and delivers exactly what the synchronous entry reads.
+    #[test]
+    fn a_carrier_reached_mid_walk_yields_at_each_read_of_its_resolution_and_resumes_there() {
+        let label = "mid-walk carrier";
+        assert_site_reads(&mid_walk_carrier, label);
+        for held in 0..2 {
+            let at_hold = assert_site_suspends(&mid_walk_carrier, held, label);
+            assert_eq!(
+                at_hold.hops, 2,
+                "{label}: the alias and the carrier's hop were walked before read {held}"
+            );
+            assert_eq!(at_hold.admission, 0, "{label}: the subject is no carrier");
+        }
+        for held in 0..2 {
+            assert_site_releases(&mid_walk_carrier, held, label);
+        }
+    }
+
+    /// A non-empty `Expanded` path resolves its terminal carrier one level
+    /// as a read of its own. Held there — after the base's instantiation
+    /// and its member hop completed — the path yields holding them;
+    /// released, it resolves and expands the terminal without walking a
+    /// hop again, delivering exactly what the synchronous entry reads.
+    #[test]
+    fn an_expanded_terminal_waiting_on_its_carriers_instantiation_resumes_without_walking_again() {
+        let label = "expanded terminal";
+        assert_site_reads(&expanded_terminal, label);
+        let at_hold = assert_site_suspends(&expanded_terminal, 1, label);
+        assert_eq!(
+            at_hold.hops, 2,
+            "{label}: the base and its member were walked before the terminal's read"
+        );
+        assert_site_releases(&expanded_terminal, 1, label);
+    }
+
+    /// A member read off an array reads the global `Array` wrapper's
+    /// instantiation as the hop's own read, the global lookup answered as
+    /// a port. Held there, after the base's instantiation and the array
+    /// member, the path yields; released, it reads `marker` off the wrapper
+    /// without walking a hop again.
+    #[test]
+    fn an_array_member_waiting_on_its_wrapper_resumes_without_walking_again() {
+        let label = "array wrapper";
+        assert_site_reads(&array_wrapper, label);
+        let at_hold = assert_site_suspends(&array_wrapper, 1, label);
+        assert_eq!(
+            at_hold.hops, 3,
+            "{label}: the base, its array member and the wrapper's hop were walked"
+        );
+        assert_site_releases(&array_wrapper, 1, label);
+    }
+
+    /// A mapped type narrowed to its selected key reads, for an identity
+    /// mapper, the key's value off its source as the hop's own read. Held
+    /// there (as the canonical path its entry admits), after the mapping's
+    /// instantiation, the path yields; released,
+    /// it finishes the key without walking a hop again, to exactly what the
+    /// synchronous entry reads.
+    #[test]
+    fn a_mapped_key_waiting_on_its_selected_value_resumes_without_walking_again() {
+        let label = "mapped key";
+        assert_site_reads(&mapped_key, label);
+        // The selected value is an `IndexedAccess` read, which a frame
+        // admits as its canonical path and then needs: that path is held.
+        let admitted = |host: &crate::VerterHost, dispatch: &HostDispatch<'_>| {
+            let (root, mut reads) = mapped_key(host, dispatch);
+            let SemanticQueryKey::IndexedAccess { base, index, mode } = reads[1].clone() else {
+                unreachable!("the selected value is an indexed access")
+            };
+            reads[1] = SemanticQueryKey::ProjectPath {
+                base,
+                path: verter_type_expr::OwnedSlice::from(
+                    vec![verter_type_engine::semantic_query::PathSegment::Index(
+                        index,
+                    )]
+                    .into_boxed_slice(),
+                ),
+                context: ProjectionReductionContext::published(mode),
+            };
+            (root, reads)
+        };
+        assert_site_suspends(&admitted, 1, label);
+        assert_site_releases(&admitted, 1, label);
     }
 }
 
