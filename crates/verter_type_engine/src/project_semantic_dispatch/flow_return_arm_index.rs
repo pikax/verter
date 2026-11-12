@@ -31,7 +31,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::super::flow_products::{FlowArmRemainder, FlowNarrowed};
 use super::{
     FlowDemandDriver, FlowEvaluator, GuardNarrowing, HeritageReading, InArmPresence,
-    InstanceofHeritage, PredicateNarrowConsumption,
+    InstanceofHeritage, Memoized, PredicateNarrowConsumption,
 };
 use crate::semantic_query::{
     FlowReturnDegradation, LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId,
@@ -88,10 +88,12 @@ pub(super) struct ArmIndex {
     /// Whether every subset of the arms builds a union enumerating back to
     /// exactly that subset, which is what lets a remainder stand for the
     /// union the general narrow would build ([`FlowEvaluator::arm_index_is_exact`]).
-    exact: OnceLock<bool>,
-    heritage: OnceLock<Option<Arc<HeritageArms>>>,
-    own_keys: OnceLock<Arc<OwnKeyArms>>,
-    tags: SyncRefCell<FxHashMap<Arc<str>, Option<Arc<StringArms>>>>,
+    exact: OnceLock<Memoized<bool>>,
+    heritage: OnceLock<Memoized<Arc<HeritageArms>>>,
+    own_keys: OnceLock<Memoized<Arc<OwnKeyArms>>>,
+    tags: SyncRefCell<FxHashMap<Arc<str>, MemoizedTagArms>>,
+    /// Read from the arms' own nodes alone: no read to keep the
+    /// completeness of.
     literals: OnceLock<Option<Arc<StringArms>>>,
 }
 
@@ -227,17 +229,35 @@ pub(super) fn string_literal_text<M: verter_audit::observe::ObserveExec>(
     }
 }
 
+/// The arms of an index by the string literal one member reads, when
+/// every arm's reads one, each distinct ([`FlowEvaluator::tag_arms`]).
+type MemoizedTagArms = Memoized<Option<Arc<StringArms>>>;
+
+/// The value `cell` keeps, computed with `compute` by its first reader and
+/// read with its completeness by every later one ([`Memoized::read`]).
+fn once_read<V: Clone>(cell: &OnceLock<Memoized<V>>, compute: impl FnOnce() -> V) -> V {
+    if let Some(entry) = cell.get() {
+        return entry.read();
+    }
+    let entry = Memoized::compute(compute);
+    let value = entry.computed();
+    let _ = cell.set(entry);
+    value
+}
+
 impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// The index of `node`'s union arms, enumerated once per evaluation.
     fn arm_index(&self, node: SemanticNodeId) -> Arc<ArmIndex> {
         if let Some(index) = self.tables.arm_indexes.borrow().get(&node) {
-            return Arc::clone(index);
+            return index.read();
         }
         let mut arms = Vec::new();
         let mut expanded = FxHashSet::default();
         let mut gapped = false;
-        self.dispatch.outside_inline_costs(|| {
-            self.collect_enumerated_arms(node, &mut arms, &mut expanded, &mut gapped);
+        let enumerated = Memoized::compute(|| {
+            self.dispatch.outside_inline_costs(|| {
+                self.collect_enumerated_arms(node, &mut arms, &mut expanded, &mut gapped);
+            });
         });
         note_index_preparation(arms.len());
         let mut positions = FxHashMap::default();
@@ -258,7 +278,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         self.tables
             .arm_indexes
             .borrow_mut()
-            .insert(node, Arc::clone(&index));
+            .insert(node, enumerated.with_value(Arc::clone(&index)));
         index
     }
 
@@ -269,7 +289,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// literal beside its primitive, a nullable arm the frame's null
     /// algebra erases) and every subset of them is its own union's arms.
     fn arm_index_is_exact(&self, index: &ArmIndex) -> bool {
-        *index.exact.get_or_init(|| {
+        once_read(&index.exact, || {
             self.dispatch.outside_inline_costs(|| {
                 if index.gapped || index.arms.len() < 2 || index.positions.len() != index.arms.len()
                 {
@@ -346,9 +366,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// The heritage index of `arms`, prepared once per evaluation, its
     /// ancestry observations folded into this frame's self-roots.
     fn heritage_arms(&mut self, index: &ArmIndex) -> Arc<HeritageArms> {
-        let heritage = match index.heritage.get() {
-            Some(Some(heritage)) => Arc::clone(heritage),
-            _ => self.dispatch.outside_inline_costs(|| {
+        let heritage = once_read(&index.heritage, || {
+            self.dispatch.outside_inline_costs(|| {
                 note_index_preparation(index.arms.len());
                 let mut heritage = HeritageArms {
                     by_ancestor: FxHashMap::default(),
@@ -408,11 +427,9 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                     }
                     heritage.readings.push(Some((identity, reading)));
                 }
-                let heritage = Arc::new(heritage);
-                let _ = index.heritage.set(Some(Arc::clone(&heritage)));
-                heritage
-            }),
-        };
+                Arc::new(heritage)
+            })
+        });
         for observation in &heritage.observed {
             if !self.st.heritage_self_roots.contains(observation) {
                 self.st.heritage_self_roots.push(observation.clone());
@@ -526,7 +543,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
 
     /// The own-key index of `arms`, prepared once per evaluation.
     fn own_key_arms(&self, index: &ArmIndex) -> Arc<OwnKeyArms> {
-        Arc::clone(index.own_keys.get_or_init(|| {
+        once_read(&index.own_keys, || {
             self.dispatch.outside_inline_costs(|| {
                 note_index_preparation(index.arms.len());
                 let mut own = OwnKeyArms {
@@ -554,7 +571,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                 }
                 Arc::new(own)
             })
-        }))
+        })
     }
 
     /// `"key" in subject` over an indexed union, in the checker's
@@ -681,28 +698,27 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// each distinct.
     fn tag_arms(&mut self, index: &ArmIndex, name: &Arc<str>) -> Option<Arc<StringArms>> {
         if let Some(tags) = index.tags.borrow().get(name) {
-            return tags.clone();
+            return tags.read();
         }
-        note_index_preparation(index.arms.len());
-        let member: Arc<[Arc<str>]> = Arc::from([Arc::clone(name)]);
-        let mut by_text = FxHashMap::default();
-        let mut tags = Some(());
-        for (position, arm) in index.arms.iter().enumerate() {
-            let text = self
-                .discriminant_member(*arm, &member)
-                .and_then(|tag| string_literal_text(self.dispatch.graph(), tag));
-            let distinct = text.is_some_and(|text| by_text.insert(text, position as u32).is_none());
-            if !distinct {
-                tags = None;
-                break;
+        let tags = Memoized::compute(|| {
+            note_index_preparation(index.arms.len());
+            let member: Arc<[Arc<str>]> = Arc::from([Arc::clone(name)]);
+            let mut by_text = FxHashMap::default();
+            for (position, arm) in index.arms.iter().enumerate() {
+                let text = self
+                    .discriminant_member(*arm, &member)
+                    .and_then(|tag| string_literal_text(self.dispatch.graph(), tag));
+                let distinct =
+                    text.is_some_and(|text| by_text.insert(text, position as u32).is_none());
+                if !distinct {
+                    return None;
+                }
             }
-        }
-        let tags = tags.map(|()| Arc::new(StringArms { by_text }));
-        index
-            .tags
-            .borrow_mut()
-            .insert(Arc::clone(name), tags.clone());
-        tags
+            Some(Arc::new(StringArms { by_text }))
+        });
+        let read = tags.computed();
+        index.tags.borrow_mut().insert(Arc::clone(name), tags);
+        read
     }
 
     /// The arms of `index` by their own text, when every arm is a distinct
