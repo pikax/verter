@@ -281,6 +281,14 @@ pub(super) async fn handle_initialize(
         resolve_provider,
         server.documents.host().language_classifier(),
     );
+    // A method the client registers dynamically is registered after
+    // `initialized` from the participation mask instead (COX0).
+    let _ = server.dynamic_registrations.set(
+        crate::capabilities::registration::DynamicRegistrations::negotiate(
+            &params.capabilities,
+            &mut capabilities,
+        ),
+    );
     // The participation receipt of the initial input (COX0): the effective
     // cells a host gates its own client-local producers on.
     if let Some(serde_json::Value::Object(experimental)) = capabilities.experimental.as_mut() {
@@ -558,17 +566,19 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
             kind: watch_kind,
         },
     ]);
-    let _ = server
-        .client
-        .register_capability(vec![Registration {
-            id: "verter-file-watcher".to_string(),
-            method: "workspace/didChangeWatchedFiles".to_string(),
-            register_options: serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
-                watchers,
-            })
-            .ok(),
-        }])
-        .await;
+    let watcher_registration = server.client.register_capability(vec![Registration {
+        id: "verter-file-watcher".to_string(),
+        method: "workspace/didChangeWatchedFiles".to_string(),
+        register_options: serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
+            watchers,
+        })
+        .ok(),
+    }]);
+
+    // E. Register every dynamically registrable method the participation
+    // mask admits (COX0), without waiting for the watcher reply: these
+    // methods have no static advertisement to fall back on meanwhile.
+    let _ = tokio::join!(watcher_registration, server.reconcile_registrations());
 }
 
 pub(super) async fn handle_shutdown(server: &VerterLanguageServer) -> Result<()> {

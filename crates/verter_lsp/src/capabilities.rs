@@ -11,6 +11,7 @@ mod file_operations;
 mod formatting;
 mod navigation;
 mod on_type_formatting;
+pub(crate) mod registration;
 mod semantic_tokens;
 mod workspace;
 

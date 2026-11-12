@@ -422,6 +422,89 @@ async fn verter_only_mode_starts_without_a_typescript_authority() {
     );
 }
 
+/// COX0 `StaticRegistration`: a method the client registers dynamically is
+/// not advertised statically. It stays registered while some served profile
+/// admits it, leaves the client once the mask withdraws it everywhere, and a
+/// withdrawal narrower than a profile keeps it registered (refused per
+/// request instead).
+#[tokio::test]
+async fn dynamic_registration_follows_the_mask() {
+    use crate::capabilities::registration::DynamicRegistrations;
+    let client: ClientCapabilities = serde_json::from_value(serde_json::json!({
+        "textDocument": {
+            "hover": { "dynamicRegistration": true },
+            "completion": { "dynamicRegistration": false }
+        }
+    }))
+    .expect("client capabilities");
+    let mut capabilities = host_server_capabilities(true);
+    let registrations = DynamicRegistrations::negotiate(&client, &mut capabilities);
+    assert!(capabilities.hover_provider.is_none(), "registered instead");
+    assert!(capabilities.completion_provider.is_some(), "static-only");
+    assert_eq!(
+        registrations.negotiated(),
+        vec![(
+            "textDocument/hover",
+            &serde_json::json!({ "documentSelector": null })
+        )]
+    );
+
+    let service = service();
+    let server = service.inner();
+    let app = open_test_vue(server, "/cox0/App.vue", APP);
+    let hover_registered = || {
+        registrations
+            .desired(&server.documents)
+            .contains("textDocument/hover")
+    };
+    assert!(hover_registered());
+    server
+        .update_participation(input(serde_json::json!({ "version": 1, "presets": [
+            { "target": { "kind": "operation", "operation": "hover" },
+              "selector": { "kind": "all" }, "preset": "disabled" }
+        ]})))
+        .await
+        .expect("valid input");
+    assert!(!hover_registered(), "withdrawn everywhere");
+    server
+        .update_participation(input(serde_json::json!({ "version": 1, "presets": [
+            { "target": { "kind": "operation", "operation": "hover" },
+              "selector": { "kind": "all" }, "preset": "disabled" },
+            { "target": { "kind": "operation", "operation": "hover" },
+              "selector": { "kind": "document", "uri": app.as_str() }, "preset": "full" }
+        ]})))
+        .await
+        .expect("valid input");
+    assert!(hover_registered(), "a narrower re-admission keeps it");
+    server
+        .update_participation(input(serde_json::json!({ "version": 1, "presets": [
+            { "target": { "kind": "profile", "profile": profile_ref(server, &app) },
+              "selector": { "kind": "all" }, "preset": "disabled" }
+        ]})))
+        .await
+        .expect("valid input");
+    assert!(hover_registered(), "other profiles still admit it");
+
+    // A request with no document needs every served profile, so one
+    // withdrawn profile withdraws the method from the client.
+    let workspace_client: ClientCapabilities = serde_json::from_value(serde_json::json!({
+        "workspace": { "symbol": { "dynamicRegistration": true } }
+    }))
+    .expect("client capabilities");
+    let symbols =
+        DynamicRegistrations::negotiate(&workspace_client, &mut host_server_capabilities(true));
+    assert!(!symbols
+        .desired(&server.documents)
+        .contains("workspace/symbol"));
+    server
+        .update_participation(input(serde_json::json!({ "version": 1, "presets": [] })))
+        .await
+        .expect("valid input");
+    assert!(symbols
+        .desired(&server.documents)
+        .contains("workspace/symbol"));
+}
+
 /// Every code-action kind is its own cell: a request no kind admits is
 /// refused, and produced actions are attributed by their LSP kind.
 #[tokio::test]

@@ -27,7 +27,8 @@ use tower_lsp_server::jsonrpc::{self, Error, ErrorCode, Id, Response};
 use tower_lsp_server::ls_types::notification::{self, Notification};
 use tower_lsp_server::ls_types::request::{self, Request};
 use tower_lsp_server::ls_types::{
-    error_codes, LogMessageParams, MessageType, Registration, RegistrationParams, ShowMessageParams,
+    error_codes, LogMessageParams, MessageType, Registration, RegistrationParams,
+    ShowMessageParams, Unregistration, UnregistrationParams,
 };
 
 use super::replaceable::NotificationBody;
@@ -441,6 +442,16 @@ impl Outbound {
     ) -> jsonrpc::Result<()> {
         self.send_request::<request::RegisterCapability>(RegistrationParams { registrations })
             .await
+    }
+
+    pub async fn unregister_capability(
+        &self,
+        unregisterations: Vec<Unregistration>,
+    ) -> jsonrpc::Result<()> {
+        self.send_request::<request::UnregisterCapability>(UnregistrationParams {
+            unregisterations,
+        })
+        .await
     }
 
     pub async fn semantic_tokens_refresh(&self) -> jsonrpc::Result<()> {
