@@ -1936,6 +1936,12 @@ impl SemanticGraphStore {
             .call_arguments_related
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped once per property pair an object comparison relates.
+    pub fn record_relation_member_related(&self) {
+        self.stats
+            .relation_members_related
+            .fetch_add(1, Ordering::Relaxed);
+    }
     /// Bumped by a query entry's admission once per stage it computes.
     pub fn record_admission_stage(&self) {
         self.stats

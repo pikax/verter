@@ -42,7 +42,7 @@
 use super::call_resolve::{CallWalk, ContextualCallState, DeclaredCallResult, ResolveCallStep};
 use super::dispatch_txn::{InferenceOccurrence, RelationStep};
 use super::query_frames::{OperandDemand, QueryDelivery};
-use super::relation::RelateRootBuild;
+use super::relation::{RelateRootBuild, RelationDispatch, RootDispatch};
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
@@ -230,6 +230,15 @@ enum RelationState {
     /// operands' carrier walks are demanded first; each instantiation or
     /// `typeof` a walk reads that must be computed is a request.
     Compute(Prepared, Option<Box<OperandDemand>>),
+    /// A machinery root on a frame whose structural dispatch stopped inside
+    /// a sub-relation that waits on a read: the root's build, its operand
+    /// answers, and the dispatch — its worklist, the object comparison and
+    /// the sub-relations it stands inside, each on its own open frame.
+    Dispatch {
+        root: Box<RelateRootBuild>,
+        demand: Box<OperandDemand>,
+        dispatch: Box<RelationDispatch>,
+    },
     /// The output was delivered, or the relation was released.
     Finished,
 }
@@ -521,22 +530,82 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         read.state = RelationState::Compute(prepared, Some(demand));
                         return HelperStep::Request(request);
                     }
-                    let output = self.with_operand_answers(&mut demand, depth, || {
-                        self.relation_compute_in_place(prepared)
-                    });
-                    return HelperStep::Done(output);
+                    let Prepared::Root(root) = prepared else {
+                        unreachable!("only a machinery root demands its operands")
+                    };
+                    return self.dispatch_relation_root(read, root, demand, None, None, depth);
+                }
+                RelationState::Dispatch {
+                    root,
+                    demand,
+                    dispatch,
+                } => {
+                    let HelperDrive::Frame { depth } = drive else {
+                        unreachable!("only a frame stops a relation's dispatch")
+                    };
+                    return self.dispatch_relation_root(
+                        read,
+                        root,
+                        demand,
+                        Some(dispatch),
+                        delivery.take(),
+                        depth,
+                    );
                 }
                 RelationState::Finished => unreachable!("a relation delivers its output once"),
             }
         }
     }
 
+    /// Run a machinery root's structural dispatch on a frame, its operand
+    /// answers installed: `dispatch` is the one it stopped, entered with
+    /// `delivery`, else it begins. A sub-relation that must wait on a read
+    /// stops it again, its request the root's; done, the root's build
+    /// finishes, its frame closed.
+    fn dispatch_relation_root(
+        &self,
+        read: &mut RelationRead,
+        root: Box<RelateRootBuild>,
+        mut demand: Box<OperandDemand>,
+        dispatch: Option<Box<RelationDispatch>>,
+        delivery: Option<HelperDelivery>,
+        depth: u32,
+    ) -> HelperStep<RelationOutput> {
+        let step = self.with_operand_answers(&mut demand, depth, || {
+            self.advance_relate_build_dispatch(root, dispatch, delivery, depth)
+        });
+        match step {
+            RootDispatch::Finished(output) => HelperStep::Done(RelationOutput::Root(output)),
+            RootDispatch::Held {
+                build,
+                dispatch,
+                request,
+            } => {
+                #[cfg(any(test, feature = "test-support"))]
+                self.note_relation_suspension_for_tests(&request, &dispatch);
+                read.state = RelationState::Dispatch {
+                    root: build,
+                    demand,
+                    dispatch,
+                };
+                HelperStep::Request(request)
+            }
+        }
+    }
+
     /// Release a relation its consumer stopped before it delivered: a
     /// machinery root waiting on its operands closes its root obligation
-    /// frame undecided and aborts the members no publication will drain.
+    /// frame undecided and aborts the members no publication will drain; one
+    /// stopped inside its dispatch first closes, innermost first, the frames
+    /// its sub-relations opened.
     pub(super) fn release_relation_read(&self, read: RelationRead) {
-        if let RelationState::Compute(Prepared::Root(root), _) = read.state {
-            self.abandon_relate_build(*root);
+        match read.state {
+            RelationState::Compute(Prepared::Root(root), _) => self.abandon_relate_build(*root),
+            RelationState::Dispatch { root, dispatch, .. } => {
+                self.abandon_relation_dispatch(*dispatch);
+                self.abandon_relate_build(*root);
+            }
+            _ => {}
         }
     }
 

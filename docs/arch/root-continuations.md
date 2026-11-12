@@ -1498,12 +1498,44 @@ walk makes first when it reaches it through graph-only steps
 (`relation_operand_first_instantiation`, computed without reading), is
 entered once as the walk would enter it; a warm result answers at once and
 one that must be computed is a request. With every demanded instantiation
-answered, the dispatch runs in place, its walk made once with those reads
-answered by the deliveries. Nothing is demanded that the reduction would
-not read next, so a pair a shallow check decides instantiates no operand,
-and nothing an operand's walk reads after its first instantiation — a
-deeper hop, a deferred evaluation, a key set — is read twice; those reads
-are still made in place. A pair or member relation computes in
+answered, the dispatch runs over the deliveries. Nothing is demanded that
+the reduction would not read next, so a pair a shallow check decides
+instantiates no operand, and nothing an operand's walk reads after its
+first instantiation — a deeper hop, a deferred evaluation, a key set — is
+read twice; those reads are still made in place.
+
+The dispatch itself is an owned computation (`RelationDispatch`): its
+prefix — carrier unwraps, recursion entry, alias normalization and the
+other steps before the structural worklist
+(`decide_relation_before_worklist`) — runs in place, and its worklist
+(`RelateWorklist`: the items still to relate and the results so far) is
+advanced by a loop that can stop. On a frame, two kinds of item stop it:
+an object comparison (`ObjectWalk`: the target property it stands at, the
+combined result of the properties related so far, the accessor keys
+already related) at a property pair, and a canonical sub-relation
+(`RelateWork::Eval` of a pair the canonical frame relates). An object
+comparison the prefix's Object-vs-Record arm reaches (a declaration or
+object source against a literal-key target) is handed to the loop as its
+one item, held before its first property pair, so it stops the same way
+(`BeforeWorklist::Objects`). Either item
+reaches a sub-relation, which is staged exactly as the authority runs it
+(`StagedMember`): the member steps before its key (a projection, an
+inference deposit, an uncached union source), the SCC substitution rail,
+the answers before compute (a literal pair, an overflowed chain, a
+reentered frame and its back-edge, a settled or warm answer), then its
+inline frame opened and its reduction run up to its structural dispatch.
+When that leaves the pair undecided its operands' first instantiations
+are demanded as a root's are; one that must be computed stops the
+sub-relation, its frame open, and with it the object comparison, the
+worklist and the root, each keeping where it stands. The delivery enters
+the sub-relation's demand; with its operands answered its own dispatch
+runs the same way — stopping again wherever its worklist does — and its
+frame closes through the SCC discharge, its step folded onto the caller's
+bindings, and the comparison continues at its next property: no property
+relates again, no item is charged again, no frame opens again. Driven in
+place (`relate_objects`, `decide_relation`), the same computations never
+stop. A release closes the frames the stopped sub-relations opened,
+innermost first, then the root's. A pair or member relation computes in
 place on either driver. A `Relate` root polled at the production entry, or
 read through the query entry outside every open obligation and any drive —
 not a binding root, not a re-discharge, its symmetric operands already in
@@ -1556,10 +1588,11 @@ skipping to the stopped candidate — is gone.
 
 Graph counters measure the physical work: `relation_roots_opened` (one per
 root obligation frame a machinery root opens), `relation_reductions`
-(one per structural reduction), `call_candidates_begun` (one per candidate
-check whose prologue runs) and `call_arguments_related` (one per
-first-pass argument relation), counted where the work runs, outside every
-charge and its rollback.
+(one per structural reduction), `relation_members_related` (one per
+property pair an object comparison relates), `call_candidates_begun` (one
+per candidate check whose prologue runs) and `call_arguments_related` (one
+per first-pass argument relation), counted where the work runs, outside
+every charge and its rollback.
 
 Behaviour, in the session's `semantic_poll_contract` group:
 `a_relation_root_whose_source_operand_is_held_yields_with_its_root_frame_open`
@@ -1576,6 +1609,23 @@ included, with the synchronous entry's absolute work (one root opened).
 `a_relation_root_released_while_its_operand_is_held_leaves_nothing_open`
 and `a_relation_root_is_woken_by_its_requests_cancellation_while_its_operand_is_held`
 drop or cancel the waiting root.
+`a_relation_root_held_at_a_later_member_resumes_after_its_recorded_backedge`
+relates `interface Left { aNext: Left; zLeaf: BoxA<"a"> }` to the matching
+`Right` while another task instantiates `BoxA<"a">`: the first poll
+answers `Pending` two object comparisons deep: the root's first
+property relates the recursive references on a frame of their own, whose
+comparison's first property re-enters that frame (its back-edge recorded
+there) and whose second property's frame is open above it; repolls do no work, and
+released, the root resumes elsewhere at that member to the synchronous
+entry's read, receipt tree included, with the synchronous entry's absolute
+work (one root, no property related twice).
+`a_relation_root_held_inside_a_nested_members_comparison_resumes_where_it_stood`
+wraps the pair in `interface OuterLeft { inner: Left }` and its `Right` twin:
+the root stops three comparisons deep, the back-edge recorded on the
+recursive pair's own frame, and resumes to the synchronous read.
+`a_relation_root_released_while_its_later_member_is_held_leaves_nothing_open`
+and `a_relation_root_held_at_a_later_member_is_woken_by_its_requests_cancellation`
+drop or cancel it there.
 `a_call_root_waiting_on_its_second_argument_resumes_without_beginning_its_candidate_again`
 and `a_call_root_waiting_on_its_candidate_list_resumes_to_the_synchronous_read`
 poll `pick(1, box)`'s result while another task produces the instantiation
@@ -1846,15 +1896,19 @@ signature-list roots over such subjects still enter the synchronous cold
 admission, since those families do not build as continuations yet.
 
 A helper computation ([Helper continuations](#helper-continuations))
-suspends only at a relation's operand demands, a call walk's candidate
-lists and argument operand demands, and a contextual call's callback
-exchange. Below those points it runs in place, inventoried for conversion
-by its owner:
+suspends only at a relation's operand demands, the operand demands of a
+sub-relation its worklist or an object comparison's property pair reaches,
+a call walk's candidate lists and argument operand demands, and a
+contextual call's callback exchange. Below those points it runs in place,
+inventoried for conversion by its owner:
 
-- the relation reduction (`reduce_relation` and the structural,
-  signature, variance, excess-property and explanation helpers it calls),
-  its inference collection and fixation, and the SCC discharge and
-  re-discharge at its frame's close;
+- the relation reduction's prefix (but for the object comparison its
+  Object-vs-Record arm hands to the dispatch) and the worklist items that stop
+  nowhere: arm, positional-arm and nested-pair items, union and
+  intersection distribution, the signature, index-signature, variance,
+  excess-property and explanation helpers, and every sub-relation those
+  reach; its inference collection and fixation; and the SCC discharge and
+  re-discharge at a frame's close;
 - the call executor below its walk's seams: argument acquisition (an
   argument's program expression evaluates in place), contextual candidate
   preparation, the relations both applicability passes make (inside each
