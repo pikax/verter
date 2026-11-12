@@ -12,7 +12,7 @@
 //! `strictNullChecks` × `noImplicitAny` setting; the four settings agree
 //! except where a table says otherwise.
 
-use super::checker_probe_lane_tests::{degradation_in, mismatches_in, ProbeProject};
+use super::checker_probe_lane_tests::{return_failures_in_one_host, ProbeProject};
 
 const FIXTURE: &str = "\
 declare const u: unique symbol;
@@ -43,25 +43,6 @@ export function varLocalUnion(c: boolean) { var l = u; return c ? l : 1; }
 export function letReassignU(c: boolean) { let l = u; l = u; return c ? l : 1; }
 export function autoLetUnion(c: boolean) { let x; x = u; return c ? x : 1; }
 ";
-
-fn failures_in(project: ProbeProject<'_>, rows: &[(&str, &str)]) -> Vec<String> {
-    let probes: Vec<(String, &str)> = rows
-        .iter()
-        .map(|(name, checker)| (format!("ReturnType<typeof {name}>"), *checker))
-        .collect();
-    let probe_rows: Vec<(&str, &str)> = probes
-        .iter()
-        .map(|(probe, checker)| (probe.as_str(), *checker))
-        .collect();
-    let mut failures = mismatches_in(project, FIXTURE, &probe_rows);
-    for (name, _) in rows {
-        match degradation_in(project, FIXTURE, name) {
-            Ok(None) => {}
-            other => failures.push(format!("`{name}` is not complete: {other:?}")),
-        }
-    }
-    failures
-}
 
 /// Measured on TypeScript 7.0.2 (`ReturnType<typeof f>`):
 ///
@@ -152,24 +133,16 @@ fn a_unique_symbol_widens_where_the_checker_widens_it() {
             compiler_options: Some(options),
             ..ProbeProject::default()
         };
-        let mut failures = failures_in(project, rows);
-        failures.extend(failures_in(
-            project,
-            &[
-                ("retFallthrough", fallthrough),
-                ("autoLet", auto_let),
-                ("autoLetUnion", auto_let_union),
-            ],
-        ));
-        failures.extend(mismatches_in(
-            project,
-            FIXTURE,
-            &[("ReturnType<typeof retAnnotated>", "symbol")],
-        ));
-        match degradation_in(project, FIXTURE, "retAnnotated") {
-            Ok(None) => {}
-            other => failures.push(format!("`retAnnotated` is not complete: {other:?}")),
-        }
+        // One host per setting holds the module once, as the checker checks
+        // one file; every row is read there and its return must be complete.
+        let mut all_rows: Vec<(&str, &str)> = rows.to_vec();
+        all_rows.extend_from_slice(&[
+            ("retFallthrough", fallthrough),
+            ("autoLet", auto_let),
+            ("autoLetUnion", auto_let_union),
+            ("retAnnotated", "symbol"),
+        ]);
+        let failures = return_failures_in_one_host(project, FIXTURE, &all_rows);
         assert!(failures.is_empty(), "{options}:\n{}", failures.join("\n"));
     }
 }

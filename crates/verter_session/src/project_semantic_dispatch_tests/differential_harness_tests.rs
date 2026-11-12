@@ -283,9 +283,27 @@ impl<'a> Matrix<'a> {
     }
 
     fn run(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Vec<String> {
+        Self::failures_of(self.settings, rows, self.verdicts(rows))
+    }
+
+    /// [`Self::same`] read from `host`, a host [`Self::host`] built for the
+    /// same `rows`.
+    pub(super) fn same_on(&self, host: &Arc<VerterHost>, rows: &[(Read<'_>, &str)]) -> Vec<String> {
+        let rows: Vec<(Read<'_>, Vec<&str>)> = rows
+            .iter()
+            .map(|(read, answer)| (*read, vec![*answer; self.settings.len()]))
+            .collect();
+        Self::failures_of(self.settings, &rows, self.verdicts_on(host, &rows))
+    }
+
+    fn failures_of(
+        settings: &[Setting],
+        rows: &[(Read<'_>, Vec<&str>)],
+        verdicts: Vec<Vec<Verdict>>,
+    ) -> Vec<String> {
         let mut failures = Vec::new();
-        for ((read, answers), verdicts) in rows.iter().zip(self.verdicts(rows)) {
-            for ((setting, expected), verdict) in self.settings.iter().zip(answers).zip(verdicts) {
+        for ((read, answers), verdicts) in rows.iter().zip(verdicts) {
+            for ((setting, expected), verdict) in settings.iter().zip(answers).zip(verdicts) {
                 if !verdict.matched {
                     failures.push(format!(
                         "{} `{}` [{}]: the checker answers `{expected}`, {}",
@@ -503,7 +521,17 @@ impl<'a> Matrix<'a> {
     /// its proof — the finalizer's verdict partial — with its partial
     /// reasons, as the failure list.
     pub(super) fn unproven_returns(&self, functions: &[&str]) -> Vec<String> {
-        let host = self.host(&[]);
+        self.unproven_returns_on(&self.host(&[]), functions)
+    }
+
+    /// [`Self::unproven_returns`] read from `host`, a host [`Self::host`]
+    /// built for the rows the caller already read, so the module is not
+    /// built twice.
+    pub(super) fn unproven_returns_on(
+        &self,
+        host: &Arc<VerterHost>,
+        functions: &[&str],
+    ) -> Vec<String> {
         let mut unproven = Vec::new();
         for setting in self.settings {
             let canonical = format!("{}/probe.ts", setting.root);
@@ -513,7 +541,7 @@ impl<'a> Matrix<'a> {
                 let host_ctx = crate::resolver_core::HostResolverContext::<
                     '_,
                     verter_audit::observe::Uncaptured,
-                >::new(&host, &store_view, overlay);
+                >::new(host, &store_view, overlay);
                 let dispatch = ProjectSemanticDispatch::new(&host_ctx);
                 let key = whole_return_key(&dispatch, &canonical, function);
                 let read = dispatch.execute_read(

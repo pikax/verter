@@ -187,8 +187,6 @@ fn overloaded_contextual_chains_infer_each_stage_from_the_previous_return() {
         .iter()
         .map(|(name, answer)| (name.as_str(), answer.as_str()))
         .collect::<Vec<_>>();
-    let matrix = Matrix::new(&source);
-    let mut failures = matrix.returns(&rows);
     let types = expected
         .iter()
         .map(|(name, answer)| {
@@ -198,16 +196,29 @@ fn overloaded_contextual_chains_infer_each_stage_from_the_previous_return() {
             )
         })
         .collect::<Vec<_>>();
-    failures.extend(
-        matrix.types(
-            &types
+    // One host per setting holds the returns, the typed reads and the proof
+    // check, so each chain is resolved once there.
+    let reads = rows
+        .iter()
+        .map(|(name, answer)| (Read::Return(name), *answer))
+        .chain(
+            types
                 .iter()
-                .map(|(name, answer)| (name.as_str(), *answer))
-                .collect::<Vec<_>>(),
-        ),
+                .map(|(probe, answer)| (Read::Type(probe.as_str()), *answer)),
+        )
+        .collect::<Vec<_>>();
+    let matrix = Matrix::new(&source);
+    let host = matrix.host(
+        &reads
+            .iter()
+            .map(|(read, answer)| (*read, vec![*answer; 4]))
+            .collect::<Vec<_>>(),
     );
-    failures
-        .extend(matrix.unproven_returns(&rows.iter().map(|(name, _)| *name).collect::<Vec<_>>()));
+    let mut failures = matrix.same_on(&host, &reads);
+    failures.extend(matrix.unproven_returns_on(
+        &host,
+        &rows.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+    ));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
