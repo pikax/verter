@@ -171,6 +171,9 @@ pub struct ResolvedEmitOccurrence {
     pub tags: Vec<verter_session_query::analysis::types::JsdocTag>,
     /// The payload's published source position.
     pub payload_source: verter_type_expr::facts::SourcePosition,
+    /// The payload's sealed member type, read from [`Self::payload_source`]
+    /// at normalize time: the tuple the emit member exports.
+    pub payload_value: NamedTypeMemberOutput,
     /// Atomic payload authority, exactness, degradation, provenance, and
     /// authored evidence for this occurrence.
     pub payload_publication: verter_type_expr::TypePublication,
@@ -372,10 +375,40 @@ pub enum NamedTypeMemberOutput {
         /// node id 0 rather than fabricating `void`).
         return_type: Option<NamedTypeLeaf>,
     },
+    /// A tuple of leaf or leaf-union elements: an emit's payload, one
+    /// element per payload position.
+    Tuple {
+        /// Whether the tuple is readonly.
+        readonly: bool,
+        /// Source-ordered elements.
+        elements: Vec<NamedTupleElement>,
+    },
     /// A resolved value outside the shallow output vocabulary — degraded at
     /// CONSTRUCTION time (the producer classifies and discards its transient
     /// raised form), encoded as a structurally-unencodable opaque on the wire.
     Opaque,
+}
+
+/// One tuple element in the sealed vocabulary. Not recursive.
+#[derive(Debug, Clone, PartialEq, verter_no_typeexpr::NoTypeExpr)]
+pub struct NamedTupleElement {
+    /// The element label; `None` for an unlabeled element.
+    pub label: Option<Arc<str>>,
+    /// Whether the element is optional.
+    pub optional: bool,
+    /// Whether the element is a rest element.
+    pub rest: bool,
+    /// The element type.
+    pub ty: NamedTupleElementType,
+}
+
+/// A tuple element's sealed type: a leaf, or a finite union of leaves.
+#[derive(Debug, Clone, PartialEq, verter_no_typeexpr::NoTypeExpr)]
+pub enum NamedTupleElementType {
+    /// A primitive / literal / ref / empty-object / opaque leaf.
+    Leaf(NamedTypeLeaf),
+    /// A finite union of leaves (`'a' | 'b'`).
+    Union(Vec<NamedTypeLeaf>),
 }
 
 /// A non-recursive leaf in the sealed vocabulary (function return / object
@@ -469,6 +502,100 @@ impl NamedTypeMemberOutput {
 }
 
 impl NamedTypeMemberOutput {
+    /// An emit payload's member type, read from its published payload
+    /// position: a closed tuple fact is converted as it stands; a replayable
+    /// source is raised under the navigable published view a framework
+    /// member reference replays under, and its tuple read element by element.
+    /// A failed, absent or unraisable payload is opaque.
+    pub(crate) fn emit_payload<C: verter_type_engine::resolver_core::ResolverCapabilities>(
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
+        scope_canonical: &str,
+        position: &verter_type_expr::facts::SourcePosition,
+    ) -> Self {
+        use verter_type_expr::facts::{ClosedTypeFact, SemanticTypeSource};
+        let Some(source) = position.present() else {
+            return Self::Opaque;
+        };
+        if let SemanticTypeSource::Closed(ClosedTypeFact::Tuple(tuple)) = source {
+            return Self::Tuple {
+                readonly: tuple.readonly,
+                elements: tuple
+                    .elements
+                    .iter()
+                    .map(|element| NamedTupleElement {
+                        label: element.label.as_deref().map(Arc::from),
+                        optional: element.optional,
+                        rest: element.rest,
+                        ty: NamedTupleElementType::from_fact(&element.ty),
+                    })
+                    .collect(),
+            };
+        }
+        if !crate::typeinfo::node_refs::is_replayable_source(source) {
+            return Self::Opaque;
+        }
+        // The raised payload lives only while a construction scope roots it:
+        // classify it inside one, whatever scope the caller holds.
+        let _scope = dispatch.enter_construction_scope();
+        crate::typeinfo::node_refs::source_scope_owner(source)
+            .and_then(|scope_owner| {
+                crate::typeinfo::node_refs::raise_framework_member_source(
+                    dispatch,
+                    scope_canonical,
+                    scope_owner,
+                    source,
+                )
+            })
+            .map_or(Self::Opaque, |node| Self::raised_payload(dispatch, node))
+    }
+
+    /// A raised payload node: a tuple element by element, else its shallow
+    /// output.
+    fn raised_payload<C: verter_type_engine::resolver_core::ResolverCapabilities>(
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
+        node: verter_type_engine::semantic_query::SemanticNodeId,
+    ) -> Self {
+        use verter_type_engine::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch;
+        use verter_type_engine::semantic_query::SemanticNodeData;
+        if let Some(data) = dispatch.graph().read_in_scope(node) {
+            if let SemanticNodeData::Tuple { elements, readonly } = data.as_ref() {
+                return Self::Tuple {
+                    readonly: *readonly,
+                    elements: elements
+                        .iter()
+                        .map(|element| NamedTupleElement {
+                            label: element
+                                .label
+                                .as_ref()
+                                .map(|label| Arc::from(label.to_string())),
+                            optional: element.optional,
+                            rest: element.rest,
+                            ty: dispatch.node_leaf_fact_or_union(element.value).map_or_else(
+                                || {
+                                    NamedTupleElementType::Leaf(
+                                        node_shallow_member_output_with_dispatch(
+                                            dispatch,
+                                            element.value,
+                                        )
+                                        .map_or(
+                                            NamedTypeLeaf::Opaque,
+                                            NamedTypeLeaf::from_raised_shallow,
+                                        ),
+                                    )
+                                },
+                                |fact| NamedTupleElementType::from_fact(&fact),
+                            ),
+                        })
+                        .collect(),
+                };
+            }
+        }
+        node_shallow_member_output_with_dispatch(dispatch, node)
+            .map_or(Self::Opaque, Self::from_raised_shallow)
+    }
+}
+
+impl NamedTypeMemberOutput {
     /// A member value's sealed shallow type read from its replayable
     /// `source`, raised (inside its own construction scope) in the
     /// navigable published view a member reference replays under. `None`
@@ -496,7 +623,44 @@ impl NamedTypeMemberOutput {
     }
 }
 
+impl NamedTupleElementType {
+    /// A closed element fact: a leaf or a leaf union; any other element
+    /// form is an opaque leaf.
+    fn from_fact(fact: &verter_type_expr::facts::FactOrLocator) -> Self {
+        use verter_type_expr::facts::FactOrLocator;
+        match fact {
+            FactOrLocator::Leaf(leaf) => Self::Leaf(NamedTypeLeaf::from_leaf_fact(leaf)),
+            FactOrLocator::LeafUnion(leaves) => {
+                Self::Union(leaves.iter().map(NamedTypeLeaf::from_leaf_fact).collect())
+            }
+            FactOrLocator::Locator(_)
+            | FactOrLocator::MacroPayload(_)
+            | FactOrLocator::LeafObject(_) => Self::Leaf(NamedTypeLeaf::Opaque),
+        }
+    }
+}
+
 impl NamedTypeLeaf {
+    /// A closed leaf fact. A number literal whose stored text does not
+    /// parse as a number is opaque.
+    fn from_leaf_fact(leaf: &verter_type_expr::facts::LeafTypeFact) -> Self {
+        use verter_type_expr::facts::LeafTypeFact;
+        use verter_type_expr::LiteralValue;
+        match leaf {
+            LeafTypeFact::Primitive(name) => Self::Primitive(*name),
+            LeafTypeFact::StringLiteral(text) => Self::Literal(LiteralValue::String(text.clone())),
+            LeafTypeFact::NumberLiteral(text) => {
+                text.parse::<f64>().map_or(Self::Opaque, |number| {
+                    Self::Literal(LiteralValue::Number(number))
+                })
+            }
+            LeafTypeFact::BooleanLiteral(flag) => Self::Literal(LiteralValue::Boolean(*flag)),
+            LeafTypeFact::Ref(name) => Self::Ref {
+                name: Arc::from(name.as_str()),
+            },
+        }
+    }
+
     fn from_raised_shallow(
         raised: verter_type_engine::project_semantic_dispatch::raise::RaisedShallowMemberOutput,
     ) -> Self {

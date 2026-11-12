@@ -883,6 +883,7 @@ fn resolved_named_member_type(
             Some(NamedTypeMemberOutput::EmptyObject) => Some("{}".to_string()),
             Some(NamedTypeMemberOutput::Ref { name }) => Some(name.to_string()),
             Some(NamedTypeMemberOutput::Function { .. })
+            | Some(NamedTypeMemberOutput::Tuple { .. })
             | Some(NamedTypeMemberOutput::Opaque)
             | None => None,
         })

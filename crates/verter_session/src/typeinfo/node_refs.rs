@@ -146,6 +146,9 @@ pub(crate) struct FrameworkMemberLocator {
     pub(crate) role: MemberRole,
     /// The member's published name.
     pub(crate) member_name: Arc<str>,
+    /// The emit occurrence an emit payload belongs to: overloads of one
+    /// event name are distinct members. `None` for every other role.
+    pub(crate) occurrence: Option<verter_type_expr::facts::ResolvedEmitOccurrenceId>,
     /// The member value's replayable source.
     pub(crate) source: verter_type_expr::facts::SemanticTypeSource,
 }
@@ -179,6 +182,8 @@ pub(crate) enum MemberRole {
     Slot,
     /// A model binding's value type.
     Model,
+    /// An emit occurrence's payload tuple.
+    EmitPayload,
 }
 
 /// The authored owner `source`'s replay is anchored in: the anchor owner of
@@ -216,15 +221,25 @@ impl FrameworkMemberLocator {
             + self.component_canonical.len()
             + self.member_name.len()
             + serde_json::to_vec(&self.source).map_or(0, |bytes| bytes.len())
+            + self
+                .occurrence
+                .as_ref()
+                .and_then(|occurrence| serde_json::to_vec(occurrence).ok())
+                .map_or(0, |bytes| bytes.len())
     }
 
     /// The canonical encoding of the member's typed role: the component
     /// selector and admitted profile it is read under, then surface, role,
-    /// name, producing macro and source, under explicit tags. Two members
-    /// share a role digest only when every one of them agrees.
+    /// name, producing macro and source, and an emit payload's occurrence,
+    /// under explicit tags. Two members share a role digest only when every
+    /// one of them agrees.
     fn role_digest(&self) -> Option<[u8; 32]> {
         use crate::typeinfo::framework_surface::plan::ComponentExport;
         let source = serde_json::to_vec(&self.source).ok()?;
+        let occurrence = match &self.occurrence {
+            Some(occurrence) => Some(serde_json::to_vec(occurrence).ok()?),
+            None => None,
+        };
         let mut encoder = CanonicalEncoder::new("verter.typeinfo.fact.framework_member_role.v1");
         encoder.field_str(1, &self.component_canonical);
         match &self.component_export {
@@ -241,6 +256,9 @@ impl FrameworkMemberLocator {
             .field_enum_discriminant(8, producer_tag(self.producer))
             .field_u32(9, producer_ordinal(self.producer))
             .field_bytes(10, &source);
+        if let Some(occurrence) = &occurrence {
+            encoder.field_bytes(11, occurrence);
+        }
         Some(*encoder.digest().as_bytes())
     }
 }
@@ -294,6 +312,7 @@ const fn member_role_tag(role: MemberRole) -> u32 {
         MemberRole::OptionsMember => 3,
         MemberRole::Slot => 4,
         MemberRole::Model => 5,
+        MemberRole::EmitPayload => 6,
     }
 }
 
@@ -991,7 +1010,8 @@ pub(crate) fn replay_issued_in_view<M: verter_audit::observe::ObserveExec>(
                 MemberRole::Prop
                 | MemberRole::Exposed
                 | MemberRole::OptionsMember
-                | MemberRole::Model => node,
+                | MemberRole::Model
+                | MemberRole::EmitPayload => node,
             })
         }
     }

@@ -952,6 +952,12 @@ pub(crate) fn emits_from_typeinfo_surface<C: crate::session_attachment::SessionC
             .map(|_| macro_surface.signature_expr_scope(sig));
         let return_publication_scope = Some(macro_surface.signature_expr_scope(sig));
         let payload_publication = resolved_emit_payload_publication(&payload_source, None);
+        let payload_value =
+            crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::emit_payload(
+                dispatch,
+                macro_surface.owner_canonical.as_ref(),
+                &payload_source,
+            );
         // Surface JSDoc rides on the call signature itself. When that slice is
         // absent, only the analyzer row proven identical by declaration file,
         // declaration span, and payload tuple may complete it. A union of event
@@ -1004,6 +1010,7 @@ pub(crate) fn emits_from_typeinfo_surface<C: crate::session_attachment::SessionC
                 description: description.clone(),
                 tags: tags.clone(),
                 payload_source: payload_source.clone(),
+                payload_value: payload_value.clone(),
                 payload_publication: payload_publication.clone(),
                 return_publication: Some(return_publication.clone()),
                 return_publication_scope: return_publication_scope.clone(),
@@ -1216,6 +1223,12 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
             &payload_source,
             authored_field.and_then(crate::authored_evidence_producer::from_analyzed_emit),
         );
+        let payload_value =
+            crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::emit_payload(
+                dispatch,
+                macro_surface.owner_canonical.as_ref(),
+                &payload_source,
+            );
         Some(ResolvedEmitOccurrence {
             id: verter_type_expr::facts::ResolvedEmitOccurrenceId::new(
                 verter_type_expr::facts::CallableOccurrenceHandle::member(
@@ -1236,6 +1249,7 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
             description,
             tags,
             payload_source,
+            payload_value,
             payload_publication,
             return_publication: None,
             return_publication_scope: None,

@@ -416,8 +416,8 @@ mod tests {
 
     #[test]
     fn project_member_origin_omits_absent_hop_fields_over_a_nonempty_table_zero() {
-        // DISCRIMINATING (the P0): the graph string table's entry 0 is a real
-        // interned string — the encoder NEVER seeds it with `""`. A LOCAL hop
+        // DISCRIMINATING (the P0): a graph string table's entry 0 may be a
+        // real string (here `"__SENTINEL_ZERO__"`). A LOCAL hop
         // carries NO string fields; an IMPORT hop without a specifier carries
         // `from`+`importedName` but no specifier. The presence-aware projection
         // must OMIT the absent fields, never resolve them to entry 0

@@ -1759,6 +1759,12 @@ fn callback_events_from_props_surface<M: verter_audit::observe::ObserveExec>(
                 verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredPayload,
             ));
         let payload_publication = resolved_emit_payload_publication(&payload_source, None);
+        let payload_value =
+            crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::emit_payload(
+                dispatch,
+                owner,
+                &payload_source,
+            );
         let return_position = verter_type_expr::facts::SourcePosition::Present(
             verter_type_expr::facts::SemanticTypeSource::Projected(
                 verter_type_expr::facts::ProjectedTypeFact::CallableOccurrence {
@@ -1802,6 +1808,7 @@ fn callback_events_from_props_surface<M: verter_audit::observe::ObserveExec>(
             description: None,
             tags: Vec::new(),
             payload_source,
+            payload_value,
             payload_publication,
             return_publication: Some(return_publication),
             return_publication_scope: Some(member_scope),

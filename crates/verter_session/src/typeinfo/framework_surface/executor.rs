@@ -567,6 +567,7 @@ struct MemberSource {
     surface: FrameworkSurfaceKind,
     role: crate::typeinfo::node_refs::MemberRole,
     name: String,
+    occurrence: Option<verter_type_expr::facts::ResolvedEmitOccurrenceId>,
     producer: crate::typeinfo::node_refs::MemberProducer,
     scope_owner: verter_type_expr::TopLevelOwnerId,
     source: verter_type_expr::facts::SemanticTypeSource,
@@ -591,9 +592,10 @@ fn publish_member_node_refs(
 }
 
 /// The exported members a response can address: each exported props,
-/// expose, options or slots member whose name exactly one producer contributed a
-/// replayable source for. A name contributed twice, or exported twice, is
-/// ambiguous and addressed by nothing.
+/// expose, options, slots, model or emits member whose name (for an emit,
+/// its occurrence) exactly one producer contributed a replayable source
+/// for. A member contributed twice, or exported twice, is ambiguous and
+/// addressed by nothing.
 fn exported_framework_members<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
@@ -603,16 +605,23 @@ fn exported_framework_members<M: verter_audit::observe::ObserveExec>(
     sources: Vec<MemberSource>,
     exported: &[crate::typeinfo::framework_surface::graph_export::ExportedMemberNode],
 ) -> Vec<crate::typeinfo::node_refs::ExportedFrameworkMember> {
-    let exported_count = |kind: FrameworkSurfaceKind, name: &str| {
-        exported
-            .iter()
-            .filter(|node| node.kind == kind && node.name == name)
-            .count()
+    // A member is its surface, name and (for an emit payload) occurrence.
+    let exports = |node: &crate::typeinfo::framework_surface::graph_export::ExportedMemberNode,
+                   source: &MemberSource| {
+        node.kind == source.surface
+            && node.name == source.name
+            && node.occurrence == source.occurrence
     };
-    let contributed_count = |kind: FrameworkSurfaceKind, name: &str| {
+    let exported_count =
+        |source: &MemberSource| exported.iter().filter(|node| exports(node, source)).count();
+    let contributed_count = |source: &MemberSource| {
         sources
             .iter()
-            .filter(|source| source.surface == kind && source.name == name)
+            .filter(|other| {
+                other.surface == source.surface
+                    && other.name == source.name
+                    && other.occurrence == source.occurrence
+            })
             .count()
     };
     let export_name: Arc<str> = match &selector.export {
@@ -621,14 +630,11 @@ fn exported_framework_members<M: verter_audit::observe::ObserveExec>(
     };
     sources
         .iter()
-        .filter(|source| {
-            exported_count(source.surface, &source.name) == 1
-                && contributed_count(source.surface, &source.name) == 1
-        })
+        .filter(|source| exported_count(source) == 1 && contributed_count(source) == 1)
         .filter_map(|source| {
             let type_node_id = exported
                 .iter()
-                .find(|node| node.kind == source.surface && node.name == source.name)?
+                .find(|node| exports(node, source))?
                 .type_node_id;
             Some((type_node_id, source))
         })
@@ -649,6 +655,7 @@ fn exported_framework_members<M: verter_audit::observe::ObserveExec>(
                     producer: source.producer,
                     role: source.role,
                     member_name: Arc::from(source.name.as_str()),
+                    occurrence: source.occurrence.clone(),
                     source: source.source.clone(),
                 },
             },
@@ -852,8 +859,8 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
 
     /// Record every replayable member source `dtos` (one producer's bundle)
     /// contributes to `requested_kind`: a props row's value authority, an
-    /// exposed row's value source, an options member's or a slot's value
-    /// source. Closed, synthesized, failed and absent positions are not
+    /// exposed row's value source, an options member's, a slot's or a model
+    /// binding's value source, or an emit occurrence's payload source. Closed, synthesized, failed and absent positions are not
     /// addresses and are skipped. Each source replays under the owner its
     /// authored anchor is written in.
     fn collect_member_sources(
@@ -868,6 +875,15 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
             &'r str,
             Option<&'r verter_type_expr::facts::SemanticTypeSource>,
         );
+        // An emit payload is keyed by its occurrence: overloads of one event
+        // name are distinct members.
+        let occurrences: Vec<Option<&verter_type_expr::facts::ResolvedEmitOccurrenceId>> =
+            match requested_kind {
+                FrameworkSurfaceKind::Emits => {
+                    dtos.emit_fields().iter().map(|row| Some(&row.id)).collect()
+                }
+                _ => Vec::new(),
+            };
         let rows: Vec<Row<'_>> = match requested_kind {
             FrameworkSurfaceKind::Props => dtos
                 .prop_fields()
@@ -924,10 +940,20 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
                         .collect()
                 })
                 .unwrap_or_default(),
-            FrameworkSurfaceKind::Emits => return,
+            FrameworkSurfaceKind::Emits => dtos
+                .emit_fields()
+                .iter()
+                .map(|row| {
+                    (
+                        MemberRole::EmitPayload,
+                        row.name.as_str(),
+                        row.payload_source.present(),
+                    )
+                })
+                .collect(),
         };
         let mut members = self.members.borrow_mut();
-        for (role, name, source) in rows {
+        for (index, (role, name, source)) in rows.into_iter().enumerate() {
             let Some(source) = source.filter(|source| is_replayable_source(source)) else {
                 continue;
             };
@@ -938,6 +964,7 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
                 surface: requested_kind,
                 role,
                 name: name.to_string(),
+                occurrence: occurrences.get(index).copied().flatten().cloned(),
                 producer,
                 scope_owner,
                 source: source.clone(),
