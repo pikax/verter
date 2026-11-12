@@ -51,6 +51,7 @@ mod virtual_file_pipeline;
 mod vue_macro_dependency_diagnostics;
 mod vue_script_extract;
 
+pub(crate) use dependency_resolution::TypeRouteLanes;
 #[cfg(test)]
 pub(crate) use virtual_file_pipeline::vue_macro_output_matches_revision;
 

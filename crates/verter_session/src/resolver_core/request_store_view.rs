@@ -180,6 +180,9 @@ pub(crate) struct CanonicalCompletionOverlay {
     /// request-world memo covering the base, session-overlay and
     /// `RequestOnly` worlds. See [`RequestBundleMemo`].
     bundle_memo: RequestBundleMemo,
+    /// The type-route lanes the request resolved. See
+    /// [`crate::host_resolve::TypeRouteLanes`].
+    type_route_lanes: crate::host_resolve::TypeRouteLanes,
     /// Source lifetime bookkeeping only: excluded from revision, compatibility
     /// and validation population. Includes unpublished inputs until request end.
     pub(crate) input_artifacts: super::request_inputs::InputArtifactLeases,
@@ -381,6 +384,7 @@ impl CanonicalCompletionOverlay {
             derived_hashes_nonempty: AtomicBool::new(false),
             file_facts_nonempty: AtomicBool::new(false),
             bundle_memo: RequestBundleMemo::default(),
+            type_route_lanes: crate::host_resolve::TypeRouteLanes::default(),
             input_artifacts: super::request_inputs::InputArtifactLeases::default(),
             #[cfg(test)]
             verify_write_protocol: AtomicBool::new(false),
@@ -514,6 +518,11 @@ impl CanonicalCompletionOverlay {
     #[inline]
     pub(crate) fn bundle_memo(&self) -> &RequestBundleMemo {
         &self.bundle_memo
+    }
+
+    /// The type-route lanes the request resolved.
+    pub(crate) fn type_route_lanes(&self) -> &crate::host_resolve::TypeRouteLanes {
+        &self.type_route_lanes
     }
 
     /// Idempotently promote a freshly-loaded canonical's facts into the

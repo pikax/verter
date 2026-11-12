@@ -127,7 +127,7 @@ impl Drop for ResolutionWitnessScope {
 /// Replay observations a memoized witness build recorded into every open
 /// [`ResolutionWitnessScope`], as the resolutions that produced them
 /// recorded them when the build ran.
-fn replay_resolution_witness(observed: &[FactVersionRef]) {
+pub(crate) fn replay_resolution_witness(observed: &[FactVersionRef]) {
     if WITNESS_DEPTH.with(Cell::get) == 0 || observed.is_empty() {
         return;
     }

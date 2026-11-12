@@ -497,12 +497,18 @@ fn a_chain_across_modules_needs_no_more_query_depth_than_a_short_one() {
 /// host under the production caps: its outcome and the connected work its
 /// demand charged.
 fn module_chain_work(levels: usize) -> (Outcome, usize) {
+    module_chain_work_on(levels, |_| {})
+}
+
+/// [`module_chain_work`] on a host `configure` prepared first.
+fn module_chain_work_on(levels: usize, configure: impl FnOnce(&VerterHost)) -> (Outcome, usize) {
     let files = module_chain(levels, true);
     let sources: Vec<(&str, &str)> = files
         .iter()
         .map(|(path, source)| (path.as_str(), source.as_str()))
         .collect();
     let host = host_with(&sources);
+    configure(&host);
     let entry = files.last().expect("a chain has a last module").0.as_str();
     with_dispatch(&host, |dispatch| {
         let key = key_of(dispatch, entry, "witness");
@@ -555,6 +561,25 @@ fn a_generic_chain_across_modules_costs_the_same_work_per_module_to_25_modules()
         );
         assert_module_chain_work_per_module(works[2] - works[1], [13, 19, 25]);
     });
+}
+
+/// A module chain answers, and charges the same connected work, whether its
+/// request keeps the type-route lanes it resolves or resolves each again at
+/// every edge read.
+#[test]
+fn a_module_chain_answers_alike_with_kept_or_fresh_type_route_lanes() {
+    let run = |keep: bool| {
+        on_stack(8 << 20, move || {
+            module_chain_work_on(11, |host| {
+                host.test_force
+                    .disable_type_route_lane_reuse_for_tests
+                    .store(!keep, std::sync::atomic::Ordering::Relaxed);
+            })
+        })
+    };
+    let kept = run(true);
+    assert_tagged_value(&kept.0, &[number(), string()]);
+    assert_eq!(kept, run(false));
 }
 
 /// A generic chain across 101 modules answers the checker's value: the gate
