@@ -1901,10 +1901,11 @@ non-`Clone` `FlowProductExecution` and advanced only through `&mut`.
 Snapshots (`FlowProductStore`, and the evaluator's `FlowFrameProducts`)
 carry no execution handle; a declaration-bearing read pairs a snapshot with
 its own execution (`FlowProductRead`), and a transfer bundle is validated
-whole before it commits. Each nested function's activation is its own
-`self_cell` (`NestedActivationCell`): it owns its slice content, parameters
-and binder environment beside the evaluator state and region run that
-borrow them, and reaches the frames around it only through owned snapshots
+whole before it commits. The root evaluation and each nested function own
+their activation as a `self_cell` (`ActivationCell`): it owns its slice
+content, parameters and binder environment (and, for the root, its flow
+return key) beside the evaluator state and region run that borrow them,
+and reaches the frames around it only through owned snapshots
 (binder environments and products behind `Arc`), so it moves as a unit and
 borrows from no other activation. A stepped read a retained frame waits on
 (an object literal's or a class's member function) keeps its observation as
@@ -1919,12 +1920,19 @@ capsules that borrow nothing (`HeldTransactionReadRecording`,
 the driver; one dropped unclosed (only an unwind drops one) is subsumed by
 the recording around it. A class expression's receiver is shared between
 the activations reading `this` behind `Arc` with `sync_cell` interior
-state. Retaining the evaluation is still blocked on the root activation's
-borrowed inputs, on an owned `FlowRead` lifecycle (preparation,
-evaluation, finishing and closing, with abandonment unwinding the
-activations inside out), and on the dispatch read helpers the body calls
-(signature discovery, the contextual call executor, type-leaf lowering, the
-relation entry) being continuations themselves. The relation entry and the
+state. The root evaluation is an owned `FlowRead`: its root activation, the
+nested activations the drive has pushed and its tables, stepped one drive
+step at a time and borrowing nothing between steps; synchronous evaluation
+steps it to completion and finishes the value from its root activation.
+The callee schedule keeps one session per flow root, keyed by the root's
+flow return; a frame beneath a root reads the session of the innermost
+root below it on the reentry stack, and the root's `HeldFlowSchedule`
+removes it. Retaining the evaluation is still blocked on making the read
+`Send` (its held observation and read recording capsules, and the
+thread-local completeness scopes it runs under, as per-step carries), on
+abandonment unwinding the activations inside out, and on the dispatch
+read helpers the body calls (signature discovery, the contextual call
+executor, type-leaf lowering, the relation entry) being continuations themselves. The relation entry and the
 contextual call executor have the owned interface the body advances
 ([Helper continuations](#helper-continuations)); what runs below their
 first requests is still in place.

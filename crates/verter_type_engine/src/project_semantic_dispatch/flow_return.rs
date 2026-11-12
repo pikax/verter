@@ -7261,113 +7261,154 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::semantic_query::checker_policy::TupleSplicePosition::Expression,
         );
         let value_observations = crate::request_context::ColdComputeCompletenessScope::enter();
-        let mut evaluator_state = FlowEvaluatorState {
-            call_receivers: rustc_hash::FxHashMap::default(),
-            call_arguments: Arc::clone(&ir.call_arguments),
-            self_slot: Some(key),
-            canonical,
-            owner,
-            nullability: key.context.policy.nullability,
-            circular_return: std::cell::Cell::new(false),
-            frame_declares_return: ir.declared_return.is_some(),
-            bare_self_return: None,
-            no_implicit_any: key.context.policy.no_implicit_any,
-            use_unknown_in_catch_variables: key.context.policy.use_unknown_in_catch_variables,
-            no_implicit_this: key.context.policy.no_implicit_this,
-            params: &params,
-            param_names: &ir.params,
-            binder_env: &binder_env,
-            enclosing_frames: EnclosingFrames::default(),
-            bindings: ir.bindings.clone(),
-            skeleton: skeleton.clone(),
-            flow_graph: bound.graph_ref(),
-            execution_selection,
-            plan: demand_carrier
-                .as_ref()
-                .map(|carrier| Arc::clone(&carrier.plan)),
-            anchor: frame_anchor,
-            products,
-            frame_execution,
-            narrowing_writes: Vec::new(),
-            observations: BodyCompletionObservations::none(),
-            member_filter,
-            independent_members: Some(0),
-            independent_returns: Some(0),
-            constructive_values: rustc_hash::FxHashMap::default(),
-            constructive_signatures: rustc_hash::FxHashMap::default(),
-            holds: Vec::new(),
-            yield_contributions: Vec::new(),
-            degradation: unapplied_write_effect
-                .then_some(crate::semantic_query::FlowReturnDegradation::UnappliedWriteEffect)
-                .or_else(|| {
-                    signature_position_unmodeled
-                        .then_some(crate::semantic_query::FlowReturnDegradation::UnmodeledPosition)
-                }),
-            pending_statement_gap: None,
-            pattern_write_definition: None,
-            correlated_groups: Vec::new(),
-            guard_aliases: rustc_hash::FxHashMap::default(),
-            auto_typed_locals: rustc_hash::FxHashSet::default(),
-            inferred_declared_locals: rustc_hash::FxHashMap::default(),
-            declared_capture_types: rustc_hash::FxHashMap::default(),
-            extended_capture_identities: rustc_hash::FxHashSet::default(),
-            evolving_locals: rustc_hash::FxHashSet::default(),
-            circular_inferred: rustc_hash::FxHashSet::default(),
-            unwidened_views: rustc_hash::FxHashMap::default(),
-            regular_right_operands: rustc_hash::FxHashSet::default(),
-            declared_return,
-            call_fresh_literal_returns: Vec::new(),
-            break_exits: Vec::new(),
-            return_edges: Vec::new(),
-            throw_points: Vec::new(),
-            collect_throw_points: false,
-            scope_shadows: Vec::new(),
-            call_evidence: Vec::new(),
-            call_drive: None,
-            expression_write_nodes: rustc_hash::FxHashMap::default(),
-            capture_write_lookahead: rustc_hash::FxHashMap::default(),
-            executed_walk: ExecutedSliceWalk::default(),
-            heritage_self_roots: Vec::new(),
-            inferred_predicate: None,
-            checker_diagnostics: Vec::new(),
-            call_diagnostic_sites: rustc_hash::FxHashMap::default(),
-            declared_reads: false,
-            dead_writes: false,
-            dead_written: rustc_hash::FxHashSet::default(),
-            dead_written_log: Vec::new(),
-            receiver: None,
-            contextual_object_this: None,
-            contextual_object_receiver: None,
-            inherits_contextual_object_receiver: false,
-            object_first_pass_context: ObjectFirstPassContext::default(),
+        // The root's activation owns what its evaluator borrows; the read
+        // owns the activation and the tables, and borrows nothing.
+        let owned = nested::ActivationOwned {
+            content: Arc::clone(&ir),
+            params,
+            binder_env: Arc::clone(&binder_env),
+            canonical: Arc::from(canonical),
+            self_slot: Some(key.clone()),
         };
-        let mut evaluator = FlowEvaluator::over(&flow_cx, &mut evaluator_state, &mut tables);
-        evaluator.bind_explicit_this(ir.declared_this.as_ref());
-        let holds;
-        let yield_contributions;
-        let degradation;
-        let observations;
-        let mut call_evidence;
-        let mut executed_walk;
-        let product_budget_exceeded;
-        let frame_product_evidence;
-        let products_finished;
-        let frame_bindings;
-        let frame_products;
-        let inferred_predicate;
-        let checker_diagnostics;
-        let circular_return;
-        let independent_members;
-        let independent_returns;
-        let constructive_return;
-        let constructed_values;
-        let (contributors, body_falls_through) = {
-            evaluator.seed_hoisted_var_declarations(&ir.body);
-            let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
+        let root = nested::ActivationCell::new(owned, |owned| {
+            let mut evaluator = FlowEvaluatorState {
+                call_receivers: rustc_hash::FxHashMap::default(),
+                call_arguments: Arc::clone(&owned.content.call_arguments),
+                self_slot: owned.self_slot.as_ref(),
+                canonical: &owned.canonical,
+                owner,
+                nullability: key.context.policy.nullability,
+                circular_return: std::cell::Cell::new(false),
+                frame_declares_return: ir.declared_return.is_some(),
+                bare_self_return: None,
+                no_implicit_any: key.context.policy.no_implicit_any,
+                use_unknown_in_catch_variables: key.context.policy.use_unknown_in_catch_variables,
+                no_implicit_this: key.context.policy.no_implicit_this,
+                params: &owned.params,
+                param_names: &owned.content.params,
+                binder_env: &owned.binder_env,
+                enclosing_frames: EnclosingFrames::default(),
+                bindings: owned.content.bindings.clone(),
+                skeleton: skeleton.clone(),
+                flow_graph: bound.graph_ref(),
+                execution_selection,
+                plan: demand_carrier
+                    .as_ref()
+                    .map(|carrier| Arc::clone(&carrier.plan)),
+                anchor: frame_anchor,
+                products,
+                frame_execution,
+                narrowing_writes: Vec::new(),
+                observations: BodyCompletionObservations::none(),
+                member_filter,
+                independent_members: Some(0),
+                independent_returns: Some(0),
+                constructive_values: rustc_hash::FxHashMap::default(),
+                constructive_signatures: rustc_hash::FxHashMap::default(),
+                holds: Vec::new(),
+                yield_contributions: Vec::new(),
+                degradation: unapplied_write_effect
+                    .then_some(crate::semantic_query::FlowReturnDegradation::UnappliedWriteEffect)
+                    .or_else(|| {
+                        signature_position_unmodeled.then_some(
+                            crate::semantic_query::FlowReturnDegradation::UnmodeledPosition,
+                        )
+                    }),
+                pending_statement_gap: None,
+                pattern_write_definition: None,
+                correlated_groups: Vec::new(),
+                guard_aliases: rustc_hash::FxHashMap::default(),
+                auto_typed_locals: rustc_hash::FxHashSet::default(),
+                inferred_declared_locals: rustc_hash::FxHashMap::default(),
+                declared_capture_types: rustc_hash::FxHashMap::default(),
+                extended_capture_identities: rustc_hash::FxHashSet::default(),
+                evolving_locals: rustc_hash::FxHashSet::default(),
+                circular_inferred: rustc_hash::FxHashSet::default(),
+                unwidened_views: rustc_hash::FxHashMap::default(),
+                regular_right_operands: rustc_hash::FxHashSet::default(),
+                declared_return,
+                call_fresh_literal_returns: Vec::new(),
+                break_exits: Vec::new(),
+                return_edges: Vec::new(),
+                throw_points: Vec::new(),
+                collect_throw_points: false,
+                scope_shadows: Vec::new(),
+                call_evidence: Vec::new(),
+                call_drive: None,
+                expression_write_nodes: rustc_hash::FxHashMap::default(),
+                capture_write_lookahead: rustc_hash::FxHashMap::default(),
+                executed_walk: ExecutedSliceWalk::default(),
+                heritage_self_roots: Vec::new(),
+                inferred_predicate: None,
+                checker_diagnostics: Vec::new(),
+                call_diagnostic_sites: rustc_hash::FxHashMap::default(),
+                declared_reads: false,
+                dead_writes: false,
+                dead_written: rustc_hash::FxHashSet::default(),
+                dead_written_log: Vec::new(),
+                receiver: None,
+                contextual_object_this: None,
+                contextual_object_receiver: None,
+                inherits_contextual_object_receiver: false,
+                object_first_pass_context: ObjectFirstPassContext::default(),
+            };
+            let run = {
+                let mut root = FlowEvaluator::over(&flow_cx, &mut evaluator, &mut tables);
+                root.bind_explicit_this(owned.content.declared_this.as_ref());
+                root.seed_hoisted_var_declarations(&owned.content.body);
+                root.start_region_run(&owned.content.body)
+            };
+            nested::ActivationState { evaluator, run }
+        });
+        let mut read = read::FlowRead::new(tables, root);
+        let (outcome, body_falls_through) = read.evaluate(&flow_cx);
+        // What finishing the value reads from the root's evaluator.
+        struct RootEvaluated {
+            holds: Vec<HeldCallee>,
+            yield_contributions: Vec<YieldContribution>,
+            degradation: Option<crate::semantic_query::FlowReturnDegradation>,
+            observations: BodyCompletionObservations,
+            call_evidence: Vec<FlowCallEvidence>,
+            executed_walk: ExecutedSliceWalk,
+            product_budget_exceeded: Option<super::flow_products::FlowProductBudgetExceeded>,
+            frame_product_evidence: Option<super::flow_products::FlowProductEvidence>,
+            products_finished: bool,
+            frame_bindings: verter_session_query::flow::bundle::BindingsRef,
+            frame_products: FlowProductStore,
+            inferred_predicate: Option<crate::semantic_query::SignaturePredicate>,
+            checker_diagnostics: Vec<crate::semantic_query::CheckerDiagnosticOccurrence>,
+            circular_return: bool,
+            independent_members: Option<usize>,
+            independent_returns: Option<usize>,
+            constructive_return: Option<ConstructiveValue>,
+            constructed_values: rustc_hash::FxHashMap<SemanticNodeId, ConstructiveValue>,
+        }
+        let RootEvaluated {
+            holds,
+            yield_contributions,
+            degradation,
+            observations,
+            mut call_evidence,
+            mut executed_walk,
+            product_budget_exceeded,
+            frame_product_evidence,
+            products_finished,
+            frame_bindings,
+            frame_products,
+            inferred_predicate,
+            checker_diagnostics,
+            circular_return,
+            independent_members,
+            independent_returns,
+            constructive_return,
+            constructed_values,
+        } = read.with_root(|_, state, tables| {
+            let mut evaluator = FlowEvaluator::over(&flow_cx, state, tables);
             evaluator.report_receiver_reads(ir.receiver_reads.as_ref());
             evaluator.promote_pending_statement_gap();
-            inferred_predicate = evaluator.st.inferred_predicate;
-            circular_return = (self.take_return_cycle(key) || evaluator.st.circular_return.get())
+            let inferred_predicate = evaluator.st.inferred_predicate;
+            let circular_return = (self.take_return_cycle(key)
+                || evaluator.st.circular_return.get())
                 && ir.declared_return.is_none();
             if circular_return {
                 let occurrence = entry
@@ -7377,32 +7418,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     evaluator.record_checker_diagnostic(occurrence);
                 }
             }
-            checker_diagnostics = {
+            let checker_diagnostics = {
                 let mut occurrences = std::mem::take(&mut evaluator.st.checker_diagnostics);
                 occurrences.sort();
                 occurrences
             };
-            holds = std::mem::take(&mut evaluator.st.holds);
-            yield_contributions = std::mem::take(&mut evaluator.st.yield_contributions);
-            observations = evaluator.st.observations;
-            independent_members = evaluator.st.independent_members;
-            independent_returns = evaluator.st.independent_returns;
-            constructive_return = outcome
+            let holds = std::mem::take(&mut evaluator.st.holds);
+            let yield_contributions = std::mem::take(&mut evaluator.st.yield_contributions);
+            let observations = evaluator.st.observations;
+            let independent_members = evaluator.st.independent_members;
+            let independent_returns = evaluator.st.independent_returns;
+            let constructive_return = outcome
                 .as_ref()
                 .ok()
                 .filter(|values| values.len() == 1)
                 .and_then(|values| evaluator.st.constructive_values.get(&values[0].node))
                 .cloned();
-            constructed_values = std::mem::take(&mut evaluator.st.constructive_values);
-            call_evidence = std::mem::take(&mut evaluator.st.call_evidence);
-            executed_walk = std::mem::take(&mut evaluator.st.executed_walk);
+            let constructed_values = std::mem::take(&mut evaluator.st.constructive_values);
+            let call_evidence = std::mem::take(&mut evaluator.st.call_evidence);
+            let executed_walk = std::mem::take(&mut evaluator.st.executed_walk);
             let finished = evaluator
                 .tables
                 .execution(evaluator.st.frame_execution)
                 .borrow_mut()
                 .finish(evaluator.st.plan.as_deref());
-            products_finished = finished.is_ok();
-            product_budget_exceeded = match &finished {
+            let products_finished = finished.is_ok();
+            let product_budget_exceeded = match &finished {
                 Err(FlowProductFailure::BudgetExceeded(exceeded)) => Some(*exceeded),
                 _ => None,
             };
@@ -7415,10 +7456,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     );
                 }
             }
-            frame_product_evidence = finished.ok().flatten();
-            degradation = evaluator.st.degradation;
-            frame_bindings = evaluator.st.bindings.clone();
-            frame_products = evaluator.st.products.clone();
+            let frame_product_evidence = finished.ok().flatten();
+            let degradation = evaluator.st.degradation;
+            let frame_bindings = evaluator.st.bindings.clone();
+            let frame_products = evaluator.st.products.clone();
             // Fold in every cross-file heritage hop the `instanceof`
             // narrowing observed (see the field doc on
             // `FlowEvaluator::heritage_self_roots`): a `class_heritage_bases`
@@ -7429,8 +7470,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self_roots.push(root);
                 }
             }
-            (outcome, body_falls_through)
-        };
+            RootEvaluated {
+                holds,
+                yield_contributions,
+                degradation,
+                observations,
+                call_evidence,
+                executed_walk,
+                product_budget_exceeded,
+                frame_product_evidence,
+                products_finished,
+                frame_bindings,
+                frame_products,
+                inferred_predicate,
+                checker_diagnostics,
+                circular_return,
+                independent_members,
+                independent_returns,
+                constructive_return,
+                constructed_values,
+            }
+        });
+        let contributors = outcome;
         // A call the lowering DECIDED ABOVE (folded into a surviving
         // decided leaf, or sitting in a control position) never feeds the
         // demanded value its return, and no relation was consumed for it:
@@ -7548,7 +7609,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             bindings: &frame_bindings,
             product_evidence: frame_product_evidence.as_ref(),
             products: &frame_products,
-            frame_execution: tables.execution(frame_execution),
+            frame_execution: read.tables().execution(frame_execution),
             constructed_values: &constructed_values,
         };
         let contributors = match contributors {
@@ -10718,6 +10779,8 @@ mod branches;
 mod call_stack;
 #[path = "flow_return_nested.rs"]
 mod nested;
+#[path = "flow_return_read.rs"]
+mod read;
 use branches::{BranchStep, DeadPath, Entered};
 use nested::{NestedChildParts, NestedDemand, NestedSignatureStep};
 #[path = "flow_return_operators.rs"]

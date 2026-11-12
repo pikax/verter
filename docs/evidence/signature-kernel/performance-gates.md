@@ -910,7 +910,7 @@ Recorded plainly so no reader mistakes absence for a pass:
   signature composed on its parent and the parent's region resumed with
   it. What a nested evaluator borrows (its parameters, binder
   environment and slice content) is owned by its own activation cell
-  (`NestedActivationCell`, a `self_cell` whose evaluator state and region
+  (`ActivationCell`, a `self_cell` whose evaluator state and region
   run borrow only the inputs it owns), and the frames around it are a
   shared chain of owned snapshots, so no evaluator borrows a native frame,
   or another activation, of the one around it and the native stack a nest

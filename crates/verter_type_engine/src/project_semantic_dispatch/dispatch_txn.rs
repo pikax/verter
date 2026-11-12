@@ -2873,7 +2873,7 @@ pub struct FlowReturnDomainRuntime {
     /// The callee schedule session while frames evaluate: the callee
     /// returns a schedule already settled, and the instantiated returns
     /// each uninstantiated frame's call resolution demanded.
-    pub(crate) schedule: super::flow_return::schedule::FlowScheduleSession,
+    pub(crate) schedule: super::flow_return::schedule::FlowScheduleSessions,
     /// The flow results completed on this transaction, by demand.
     pub results: FlowResultTable,
 }
