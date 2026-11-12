@@ -1530,7 +1530,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         if self.tables.resolving_functions.borrow().frame_windows.len() >= NESTED_RECORDING_DEPTH {
             return None;
         }
-        let reads = dispatch.begin_transaction_read()?;
+        let reads = self.begin_transaction_read()?;
         let receiver = self.enclosing_receiver_of(context).map(|receiver| {
             let start = receiver.reads.begin();
             (receiver, start)
@@ -1625,7 +1625,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     .iter()
                     .all(|read| read.read != class_expression::ReceiverMemberRead::Forward)
             });
-        let replay = self.dispatch.finish_transaction_read(reads, admissible);
+        let replay = self.finish_transaction_read(reads, admissible);
         let (
             Some(signature),
             Some(body),

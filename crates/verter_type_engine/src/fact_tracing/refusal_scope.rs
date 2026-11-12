@@ -140,6 +140,66 @@ impl Drop for TaskRefusalInstall<'_> {
     }
 }
 
+/// The refusals a held read observes between the extents it runs in, owned
+/// by the read as plain data. Attaching pushes a fresh scope seeded with
+/// them on top of this thread's scopes, so a refusal recorded while the read
+/// runs reaches it and every scope below, as one recorded inside a nested
+/// [`RefusalObservationScope`] does; detaching removes that scope by
+/// identity and keeps what it observed. Nothing is recorded below on
+/// detach: the read's consumer records it once, at completion.
+#[derive(Debug, Default)]
+pub(crate) struct HeldRefusal {
+    observed: Option<NonCacheableReadReason>,
+    /// The address of the scope this rail pushed, while attached: its
+    /// identity on this thread's stack, never dereferenced.
+    attached: Option<usize>,
+}
+
+impl HeldRefusal {
+    /// Push this rail's scope on top of this thread's scopes.
+    pub(crate) fn attach(&mut self) {
+        verter_debug_assert!(self.attached.is_none(), "a rail is attached once at a time");
+        let cell = Rc::new(Cell::new(self.observed));
+        self.attached = Some(Rc::as_ptr(&cell) as usize);
+        ACTIVE_REFUSAL_SCOPES.with(|scopes| scopes.borrow_mut().push(cell));
+    }
+
+    /// Remove this rail's scope from this thread's scopes, by identity,
+    /// keeping what it observed.
+    pub(crate) fn detach(&mut self) {
+        let attached = self.attached.take();
+        ACTIVE_REFUSAL_SCOPES.with(|scopes| {
+            let mut scopes = scopes.borrow_mut();
+            let position = scopes
+                .iter()
+                .rposition(|entry| Some(Rc::as_ptr(entry) as usize) == attached);
+            verter_debug_assert!(
+                position.is_some() && position == scopes.len().checked_sub(1),
+                "a rail leaves from the top of its thread's stack"
+            );
+            if let Some(position) = position {
+                self.observed = scopes.remove(position).get();
+            }
+        });
+    }
+
+    /// What the rail observed so far.
+    pub(crate) fn observed(&self) -> Option<NonCacheableReadReason> {
+        self.observed
+    }
+}
+
+/// How many refusal scopes are active on this thread.
+pub(crate) fn refusal_scope_depth() -> usize {
+    ACTIVE_REFUSAL_SCOPES.with(|scopes| scopes.borrow().len())
+}
+
+/// Remove every refusal scope pushed above `depth`: an unwinding
+/// computation restores the thread's scopes as it found them.
+pub(crate) fn truncate_refusal_scopes(depth: usize) {
+    ACTIVE_REFUSAL_SCOPES.with(|scopes| scopes.borrow_mut().truncate(depth));
+}
+
 /// Record a typed non-cacheable reason into every active scope. Called
 /// only from the marking chokepoint so no producer can taint a value
 /// without the reason being observable.

@@ -182,6 +182,69 @@ pub fn current_execution_abort() -> Option<crate::semantic_query::ExecutionAbort
     EXECUTION_ABORTS.with(|stack| stack.borrow().last().copied().flatten())
 }
 
+/// A held read's execution validity: the abort its steps observed, owned by
+/// the read as plain data between the extents it runs in. Attaching pushes
+/// it on top of the thread's validity stack, where it is the innermost scope
+/// of what runs; detaching takes it back off and never bubbles. Its owner
+/// decides where the abort goes once the read ends: to the scope below it at
+/// completion ([`Self::close`]), or back to whoever abandons the read.
+#[derive(Debug, Default)]
+pub(crate) struct HeldValidity {
+    abort: Option<crate::semantic_query::ExecutionAbort>,
+    /// The thread stack's depth with this rail on top, while attached.
+    attached_at: Option<usize>,
+}
+
+impl HeldValidity {
+    /// The validity of a read held from here: it inherits the abort of the
+    /// execution active now, as [`ExecutionValidityScope::enter`] does.
+    pub(crate) fn open() -> Self {
+        Self {
+            abort: current_execution_abort(),
+            attached_at: None,
+        }
+    }
+
+    /// Push the rail on top of this thread's validity stack.
+    pub(crate) fn attach(&mut self) {
+        verter_debug_assert!(
+            self.attached_at.is_none(),
+            "a rail is attached once at a time"
+        );
+        self.attached_at = Some(EXECUTION_ABORTS.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            stack.push(self.abort);
+            stack.len()
+        }));
+    }
+
+    /// Take the rail off this thread's validity stack, where it is the top,
+    /// keeping the abort it observed. Nothing bubbles.
+    pub(crate) fn detach(&mut self) {
+        let depth = self.attached_at.take();
+        let observed = EXECUTION_ABORTS.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            verter_debug_assert!(
+                depth == Some(stack.len()),
+                "a rail leaves from the top of its thread's stack"
+            );
+            stack.pop().flatten()
+        });
+        self.abort = self.abort.or(observed);
+    }
+
+    /// Detach the rail at its read's completion and hand its abort to the
+    /// scope below it, as an ending validity scope does: an abort always
+    /// bubbles, whatever the consumer does with the read's value.
+    pub(crate) fn close(mut self) -> Option<crate::semantic_query::ExecutionAbort> {
+        self.detach();
+        if let Some(abort) = self.abort {
+            observe_execution_abort(abort);
+        }
+        self.abort
+    }
+}
+
 thread_local! {
     /// Per-thread nesting depth of [`RootTemplateDemandScope`].
     ///
@@ -387,6 +450,149 @@ impl DeferredPartialStickyScope {
 impl Drop for DeferredPartialStickyScope {
     fn drop(&mut self) {
         DEFERRED_PARTIAL_STICKY_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// A held read's cold-compute completeness: what its steps folded, owned by
+/// the read as plain data between the extents it runs in. Attaching pushes
+/// it on top of the thread's completeness stack; detaching takes the top
+/// back and never merges it into the scope below. The read's consumer takes
+/// it once, at completion ([`Self::close`]).
+#[derive(Debug)]
+pub(crate) struct HeldCompleteness {
+    completeness: ResultCompleteness,
+    /// The thread stack's depth with this rail on top, while attached.
+    attached_at: Option<usize>,
+}
+
+impl HeldCompleteness {
+    /// A rail seeded `Complete`, as [`ColdComputeCompletenessScope::enter`]
+    /// seeds a scope.
+    pub(crate) fn open() -> Self {
+        Self {
+            completeness: ResultCompleteness::Complete,
+            attached_at: None,
+        }
+    }
+
+    /// Push the rail on top of this thread's completeness stack.
+    pub(crate) fn attach(&mut self) {
+        verter_debug_assert!(
+            self.attached_at.is_none(),
+            "a rail is attached once at a time"
+        );
+        self.attached_at = Some(COLD_COMPUTE_COMPLETENESS.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            stack.push(self.completeness);
+            stack.len()
+        }));
+    }
+
+    /// Take the rail off this thread's completeness stack, where it is the
+    /// top, keeping what it accumulated. Nothing merges below.
+    pub(crate) fn detach(&mut self) {
+        let depth = self.attached_at.take();
+        COLD_COMPUTE_COMPLETENESS.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            verter_debug_assert!(
+                depth == Some(stack.len()),
+                "a rail leaves from the top of its thread's stack"
+            );
+            if let Some(top) = stack.pop() {
+                self.completeness = top;
+            }
+        });
+    }
+
+    /// Detach the rail at its read's completion: what it accumulated, which
+    /// the read's consumer adopts or discards.
+    pub(crate) fn close(mut self) -> ResultCompleteness {
+        self.detach();
+        self.completeness
+    }
+}
+
+/// A held read's sticky-partial deferral: attaching defers the request
+/// sticky for what runs, as a [`DeferredPartialStickyScope`] does, and
+/// detaching ends that deferral. Plain data between the extents the read
+/// runs in.
+#[derive(Debug, Default)]
+pub(crate) struct HeldSticky {
+    attached: bool,
+}
+
+impl HeldSticky {
+    /// Defer the request sticky on this thread.
+    pub(crate) fn attach(&mut self) {
+        verter_debug_assert!(!self.attached, "a rail is attached once at a time");
+        DEFERRED_PARTIAL_STICKY_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+        self.attached = true;
+    }
+
+    /// End the deferral this rail made on this thread.
+    pub(crate) fn detach(&mut self) {
+        verter_debug_assert!(self.attached, "only an attached rail detaches");
+        DEFERRED_PARTIAL_STICKY_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        self.attached = false;
+    }
+}
+
+/// Where this thread's validity, completeness and sticky-deferral stacks
+/// stood before a held read's rails were attached for one extent. If the
+/// extent unwinds before they are detached, dropping the mark restores the
+/// thread's stacks to it without merging anything; an extent that detached
+/// every rail ends with [`Self::release`].
+#[must_use = "a rail mark restores the thread when its extent unwinds"]
+pub(crate) struct ThreadRailMark {
+    aborts: usize,
+    completeness: usize,
+    sticky_depth: usize,
+    armed: bool,
+}
+
+impl ThreadRailMark {
+    /// Where this thread's stacks stand now.
+    pub(crate) fn take() -> Self {
+        Self {
+            aborts: EXECUTION_ABORTS.with(|stack| stack.borrow().len()),
+            completeness: COLD_COMPUTE_COMPLETENESS.with(|stack| stack.borrow().len()),
+            sticky_depth: DEFERRED_PARTIAL_STICKY_DEPTH.with(Cell::get),
+            armed: true,
+        }
+    }
+
+    /// This thread's validity, completeness and sticky-deferral depths
+    /// (test-only).
+    #[cfg(test)]
+    pub(crate) fn depths_for_tests() -> (usize, usize, usize) {
+        (
+            EXECUTION_ABORTS.with(|stack| stack.borrow().len()),
+            COLD_COMPUTE_COMPLETENESS.with(|stack| stack.borrow().len()),
+            DEFERRED_PARTIAL_STICKY_DEPTH.with(Cell::get),
+        )
+    }
+
+    /// The extent ended with every rail it attached detached: the stacks
+    /// stand where they stood at the mark.
+    pub(crate) fn release(mut self) {
+        verter_debug_assert!(
+            self.aborts == EXECUTION_ABORTS.with(|stack| stack.borrow().len())
+                && self.completeness
+                    == COLD_COMPUTE_COMPLETENESS.with(|stack| stack.borrow().len())
+                && self.sticky_depth == DEFERRED_PARTIAL_STICKY_DEPTH.with(Cell::get),
+            "a held read's extent detaches every rail it attached"
+        );
+        self.armed = false;
+    }
+}
+
+impl Drop for ThreadRailMark {
+    fn drop(&mut self) {
+        if self.armed {
+            EXECUTION_ABORTS.with(|stack| stack.borrow_mut().truncate(self.aborts));
+            COLD_COMPUTE_COMPLETENESS.with(|stack| stack.borrow_mut().truncate(self.completeness));
+            DEFERRED_PARTIAL_STICKY_DEPTH.with(|depth| depth.set(self.sticky_depth));
+        }
     }
 }
 

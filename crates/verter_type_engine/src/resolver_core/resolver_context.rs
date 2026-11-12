@@ -565,44 +565,92 @@ pub(crate) fn record_fact_reads<R>(
     policy: verter_session_query::facts::policy::FactPolicy,
     work: impl FnOnce() -> R,
 ) -> (R, RecordedFactReads) {
-    let recording = FactReadRecording::begin(policy);
-    let result = work();
+    let mut recording = FactReadRecording::new(policy);
+    let result = {
+        let _installed = recording.install();
+        work()
+    };
     (result, recording.finish())
 }
 
-/// A passive fact-read recording that stays installed across the steps of a
-/// computation that does not run inside one closure — the explicit-stack
-/// form of [`record_fact_reads`]. Recordings nest: each must finish (or
-/// drop) before the one installed before it.
+/// A passive fact-read recording: a recorder it owns, and the policy its
+/// facts are sealed under. It records only while installed on a thread.
+/// [`Self::install`] installs it for one scope; a computation that does not
+/// run inside one scope attaches it ([`Self::attach`]) and detaches it
+/// ([`Self::detach`]) around each extent it runs in, and a detached
+/// recording is plain data that may move to another thread. Recordings nest:
+/// each leaves its thread's stack before the one installed before it.
 pub(crate) struct FactReadRecording {
-    // Declared first so it drops first: the scope uninstalls the recorder
-    // before the recorder is freed.
-    scope: Option<tracer_stack::RecorderScope>,
     recorder: Box<tracer_stack::FactReadRecorder>,
     /// The policy the recorded facts are sealed under: the installed
     /// tracer's, which they are replayed into.
     policy: verter_session_query::facts::policy::FactPolicy,
+    /// Whether the recorder is on this thread's stack now.
+    attached: bool,
 }
 
 impl FactReadRecording {
-    /// Install a fresh recorder until [`Self::finish`] (or the drop).
-    pub(crate) fn begin(policy: verter_session_query::facts::policy::FactPolicy) -> Self {
-        let recorder = Box::new(tracer_stack::FactReadRecorder::default());
-        let scope = tracer_stack::install_recorder(&recorder);
+    /// A fresh recording, not installed anywhere yet.
+    pub(crate) fn new(policy: verter_session_query::facts::policy::FactPolicy) -> Self {
         Self {
-            scope: Some(scope),
-            recorder,
+            recorder: Box::default(),
             policy,
+            attached: false,
         }
     }
 
-    /// Uninstall the recorder and return what it recorded.
+    /// A fresh recording attached to this thread until [`Self::finish`] (or
+    /// the drop).
+    pub(crate) fn begin(policy: verter_session_query::facts::policy::FactPolicy) -> Self {
+        let mut recording = Self::new(policy);
+        recording.attach();
+        recording
+    }
+
+    /// Install the recording on this thread until the returned scope drops.
+    /// The scope borrows the recording, so it cannot be installed twice, nor
+    /// freed while installed.
+    pub(crate) fn install(&mut self) -> tracer_stack::RecorderScope<'_> {
+        verter_debug_assert!(!self.attached, "a recording is installed once at a time");
+        tracer_stack::install_recorder(&self.recorder)
+    }
+
+    /// Put the recording on top of this thread's recorder stack.
+    pub(crate) fn attach(&mut self) {
+        verter_debug_assert!(!self.attached, "a recording is attached once at a time");
+        tracer_stack::attach_recorder(&self.recorder);
+        self.attached = true;
+    }
+
+    /// Take the recording off this thread's recorder stack, where it is the
+    /// top, keeping what it recorded.
+    pub(crate) fn detach(&mut self) {
+        verter_debug_assert!(self.attached, "only an attached recording detaches");
+        tracer_stack::detach_recorder(&*self.recorder);
+        self.attached = false;
+    }
+
+    /// Take the recording off its thread, if it is on one, and return what
+    /// it recorded.
     pub(crate) fn finish(mut self) -> RecordedFactReads {
-        drop(self.scope.take());
+        if self.attached {
+            self.detach();
+        }
         let (facts, non_cacheable) = std::mem::take(&mut *self.recorder).into_parts();
         RecordedFactReads {
             facts: self.policy.set_of(facts),
             non_cacheable,
+        }
+    }
+}
+
+impl Drop for FactReadRecording {
+    fn drop(&mut self) {
+        // Only an unwinding computation drops an attached recording: its
+        // recorder leaves the thread before it is freed, unless the
+        // unwinding extent already took it off.
+        if self.attached {
+            tracer_stack::forget_recorder(&*self.recorder);
         }
     }
 }

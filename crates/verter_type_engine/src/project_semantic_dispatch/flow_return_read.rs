@@ -7,6 +7,12 @@
 //! drive, and its state stays with it between steps. Synchronous
 //! evaluation steps it until the root region completes, then finishes the
 //! value from its root activation, in place.
+//!
+//! The thread-side rails of the observations its frames hold open live in
+//! its tables ([`super::rails::ReadRails`]): an extent of its evaluation
+//! attaches them on top of the running thread when it begins and detaches
+//! them when it ends, once per extent, never once per step. Between extents
+//! a read is plain owned data that may move to another thread.
 
 use super::nested::{ActivationCell, ActivationOwned, DriveEnd, NestedActivation};
 use super::*;
@@ -30,8 +36,10 @@ pub(super) struct FlowRead {
 }
 
 // A read is exclusively owned: one evaluation steps it, and it is never
-// duplicated. It borrows nothing, so it can be kept between steps.
+// duplicated. It borrows nothing, so it can be kept between steps, and
+// holds nothing bound to a thread, so it can resume on another one.
 static_assertions::assert_not_impl_any!(FlowRead: Clone, Copy);
+static_assertions::assert_impl_all!(FlowRead: Send);
 const _: fn() = || {
     fn owns_everything<T: 'static>() {}
     owns_everything::<FlowRead>();
@@ -73,20 +81,24 @@ impl FlowRead {
         })
     }
 
-    /// Step the read until its root region completes. The root run's frames
-    /// are released then, before the value is finished.
+    /// Step the read until its root region completes, in one extent: its
+    /// rails are attached to the running thread for the extent and detached
+    /// at its end. The root run's frames are released then, before the value
+    /// is finished.
     pub(super) fn evaluate<'d, D: FlowDemandDriver>(
         &mut self,
         dispatch: &'d FlowCx<'d, D>,
     ) -> RegionOutcome {
+        let extent = self.tables.rails.attach();
         let outcome = loop {
             if let Some(outcome) = self.step(dispatch) {
                 break outcome;
             }
         };
+        self.tables.rails.detach(extent);
         verter_debug_assert!(
-            self.stack.is_empty(),
-            "a completed root region leaves no nested activation"
+            self.stack.is_empty() && self.tables.rails.is_empty(),
+            "a completed root region leaves no nested activation and holds no read open"
         );
         self.root
             .with_dependent_mut(|_, active| drop(std::mem::take(&mut active.run.frames)));
