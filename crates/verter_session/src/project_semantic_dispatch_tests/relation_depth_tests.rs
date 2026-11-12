@@ -612,7 +612,7 @@ fn a_pair_every_union_member_reaches_is_related_once() {
             .map(|(probe, answer)| (probe.as_str(), *answer))
             .collect();
         failures.extend(
-            mismatches(&doubling_unions(depth), &rows)
+            mismatches_in_one_host(&doubling_unions(depth), &rows)
                 .into_iter()
                 .map(|failure| format!("depth {depth}: {failure}")),
         );
