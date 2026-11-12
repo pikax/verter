@@ -1384,9 +1384,13 @@ fn noop_legacy_replace_never_exposes_absent_current_key_under_race() {
         })
     };
 
-    // Many base-equivalent no-op replaces, racing the reader.
+    // Many base-equivalent no-op replaces, racing the reader. Each insert
+    // builds its own payload and compares it structurally, so one indexed
+    // file serves every replace: building a fresh one costs more than the
+    // replace it feeds.
+    let indexed = synth_indexed(0x55);
     for _ in 0..20_000u64 {
-        store.insert(Arc::clone(&canonical), synth_indexed(0x55));
+        store.insert(Arc::clone(&canonical), Arc::clone(&indexed));
     }
     stop.store(true, Ordering::Relaxed);
     reader.join().expect("reader thread must not panic");

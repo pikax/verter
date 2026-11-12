@@ -172,13 +172,34 @@ fn two_object_unions_meet_the_limit_at_one_hundred_thousand() {
 /// Measured: at `|X|` 40 (4,040) and 990 (99,990) `IsAny<R>` is
 /// `"not-any"` and `[R] extends [{ x: 0 }] ? 1 : 2` is `2`; at 991
 /// (100,091) they are `any` and `1` under TS2590.
+///
+/// The gate checks 40, whose whole product would be over the limit, and 991,
+/// the first width whose divided product is. 990, the widest that builds
+/// (99,990 constituents), is checked by
+/// [`nightly_scale::three_written_types_build_up_to_the_limit`]. The limit
+/// itself counts as the checker counts
+/// (`checker_policy::tests::the_cross_product_rule_counts_as_the_checker_counts`).
 #[test]
 fn three_written_types_divide_before_the_product_is_checked() {
-    for (x, is_any, relation) in [
-        (40, "\"not-any\"", "2"),
-        (990, "\"not-any\"", "2"),
-        (991, "any", "1"),
-    ] {
+    assert_three_written_types_divide(&[(40, "\"not-any\"", "2"), (991, "any", "1")]);
+}
+
+mod nightly_scale {
+    use super::*;
+
+    /// [`super::three_written_types_divide_before_the_product_is_checked`] at
+    /// `|X|` 990, whose divided product of 99,990 constituents is built.
+    #[test]
+    fn three_written_types_build_up_to_the_limit() {
+        assert_three_written_types_divide(&[(990, "\"not-any\"", "2")]);
+    }
+}
+
+/// `X & Y & Z` at each `(|X|, IsAny<R>, relation)` row answers as the
+/// checker does.
+#[track_caller]
+fn assert_three_written_types_divide(rows: &[(usize, &str, &str)]) {
+    for &(x, is_any, relation) in rows {
         let source = format!(
             "{IS_ANY}{}{}{}type R = X & Y & Z;\n",
             object_union("X", "x", x),

@@ -667,16 +667,19 @@ fn conditional_chain(length: usize, branch: impl Fn(usize) -> String) -> String 
 }
 
 /// The literal-branch chain `literal_length` levels long and the alias-branch
-/// chain 100 levels long, each displayed cold and then warm.
-fn conditional_chain_displays(literal_length: usize) -> [(String, [String; 2]); 2] {
+/// chain `alias_length` levels long, each displayed cold and then warm.
+fn conditional_chain_displays(
+    literal_length: usize,
+    alias_length: usize,
+) -> [(String, [String; 2]); 2] {
     [
         (
             conditional_chain(literal_length, |_| "\"ok\"".to_owned()),
             format!("C{literal_length}"),
         ),
         (
-            conditional_chain(100, |p| format!("C{p}")),
-            "C100".to_owned(),
+            conditional_chain(alias_length, |p| format!("C{p}")),
+            format!("C{alias_length}"),
         ),
     ]
     .map(|(source, probe)| {
@@ -692,17 +695,20 @@ fn assert_conditional_chains_decide(displays: [(String, [String; 2]); 2]) {
     }
 }
 
-/// The literal-branch chain at 200 levels and the alias-branch chain at 100,
+/// The literal-branch chain at 200 levels and the alias-branch chain at 50,
 /// cold and warm alike, on a 448 KiB stack: the gate version of the 500- and
 /// 100-level, 1 MiB test in the nightly scale tier. The chains need 192 to
 /// 256 KiB of fixed stack (measured at ten levels), so 448 KiB leaves at most
-/// 1.28 KiB a level over 200 levels, against at least 1.54 KiB over 500
-/// levels on 1 MiB for the same fixed need; the 100-level alias-branch chain
-/// keeps its length on the smaller stack, so its bound is tighter still.
+/// 1.28 KiB a level over 200 literal-branch levels, against at least 1.54 KiB
+/// over 500 levels on 1 MiB, and at most 5.12 KiB a level over 50
+/// alias-branch levels, against at least 7.68 KiB over 100 levels on 1 MiB.
+/// Each alias-branch decision walks the carriers below it, so that chain's
+/// cost grows faster than its length: 50 levels decide in about a third of
+/// the time 100 take.
 #[test]
 fn conditional_chains_decide_cold_and_warm_on_a_small_stack() {
     in_a_fresh_process(test_path!(), || {
-        let displays = on_a_stack_of(448 << 10, || conditional_chain_displays(200));
+        let displays = on_a_stack_of(448 << 10, || conditional_chain_displays(200, 50));
         assert_conditional_chains_decide(displays);
     });
 }
@@ -1558,7 +1564,7 @@ mod nightly_scale {
     #[test]
     fn conditional_chains_decide_cold_and_warm_on_a_one_mebibyte_stack() {
         in_a_fresh_process(test_path!(), || {
-            let displays = on_a_one_mebibyte_stack(|| conditional_chain_displays(500));
+            let displays = on_a_one_mebibyte_stack(|| conditional_chain_displays(500, 100));
             assert_conditional_chains_decide(displays);
         });
     }

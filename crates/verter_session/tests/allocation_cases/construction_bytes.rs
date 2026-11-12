@@ -232,10 +232,49 @@ fn assert_relation_within_charge(count: usize, allowance: Option<u32>) -> i64 {
 /// Measured on TypeScript 7.0.2 (all four settings agree): `[S] extends [T] ?
 /// 1 : 2` is `1` over 200 reversed arms, `1` at 1,800 and `2` under TS2859
 /// at 2,100.
+///
+/// The gate relates 100 and 141 arms in full (5,050 and 10,011 pairs), so
+/// the working state per comparison is compared across twice the
+/// comparisons, under 9/8 of the first size's (about the square root of the
+/// 5/4 the full run allows across four times the comparisons); the relation
+/// its allowance stops is
+/// [`a_relation_stopped_by_its_allowance_holds_no_more_than_it_charges`].
+/// The full 200-arm relation (20,100 pairs) is
+/// [`nightly_scale::a_relation_of_200_arms_holds_no_more_than_it_charges`].
 #[test]
 fn a_relation_holds_no_more_than_it_charges() {
-    // More sizes are measured on request (`VERTER_RELATION_PAIR_ARMS=2100,3200`);
-    // the default two keep the canary fast.
+    assert_relations_hold_no_more_than_they_charge(&[100, 141], false, (9, 8));
+}
+
+/// 200 arms under an allowance that stops them part way are measured per
+/// comparison they ran, against 100 arms related in full.
+#[test]
+fn a_relation_stopped_by_its_allowance_holds_no_more_than_it_charges() {
+    assert_relations_hold_no_more_than_they_charge(&[100], true, (5, 4));
+}
+
+mod nightly_scale {
+    use super::*;
+
+    /// [`super::a_relation_holds_no_more_than_it_charges`] and its allowance
+    /// counterpart at full size: 100 and 200 arms in full, then 200 under
+    /// the allowance.
+    #[test]
+    fn a_relation_of_200_arms_holds_no_more_than_it_charges() {
+        assert_relations_hold_no_more_than_they_charge(&[100, 200], true, (5, 4));
+    }
+}
+
+/// Relate each of `full` reversed arms in full, then, when `stopped`, 200
+/// arms under an allowance of 5,000 comparisons, and check that the working
+/// state per comparison stays within `growth` (a numerator over a
+/// denominator) of the first size's.
+fn assert_relations_hold_no_more_than_they_charge(
+    full: &[usize],
+    stopped: bool,
+    (numerator, denominator): (i64, i64),
+) {
+    // More sizes are measured on request (`VERTER_RELATION_PAIR_ARMS=2100,3200`).
     let requested: Vec<usize> = std::env::var("VERTER_RELATION_PAIR_ARMS")
         .map(|sizes| {
             sizes
@@ -245,17 +284,19 @@ fn a_relation_holds_no_more_than_it_charges() {
         })
         .unwrap_or_default();
     let mut active_per_comparison = Vec::new();
-    for count in [100, 200].into_iter().chain(requested) {
+    for count in full.iter().copied().chain(requested) {
         active_per_comparison.push(assert_relation_within_charge(count, None));
     }
     // 200 arms relate 20,100 pairs; an allowance of a quarter of them stops
     // the check part way, the way the checker's own allowance stops 2,100
     // arms, at a size the default run reaches quickly.
-    active_per_comparison.push(assert_relation_within_charge(200, Some(5_000)));
+    if stopped {
+        active_per_comparison.push(assert_relation_within_charge(200, Some(5_000)));
+    }
     assert!(
-        active_per_comparison
-            .iter()
-            .all(|per_comparison| per_comparison * 4 <= active_per_comparison[0] * 5),
+        active_per_comparison.iter().all(|per_comparison| {
+            per_comparison * denominator <= active_per_comparison[0] * numerator
+        }),
         "the working state per comparison grows with the arms: {active_per_comparison:?}"
     );
 }
