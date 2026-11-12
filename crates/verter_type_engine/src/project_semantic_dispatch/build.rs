@@ -10079,51 +10079,70 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         })
     }
 
+    /// What a recording held across the steps of a computation retained
+    /// between them ([`Self::hold_transaction_read`]) records under: the
+    /// installed fact policy, and the canonical evidence epoch. `None` when
+    /// the read could not be replayed. Such a computation runs under a
+    /// completeness scope of its own, so it never needs the private scope
+    /// [`Self::begin_transaction_read`] opens where none is active; one
+    /// that would is not recorded.
+    pub(super) fn held_transaction_read_policy(
+        &self,
+    ) -> Option<(verter_session_query::facts::policy::FactPolicy, u64)> {
+        if !crate::request_context::cold_compute_completeness_scope_active() {
+            return None;
+        }
+        let (policy, private_completeness, evidence_epoch) = self.transaction_read_prelude()?;
+        verter_debug_assert!(private_completeness.is_none());
+        Some((policy, evidence_epoch))
+    }
+
     /// [`Self::begin_transaction_read`] for a read recorded across the
     /// steps of a computation retained between them: the same recording,
-    /// owned by the computation. [`Self::finish_held_transaction_read`]
-    /// ends it.
-    pub(super) fn hold_transaction_read(&self) -> Option<HeldTransactionReadRecording> {
-        let (policy, private_completeness, evidence_epoch) = self.transaction_read_prelude()?;
+    /// owned by the computation, whose thread-side part is `rails`, just
+    /// opened in the computation's rail stack under the policy
+    /// [`Self::held_transaction_read_policy`] gave with `evidence_epoch`.
+    /// [`Self::finish_held_transaction_read`] ends it.
+    pub(super) fn hold_transaction_read(
+        &self,
+        rails: super::flow_return::RecordingRail,
+        evidence_epoch: u64,
+    ) -> HeldTransactionReadRecording {
         let frame_depth = {
             let mut stack = self.build_local_taint.borrow_mut();
             stack.push(super::BuildLocalTaint::default());
             stack.len()
         };
-        let refusals = crate::fact_tracing::RefusalObservationScope::enter();
-        let reads = crate::resolver_core::resolver_context::FactReadRecording::begin(policy);
-        Some(HeldTransactionReadRecording {
-            reads,
-            refusals,
+        HeldTransactionReadRecording {
+            rails,
             frame_depth,
-            private_completeness,
             evidence_epoch,
-        })
+        }
     }
 
-    /// End a held recording as [`TransactionReadRecording::finish`] ends
-    /// one, for a read whose replay must reproduce every rail it reached:
-    /// one that raised or read an operation refusal is not reusable, since
-    /// the replay re-deposits no refusal.
+    /// End a held recording, whose rails observed `closed`, as
+    /// [`TransactionReadRecording::finish`] ends one, for a read whose replay
+    /// must reproduce every rail it reached: one that raised or read an
+    /// operation refusal is not reusable, since the replay re-deposits no
+    /// refusal.
     pub(super) fn finish_held_transaction_read(
         &self,
         recording: HeldTransactionReadRecording,
+        closed: super::flow_return::ClosedRecording,
         complete: bool,
     ) -> Option<(
         verter_session_query::facts::reuse::ReuseClass,
         super::dispatch_txn::FlowMemberReuse,
     )> {
         let HeldTransactionReadRecording {
-            reads,
-            refusals,
+            rails: _,
             frame_depth,
-            private_completeness,
             evidence_epoch,
         } = recording;
         finish_recorded_read(
             self,
-            reads,
-            refusals,
+            closed.reads,
+            closed.refused,
             || {
                 let mut stack = self.build_local_taint.borrow_mut();
                 verter_debug_assert!(
@@ -10132,7 +10151,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 );
                 stack.pop().unwrap_or_default()
             },
-            private_completeness,
+            None,
             evidence_epoch,
             complete,
             false,
@@ -22984,10 +23003,13 @@ impl TransactionReadRecording<'_> {
             private_completeness,
             evidence_epoch,
         } = self;
+        let reads = reads.finish();
+        let refused = refusals.observed();
+        drop(refusals);
         finish_recorded_read(
             dispatch,
             reads,
-            refusals,
+            refused,
             || frame.finish(),
             private_completeness,
             evidence_epoch,
@@ -22999,32 +23021,38 @@ impl TransactionReadRecording<'_> {
 
 /// A transaction read being recorded across the steps of a computation
 /// retained between them ([`ProjectSemanticDispatch::hold_transaction_read`]):
-/// the rails of a [`TransactionReadRecording`], borrowing nothing from the
-/// dispatch, so the computation owns it by value.
+/// the recording of a [`TransactionReadRecording`], borrowing nothing, so
+/// the computation owns it by value. Its build-local frame, on the request,
+/// stays where it is between steps; its refusal scope and fact recorder, on
+/// the thread, are rails in the computation's own rail stack, which it
+/// names. It is plain data:
 /// [`ProjectSemanticDispatch::finish_held_transaction_read`] ends it.
-/// Dropped unfinished (only an unwind drops one), its request-context
-/// scopes uninstall themselves; the build-local frame it opened is the
-/// unwinding build's, discarded with it.
 pub(super) struct HeldTransactionReadRecording {
-    // Uninstalled innermost first: the recorder, then the refusal scope
-    // and the private completeness scope.
-    reads: crate::resolver_core::resolver_context::FactReadRecording,
-    refusals: crate::fact_tracing::RefusalObservationScope,
+    /// The recording's thread-side rails in its computation's rail stack.
+    rails: super::flow_return::RecordingRail,
     /// The build-local taint stack's depth with this recording's frame on
     /// top.
     frame_depth: usize,
-    private_completeness: Option<crate::request_context::ColdComputeCompletenessScope>,
     evidence_epoch: u64,
 }
 
-/// End a recording whose build-local frame `take_frame` pops: fold what it
-/// observed into the enclosing build, and return what reusing the read must
-/// replay ([`TransactionReadRecording::finish`]).
+impl HeldTransactionReadRecording {
+    /// The recording's thread-side rails.
+    pub(super) fn rails(&self) -> super::flow_return::RecordingRail {
+        self.rails
+    }
+}
+
+/// End a recording whose fact recorder recorded `reads` and whose refusal
+/// scope observed `refused`, both already off the thread, and whose
+/// build-local frame `take_frame` pops: fold what it observed into the
+/// enclosing build, and return what reusing the read must replay
+/// ([`TransactionReadRecording::finish`]).
 #[allow(clippy::too_many_arguments)]
 fn finish_recorded_read<C: crate::resolver_core::ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
-    reads: crate::resolver_core::resolver_context::FactReadRecording,
-    refusals: crate::fact_tracing::RefusalObservationScope,
+    reads: crate::resolver_core::resolver_context::RecordedFactReads,
+    refused: Option<verter_session_query::facts::reuse::NonCacheableReadReason>,
     take_frame: impl FnOnce() -> super::BuildLocalTaint,
     private_completeness: Option<crate::request_context::ColdComputeCompletenessScope>,
     evidence_epoch: u64,
@@ -23035,9 +23063,6 @@ fn finish_recorded_read<C: crate::resolver_core::ResolverCapabilities>(
     super::dispatch_txn::FlowMemberReuse,
 )> {
     {
-        let reads = reads.finish();
-        let refused = refusals.observed();
-        drop(refusals);
         let observed = take_frame();
         let folded_partial =
             crate::request_context::current_cold_compute_completeness().is_partial();

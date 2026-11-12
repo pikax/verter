@@ -210,26 +210,86 @@ pub(crate) fn collapse_evidence(
     }
 }
 
-/// Pops the recorder its scope installed, unwinding included.
-pub(crate) struct RecorderScope(());
+/// Removes the recorder its scope installed, by identity, unwinding
+/// included. The scope borrows the recorder, so the recorder outlives it.
+pub(crate) struct RecorderScope<'r> {
+    recorder: *const FactReadRecorder,
+    _recorder: std::marker::PhantomData<&'r FactReadRecorder>,
+}
 
-impl Drop for RecorderScope {
+impl Drop for RecorderScope<'_> {
     fn drop(&mut self) {
-        ACTIVE_RECORDERS.with(|slot| {
-            slot.borrow_mut().pop();
-        });
+        detach_recorder(self.recorder);
     }
 }
 
 /// Install `recorder` for the lifetime of the returned scope.
+pub(crate) fn install_recorder(recorder: &FactReadRecorder) -> RecorderScope<'_> {
+    attach_recorder(recorder);
+    RecorderScope {
+        recorder,
+        _recorder: std::marker::PhantomData,
+    }
+}
+
+/// Push `recorder` on this thread's recorder stack: the raw form a held
+/// recording attaches by between the steps of a computation that does not
+/// run inside one scope.
 ///
-/// SAFETY: the caller keeps `recorder` alive for as long as the scope,
-/// and drops the scope first.
-pub(crate) fn install_recorder(recorder: &FactReadRecorder) -> RecorderScope {
+/// SAFETY: the caller removes it with [`detach_recorder`] before
+/// `recorder` is freed.
+pub(crate) fn attach_recorder(recorder: &FactReadRecorder) {
     ACTIVE_RECORDERS.with(|slot| {
         slot.borrow_mut().push(recorder as *const FactReadRecorder);
     });
-    RecorderScope(())
+}
+
+/// Remove `recorder` from this thread's recorder stack, by identity. It is
+/// the top of the stack, except while the thread unwinds: popping blindly
+/// there would remove another computation's recorder and leave this one
+/// collecting that computation's facts.
+pub(crate) fn detach_recorder(recorder: *const FactReadRecorder) {
+    ACTIVE_RECORDERS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let position = slot
+            .iter()
+            .rposition(|&active| std::ptr::eq(active, recorder));
+        verter_debug_assert!(
+            std::thread::panicking()
+                || (position.is_some() && position == slot.len().checked_sub(1)),
+            "a recorder leaves from the top of its thread's stack"
+        );
+        if let Some(position) = position {
+            slot.remove(position);
+        }
+    });
+}
+
+/// Remove `recorder` from this thread's stack wherever it is, if it is
+/// still there: a recording dropped after the extent it was attached in
+/// unwound, which may already have removed it.
+pub(crate) fn forget_recorder(recorder: *const FactReadRecorder) {
+    ACTIVE_RECORDERS.with(|slot| {
+        slot.borrow_mut()
+            .retain(|active| !std::ptr::eq(*active, recorder));
+    });
+}
+
+/// How many recorders are installed on this thread.
+pub(crate) fn recorder_depth() -> usize {
+    ACTIVE_RECORDERS.with(|slot| slot.borrow().len())
+}
+
+/// Remove every recorder installed above `depth`: an unwinding computation
+/// restores the thread's stack as it found it.
+pub(crate) fn truncate_recorders(depth: usize) {
+    ACTIVE_RECORDERS.with(|slot| slot.borrow_mut().truncate(depth));
+}
+
+/// The recorders installed on this thread, innermost last (test-only).
+#[cfg(test)]
+pub(crate) fn active_recorders_for_tests() -> Vec<*const FactReadRecorder> {
+    ACTIVE_RECORDERS.with(|slot| slot.borrow().to_vec())
 }
 
 fn active_recorders() -> SmallVec<[*const FactReadRecorder; 4]> {
@@ -573,6 +633,47 @@ mod propagation_tests {
 #[cfg(test)]
 mod recorder_tests {
     use super::*;
+
+    /// A recorder scope removes its own recorder, by identity, even when an
+    /// unwind drops the scopes out of order: the recorder installed above it
+    /// stays installed, and nothing is left recording for a scope that has
+    /// gone.
+    #[test]
+    fn an_out_of_order_unwind_removes_each_recorder_by_identity() {
+        struct Probe<'s>(&'s RefCell<Vec<*const FactReadRecorder>>);
+        impl Drop for Probe<'_> {
+            fn drop(&mut self) {
+                *self.0.borrow_mut() = active_recorders_for_tests();
+            }
+        }
+        // Fields drop in declaration order: the outer recorder's scope
+        // first, while the inner one is still installed above it.
+        struct OutOfOrder<'a> {
+            _outer: RecorderScope<'a>,
+            _probe: Probe<'a>,
+            _inner: RecorderScope<'a>,
+        }
+        let outer = FactReadRecorder::default();
+        let inner = FactReadRecorder::default();
+        let seen = RefCell::new(Vec::new());
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let outer_scope = install_recorder(&outer);
+            let inner_scope = install_recorder(&inner);
+            let _held = OutOfOrder {
+                _outer: outer_scope,
+                _probe: Probe(&seen),
+                _inner: inner_scope,
+            };
+            panic!("unwind with the recorder scopes out of order");
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(
+            *seen.borrow(),
+            vec![&inner as *const FactReadRecorder],
+            "the outer scope removes the outer recorder, not the one above it"
+        );
+        assert!(active_recorders_for_tests().is_empty());
+    }
 
     #[test]
     fn a_late_recorder_receives_a_fact_the_tracer_already_holds() {

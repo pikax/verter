@@ -10779,10 +10779,13 @@ mod branches;
 mod call_stack;
 #[path = "flow_return_nested.rs"]
 mod nested;
+#[path = "flow_return_rails.rs"]
+mod rails;
 #[path = "flow_return_read.rs"]
 mod read;
 use branches::{BranchStep, DeadPath, Entered};
 use nested::{NestedChildParts, NestedDemand, NestedSignatureStep};
+pub(super) use rails::{ClosedObservation, ClosedRecording, ObservationRail, RecordingRail};
 #[path = "flow_return_operators.rs"]
 mod operators;
 pub(super) use call_stack::HeldContextualRoute;
@@ -10844,28 +10847,45 @@ pub(super) trait FlowDemandDriver {
     fn observe_read<T>(&self, read: impl FnOnce() -> T)
         -> super::flow_return_fact::ObservedRead<T>;
     fn preserve_read_reuse_evidence<T>(&self, read: &super::flow_return_fact::ObservedRead<T>);
-    /// Open the observation of a stepped read its waiting frame owns
+    /// Open the observation of a stepped read its waiting frame owns, whose
+    /// thread-side rails are `rails`
     /// ([`ProjectSemanticDispatch::hold_read_observation`]).
-    fn hold_read_observation(&self) -> super::flow_return_fact::HeldReadObservation;
-    /// Close a held read observation
+    fn hold_read_observation(
+        &self,
+        rails: rails::ObservationRail,
+    ) -> super::flow_return_fact::HeldReadObservation;
+    /// Close a held read observation whose rails observed `closed`
     /// ([`ProjectSemanticDispatch::finish_held_read_observation`]).
     fn finish_held_read_observation(
         &self,
         held: super::flow_return_fact::HeldReadObservation,
+        closed: rails::ClosedObservation,
     ) -> super::flow_return_fact::ObservedRead<()>;
     fn adopt_read<T>(
         &self,
         read: super::flow_return_fact::ObservedRead<T>,
     ) -> Result<T, crate::semantic_query::ExecutionAbort>;
-    /// Begin recording a read the rest of the evaluation may replay
-    /// ([`ProjectSemanticDispatch::begin_transaction_read`]).
-    fn begin_transaction_read(&self) -> Option<super::build::HeldTransactionReadRecording>;
-    /// End `recording`: what replaying it reproduces, when it is reusable
-    /// and raised no operation refusal
+    /// What recording a read the rest of the evaluation may replay records
+    /// under, when it can be recorded
+    /// ([`ProjectSemanticDispatch::held_transaction_read_policy`]).
+    fn held_transaction_read_policy(
+        &self,
+    ) -> Option<(verter_session_query::facts::policy::FactPolicy, u64)>;
+    /// Begin recording a read the rest of the evaluation may replay, whose
+    /// thread-side rails are `rails`
+    /// ([`ProjectSemanticDispatch::hold_transaction_read`]).
+    fn hold_transaction_read(
+        &self,
+        rails: rails::RecordingRail,
+        evidence_epoch: u64,
+    ) -> super::build::HeldTransactionReadRecording;
+    /// End `recording`, whose rails observed `closed`: what replaying it
+    /// reproduces, when it is reusable and raised no operation refusal
     /// ([`ProjectSemanticDispatch::finish_held_transaction_read`]).
     fn finish_transaction_read(
         &self,
         recording: super::build::HeldTransactionReadRecording,
+        closed: rails::ClosedRecording,
         complete: bool,
     ) -> Option<(
         verter_session_query::facts::reuse::ReuseClass,
@@ -11434,14 +11454,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn preserve_read_reuse_evidence<T>(&self, read: &super::flow_return_fact::ObservedRead<T>) {
         read.preserve_reuse_evidence(self);
     }
-    fn hold_read_observation(&self) -> super::flow_return_fact::HeldReadObservation {
-        ProjectSemanticDispatch::hold_read_observation(self)
+    fn hold_read_observation(
+        &self,
+        rails: rails::ObservationRail,
+    ) -> super::flow_return_fact::HeldReadObservation {
+        ProjectSemanticDispatch::hold_read_observation(self, rails)
     }
     fn finish_held_read_observation(
         &self,
         held: super::flow_return_fact::HeldReadObservation,
+        closed: rails::ClosedObservation,
     ) -> super::flow_return_fact::ObservedRead<()> {
-        ProjectSemanticDispatch::finish_held_read_observation(self, held)
+        ProjectSemanticDispatch::finish_held_read_observation(self, held, closed)
     }
     fn adopt_read<T>(
         &self,
@@ -11449,18 +11473,28 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     ) -> Result<T, crate::semantic_query::ExecutionAbort> {
         read.adopt(self)
     }
-    fn begin_transaction_read(&self) -> Option<super::build::HeldTransactionReadRecording> {
-        ProjectSemanticDispatch::hold_transaction_read(self)
+    fn held_transaction_read_policy(
+        &self,
+    ) -> Option<(verter_session_query::facts::policy::FactPolicy, u64)> {
+        ProjectSemanticDispatch::held_transaction_read_policy(self)
+    }
+    fn hold_transaction_read(
+        &self,
+        rails: rails::RecordingRail,
+        evidence_epoch: u64,
+    ) -> super::build::HeldTransactionReadRecording {
+        ProjectSemanticDispatch::hold_transaction_read(self, rails, evidence_epoch)
     }
     fn finish_transaction_read(
         &self,
         recording: super::build::HeldTransactionReadRecording,
+        closed: rails::ClosedRecording,
         complete: bool,
     ) -> Option<(
         verter_session_query::facts::reuse::ReuseClass,
         super::dispatch_txn::FlowMemberReuse,
     )> {
-        ProjectSemanticDispatch::finish_held_transaction_read(self, recording, complete)
+        ProjectSemanticDispatch::finish_held_transaction_read(self, recording, closed, complete)
     }
     fn replay_transaction_read(
         &self,
@@ -12404,14 +12438,18 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     fn preserve_read_reuse_evidence<T>(&self, read: &super::flow_return_fact::ObservedRead<T>) {
         self.driver.preserve_read_reuse_evidence(read);
     }
-    fn hold_read_observation(&self) -> super::flow_return_fact::HeldReadObservation {
-        self.driver.hold_read_observation()
+    fn hold_read_observation(
+        &self,
+        rails: rails::ObservationRail,
+    ) -> super::flow_return_fact::HeldReadObservation {
+        self.driver.hold_read_observation(rails)
     }
     fn finish_held_read_observation(
         &self,
         held: super::flow_return_fact::HeldReadObservation,
+        closed: rails::ClosedObservation,
     ) -> super::flow_return_fact::ObservedRead<()> {
-        self.driver.finish_held_read_observation(held)
+        self.driver.finish_held_read_observation(held, closed)
     }
     fn adopt_read<T>(
         &self,
@@ -12419,18 +12457,29 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     ) -> Result<T, crate::semantic_query::ExecutionAbort> {
         self.driver.adopt_read(read)
     }
-    fn begin_transaction_read(&self) -> Option<super::build::HeldTransactionReadRecording> {
-        self.driver.begin_transaction_read()
+    fn held_transaction_read_policy(
+        &self,
+    ) -> Option<(verter_session_query::facts::policy::FactPolicy, u64)> {
+        self.driver.held_transaction_read_policy()
+    }
+    fn hold_transaction_read(
+        &self,
+        rails: rails::RecordingRail,
+        evidence_epoch: u64,
+    ) -> super::build::HeldTransactionReadRecording {
+        self.driver.hold_transaction_read(rails, evidence_epoch)
     }
     fn finish_transaction_read(
         &self,
         recording: super::build::HeldTransactionReadRecording,
+        closed: rails::ClosedRecording,
         complete: bool,
     ) -> Option<(
         verter_session_query::facts::reuse::ReuseClass,
         super::dispatch_txn::FlowMemberReuse,
     )> {
-        self.driver.finish_transaction_read(recording, complete)
+        self.driver
+            .finish_transaction_read(recording, closed, complete)
     }
     fn replay_transaction_read(
         &self,
@@ -13379,6 +13428,9 @@ struct FlowTables {
     /// Each frame's product execution, by [`ExecutionId`]: open from the
     /// frame's preparation until its function's signature is composed.
     executions: Vec<Option<std::cell::RefCell<FlowFrameExecution>>>,
+    /// The thread-side rails of the read observations and recordings the
+    /// evaluation's frames hold open ([`rails::ReadRails`]).
+    rails: rails::ReadRails,
 }
 
 impl FlowTables {
@@ -13427,6 +13479,47 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             st,
             tables,
         }
+    }
+
+    /// Hold the observation of a read this frame's step waits on: its rails
+    /// on top of the evaluation's rail stack, its frame on the request.
+    fn hold_read_observation(&mut self) -> super::flow_return_fact::HeldReadObservation {
+        let rails = self.tables.rails.open_observation();
+        self.dispatch.hold_read_observation(rails)
+    }
+
+    /// Close a held read observation: what the read observed since it was
+    /// held, for its consumer to adopt or discard.
+    fn finish_held_read_observation(
+        &mut self,
+        held: super::flow_return_fact::HeldReadObservation,
+    ) -> super::flow_return_fact::ObservedRead<()> {
+        let closed = self.tables.rails.close_observation(held.rails());
+        self.dispatch.finish_held_read_observation(held, closed)
+    }
+
+    /// Begin recording a read the rest of the evaluation may replay, its
+    /// rails on top of the evaluation's rail stack. `None` when the read
+    /// could not be replayed.
+    fn begin_transaction_read(&mut self) -> Option<super::build::HeldTransactionReadRecording> {
+        let (policy, evidence_epoch) = self.dispatch.held_transaction_read_policy()?;
+        let rails = self.tables.rails.open_recording(policy);
+        Some(self.dispatch.hold_transaction_read(rails, evidence_epoch))
+    }
+
+    /// End a recording [`Self::begin_transaction_read`] began: what
+    /// replaying it reproduces, when it is reusable.
+    fn finish_transaction_read(
+        &mut self,
+        recording: super::build::HeldTransactionReadRecording,
+        complete: bool,
+    ) -> Option<(
+        verter_session_query::facts::reuse::ReuseClass,
+        super::dispatch_txn::FlowMemberReuse,
+    )> {
+        let closed = self.tables.rails.close_recording(recording.rails());
+        self.dispatch
+            .finish_transaction_read(recording, closed, complete)
     }
 }
 
@@ -15694,7 +15787,6 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         self.settle_method_cycle(&receiver, member, value, again, degradation);
                     if !again && receiver.forward_read.get() {
                         if self
-                            .dispatch
                             .finish_held_read_observation(observations)
                             .discard()
                             .is_err()
@@ -15704,11 +15796,8 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         self.st.degradation = degradation;
                         frame.again.push((position, member));
                     } else {
-                        if self
-                            .dispatch
-                            .adopt_read(self.dispatch.finish_held_read_observation(observations))
-                            .is_err()
-                        {
+                        let observed = self.finish_held_read_observation(observations);
+                        if self.dispatch.adopt_read(observed).is_err() {
                             return ObjectEvalStep::Done(Positional::Unmodeled);
                         }
                         frame.again_progress = true;
@@ -15992,7 +16081,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 degradation: self.st.degradation,
                 holds_before: self.st.holds.len(),
                 again,
-                observations: self.dispatch.hold_read_observation(),
+                observations: self.hold_read_observation(),
             };
             // A method is typed by the contextual signature its property's
             // contextual type gives it, as a function-valued property is.

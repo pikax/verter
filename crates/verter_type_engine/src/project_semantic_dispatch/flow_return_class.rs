@@ -553,19 +553,15 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let receiver = frame.receiver.clone().expect("the class's receiver");
         if !again && receiver.forward_read.get() && is_class_function(&member.value) {
             if let Some(observations) = observations {
-                let _ = self
-                    .dispatch
-                    .finish_held_read_observation(observations)
-                    .discard();
+                let _ = self.finish_held_read_observation(observations).discard();
             }
             self.st.degradation = degradation;
             frame.again.push(index);
             return;
         }
         if let Some(observations) = observations {
-            let _ = self
-                .dispatch
-                .adopt_read(self.dispatch.finish_held_read_observation(observations));
+            let observed = self.finish_held_read_observation(observations);
+            let _ = self.dispatch.adopt_read(observed);
         }
         self.record_receiver_member(&receiver, member, value);
         frame.values[index] = Some(value);
@@ -631,7 +627,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                 index,
                                 degradation,
                                 again,
-                                observations: Some(self.dispatch.hold_read_observation()),
+                                observations: Some(self.hold_read_observation()),
                                 value: if getter {
                                     MemberAwait::Getter
                                 } else {

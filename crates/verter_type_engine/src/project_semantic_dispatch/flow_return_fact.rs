@@ -109,22 +109,30 @@ impl ReadObservationScope<'_> {
 }
 
 /// The observation owner for a stepped read whose waiting frame is kept
-/// between steps: the rails of a [`ReadObservationScope`], borrowing nothing
-/// from the dispatch, so the frame waiting on the read owns it by value
-/// (an evaluator activation retains its frames in its own cell).
-/// [`ProjectSemanticDispatch::finish_held_read_observation`] closes it. Its
-/// request-context rails close themselves if it drops unfinished (only an
-/// unwinding evaluation drops one); the build-local frame it opened is then
-/// the unwinding build's, discarded with it.
+/// between steps: the observation of a [`ReadObservationScope`], borrowing
+/// nothing, so the frame waiting on the read owns it by value (an evaluator
+/// activation retains its frames in its own cell). Its state on the request
+/// (the build-local taint frame it opened, the degraded-read count it
+/// started from) stays where it is between steps; its state on the thread
+/// is a set of rails in the flow read's own rail stack, which it names
+/// ([`super::flow_return::ObservationRail`]). It is plain data:
+/// [`ProjectSemanticDispatch::finish_held_read_observation`] closes it, with
+/// what its rails observed.
 #[must_use = "a held read observation must be finished"]
 pub(super) struct HeldReadObservation {
-    validity: crate::request_context::ExecutionValidityScope,
-    sticky: crate::request_context::DeferredPartialStickyScope,
-    completeness: crate::request_context::ColdComputeCompletenessScope,
+    /// The observation's thread-side rails in its read's rail stack.
+    rails: super::flow_return::ObservationRail,
     /// The build-local taint stack's depth with this observation's frame
     /// on top.
     frame_depth: usize,
     degraded_before: u32,
+}
+
+impl HeldReadObservation {
+    /// The observation's thread-side rails.
+    pub(super) fn rails(&self) -> super::flow_return::ObservationRail {
+        self.rails
+    }
 }
 
 /// An owned return source awaiting a value demand.
@@ -629,36 +637,35 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     /// [`Self::begin_read_observation`] for a read whose waiting frame is
-    /// kept between steps: the same rails, owned by the frame.
-    pub(super) fn hold_read_observation(&self) -> HeldReadObservation {
-        let validity = crate::request_context::ExecutionValidityScope::enter();
-        let sticky = crate::request_context::DeferredPartialStickyScope::enter();
-        let completeness = crate::request_context::ColdComputeCompletenessScope::enter();
+    /// kept between steps: the same observation, owned by the frame, whose
+    /// thread-side part is `rails`, just opened in the flow read's rail
+    /// stack.
+    pub(super) fn hold_read_observation(
+        &self,
+        rails: super::flow_return::ObservationRail,
+    ) -> HeldReadObservation {
         let frame_depth = {
             let mut stack = self.build_local_taint.borrow_mut();
             stack.push(BuildLocalTaint::default());
             stack.len()
         };
         HeldReadObservation {
-            validity,
-            sticky,
-            completeness,
+            rails,
             frame_depth,
             degraded_before: self.degraded_member_reads.get(),
         }
     }
 
-    /// Close `held`: what the read observed since it was held, taken off
-    /// the enclosing rails exactly as [`ReadObservationScope::finish`]
-    /// takes it.
+    /// Close `held`, whose rails observed `closed`: what the read observed
+    /// since it was held, taken off the enclosing rails exactly as
+    /// [`ReadObservationScope::finish`] takes it.
     pub(super) fn finish_held_read_observation(
         &self,
         held: HeldReadObservation,
+        closed: super::flow_return::ClosedObservation,
     ) -> ObservedRead<()> {
         let HeldReadObservation {
-            validity,
-            sticky,
-            completeness,
+            rails: _,
             frame_depth,
             degraded_before,
         } = held;
@@ -666,7 +673,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .degraded_member_reads
             .get()
             .saturating_sub(degraded_before);
-        let abort = crate::request_context::current_execution_abort();
         let frame = {
             let mut stack = self.build_local_taint.borrow_mut();
             verter_debug_assert!(
@@ -675,15 +681,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             );
             stack.pop().unwrap_or_default()
         };
-        let observed = crate::request_context::current_cold_compute_completeness();
-        completeness.discard();
-        drop(sticky);
-        drop(validity);
         self.degraded_member_reads.set(degraded_before);
         ObservedRead {
             value: (),
-            abort,
-            completeness: observed,
+            abort: closed.abort,
+            completeness: closed.completeness,
             frame,
             degraded_member_reads,
         }
