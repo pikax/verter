@@ -215,6 +215,8 @@ pub(crate) struct AtomicSemanticGraphStats {
     pub(super) call_candidates_begun: Tally,
     /// Argument relations call resolutions' first pass ran.
     pub(super) call_arguments_related: Tally,
+    /// Property pairs object comparisons related.
+    pub(super) relation_members_related: Tally,
     /// Admission stages query entries computed, once per stage.
     pub(super) admission_stages_walked: Tally,
     /// Steps deferred evaluations computed, once per step.
@@ -299,6 +301,7 @@ impl Default for AtomicSemanticGraphStats {
             relation_reductions: Tally::default(),
             call_candidates_begun: Tally::default(),
             call_arguments_related: Tally::default(),
+            relation_members_related: Tally::default(),
             admission_stages_walked: Tally::default(),
             deferred_steps_evaluated: Tally::default(),
             path_length_samples: Mutex::new(SampleCollector::with_cap(SAMPLE_RESERVOIR_CAP)),
@@ -513,6 +516,7 @@ impl SemanticGraphStore {
             relation_reductions: stats.relation_reductions.load(Ordering::Relaxed),
             call_candidates_begun: stats.call_candidates_begun.load(Ordering::Relaxed),
             call_arguments_related: stats.call_arguments_related.load(Ordering::Relaxed),
+            relation_members_related: stats.relation_members_related.load(Ordering::Relaxed),
             admission_stages_walked: stats.admission_stages_walked.load(Ordering::Relaxed),
             deferred_steps_evaluated: stats.deferred_steps_evaluated.load(Ordering::Relaxed),
             path_length_p50,

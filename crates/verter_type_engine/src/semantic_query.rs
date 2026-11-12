@@ -6635,6 +6635,11 @@ pub struct SemanticGraphStats {
     /// Counted where the relation runs, outside every charge and its
     /// rollback, so an argument related again counts again.
     pub call_arguments_related: u64,
+    /// Property pairs object comparisons related, wherever they ran: one
+    /// per target property whose pair the comparison relates. Counted where
+    /// the pair is related, outside every charge and its rollback, so a
+    /// comparison walked again from its first property counts again.
+    pub relation_members_related: u64,
     /// Stages query entries computed admitting their keys, wherever they
     /// ran: one per stage of an entry's sugar, carrier, apparent-wrapper and
     /// signature-subject normalization, counted where the stage runs,
@@ -13073,6 +13078,7 @@ mod tests {
             "relation_reductions",
             "call_candidates_begun",
             "call_arguments_related",
+            "relation_members_related",
             "admission_stages_walked",
             "deferred_steps_evaluated",
         ];

@@ -8249,6 +8249,447 @@ mod semantic_poll_contract {
         drop(other);
     }
 
+    const MEMBER_RELATION_FILE: &str = "/semantic-task/member-relation.ts";
+
+    /// Two recursive interfaces whose first members relate back to the
+    /// pair itself and whose later members relate two applications of
+    /// distinct aliases: relating `Left` to `Right` records the recursive
+    /// member's back-edge before the later member instantiates its
+    /// operands. `OuterLeft` and `OuterRight` wrap the pair in a member of
+    /// their own.
+    const MEMBER_RELATION: &str = "type BoxA<T> = { v: T };\n\
+                                   type BoxB<T> = { v: T };\n\
+                                   interface Left { aNext: Left; zLeaf: BoxA<\"a\"> }\n\
+                                   interface Right { aNext: Right; zLeaf: BoxB<string> }\n\
+                                   interface OuterLeft { inner: Left }\n\
+                                   interface OuterRight { inner: Right }\n";
+
+    fn member_relation_host() -> Arc<crate::VerterHost> {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            MEMBER_RELATION_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(MEMBER_RELATION),
+            crate::FileLanguage::script_ts(),
+        );
+        host.ensure_indexed_ready(MEMBER_RELATION_FILE)
+            .expect("the interfaces have indexed input before a member is held");
+        host
+    }
+
+    /// The interface `pair.0` related to `pair.1` as a machinery root, and
+    /// the instantiation the later member of `Left` and `Right` reads first:
+    /// `BoxA<"a">` in structural transit.
+    fn member_relation_keys(
+        host: &crate::VerterHost,
+        dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        pair: (&str, &str),
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
+        use verter_type_engine::semantic_query::{
+            DeclIdentity, InstantiateKey, LiteralValue, NodeScopeId,
+        };
+        let graph = dispatch.graph_arc();
+        let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+        let whole_hash = host
+            .shallow_file_state(MEMBER_RELATION_FILE)
+            .expect("the interfaces are indexed")
+            .whole_hash;
+        let declaration = |name: &str| {
+            graph.intern_node(SemanticNodeData::DeclRef {
+                identity: DeclIdentity {
+                    canonical_id: MEMBER_RELATION_FILE.into(),
+                    owner,
+                    whole_hash,
+                    decl_name: name.into(),
+                },
+            })
+        };
+        let relate = dispatch
+            .relate_key_for(declaration(pair.0), declaration(pair.1))
+            .to_query_key();
+        // The argument as the file lowered it: a literal bound to its
+        // declaration's file, not the scope-less literal a fixture interns.
+        let a = graph.intern_node_with_scope(
+            SemanticNodeData::Literal(LiteralValue::String("a".into())),
+            NodeScopeId::File {
+                canonical_id: MEMBER_RELATION_FILE.into(),
+                owner,
+                whole_hash,
+                local_scope: None,
+            },
+        );
+        let leaf = SemanticQueryKey::Instantiate(InstantiateKey::new(
+            dispatch.type_slot_for(MEMBER_RELATION_FILE, owner, "BoxA"),
+            Arc::from([a]),
+            dispatch.instantiate_context_for(
+                MEMBER_RELATION_FILE,
+                ProjectionReductionContext::structural_transit(),
+            ),
+        ));
+        (relate, leaf)
+    }
+
+    /// The physical work relations on `host` did, wherever they ran: the
+    /// machinery roots opened, the structural reductions, the
+    /// instantiations built and the property pairs object comparisons
+    /// related. Each is counted where the work is done, outside every
+    /// charge and its rollback.
+    fn member_relation_work(host: &crate::VerterHost) -> [u64; 4] {
+        let stats = host.project_type_store().semantic_graph().stats_snapshot();
+        [
+            stats.relation_roots_opened,
+            stats.relation_reductions,
+            stats.instantiate_count,
+            stats.relation_members_related,
+        ]
+    }
+
+    fn member_relation_work_since(after: [u64; 4], before: [u64; 4]) -> [u64; 4] {
+        std::array::from_fn(|i| after[i] - before[i])
+    }
+
+    /// The synchronous premise of the member rows: `Left` is assignable to
+    /// `Right` — a complete, priced answer — through one root that relates
+    /// both members of the pair and instantiates the later member's
+    /// operands.
+    fn member_relation_premise(pair: (&str, &str)) -> (ReadSummary, [u64; 4]) {
+        let host = member_relation_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let (relate, _) = member_relation_keys(&host, &dispatch, pair);
+        let before = member_relation_work(&host);
+        let read = dispatch.execute_via_cold_build_helper(relate);
+        let synchronous = read_summary(&dispatch, &read);
+        let work = member_relation_work_since(member_relation_work(&host), before);
+        assert!(
+            synchronous.0.contains("Assignable"),
+            "premise: the pair is assignable: {synchronous:?}"
+        );
+        assert!(
+            !synchronous.3 && synchronous.5.is_some(),
+            "premise: a complete, priced answer: {synchronous:?}"
+        );
+        assert_eq!(work[0], 1, "premise: one machinery root: {work:?}");
+        assert!(
+            work[2] >= 2 && work[3] >= 2,
+            "premise: the root relates both members and instantiates the later one's operands: {work:?}"
+        );
+        (synchronous, work)
+    }
+
+    /// What a polled relation root did while its later member's operand
+    /// was held.
+    struct HeldMemberRelation {
+        yielded: bool,
+        suspensions: Vec<
+            verter_type_engine::project_semantic_dispatch::relation::RelationSuspensionForTests,
+        >,
+        at_hold: [u64; 4],
+        repolled_pending: bool,
+        pending_elsewhere: Option<bool>,
+        repoll_work: [u64; 4],
+        woken: bool,
+        work: [u64; 4],
+        read: ValueRead,
+    }
+
+    /// The relation polled at the production entry on a fresh host while
+    /// another task produces its later member's operand instantiation;
+    /// released, its task is resumed on another thread and the answer
+    /// delivered here.
+    fn poll_member_relation_holding(
+        pair: (&str, &str),
+    ) -> (Arc<crate::VerterHost>, HeldMemberRelation) {
+        let host = member_relation_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let (relate, leaf) = member_relation_keys(&host, &dispatch, pair);
+        let (other, lease) = hold_producer(&host, graph, leaf);
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let before = member_relation_work(&host);
+        let _ = verter_type_engine::project_semantic_dispatch::relation::take_relation_suspensions_for_tests();
+        let mut entry = dispatch.poll_query(relate);
+        let (first, suspensions, at_hold, repolled_pending, pending_elsewhere, repoll_work) =
+            while_held(lease, || {
+                let first = entry.poll(&waker);
+                let suspensions = verter_type_engine::project_semantic_dispatch::relation::take_relation_suspensions_for_tests();
+                let at_hold = member_relation_work_since(member_relation_work(&host), before);
+                if first.is_ready() {
+                    return (first, suspensions, at_hold, false, None, [0; 4]);
+                }
+                let repolled_pending = {
+                    let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                    entry.poll(&waker).is_pending()
+                };
+                let pending_elsewhere = entry.task().map(|task| {
+                    assert_send(task);
+                    std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| task.poll(&waker).is_pending())
+                            .join()
+                            .expect("the pending poll returns")
+                    })
+                });
+                let repoll_work = member_relation_work_since(
+                    member_relation_work_since(member_relation_work(&host), before),
+                    at_hold,
+                );
+                (
+                    first,
+                    suspensions,
+                    at_hold,
+                    repolled_pending,
+                    pending_elsewhere,
+                    repoll_work,
+                )
+            });
+        let woken = counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1;
+        let yielded = first.is_pending();
+        let read = match first {
+            Poll::Ready(read) => read,
+            Poll::Pending => resume_elsewhere(&mut entry),
+        };
+        drop(entry);
+        let run = HeldMemberRelation {
+            yielded,
+            suspensions,
+            at_hold,
+            repolled_pending,
+            pending_elsewhere,
+            repoll_work,
+            woken,
+            work: member_relation_work_since(member_relation_work(&host), before),
+            read,
+        };
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+        drop(other);
+        drop(scope);
+        drop(dispatch);
+        (host, run)
+    }
+
+    /// A relation root whose later member's operand instantiation another
+    /// task is producing returns `Pending` at the polled entry from inside
+    /// two object comparisons: the root's first member relates the
+    /// recursive references `Left` and `Right` name on a frame of its own,
+    /// whose comparison's first member re-enters that pair — its back-edge
+    /// recorded on that frame — and whose later member's own frame is open
+    /// above it, its reduction standing at its structural dispatch. Polled again while held, under
+    /// a probe that forbids every wait, and on another thread, it stays
+    /// pending and does no work. Released, it resumes on another thread at
+    /// that member — relating no member, opening no root and reducing no
+    /// pair again — and delivers exactly what the synchronous entry reads,
+    /// receipt tree included, with the same absolute work.
+    #[test]
+    fn a_relation_root_held_at_a_later_member_resumes_after_its_recorded_backedge() {
+        let (synchronous, synchronous_work) = member_relation_premise(("Left", "Right"));
+        let (host, run) = poll_member_relation_holding(("Left", "Right"));
+        assert!(
+            run.yielded,
+            "the root yields while another task instantiates its later member's operand:              work {:?} (synchronous {synchronous_work:?}), synchronous read {synchronous:?}",
+            run.work
+        );
+        let [suspension] = run.suspensions.as_slice() else {
+            panic!("the root's dispatch stops once: {:?}", run.suspensions);
+        };
+        assert_eq!(
+            suspension.member_positions,
+            [0, 1],
+            "the root's comparison stands at its recursive member, whose own comparison stands at its later member: {suspension:?}"
+        );
+        let [root, recursive, member] = suspension.frames.as_slice() else {
+            panic!("the root, its recursive member and that member's later member are open: {suspension:?}");
+        };
+        assert!(
+            root.assumption_targets.is_empty()
+                && recursive.assumption_targets.contains(&1)
+                && recursive.min_open_target == Some(1),
+            "the recursive pair's back-edge to its own frame is recorded: {suspension:?}"
+        );
+        assert!(
+            member.assumption_targets.is_empty()
+                && member.pending_watermark == suspension.pending,
+            "the later member's frame is open with nothing deposited above its watermark: {suspension:?}"
+        );
+        assert_eq!(
+            run.at_hold[0], 1,
+            "one root is open while the member waits: {:?}",
+            run.at_hold
+        );
+        assert!(
+            run.at_hold[3] >= 2,
+            "both members began relating before the wait: {:?}",
+            run.at_hold
+        );
+        assert!(run.repolled_pending);
+        assert_eq!(run.pending_elsewhere, Some(true));
+        assert_eq!(run.repoll_work, [0; 4], "a pending repoll does no work");
+        assert!(run.woken, "the producer going away wakes the root");
+        assert_eq!(
+            run.work, synchronous_work,
+            "no member relates again, no root opens again and no pair reduces twice"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+    }
+
+    /// A relation root whose member's own object comparison reaches the
+    /// held read: `OuterLeft` related to `OuterRight` relates `inner`, the
+    /// `Left`/`Right` pair, on a frame of its own, whose first member
+    /// relates the recursive references on a frame of their own, which
+    /// their own first member re-enters and whose later member waits on
+    /// `BoxA<"a">`. The root stops three comparisons deep — every frame kept
+    /// open, the back-edge recorded on the recursive pair's frame — and
+    /// resumes elsewhere to the synchronous read with the same absolute
+    /// work.
+    #[test]
+    fn a_relation_root_held_inside_a_nested_members_comparison_resumes_where_it_stood() {
+        let pair = ("OuterLeft", "OuterRight");
+        let (synchronous, synchronous_work) = member_relation_premise(pair);
+        let (host, run) = poll_member_relation_holding(pair);
+        assert!(
+            run.yielded,
+            "the root yields while the nested member is held"
+        );
+        let [suspension] = run.suspensions.as_slice() else {
+            panic!("the root's dispatch stops once: {:?}", run.suspensions);
+        };
+        assert_eq!(
+            suspension.member_positions,
+            [0, 0, 1],
+            "the root stands inside the nested comparisons at the later member: {suspension:?}"
+        );
+        let [root, inner, recursive, leaf] = suspension.frames.as_slice() else {
+            panic!("the root, the inner pair, the recursive pair and its later member are open: {suspension:?}");
+        };
+        assert!(
+            root.assumption_targets.is_empty()
+                && inner.assumption_targets.is_empty()
+                && recursive.assumption_targets.contains(&2)
+                && recursive.min_open_target == Some(2)
+                && leaf.assumption_targets.is_empty(),
+            "the recursive member's back-edge targets the recursive pair's frame: {suspension:?}"
+        );
+        assert!(run.repolled_pending);
+        assert_eq!(run.pending_elsewhere, Some(true));
+        assert_eq!(run.repoll_work, [0; 4], "a pending repoll does no work");
+        assert!(run.woken);
+        assert_eq!(
+            run.work, synchronous_work,
+            "no comparison walks again and no frame opens again"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous);
+    }
+
+    /// A relation root released while its later member waits on its held
+    /// operand closes the member's frame and its own and withdraws its
+    /// wait, leaving nothing open; the producer it waited on is left alone,
+    /// and the dispatcher reads the relation afterwards as the synchronous
+    /// entry does.
+    #[test]
+    fn a_relation_root_released_while_its_later_member_is_held_leaves_nothing_open() {
+        let (synchronous, _) = member_relation_premise(("Left", "Right"));
+        let host = member_relation_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let (relate, leaf) = member_relation_keys(&host, &dispatch, ("Left", "Right"));
+        let (other, lease) = hold_producer(&host, graph, leaf);
+        let _ = verter_type_engine::project_semantic_dispatch::relation::take_relation_suspensions_for_tests();
+        let mut entry = dispatch.poll_query(relate.clone());
+        let pending = while_held(lease, || {
+            let pending = entry.poll(Waker::noop()).is_pending();
+            drop(entry);
+            pending
+        });
+        assert!(pending, "the root yields while its later member is held");
+        assert_eq!(
+            verter_type_engine::project_semantic_dispatch::relation::take_relation_suspensions_for_tests().len(),
+            1,
+            "the root stopped inside its dispatch"
+        );
+        assert_eq!(
+            dispatch.open_request_state_for_tests(),
+            NOTHING_OPEN,
+            "the released root closes its member's frame and its own"
+        );
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(
+            graph.resident_flight_keys_for_tests().is_empty(),
+            "the released root's relation flights are withdrawn"
+        );
+        drop(other);
+        let read = dispatch.execute_via_cold_build_helper(relate);
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+    }
+
+    /// A relation root whose later member waits on its held operand is
+    /// woken by its request's cancellation with the producer still held,
+    /// and its next poll delivers the terminal cancelled read, every frame
+    /// it opened closed and its wait withdrawn.
+    #[test]
+    fn a_relation_root_held_at_a_later_member_is_woken_by_its_requests_cancellation() {
+        let host = member_relation_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let (relate, leaf) = member_relation_keys(&host, &dispatch, ("Left", "Right"));
+        let (other, lease) = hold_producer(&host, graph, leaf);
+        let request = budgeted_request(1);
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let wakes = || counter.0.load(std::sync::atomic::Ordering::SeqCst);
+        let (first, woken, next) = {
+            let _request = verter_type_engine::request_context::RequestContextGuard::install(
+                Arc::clone(&request),
+            );
+            let mut entry = dispatch.poll_query(relate);
+            let observed = while_held(lease, || {
+                let first = entry.poll(&waker).is_pending();
+                let before = wakes();
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| request.cancel())
+                        .join()
+                        .expect("the request is cancelled on another thread");
+                });
+                let woken = wakes() > before;
+                let next = match entry.poll(&waker) {
+                    Poll::Ready(read) => Some(read),
+                    Poll::Pending => None,
+                };
+                (first, woken, next)
+            });
+            drop(entry);
+            observed
+        };
+        assert!(first, "the root yields while its later member is held");
+        assert!(
+            woken,
+            "the request's cancellation wakes the root with the producer still held"
+        );
+        let read = next.expect("the woken root reads its cancellation without the producer");
+        assert!(
+            matches!(
+                read.value(),
+                QueryResult::Error(verter_type_engine::semantic_query::QueryError::Cancelled)
+            ),
+            "the cancelled root reads a terminal cancellation: {read:?}"
+        );
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(
+            graph.resident_flight_keys_for_tests().is_empty(),
+            "the cancelled root's relation flights are withdrawn"
+        );
+        drop(other);
+    }
+
     /// The physical work call resolutions on `host` did, wherever they ran:
     /// the candidates whose applicability check began, and the argument
     /// relations their first inference pass ran. Each is counted where the

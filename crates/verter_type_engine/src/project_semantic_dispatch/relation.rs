@@ -88,10 +88,12 @@ use super::dispatch_txn::{
     ProvisionalVerdict, RelationEnvironment, RelationFrameState, RelationPendingState,
     RelationStep, ResolveCallPendingState, StrictFamilyConfig,
 };
+use super::helper_continuation::{HelperDelivery, HelperRequest, HelperStep};
 use super::inference::session::{
     InferenceInfoSetup, InferenceSession, InferenceSessionSetup, InferenceSessionState,
     ReverseRecoveredEntry, SessionCheckpoint,
 };
+use super::query_frames::OperandDemand;
 #[cfg(feature = "semantic-observe")]
 use super::relation_explanation::RelationExplanation;
 use super::relation_predicates::*;
@@ -549,6 +551,45 @@ thread_local! {
     static RELATION_UNION_ARM_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// The most obligation frames this thread held open at once; test-only.
     static MOST_OPEN_FRAMES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The stops relation roots on frames made inside their dispatch on
+    /// this thread; test-only.
+    static RELATION_SUSPENSIONS: std::cell::RefCell<Vec<RelationSuspensionForTests>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// What a relation root on a frame held when its dispatch stopped inside a
+/// sub-relation. Test-only.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub struct RelationSuspensionForTests {
+    /// The read the dispatch stopped on.
+    pub need: SemanticQueryKey,
+    /// The target property each object comparison it stands inside is at,
+    /// outermost first.
+    pub member_positions: Vec<usize>,
+    /// The obligation frames open on the transaction, bottom first.
+    pub frames: Vec<RelationFrameForTests>,
+    /// The pending ledger's length.
+    pub pending: usize,
+}
+
+/// Take the stops relation roots on frames made inside their dispatch on
+/// this thread. Test-only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn take_relation_suspensions_for_tests() -> Vec<RelationSuspensionForTests> {
+    RELATION_SUSPENSIONS.with(|observed| std::mem::take(&mut *observed.borrow_mut()))
+}
+
+/// One open obligation frame as a stopped relation left it. Test-only.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationFrameForTests {
+    /// The frames below it its subtree assumed hold (back-edges).
+    pub assumption_targets: Vec<usize>,
+    /// The lowest frame an open assumption in its subtree targets.
+    pub min_open_target: Option<usize>,
+    /// The pending ledger's length when it was pushed.
+    pub pending_watermark: usize,
 }
 
 /// The relation-root outcome of [`ProjectSemanticDispatch::relation_discharge_and_route`].
@@ -1506,6 +1547,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         MOST_OPEN_FRAMES.with(|most| most.replace(0))
     }
 
+    /// Record the stop a relation root's dispatch made at `request`;
+    /// test-only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn note_relation_suspension_for_tests(
+        &self,
+        request: &HelperRequest,
+        dispatch: &RelationDispatch,
+    ) {
+        let txn = self.dispatch_txn.borrow();
+        let reentry = txn.reentry();
+        let frames = (0..reentry.depth())
+            .filter_map(|idx| reentry.frame(idx))
+            .map(|frame| RelationFrameForTests {
+                assumption_targets: frame.assumption_targets.clone(),
+                min_open_target: frame.min_open_target,
+                pending_watermark: frame.pending_watermark,
+            })
+            .collect();
+        let suspension = RelationSuspensionForTests {
+            need: request.query_key_for_tests().clone(),
+            member_positions: Self::held_member_positions_for_tests(dispatch),
+            frames,
+            pending: txn.obligations.pending().pending_len(),
+        };
+        RELATION_SUSPENSIONS.with(|observed| observed.borrow_mut().push(suspension));
+    }
+
     /// How many relations this thread reduced structurally
     /// ([`Self::reduce_relation`]); test-only.
     #[cfg(any(test, feature = "test-support"))]
@@ -2042,6 +2110,310 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The structural dispatch of `source` to `target` on the frame on
+    /// top of the stack, as an owned computation: its prefix in place
+    /// ([`Self::decide_relation_before_worklist`]), then the worklist
+    /// [`Self::advance_relation_dispatch`] advances. `Break` is the verdict
+    /// decided before the worklist, exactly as
+    /// [`Self::decide_relation_with_dispatch`] decides it.
+    pub(super) fn begin_relation_dispatch(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+        intersection_target_arm: bool,
+    ) -> ControlFlow<RelationResult, Box<RelationDispatch>> {
+        let pair = match self.decide_relation_before_worklist(
+            source,
+            target,
+            bindings,
+            intersection_target_arm,
+        ) {
+            ControlFlow::Break(result) => return ControlFlow::Break(result),
+            ControlFlow::Continue(BeforeWorklist::Pair(pair)) => pair,
+            ControlFlow::Continue(BeforeWorklist::Objects(views)) => {
+                // The comparison the prefix reached is the dispatch's one
+                // item, held before its first property pair: advancing the
+                // dispatch walks it, stopping wherever a pair must wait.
+                let (source, target) = *views;
+                let depth = self.top_relation_chain_depth();
+                return match self.begin_object_walk(source, target) {
+                    ControlFlow::Break(result) => ControlFlow::Break(result),
+                    ControlFlow::Continue(walk) => {
+                        ControlFlow::Continue(Box::new(RelationDispatch {
+                            worklist: RelateWorklist {
+                                work: Vec::new(),
+                                results: Vec::new(),
+                                held: Some(HeldRelation::Objects(Box::new(walk))),
+                            },
+                            depth,
+                        }))
+                    }
+                };
+            }
+        };
+        let depth = self.top_relation_chain_depth();
+        match RelationCx::new(self).begin_relate_worklist(
+            pair.source,
+            pair.target,
+            bindings,
+            pair.intersection_target_arm,
+        ) {
+            ControlFlow::Break(result) => {
+                self.restore_relation_chain_depth(depth);
+                ControlFlow::Break(result)
+            }
+            ControlFlow::Continue(worklist) => {
+                ControlFlow::Continue(Box::new(RelationDispatch { worklist, depth }))
+            }
+        }
+    }
+
+    /// Advance a relation's dispatch on a frame whose needs run `depth`
+    /// deep: the item it stopped inside first, with `delivery`, then the
+    /// items left. A canonical sub-relation or a property pair's that must
+    /// wait on a read stops it again; done, its frame takes its chain depth
+    /// back, as [`Self::decide_relation`] does.
+    pub(super) fn advance_relation_dispatch(
+        &self,
+        dispatch: &mut RelationDispatch,
+        delivery: Option<HelperDelivery>,
+        bindings: &mut Vec<InferBinding>,
+        depth: u32,
+    ) -> HelperStep<RelationResult> {
+        let cx = RelationCx::new(self);
+        let step = if dispatch.worklist.held.is_some() {
+            cx.resume_relate_worklist(&mut dispatch.worklist, bindings, delivery, depth)
+        } else {
+            verter_debug_assert!(delivery.is_none(), "a dispatch not held is asked nothing");
+            cx.run_relate_worklist(&mut dispatch.worklist, bindings, Some(depth))
+        };
+        match step {
+            Staged::Done(result) => {
+                self.restore_relation_chain_depth(dispatch.depth);
+                HelperStep::Done(result)
+            }
+            Staged::Held(stop) => HelperStep::Request(stop.1),
+        }
+    }
+
+    /// Release a dispatch stopped inside an item: the sub-relations its
+    /// held items opened close undecided, innermost first, and its frame
+    /// takes its chain depth back.
+    pub(super) fn abandon_relation_dispatch(&self, dispatch: RelationDispatch) {
+        let RelationDispatch { worklist, depth } = dispatch;
+        let mut frames = Vec::new();
+        let mut held = worklist.held;
+        loop {
+            let member = match held {
+                Some(HeldRelation::Objects(walk)) => match walk.held {
+                    Some(member) => member,
+                    None => break,
+                },
+                Some(HeldRelation::Member(member)) => member,
+                None => break,
+            };
+            let StagedMember { idx, dispatch, .. } = *member;
+            frames.push(idx);
+            held = dispatch.and_then(|dispatch| dispatch.worklist.held);
+        }
+        for idx in frames.into_iter().rev() {
+            let _ = self.relation_frame_close(idx, RelationResult::Unknown, Vec::new());
+        }
+        self.restore_relation_chain_depth(depth);
+    }
+
+    /// The positions of the object comparisons a stopped dispatch stands
+    /// inside, outermost first. Test-only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn held_member_positions_for_tests(dispatch: &RelationDispatch) -> Vec<usize> {
+        let mut positions = Vec::new();
+        let mut held = dispatch.worklist.held.as_ref();
+        loop {
+            let member = match held {
+                Some(HeldRelation::Objects(walk)) => {
+                    positions.push(walk.next);
+                    match walk.held.as_ref() {
+                        Some(member) => member,
+                        None => break,
+                    }
+                }
+                Some(HeldRelation::Member(member)) => member,
+                None => break,
+            };
+            held = member
+                .dispatch
+                .as_ref()
+                .and_then(|dispatch| dispatch.worklist.held.as_ref());
+        }
+        positions
+    }
+
+    /// The covariant sub-relation of `source` to `target` as an owned
+    /// computation on a frame whose needs run `depth` deep —
+    /// [`Self::relate_member`] staged: the authority's answers before
+    /// compute, then the inline frame opened and its reduction run up to
+    /// its structural dispatch, whose first reads unwrap both operands.
+    /// When that leaves the pair undecided, the first instantiation each
+    /// operand's carrier walk reads is demanded, as a machinery root's are:
+    /// one that must be computed stops the sub-relation, its frame open.
+    /// Nothing is demanded that the reduction would not read next.
+    fn begin_staged_member(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+        depth: u32,
+    ) -> Staged<Box<StagedMember>> {
+        let (mut key, occurrence) = match self.member_sub_key(
+            source,
+            target,
+            bindings,
+            InferPosition::Covariant,
+            None,
+            false,
+        ) {
+            ControlFlow::Break(result) => return Staged::Done(result),
+            ControlFlow::Continue(staged) => staged,
+        };
+        if let Some(result) = self.provisional_sub_answer(&key, occurrence, bindings) {
+            return Staged::Done(result);
+        }
+        if let Some(step) = self.relation_answer_before_compute(&mut key, occurrence) {
+            return Staged::Done(self.relation_result_from_step(step, bindings));
+        }
+        if self.dispatch_txn.borrow().obligations.decides_root() {
+            let step = self.execute_relate_root(key);
+            return Staged::Done(self.relation_result_from_step(step, bindings));
+        }
+        let idx = self.relation_frame_open(&key, occurrence);
+        let mut member_bindings = Vec::new();
+        if let ControlFlow::Break(verdict) =
+            self.reduce_relation_before_dispatch(&key, &mut member_bindings)
+        {
+            let step = self.relation_frame_close(idx, verdict, member_bindings);
+            return Staged::Done(self.relation_result_from_step(step, bindings));
+        }
+        let demand = OperandDemand::new([key.source, key.target]);
+        let member = Box::new(StagedMember {
+            key,
+            idx,
+            bindings: member_bindings,
+            demand,
+            dispatch: None,
+        });
+        self.advance_staged_member(member, None, bindings, depth)
+    }
+
+    /// Advance a staged sub-relation with `delivery`: its operand demand
+    /// until each operand's first instantiation is answered, then its
+    /// dispatch, those reads answered by the deliveries — stopping again
+    /// wherever its own worklist does. Done, its frame closes through the
+    /// SCC discharge and its step folds onto the caller's `bindings`.
+    fn advance_staged_member(
+        &self,
+        mut member: Box<StagedMember>,
+        delivery: Option<HelperDelivery>,
+        outer_bindings: &mut Vec<InferBinding>,
+        depth: u32,
+    ) -> Staged<Box<StagedMember>> {
+        let mut delivery = delivery;
+        if member.dispatch.is_none() {
+            let delivered = delivery.take().map(HelperDelivery::into_query);
+            if let Some(request) = self.advance_operand_demand(&mut member.demand, delivered, depth)
+            {
+                return Staged::Held(Box::new((member, request)));
+            }
+        }
+        let StagedMember {
+            key,
+            bindings,
+            demand,
+            dispatch,
+            ..
+        } = &mut *member;
+        let step = self.with_operand_answers(demand, depth, || {
+            if dispatch.is_none() {
+                match self.begin_relation_dispatch(
+                    key.source,
+                    key.target,
+                    bindings,
+                    key.policy.intersection_target_arm,
+                ) {
+                    ControlFlow::Break(verdict) => return HelperStep::Done(verdict),
+                    ControlFlow::Continue(begun) => *dispatch = Some(begun),
+                }
+            }
+            let dispatch = dispatch.as_mut().expect("the dispatch began");
+            self.advance_relation_dispatch(dispatch, delivery, bindings, depth)
+        });
+        match step {
+            HelperStep::Request(request) => Staged::Held(Box::new((member, request))),
+            HelperStep::Done(verdict) => {
+                let StagedMember { idx, bindings, .. } = *member;
+                let step = self.relation_frame_close(idx, verdict, bindings);
+                Staged::Done(self.relation_result_from_step(step, outer_bindings))
+            }
+        }
+    }
+
+    /// [`Self::relate_object_nodes`] on a frame whose needs run `depth`
+    /// deep: the comparison stops, held, at a property pair whose
+    /// sub-relation must wait on a read.
+    fn relate_object_nodes_staged(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+        depth: u32,
+    ) -> Staged<HeldRelation> {
+        let graph = self.graph();
+        let surface = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some(view.clone()),
+            _ => None,
+        };
+        let (Some(source), Some(target)) = (surface(source), surface(target)) else {
+            return Staged::Done(RelationResult::Unknown);
+        };
+        let mut walk = match self.begin_object_walk(source, target) {
+            ControlFlow::Break(result) => return Staged::Done(result),
+            ControlFlow::Continue(walk) => Box::new(walk),
+        };
+        match self.advance_object_walk(&mut walk, None, bindings, Some(depth)) {
+            Staged::Done(result) => Staged::Done(result),
+            Staged::Held(stop) => Staged::Held(Box::new((HeldRelation::Objects(walk), stop.1))),
+        }
+    }
+
+    /// Advance the item a worklist stopped inside with `delivery`.
+    fn advance_held_relation(
+        &self,
+        held: HeldRelation,
+        delivery: Option<HelperDelivery>,
+        bindings: &mut Vec<InferBinding>,
+        depth: u32,
+    ) -> Staged<HeldRelation> {
+        match held {
+            HeldRelation::Objects(mut walk) => {
+                match self.advance_object_walk(&mut walk, delivery, bindings, Some(depth)) {
+                    Staged::Done(result) => Staged::Done(result),
+                    Staged::Held(stop) => {
+                        Staged::Held(Box::new((HeldRelation::Objects(walk), stop.1)))
+                    }
+                }
+            }
+            HeldRelation::Member(member) => {
+                match self.advance_staged_member(member, delivery, bindings, depth) {
+                    Staged::Done(result) => Staged::Done(result),
+                    Staged::Held(stop) => {
+                        let (member, request) = *stop;
+                        Staged::Held(Box::new((HeldRelation::Member(member), request)))
+                    }
+                }
+            }
+        }
+    }
+
     /// [`Self::relate_objects`] over the surfaces of the object types
     /// `source` and `target`.
     fn relate_object_nodes(
@@ -2056,7 +2428,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => None,
         };
         match (surface(source), surface(target)) {
-            (Some(source), Some(target)) => self.relate_objects(&source, &target, bindings),
+            (Some(source), Some(target)) => self.relate_objects(source, target, bindings),
             _ => RelationResult::Unknown,
         }
     }
@@ -3071,6 +3443,50 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 build.at_dispatch = true;
                 true
             }
+        }
+    }
+
+    /// The structural dispatch of a machinery root's pair on a frame whose
+    /// needs run `depth` deep, its reduction standing at that dispatch
+    /// ([`Self::reduce_relate_build_before_dispatch`]): `dispatch` is the
+    /// one an earlier step stopped, entered with `delivery`, else it
+    /// begins. A sub-relation that must wait on a read stops it, the root
+    /// frame and every frame the dispatch opened kept open; done, the build
+    /// finishes ([`Self::finish_relate_build`]) with its verdict.
+    pub(super) fn advance_relate_build_dispatch(
+        &self,
+        mut build: Box<RelateRootBuild>,
+        dispatch: Option<Box<RelationDispatch>>,
+        delivery: Option<HelperDelivery>,
+        depth: u32,
+    ) -> RootDispatch {
+        verter_audit::attribute_scope!(RelationDecide);
+        verter_debug_assert!(build.at_dispatch, "a root dispatches once it stands at it");
+        let (source, target, arm) = (
+            build.key.source,
+            build.key.target,
+            build.key.policy.intersection_target_arm,
+        );
+        let mut dispatch = match dispatch {
+            Some(dispatch) => dispatch,
+            None => match self.begin_relation_dispatch(source, target, &mut build.bindings, arm) {
+                ControlFlow::Break(verdict) => {
+                    build.reduced = Some(verdict);
+                    return RootDispatch::Finished(Box::new(self.finish_relate_build(*build)));
+                }
+                ControlFlow::Continue(dispatch) => dispatch,
+            },
+        };
+        match self.advance_relation_dispatch(&mut dispatch, delivery, &mut build.bindings, depth) {
+            HelperStep::Done(verdict) => {
+                build.reduced = Some(verdict);
+                RootDispatch::Finished(Box::new(self.finish_relate_build(*build)))
+            }
+            HelperStep::Request(request) => RootDispatch::Held {
+                build,
+                dispatch,
+                request,
+            },
         }
     }
 
@@ -7023,9 +7439,39 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         source_freshness: Option<crate::semantic_query::FreshnessKey>,
         intersection_target_arm: bool,
     ) -> RelationResult {
+        match self.member_sub_key(
+            source,
+            target,
+            bindings,
+            position,
+            source_freshness,
+            intersection_target_arm,
+        ) {
+            ControlFlow::Break(result) => result,
+            ControlFlow::Continue((key, occurrence)) => {
+                self.relate_sub_key(key, occurrence, bindings)
+            }
+        }
+    }
+
+    /// The steps of [`Self::relate_member_with_freshness`] before its
+    /// sub-relation enters the authority: a projection, an inference
+    /// deposit into the open session, an uncached union source. `Break` is
+    /// the result one of them decided; `Continue` the sub-relation's key
+    /// and occurrence.
+    #[inline(never)]
+    fn member_sub_key(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+        position: InferPosition,
+        source_freshness: Option<crate::semantic_query::FreshnessKey>,
+        intersection_target_arm: bool,
+    ) -> ControlFlow<RelationResult, (RelateMemoKey, InferenceOccurrence)> {
         let occurrence = self.relation_occurrence(position);
         if let Some(result) = self.try_relation_projection(source, target, bindings, occurrence) {
-            return result;
+            return ControlFlow::Break(result);
         }
         let graph = self.graph();
         if self.relation_session_active() {
@@ -7038,7 +7484,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         Some(SemanticNodeData::Infer { .. } | SemanticNodeData::TypeParam { .. })
                     ) && self.relation_deposit(target, source, occurrence)
                     {
-                        return assignable(bindings);
+                        return ControlFlow::Break(assignable(bindings));
                     }
                 }
                 VariancePhase::Contravariant => {
@@ -7047,7 +7493,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         Some(SemanticNodeData::Infer { .. } | SemanticNodeData::TypeParam { .. })
                     ) && self.relation_deposit(source, target, occurrence)
                     {
-                        return assignable(bindings);
+                        return ControlFlow::Break(assignable(bindings));
                     }
                 }
             }
@@ -7057,7 +7503,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(result) =
                 self.relate_uncached_union_source(source, target, bindings, position)
             {
-                return result;
+                return ControlFlow::Break(result);
             }
         }
         // The discharge substitution rail (re-discharge, design §2.3 step
@@ -7070,7 +7516,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Only an intersection target's arm itself skips the weak-type
         // check; a relation it opens, a property's, never does.
         key.policy.intersection_target_arm = intersection_target_arm;
-        self.relate_sub_key(key, occurrence, bindings)
+        ControlFlow::Continue((key, occurrence))
     }
 
     /// Child judgements share the SCC substitution rail before entering
@@ -7081,13 +7527,30 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         occurrence: InferenceOccurrence,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
+        if let Some(result) = self.provisional_sub_answer(&key, occurrence, bindings) {
+            return result;
+        }
+        self.relation_result_from_step(
+            self.execute_relate_with_occurrence(key, occurrence),
+            bindings,
+        )
+    }
+
+    /// The answer the SCC substitution rail gives a child judgement before
+    /// it enters the authority, folded onto `bindings`.
+    fn provisional_sub_answer(
+        &self,
+        key: &RelateMemoKey,
+        occurrence: InferenceOccurrence,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
         {
             let txn = self.dispatch_txn.borrow();
             if !txn.obligations.substitution().is_empty() {
                 if let Some(step) =
-                    provisional_relate_step(txn.obligations.substitution(), &key, occurrence)
+                    provisional_relate_step(txn.obligations.substitution(), key, occurrence)
                 {
-                    return match step {
+                    return Some(match step {
                         RelationStep::Assignable { bindings: sub } => {
                             for binding in sub.iter() {
                                 if !bindings
@@ -7101,14 +7564,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         }
                         RelationStep::NotAssignable => RelationResult::NotAssignable,
                         _ => RelationResult::Unknown,
-                    };
+                    });
                 }
             }
         }
-        self.relation_result_from_step(
-            self.execute_relate_with_occurrence(key, occurrence),
-            bindings,
-        )
+        None
     }
 
     fn relation_result_from_step(
@@ -9868,6 +10328,41 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         bindings: &mut Vec<InferBinding>,
         intersection_target_arm: bool,
     ) -> RelationResult {
+        let pair = match self.decide_relation_before_worklist(
+            source,
+            target,
+            bindings,
+            intersection_target_arm,
+        ) {
+            ControlFlow::Break(result) => return result,
+            ControlFlow::Continue(BeforeWorklist::Pair(pair)) => pair,
+            ControlFlow::Continue(BeforeWorklist::Objects(views)) => {
+                let (source, target) = *views;
+                return self.relate_objects(source, target, bindings);
+            }
+        };
+        self.decide_relation(
+            pair.source,
+            pair.target,
+            bindings,
+            pair.intersection_target_arm,
+        )
+    }
+
+    /// [`Self::decide_relation_with_dispatch`] up to its structural
+    /// worklist: the recursion entry, the variance and type-argument
+    /// judgements, the alias normalization and the operands' unwraps.
+    /// `Break` is the verdict one of them decided; `Continue` is what the
+    /// dispatch relates next: the pair its worklist
+    /// ([`Self::decide_relation`]) relates, or the object comparison the
+    /// Object-vs-Record arm reached.
+    fn decide_relation_before_worklist(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+        intersection_target_arm: bool,
+    ) -> ControlFlow<RelationResult, BeforeWorklist> {
         // The checker's `recursiveTypeRelatedTo` entry, judged on the
         // operands the carriers stand for.
         let concrete_read = self.observe_read(|| {
@@ -9887,7 +10382,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let erased = concrete.map(|operand| self.relation_union_erased_member(operand));
         if erased[0].is_some() || erased[1].is_some() {
             let _ = concrete_read.adopt(self);
-            return self.decide_relation_with_dispatch(
+            return self.decide_relation_before_worklist(
                 erased[0].unwrap_or(source),
                 erased[1].unwrap_or(target),
                 bindings,
@@ -9896,18 +10391,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         if let Some(result) = self.enter_checker_recursion([source, target], concrete) {
             let _ = concrete_read.adopt(self);
-            return result;
+            return ControlFlow::Break(result);
         }
         // Two references to one generic declaration infer from, and relate
         // by, their type arguments' variance before any structural
         // comparison.
         if let Some(result) = self.infer_from_type_arguments(source, target, bindings) {
             let _ = concrete_read.discard();
-            return result;
+            return ControlFlow::Break(result);
         }
         if let Some(result) = self.relate_by_variance(source, target, bindings) {
             let _ = concrete_read.discard();
-            return result;
+            return ControlFlow::Break(result);
         }
         // Alias applications on either side stand for the references their
         // bodies instantiate to. Normalize both before comparing arguments.
@@ -9921,18 +10416,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let (source, target) = through_alias;
             if let Some(result) = self.infer_from_type_arguments(source, target, bindings) {
                 let _ = concrete_read.discard();
-                return result;
+                return ControlFlow::Break(result);
             }
             if let Some(result) = self.relate_by_variance(source, target, bindings) {
                 let _ = concrete_read.discard();
-                return result;
+                return ControlFlow::Break(result);
             }
         }
         let _ = concrete_read.adopt(self);
-        if let Some(r) =
-            self.try_object_vs_record_relation(source, target, bindings, intersection_target_arm)
+        match self.try_object_vs_record_relation(source, target, bindings, intersection_target_arm)
         {
-            return r;
+            Some(RecordRelation::Decided(result)) => return ControlFlow::Break(result),
+            Some(RecordRelation::Objects(views)) => {
+                return ControlFlow::Continue(BeforeWorklist::Objects(views));
+            }
+            None => {}
         }
         // A naked type parameter on the other side takes the operand as it
         // is written: an inference records the declaration carrier (an
@@ -9991,13 +10489,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             IdentityCarrierUnwrap::Concrete(id) if target_is_binder && !intrinsic(id) => source,
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable if target_is_binder => source,
-            IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
+            IdentityCarrierUnwrap::Unresolvable => {
+                return ControlFlow::Break(RelationResult::Unknown)
+            }
         };
         let target = match target_unwrap {
             IdentityCarrierUnwrap::Concrete(id) if source_is_binder && !intrinsic(id) => target,
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable if source_is_binder => target,
-            IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
+            IdentityCarrierUnwrap::Unresolvable => {
+                return ControlFlow::Break(RelationResult::Unknown)
+            }
         };
         let source = if preserve_source_reference {
             source_reference
@@ -10007,12 +10509,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A declaration naming a homomorphic mapped type over a parameter
         // the session infers reverse-maps where it is unwrapped.
         if let Some(spec) = self.reverse_mapping_target(target) {
-            return self.relate_reverse_mapping(source, spec, bindings);
+            return ControlFlow::Break(self.relate_reverse_mapping(source, spec, bindings));
         }
         // A key-remapped one infers nothing to its parameter, which then
         // stands for what it fixes to.
         if let Some(instantiated) = self.remapped_mapping_without_inference(target) {
-            return self.relate_member(source, instantiated, bindings, InferPosition::Covariant);
+            return ControlFlow::Break(self.relate_member(
+                source,
+                instantiated,
+                bindings,
+                InferPosition::Covariant,
+            ));
         }
         // Function-inference demand point (the pre-relation function-infer
         // case, now inside the authority): with an active session and a
@@ -10028,15 +10535,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             let materialised = self.materialise_function_infer_check(source);
             if materialised != source {
-                return self.decide_relation(
-                    materialised,
+                return ControlFlow::Continue(BeforeWorklist::Pair(WorklistPair {
+                    source: materialised,
                     target,
-                    bindings,
                     intersection_target_arm,
-                );
+                }));
             }
         }
-        self.decide_relation(source, target, bindings, intersection_target_arm)
+        ControlFlow::Continue(BeforeWorklist::Pair(WorklistPair {
+            source,
+            target,
+            intersection_target_arm,
+        }))
     }
 
     /// Materialise a function-infer check through the oracle's transit
@@ -13142,7 +13652,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         target: SemanticNodeId,
         bindings: &mut Vec<InferBinding>,
         intersection_target_arm: bool,
-    ) -> Option<RelationResult> {
+    ) -> Option<RecordRelation> {
         let graph = self.graph();
         let source_data = graph.node_data(source)?;
         let identity = match &*source_data {
@@ -13181,7 +13691,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 QueryResult::Value(SemanticQueryOutput { value: id, .. }) => self
                     .evaluate_deferred_semantic_node_with_context(id, transit)
                     .into_active_query_build_node(self),
-                _ => return Some(RelationResult::Unknown),
+                _ => return Some(RecordRelation::Decided(RelationResult::Unknown)),
             },
         };
         let source_view = match graph.node_data(unwrapped).as_deref() {
@@ -13201,15 +13711,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         std::slice::from_ref(&target_view),
                     ) =>
             {
-                RelationResult::NotAssignable
+                RecordRelation::Decided(RelationResult::NotAssignable)
             }
             RecordTargetShape::LiteralKey(target_view) => {
-                self.relate_objects(&source_view, &target_view, bindings)
+                RecordRelation::Objects(Box::new((source_view, target_view)))
             }
             RecordTargetShape::GenericKey {
                 key_type,
                 value_type,
-            } => self.relate_object_as_record(&source_view, key_type, value_type, bindings),
+            } => RecordRelation::Decided(self.relate_object_as_record(
+                &source_view,
+                key_type,
+                value_type,
+                bindings,
+            )),
         })
     }
 
@@ -13466,23 +13981,40 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .collect()
     }
 
-    /// Relate two object `SurfaceView`s structurally. Every required
-    /// target member must be satisfied by a matching source member (or an
-    /// applicable source index signature).
+    /// Relate the object surfaces `source` and `target` structurally — every
+    /// required target member satisfied by a matching source member or an
+    /// applicable source index signature — every read in place: an
+    /// [`ObjectWalk`] driven where it stands.
     pub(super) fn relate_objects(
         &self,
-        source: &SurfaceView,
-        target: &SurfaceView,
+        source: SurfaceView,
+        target: SurfaceView,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
-        let closed_target = target.closed();
+        let mut walk = match self.begin_object_walk(source, target) {
+            ControlFlow::Break(result) => return result,
+            ControlFlow::Continue(walk) => walk,
+        };
+        match self.advance_object_walk(&mut walk, None, bindings, None) {
+            Staged::Done(result) => result,
+            Staged::Held(_) => unreachable!("an object walk driven in place makes no request"),
+        }
+    }
 
+    /// The comparison of the object surfaces `source` and `target` as an
+    /// owned computation, before its first property pair: `Break` is the
+    /// verdict the subtype relations' object-literal check decided.
+    fn begin_object_walk(
+        &self,
+        source: SurfaceView,
+        target: SurfaceView,
+    ) -> ControlFlow<RelationResult, ObjectWalk> {
         // The subtype relations admit into an object LITERAL's type no
         // source with a property the literal lacks, unless that property
         // is `undefined` (the checker's `propertiesRelatedTo`): nested
         // literals compare as the top-level ones do, so `{ o: { a: 1, b: 2
         // } }` is not below `{ o: { a: 1 } }`.
-        if self.subtype_mode() && surface_is_object_literal(target) {
+        if self.subtype_mode() && surface_is_object_literal(&target) {
             let target_keys = target.key_index();
             let lists_unknown = source.positive_members().iter().any(|member| {
                 let Some(key) = member.key.cloned_known() else {
@@ -13497,13 +14029,47 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             });
             if lists_unknown {
-                return RelationResult::NotAssignable;
+                return ControlFlow::Break(RelationResult::NotAssignable);
             }
         }
+        ControlFlow::Continue(ObjectWalk {
+            source,
+            target,
+            next: 0,
+            acc: RelationResult::Assignable {
+                bindings: Arc::from(Vec::new().into_boxed_slice()),
+            },
+            accessor_keys: FxHashSet::default(),
+            held: None,
+        })
+    }
 
-        let mut acc = RelationResult::Assignable {
-            bindings: Arc::from(Vec::new().into_boxed_slice()),
-        };
+    /// Advance an object comparison: the property pair's sub-relation it
+    /// stopped inside first, with `delivery`, then each target property
+    /// left, then the index, call and construct signatures in place. With
+    /// `stops` (a frame's need depth) a property pair's sub-relation that
+    /// must wait on a read stops the walk at that property, its earlier
+    /// properties' combined result kept; driven in place
+    /// (`stops: None`), it never stops.
+    fn advance_object_walk(
+        &self,
+        walk: &mut ObjectWalk,
+        delivery: Option<HelperDelivery>,
+        bindings: &mut Vec<InferBinding>,
+        stops: Option<u32>,
+    ) -> Staged<()> {
+        let ObjectWalk {
+            source,
+            target,
+            next,
+            acc,
+            accessor_keys,
+            held,
+        } = walk;
+        let source = &*source;
+        let target = &*target;
+        let mut delivery = delivery;
+        let closed_target = target.closed();
         // An accessor is ONE property on either side — its getter's return,
         // else its setter's parameter — related once per key, never as the
         // accessor functions.
@@ -13512,107 +14078,125 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // index of the source's keys, so the relation costs one lookup per
         // property rather than a scan of the source per property.
         let source_keys = source.key_index();
-        let mut accessor_keys: rustc_hash::FxHashSet<crate::semantic_query::PropertyKey> =
-            rustc_hash::FxHashSet::default();
-        for t_prop in closed_target.complete_members() {
-            let Some(target_key) = t_prop.key.cloned_known() else {
-                return RelationResult::Unknown;
-            };
-            let target_property;
-            let t_prop = match t_prop.method_kind {
-                Some(
-                    verter_type_expr::ObjectMethodKind::Get
-                    | verter_type_expr::ObjectMethodKind::Set,
-                ) => {
-                    if !accessor_keys.insert(target_key.clone()) {
-                        continue;
-                    }
-                    match target
-                        .project_known_key_accessor(&target_key)
-                        .and_then(|accessor| {
-                            accessor.property_member(graph.store(), |signature| {
-                                self.materialize_returned_callable(signature)
-                            })
-                        }) {
-                        Some(property) => {
-                            target_property = property;
-                            &target_property
-                        }
-                        // A private accessor is found only on a type that
-                        // declares it, and relates only to that declaration.
-                        None if t_prop.visibility
-                            == verter_type_expr::MemberVisibility::Private =>
-                        {
-                            return self.private_accessor_relation(source, &target_key, t_prop);
-                        }
-                        None => return RelationResult::Unknown,
-                    }
-                }
-                _ => t_prop,
-            };
-            if let Some(accessor) = source_keys.project_known_key_accessor(&target_key) {
-                let prop_result = match accessor.property_member(graph.store(), |signature| {
-                    self.materialize_returned_callable(signature)
-                }) {
-                    Some(source_member) => {
-                        self.relate_property_pair(&source_member, t_prop, bindings)
-                    }
-                    None => RelationResult::Unknown,
+        let members = closed_target.complete_members();
+        while let Some(t_prop) = members.get(*next) {
+            let staged = if let Some(member) = held.take() {
+                let depth = stops.expect("only a frame stops an object walk");
+                self.advance_staged_member(member, delivery.take(), bindings, depth)
+            } else {
+                let Some(target_key) = t_prop.key.cloned_known() else {
+                    return Staged::Done(RelationResult::Unknown);
                 };
-                acc = result_and(acc, prop_result);
-                if matches!(acc, RelationResult::NotAssignable) {
-                    return RelationResult::NotAssignable;
-                }
-                continue;
-            }
-            let prop_result = match source_keys.project_known_key(&target_key) {
-                crate::semantic_query::SurfaceKeyProjection::Exact(source_member) => {
-                    self.relate_property_pair(source_member, t_prop, bindings)
-                }
-                // The subtype relations require every target property of a
-                // source that is not an object literal, the optional ones
-                // included, and no index signature stands in for it
-                // (the checker's `requireOptionalProperties`): `{ x: string }`
-                // is not a subtype of `{ x: string; y?: number }`.
-                crate::semantic_query::SurfaceKeyProjection::AbsentProven
-                    if self.subtype_mode()
-                        && !(t_prop.optional && surface_is_object_literal(source)) =>
-                {
-                    RelationResult::NotAssignable
-                }
-                // A property the source does not declare: a required target
-                // property is unmatched, whatever index signature the source
-                // carries, and an optional one is satisfied without relating
-                // any index signature to it (the checker's
-                // `getUnmatchedProperty`: `{ [k: string]: string }` is not
-                // assignable to `{ a: string }`, and `{ [k: string]: number
-                // }` is assignable to `{ a?: string }`).
-                crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
-                    if let Some(apparent) =
-                        self.relate_apparent_function_member(source, &target_key, t_prop, bindings)
-                    {
-                        apparent
-                    } else if let Some(apparent) =
-                        self.relate_apparent_object_member(&target_key, t_prop, bindings)
-                    {
-                        apparent
-                    } else if t_prop.optional {
-                        assignable(bindings)
-                    } else {
-                        RelationResult::NotAssignable
+                let target_property;
+                let t_prop = match t_prop.method_kind {
+                    Some(
+                        verter_type_expr::ObjectMethodKind::Get
+                        | verter_type_expr::ObjectMethodKind::Set,
+                    ) => {
+                        if !accessor_keys.insert(target_key.clone()) {
+                            *next += 1;
+                            continue;
+                        }
+                        match target
+                            .project_known_key_accessor(&target_key)
+                            .and_then(|accessor| {
+                                accessor.property_member(graph.store(), |signature| {
+                                    self.materialize_returned_callable(signature)
+                                })
+                            }) {
+                            Some(property) => {
+                                target_property = property;
+                                &target_property
+                            }
+                            // A private accessor is found only on a type that
+                            // declares it, and relates only to that declaration.
+                            None if t_prop.visibility
+                                == verter_type_expr::MemberVisibility::Private =>
+                            {
+                                return Staged::Done(self.private_accessor_relation(
+                                    source,
+                                    &target_key,
+                                    t_prop,
+                                ));
+                            }
+                            None => return Staged::Done(RelationResult::Unknown),
+                        }
+                    }
+                    _ => t_prop,
+                };
+                if let Some(accessor) = source_keys.project_known_key_accessor(&target_key) {
+                    match accessor.property_member(graph.store(), |signature| {
+                        self.materialize_returned_callable(signature)
+                    }) {
+                        Some(source_member) => {
+                            self.relate_property_pair(&source_member, t_prop, bindings, stops)
+                        }
+                        None => Staged::Done(RelationResult::Unknown),
+                    }
+                } else {
+                    match source_keys.project_known_key(&target_key) {
+                        crate::semantic_query::SurfaceKeyProjection::Exact(source_member) => {
+                            self.relate_property_pair(source_member, t_prop, bindings, stops)
+                        }
+                        // The subtype relations require every target property of a
+                        // source that is not an object literal, the optional ones
+                        // included, and no index signature stands in for it
+                        // (the checker's `requireOptionalProperties`): `{ x: string }`
+                        // is not a subtype of `{ x: string; y?: number }`.
+                        crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                            if self.subtype_mode()
+                                && !(t_prop.optional && surface_is_object_literal(source)) =>
+                        {
+                            Staged::Done(RelationResult::NotAssignable)
+                        }
+                        // A property the source does not declare: a required target
+                        // property is unmatched, whatever index signature the source
+                        // carries, and an optional one is satisfied without relating
+                        // any index signature to it (the checker's
+                        // `getUnmatchedProperty`: `{ [k: string]: string }` is not
+                        // assignable to `{ a: string }`, and `{ [k: string]: number
+                        // }` is assignable to `{ a?: string }`).
+                        crate::semantic_query::SurfaceKeyProjection::AbsentProven => Staged::Done(
+                            if let Some(apparent) = self.relate_apparent_function_member(
+                                source,
+                                &target_key,
+                                t_prop,
+                                bindings,
+                            ) {
+                                apparent
+                            } else if let Some(apparent) =
+                                self.relate_apparent_object_member(&target_key, t_prop, bindings)
+                            {
+                                apparent
+                            } else if t_prop.optional {
+                                assignable(bindings)
+                            } else {
+                                RelationResult::NotAssignable
+                            },
+                        ),
                     }
                 }
             };
-            acc = result_and(acc, prop_result);
+            let prop_result = match staged {
+                Staged::Done(result) => result,
+                Staged::Held(stop) => {
+                    let (member, request) = *stop;
+                    *held = Some(member);
+                    return Staged::Held(Box::new(((), request)));
+                }
+            };
+            *acc = result_and(std::mem::replace(acc, RelationResult::Unknown), prop_result);
             if matches!(acc, RelationResult::NotAssignable) {
-                return RelationResult::NotAssignable;
+                return Staged::Done(RelationResult::NotAssignable);
             }
+            *next += 1;
         }
+        let mut acc = std::mem::replace(acc, RelationResult::Unknown);
         for t_index in target.index_signatures.iter() {
             let index_result = self.relate_target_index_signature(source, t_index, bindings);
             acc = result_and(acc, index_result);
             if matches!(acc, RelationResult::NotAssignable) {
-                return RelationResult::NotAssignable;
+                return Staged::Done(RelationResult::NotAssignable);
             }
         }
         for t_sig in target.call_signatures.iter() {
@@ -13620,24 +14204,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.relate_signature_alternatives(&source.call_signatures, *t_sig, bindings);
             acc = result_and(acc, signature_result);
             if matches!(acc, RelationResult::NotAssignable) {
-                return RelationResult::NotAssignable;
+                return Staged::Done(RelationResult::NotAssignable);
             }
         }
         if !self.construct_visibilities_compatible(
             &source.construct_signatures,
             &target.construct_signatures,
         ) {
-            return RelationResult::NotAssignable;
+            return Staged::Done(RelationResult::NotAssignable);
         }
         for t_sig in target.construct_signatures.iter() {
             let signature_result =
                 self.relate_signature_alternatives(&source.construct_signatures, *t_sig, bindings);
             acc = result_and(acc, signature_result);
             if matches!(acc, RelationResult::NotAssignable) {
-                return RelationResult::NotAssignable;
+                return Staged::Done(RelationResult::NotAssignable);
             }
         }
-        acc
+        Staged::Done(acc)
     }
 
     /// Resolve a member value that is a `RecursiveRef` control sentinel to
@@ -13691,12 +14275,47 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    pub(super) fn relate_property_pair(
+    /// Relate the property pair `source` to `target` of an object
+    /// comparison: its gates and value preparation
+    /// ([`Self::property_pair_values`]), then the values' sub-relation —
+    /// in place, or with `stops` (a frame's need depth) staged on its own
+    /// frame so it can stop at a read ([`Self::begin_staged_member`]).
+    fn relate_property_pair(
         &self,
         source: &crate::semantic_query::SurfaceMember,
         target: &crate::semantic_query::SurfaceMember,
         bindings: &mut Vec<InferBinding>,
-    ) -> RelationResult {
+        stops: Option<u32>,
+    ) -> Staged<Box<StagedMember>> {
+        self.graph().record_relation_member_related();
+        let (source_value, target_value) = match self.property_pair_values(source, target, bindings)
+        {
+            ControlFlow::Break(result) => return Staged::Done(result),
+            ControlFlow::Continue(values) => values,
+        };
+        match stops {
+            None => Staged::Done(self.relate_member(
+                source_value,
+                target_value,
+                bindings,
+                InferPosition::Covariant,
+            )),
+            Some(depth) => self.begin_staged_member(source_value, target_value, bindings, depth),
+        }
+    }
+
+    /// A property pair's gates — accessibility, optionality, `readonly`
+    /// under the strict subtype relation — and its values prepared for
+    /// their sub-relation: a recursive reference rebound, an optional
+    /// target's `undefined` added. `Break` is the result a gate or a
+    /// target method's bivariant signature relation decided; `Continue`
+    /// the values the pair's sub-relation relates covariantly.
+    fn property_pair_values(
+        &self,
+        source: &crate::semantic_query::SurfaceMember,
+        target: &crate::semantic_query::SurfaceMember,
+        bindings: &mut Vec<InferBinding>,
+    ) -> ControlFlow<RelationResult, (SemanticNodeId, SemanticNodeId)> {
         // A property `readonly` modifier is not part of assignability in
         // either direction: `{ readonly a: T }` and `{ a: T }` relate both
         // ways. The `readonly` gates that DO apply live on the array and
@@ -13713,16 +14332,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // with `strictNullChecks` on or off). The strict subtype relation
         // also refuses a `readonly` member below a mutable one.
         if let Some(decided) = self.property_accessibility_relation(source, target) {
-            return decided;
+            return ControlFlow::Break(decided);
         }
         if !target.optional
             && source.optional
             && self.current_relation_kind() != RelationKind::Comparable
         {
-            return RelationResult::NotAssignable;
+            return ControlFlow::Break(RelationResult::NotAssignable);
         }
         if self.strict_subtype_mode() && source.readonly && !target.readonly {
-            return RelationResult::NotAssignable;
+            return ControlFlow::Break(RelationResult::NotAssignable);
         }
         // A `RecursiveRef` member value rebinds to its declaration surface
         // through the shared dispatch so a genuinely recursive type
@@ -13761,15 +14380,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(result) =
                 self.relate_method_signatures(source_value, target_value, bindings)
             {
-                return result;
+                return ControlFlow::Break(result);
             }
         }
-        self.relate_member(
-            source_value,
-            target_value,
-            bindings,
-            InferPosition::Covariant,
-        )
+        ControlFlow::Continue((source_value, target_value))
     }
 
     /// Relate a member value to a target METHOD's value when both are one
@@ -14937,6 +15551,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 }
 
+/// Where a machinery root's dispatch on a frame stands
+/// ([`ProjectSemanticDispatch::advance_relate_build_dispatch`]).
+pub(super) enum RootDispatch {
+    /// The build finished: its output.
+    Finished(Box<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>),
+    /// The dispatch stopped inside a sub-relation at `request`.
+    Held {
+        build: Box<RelateRootBuild>,
+        dispatch: Box<RelationDispatch>,
+        request: HelperRequest,
+    },
+}
+
 /// A machinery relation root between its first stage and its reduction:
 /// the validated key, the root obligation frame it opened on the
 /// transaction — which stays open, owned by this build, until the build
@@ -15081,6 +15708,14 @@ enum ComparableSurface {
     Unresolvable,
 }
 
+/// What the Object-vs-Record arm of a relation's dispatch decided: a
+/// verdict, or the comparison of an object source with a literal-key
+/// target, which the dispatch walks ([`ObjectWalk`]).
+enum RecordRelation {
+    Decided(RelationResult),
+    Objects(Box<(SurfaceView, SurfaceView)>),
+}
+
 /// Canonical Record shapes the `Record<K, V>`-against-Object arm handles.
 enum RecordTargetShape {
     LiteralKey(SurfaceView),
@@ -15149,6 +15784,109 @@ enum PairStep {
     Decided(RelationResult),
     /// The pair the checker relates in its place.
     Relate(SemanticNodeId, SemanticNodeId),
+}
+
+/// A relation's structural worklist: the items still to relate, last
+/// first, the results of the items related so far, and — on a frame of the
+/// continuation runtime — the item it stopped inside, which the delivery of
+/// the read that item waits on enters.
+pub(super) struct RelateWorklist {
+    work: Vec<RelateWork>,
+    results: Vec<RelationResult>,
+    held: Option<HeldRelation>,
+}
+
+impl RelateWorklist {
+    /// The worklist that expands `(source, target)`.
+    fn new(source: SemanticNodeId, target: SemanticNodeId, intersection_target_arm: bool) -> Self {
+        Self {
+            work: vec![RelateWork::Expand(source, target, intersection_target_arm)],
+            results: Vec::new(),
+            held: None,
+        }
+    }
+}
+
+/// The item a relation's worklist stopped inside, on a frame of the
+/// continuation runtime.
+pub(super) enum HeldRelation {
+    /// An object comparison standing at one of its property pairs.
+    Objects(Box<ObjectWalk>),
+    /// A sub-relation the item opened on its own frame.
+    Member(Box<StagedMember>),
+}
+
+/// Where a step of a relation computation that may stop inside a child
+/// stands: its result, or the child it stopped inside with the request
+/// that child stands at.
+pub(super) enum Staged<H> {
+    Done(RelationResult),
+    Held(Box<(H, HelperRequest)>),
+}
+
+/// A relation's structural dispatch past its prefix, as an owned
+/// computation ([`ProjectSemanticDispatch::begin_relation_dispatch`]): its
+/// worklist, and the chain depth its frame takes back once the worklist is
+/// done.
+pub(super) struct RelationDispatch {
+    worklist: RelateWorklist,
+    depth: Option<u16>,
+}
+
+/// The comparison of two object surfaces — the property pairs, then the
+/// index signatures, call and construct signatures — as an owned
+/// computation ([`ProjectSemanticDispatch::advance_object_walk`]): the
+/// target property it stands at, the combined result of the properties
+/// related so far, the accessor keys already related, and the property
+/// pair's sub-relation it stopped inside.
+pub(super) struct ObjectWalk {
+    source: SurfaceView,
+    target: SurfaceView,
+    next: usize,
+    acc: RelationResult,
+    accessor_keys: FxHashSet<crate::semantic_query::PropertyKey>,
+    held: Option<Box<StagedMember>>,
+}
+
+/// A sub-relation the authority opened on its own inline obligation frame
+/// and reduced up to its structural dispatch, as an owned computation
+/// ([`ProjectSemanticDispatch::advance_staged_member`]): its key, the
+/// frame, the bindings its reduction accumulated, the demand of its
+/// operands' first instantiations, and its dispatch once they are
+/// answered.
+pub(super) struct StagedMember {
+    key: RelateMemoKey,
+    idx: usize,
+    bindings: Vec<InferBinding>,
+    demand: OperandDemand,
+    dispatch: Option<Box<RelationDispatch>>,
+}
+
+// A stopped relation is owned state its consumer carries to whichever
+// thread resumes it, never shared or copied.
+static_assertions::assert_impl_all!(RelationDispatch: Send);
+static_assertions::assert_not_impl_any!(RelationDispatch: Clone, Copy);
+static_assertions::assert_not_impl_any!(ObjectWalk: Clone, Copy);
+static_assertions::assert_not_impl_any!(StagedMember: Clone, Copy);
+
+/// What a relation's dispatch relates once the steps before its worklist
+/// left the pair undecided
+/// ([`ProjectSemanticDispatch::decide_relation_before_worklist`]).
+pub(super) enum BeforeWorklist {
+    /// The pair its structural worklist relates.
+    Pair(WorklistPair),
+    /// The object comparison the Object-vs-Record arm reached: source and
+    /// target surfaces.
+    Objects(Box<(SurfaceView, SurfaceView)>),
+}
+
+/// The pair a relation's structural worklist relates, once its dispatch
+/// left it undecided ([`ProjectSemanticDispatch::decide_relation_before_worklist`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct WorklistPair {
+    pub(super) source: SemanticNodeId,
+    pub(super) target: SemanticNodeId,
+    pub(super) intersection_target_arm: bool,
 }
 
 /// Iterative worklist item for [`ProjectSemanticDispatch::decide_relation`].
@@ -15914,6 +16652,33 @@ trait RelationDemandDriver {
         target: SemanticNodeId,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult;
+    /// [`Self::relate_object_nodes`] on a frame whose needs run `depth`
+    /// deep: a property pair's sub-relation that must wait on a read stops
+    /// the comparison, held.
+    fn relate_object_nodes_staged(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+        depth: u32,
+    ) -> Staged<HeldRelation>;
+    /// A covariant [`Self::relate_member`] on a frame whose needs run
+    /// `depth` deep: a sub-relation that must wait on a read stops, held.
+    fn relate_member_staged(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+        depth: u32,
+    ) -> Staged<HeldRelation>;
+    /// Advance the item a worklist stopped inside with `delivery`.
+    fn advance_held_relation(
+        &self,
+        held: HeldRelation,
+        delivery: Option<HelperDelivery>,
+        bindings: &mut Vec<InferBinding>,
+        depth: u32,
+    ) -> Staged<HeldRelation>;
     fn relate_object_to_signature(
         &self,
         source: &SurfaceView,
@@ -16257,6 +17022,39 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
         ProjectSemanticDispatch::relate_object_nodes(self, source, target, bindings)
+    }
+    fn relate_object_nodes_staged(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+        depth: u32,
+    ) -> Staged<HeldRelation> {
+        ProjectSemanticDispatch::relate_object_nodes_staged(self, source, target, bindings, depth)
+    }
+    fn relate_member_staged(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+        depth: u32,
+    ) -> Staged<HeldRelation> {
+        match self.begin_staged_member(source, target, bindings, depth) {
+            Staged::Done(result) => Staged::Done(result),
+            Staged::Held(stop) => {
+                let (member, request) = *stop;
+                Staged::Held(Box::new((HeldRelation::Member(member), request)))
+            }
+        }
+    }
+    fn advance_held_relation(
+        &self,
+        held: HeldRelation,
+        delivery: Option<HelperDelivery>,
+        bindings: &mut Vec<InferBinding>,
+        depth: u32,
+    ) -> Staged<HeldRelation> {
+        ProjectSemanticDispatch::advance_held_relation(self, held, delivery, bindings, depth)
     }
     fn relate_object_to_signature(
         &self,
@@ -17449,33 +18247,116 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         bindings: &mut Vec<InferBinding>,
         intersection_target_arm: bool,
     ) -> RelationResult {
+        match self.begin_relate_worklist(source, target, bindings, intersection_target_arm) {
+            ControlFlow::Break(result) => result,
+            ControlFlow::Continue(mut worklist) => {
+                match self.run_relate_worklist(&mut worklist, bindings, None) {
+                    Staged::Done(result) => result,
+                    Staged::Held(_) => unreachable!("a worklist run in place makes no request"),
+                }
+            }
+        }
+    }
+
+    /// The worklist of `(source, target)`, after the steps that decide the
+    /// pair before it: a spread program, a projection, an unread marker,
+    /// identity. `Break` is the verdict one of them decided.
+    fn begin_relate_worklist(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+        intersection_target_arm: bool,
+    ) -> ControlFlow<RelationResult, RelateWorklist> {
         // Program recognition precedes the identity shortcut here exactly as
         // at the root and in `expand_pair`: an open program is never accepted
         // on node identity.
         if let Some(result) = self.try_object_spread_program_relation(source, target, bindings) {
-            return result;
+            return ControlFlow::Break(result);
         }
         let occurrence = self.relation_current_occurrence();
         if let Some(result) = self.try_relation_projection(source, target, bindings, occurrence) {
-            return result;
+            return ControlFlow::Break(result);
         }
         if self.relation_reads_unread_marker(source, target) {
-            return RelationResult::Unknown;
+            return ControlFlow::Break(RelationResult::Unknown);
         }
         if source == target {
             if let Some(result) = self.try_identical_open_program_result(source, bindings) {
-                return result;
+                return ControlFlow::Break(result);
             }
-            return assignable(bindings);
+            return ControlFlow::Break(assignable(bindings));
         }
-        let mut work: Vec<RelateWork> = Vec::new();
-        let mut results: Vec<RelationResult> = Vec::new();
-        work.push(RelateWork::Expand(source, target, intersection_target_arm));
+        ControlFlow::Continue(RelateWorklist::new(source, target, intersection_target_arm))
+    }
+
+    /// Continue a worklist that stopped inside an item: the item first,
+    /// entered with `delivery`, its result taken as it would have been had
+    /// it never stopped; then the items left ([`Self::run_relate_worklist`]).
+    /// No item is charged or related again.
+    #[inline(never)]
+    fn resume_relate_worklist(
+        &self,
+        worklist: &mut RelateWorklist,
+        bindings: &mut Vec<InferBinding>,
+        delivery: Option<HelperDelivery>,
+        depth: u32,
+    ) -> Staged<()> {
+        if let Some(held) = worklist.held.take() {
+            match self
+                .driver
+                .advance_held_relation(held, delivery, bindings, depth)
+            {
+                Staged::Done(result) => worklist.results.push(result),
+                Staged::Held(stop) => {
+                    let (held, request) = *stop;
+                    worklist.held = Some(held);
+                    return Staged::Held(Box::new(((), request)));
+                }
+            }
+        }
+        self.run_relate_worklist(worklist, bindings, Some(depth))
+    }
+
+    /// Relate the items of `worklist` until it is empty: its combined
+    /// result. Every item is charged to the connected-work ledger; a refused
+    /// charge leaves the relation `Unknown`. With `stops` (a frame's need
+    /// depth) a canonical sub-relation or an object comparison that must
+    /// wait on a read stops the worklist inside that item, held, with the
+    /// request it stands at; driven in place (`stops: None`) it never
+    /// stops.
+    fn run_relate_worklist(
+        &self,
+        worklist: &mut RelateWorklist,
+        bindings: &mut Vec<InferBinding>,
+        stops: Option<u32>,
+    ) -> Staged<()> {
+        let RelateWorklist {
+            work,
+            results,
+            held,
+        } = worklist;
+        verter_debug_assert!(held.is_none(), "a held item is resumed before the rest run");
+        let mut hold = |item: Staged<HeldRelation>,
+                        results: &mut Vec<RelationResult>|
+         -> Option<HelperRequest> {
+            match item {
+                Staged::Done(result) => {
+                    results.push(result);
+                    None
+                }
+                Staged::Held(stop) => {
+                    let (item, request) = *stop;
+                    *held = Some(item);
+                    Some(request)
+                }
+            }
+        };
         while let Some(item) = work.pop() {
             // A sequence is charged once, however many items it relates.
             let charged = !matches!(item, RelateWork::AllOf { next, .. } if next > 0);
             if charged && !self.charge_relation_work(1) {
-                return RelationResult::Unknown;
+                return Staged::Done(RelationResult::Unknown);
             }
             match item {
                 RelateWork::AllOf { items, next } => {
@@ -17506,20 +18387,27 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                     work.push(items[index].clone());
                 }
                 RelateWork::Expand(s, t, intersection_target_arm) => {
-                    self.expand_pair(
-                        s,
-                        t,
-                        intersection_target_arm,
-                        bindings,
-                        &mut work,
-                        &mut results,
-                    );
+                    self.expand_pair(s, t, intersection_target_arm, bindings, work, results);
                 }
                 RelateWork::Eval(s, t) => {
                     if self.relation_eval_requires_canonical_frame(s, t) {
-                        results.push(self.relate_member(s, t, bindings, InferPosition::Covariant));
+                        match stops {
+                            None => results.push(self.relate_member(
+                                s,
+                                t,
+                                bindings,
+                                InferPosition::Covariant,
+                            )),
+                            Some(depth) => {
+                                let staged =
+                                    self.driver.relate_member_staged(s, t, bindings, depth);
+                                if let Some(request) = hold(staged, results) {
+                                    return Staged::Held(Box::new(((), request)));
+                                }
+                            }
+                        }
                     } else {
-                        self.expand_pair(s, t, false, bindings, &mut work, &mut results);
+                        self.expand_pair(s, t, false, bindings, work, results);
                     }
                 }
                 RelateWork::Arm(s, t) | RelateWork::TargetArm(s, t) => {
@@ -17529,7 +18417,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                     {
                         results.push(self.relate_arm_member(s, t, target_arm, bindings));
                     } else {
-                        self.expand_pair(s, t, target_arm, bindings, &mut work, &mut results);
+                        self.expand_pair(s, t, target_arm, bindings, work, results);
                     }
                 }
                 RelateWork::PositionalArm {
@@ -17549,15 +18437,23 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                     }
                 }
                 RelateWork::Descend(s, t, kind) => {
-                    self.relate_nested_pair(s, t, kind, bindings, &mut work, &mut results);
+                    self.relate_nested_pair(s, t, kind, bindings, work, results);
                 }
                 RelateWork::Ascend => self.leave_inline_recursion(),
-                RelateWork::Objects(s, t) => {
-                    results.push(self.relate_object_nodes(s, t, bindings));
-                }
+                RelateWork::Objects(s, t) => match stops {
+                    None => results.push(self.relate_object_nodes(s, t, bindings)),
+                    Some(depth) => {
+                        let staged = self
+                            .driver
+                            .relate_object_nodes_staged(s, t, bindings, depth);
+                        if let Some(request) = hold(staged, results) {
+                            return Staged::Held(Box::new(((), request)));
+                        }
+                    }
+                },
             }
         }
-        results.pop().unwrap_or(RelationResult::Unknown)
+        Staged::Done(results.pop().unwrap_or(RelationResult::Unknown))
     }
     fn expand_pair(
         &self,
