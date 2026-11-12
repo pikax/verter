@@ -224,6 +224,12 @@ impl VerterLanguageServer {
         &self,
         input: verter_protocol::participation::ParticipationInput,
     ) -> Result<crate::participation::ParticipationReceipt> {
+        // The edit-commit fence is taken before the open documents are read
+        // and the mask changes, so no await separates accepting the input
+        // from republishing under it (a cancelled request never leaves a
+        // live mask unpublished), and an open or close committing while this
+        // update waited is seen by every step below.
+        let edit_commit = self.did_change_mutex.lock().await;
         let open: Vec<Uri> = self
             .documents
             .open_uris()
@@ -236,6 +242,16 @@ impl VerterLanguageServer {
             .map(|uri| crate::participation::document_owes_no_eager_work(&self.documents, uri))
             .collect();
         let (transition, receipt) = crate::participation::accept(&self.documents, &input)?;
+        // A document whose bytes were retained only gets the open it was
+        // owed, on its newest bytes, before any work is re-armed for it. Also
+        // on an unchanged mask (and on the document's next edit), so no
+        // retained document outlives its scope's re-admission.
+        for uri in self.documents.retained_uris() {
+            if !crate::participation::document_disables_every_cell(&self.documents, &uri) {
+                let _ = self.documents.materialize_retained(&uri);
+            }
+        }
+        drop(edit_commit);
         if transition.advanced() {
             let now = tokio::time::Instant::now();
             for (uri, was_disabled) in open.iter().zip(was_disabled) {

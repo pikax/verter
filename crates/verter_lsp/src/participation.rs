@@ -251,6 +251,37 @@ pub(crate) fn admitted_workspace_wide(
         })
 }
 
+/// Whether the scope of a document of `language` at `canonical` disables
+/// every cell: an opening of it retains bytes only (PC04).
+pub(crate) fn language_disables_every_cell(
+    documents: &DocumentRegistry,
+    language: &verter_language::FileLanguage,
+    canonical: &str,
+) -> bool {
+    let unit = file_unit(canonical);
+    documents
+        .participation()
+        .state()
+        .mask()
+        .disables_every_cell(
+            &language_profile(documents.host(), language),
+            RequestSite {
+                unit: Some(&unit),
+                region_role: None,
+            },
+        )
+}
+
+/// Whether this open document's scope disables every cell.
+pub(crate) fn document_disables_every_cell(documents: &DocumentRegistry, uri: &Uri) -> bool {
+    let site = DocumentSite::of(documents, uri);
+    documents
+        .participation()
+        .state()
+        .mask()
+        .disables_every_cell(&site.capability_profile, site.request_site())
+}
+
 /// Whether no facet of this document's scope is `Full`: the scope admits at
 /// most explicitly demanded workspace semantics, so no eager open, edit,
 /// provider or publication work is owed to it (DEM0 `DEM-D06`).
