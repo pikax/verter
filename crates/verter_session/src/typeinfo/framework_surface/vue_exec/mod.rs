@@ -993,6 +993,20 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
                                     crate::typeinfo::framework_surface::results::ModelBinding {
                                         name: row.analysis.name.clone(),
                                         prop: row.analysis.clone(),
+                                        // A model row is synthesized from the
+                                        // analyzer facts, with no classified
+                                        // member type: read it from the row's
+                                        // own source.
+                                        value: row.member_type.clone().or_else(|| {
+                                            row.authority.source().and_then(|source| {
+                                                crate::typeinfo::framework_surface::results::NamedTypeMemberOutput::from_member_source(
+                                                    dispatch,
+                                                    validated_request.owner_canonical.as_ref(),
+                                                    source,
+                                                )
+                                            })
+                                        }),
+                                        source: row.authority.source().cloned(),
                                     }
                                 })
                                 .collect();

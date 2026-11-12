@@ -329,6 +329,13 @@ pub struct ModelBinding {
     pub name: String,
     /// The synthesized prop field carrying the binding's value type.
     pub prop: AnalyzedPropField,
+    /// The binding value's sealed shallow output, read off the same props
+    /// row [`Self::prop`] comes from: `None` when no resolved type was
+    /// available.
+    pub value: Option<NamedTypeMemberOutput>,
+    /// The binding value's published source: the address a reference to the
+    /// model member replays. `None` when the row published no source.
+    pub source: Option<verter_type_expr::facts::SemanticTypeSource>,
 }
 
 /// The sealed shallow OUTPUT value of a named object-surface member — the
@@ -458,6 +465,34 @@ impl NamedTypeMemberOutput {
             },
             RaisedShallowMemberOutput::Opaque => Self::Opaque,
         }
+    }
+}
+
+impl NamedTypeMemberOutput {
+    /// A member value's sealed shallow type read from its replayable
+    /// `source`, raised (inside its own construction scope) in the
+    /// navigable published view a member reference replays under. `None`
+    /// when the source is not replayable or does not raise.
+    pub(crate) fn from_member_source<C: verter_type_engine::resolver_core::ResolverCapabilities>(
+        dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
+        scope_canonical: &str,
+        source: &verter_type_expr::facts::SemanticTypeSource,
+    ) -> Option<Self> {
+        if !crate::typeinfo::node_refs::is_replayable_source(source) {
+            return None;
+        }
+        let _scope = dispatch.enter_construction_scope();
+        let scope_owner = crate::typeinfo::node_refs::source_scope_owner(source)?;
+        let node = crate::typeinfo::node_refs::raise_framework_member_source(
+            dispatch,
+            scope_canonical,
+            scope_owner,
+            source,
+        )?;
+        verter_type_engine::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
+            dispatch, node,
+        )
+        .map(Self::from_raised_shallow)
     }
 }
 

@@ -655,7 +655,7 @@ pub(crate) fn encode_framework_surfaces_with_unsupported_message(
 }
 
 /// Record the exported node of every named member of an exactly resolved
-/// props, expose, options or slots surface. `members` are the wire members just encoded
+/// props, expose, options, slots or model surface. `members` are the wire members just encoded
 /// from `dtos`, one per named row in the same order.
 fn record_exported_members(
     arena: &mut GraphArena,
@@ -684,7 +684,12 @@ fn record_exported_members(
             .iter()
             .map(|slot| slot.name.as_str())
             .collect(),
-        FrameworkSurfaceKind::Emits | FrameworkSurfaceKind::Model => return,
+        FrameworkSurfaceKind::Model => dtos
+            .model
+            .as_ref()
+            .map(|surface| surface.bindings.iter().map(|b| b.name.as_str()).collect())
+            .unwrap_or_default(),
+        FrameworkSurfaceKind::Emits => return,
     };
     if names.len() != members.len() {
         return;
@@ -913,10 +918,10 @@ fn encode_kind_members(
                     .iter()
                     .map(|b| {
                         let name_id = arena.strings.intern(&b.name);
-                        // A model binding's prop type is an on-demand payload
-                        // LOCATOR (`AnalyzedPropField.payload`) — absent arm,
-                        // same as props/emits above.
-                        let type_node_id = arena.encode_member_value(None, 0);
+                        // The binding's sealed shallow value, read off the
+                        // props row the binding synthesizes — ZERO-DISPATCH,
+                        // exactly as the props surface encodes it.
+                        let type_node_id = arena.encode_named_member_output(b.value.as_ref());
                         wire::FrameworkSurfaceMember {
                             name_id,
                             type_node_id,

@@ -955,9 +955,10 @@ fn resolve_bindable<M: verter_audit::observe::ObserveExec>(
         .bindable_members
         .iter()
         .map(|name| {
-            let prop = props_fields
+            let row = props_fields
                 .iter()
-                .find(|row| row.analysis.name.as_str() == name.as_str())
+                .find(|row| row.analysis.name.as_str() == name.as_str());
+            let prop = row
                 .map(|row| row.analysis.clone())
                 .unwrap_or_else(|| AnalyzedPropField {
                     name: name.as_str().to_string(),
@@ -980,6 +981,8 @@ fn resolve_bindable<M: verter_audit::observe::ObserveExec>(
             ModelBinding {
                 name: name.as_str().to_string(),
                 prop,
+                value: row.and_then(|row| row.member_type.clone()),
+                source: row.and_then(|row| row.authority.source().cloned()),
             }
         })
         .collect();

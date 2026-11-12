@@ -823,6 +823,58 @@ fn ambiguous_member_names_are_not_addressed() {
     assert!(!names.iter().any(|name| name == "modelValue"), "{names:?}");
 }
 
+const MODEL_ONLY_SFC: &str = "/model-only.vue";
+const MODEL_ONLY_SFC_SOURCE: &str = r#"<script setup lang="ts">
+interface Item { id: number }
+defineModel<Item>();
+</script>
+<template><div></div></template>
+"#;
+
+/// A model binding is exported with the value type of the props row it
+/// synthesizes and addressed by that row's source under its `defineModel`
+/// producer: the reference replays to the exported binding type.
+#[test]
+fn framework_model_bindings_issue_replayable_member_references() {
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_standalone(&host, MODEL_ONLY_SFC, MODEL_ONLY_SFC_SOURCE);
+    let _ = host.resolve_framework_surface_with_audit(framework_envelope_for(
+        &host,
+        MODEL_ONLY_SFC,
+        "vue",
+        &[FrameworkSurfaceKind::Model],
+    ));
+
+    let issued = issued_member(&host, "modelValue");
+    let locator = member_locator(&issued).clone();
+    assert_eq!(locator.role, MemberRole::Model);
+    assert!(
+        matches!(
+            locator.producer,
+            MemberProducer::VueMacro {
+                kind: AnalyzedMacroKind::DefineModel,
+                ..
+            }
+        ),
+        "{:?}",
+        locator.producer
+    );
+    let dtos = macro_dtos(&host, MODEL_ONLY_SFC, AnalyzedMacroKind::DefineModel);
+    let binding = dtos
+        .model
+        .as_ref()
+        .and_then(|model| model.bindings.iter().find(|b| b.name == "modelValue"))
+        .expect("the modelValue binding");
+    assert!(
+        binding.value.is_some(),
+        "the binding exports its value type"
+    );
+    assert_eq!(binding.source.as_ref(), Some(&locator.source));
+    assert_eq!(replayed_member_type(&host, &issued), binding.value);
+}
+
 const SVELTE: &str = "/comp.svelte";
 const SVELTE_SOURCE: &str = r#"<script lang="ts">
   interface Item { id: number }
