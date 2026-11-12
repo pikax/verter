@@ -1188,15 +1188,16 @@ import TypedChild from './TypedChild.vue'\n\
             mac.kind == verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots
         })
         .expect("the child must have a defineSlots macro");
-    let resolver_surface =
-        host.resolve_vue_macro_surface(&verter_session::typeinfo::VueMacroSurfaceRequest {
+    let resolver_surface = host
+        .resolve_vue_macro_surface(&verter_session::typeinfo::VueMacroSurfaceRequest {
             owner_canonical: std::sync::Arc::from(child_canonical.as_str()),
             macro_index,
             macro_kind: slot_macro.kind,
             // The public resolver re-derives the authoritative current hash.
             root_identity: [0u8; 16],
             level: verter_session::typeinfo::TypeInfoQueryLevel::FullMetadata,
-        });
+        })
+        .expect("a settled host");
     let actual = server
         .hover(hover_params(&app_uri, position))
         .await

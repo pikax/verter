@@ -678,6 +678,9 @@ pub(crate) enum IssueRefusal {
     /// The committed basis no longer described the host's current inputs
     /// when the fact came to be registered.
     StaleAtRegistration,
+    /// No current view settled for the registration fence, so nothing
+    /// could be checked; the answer is published unaddressed.
+    Unsettled,
     /// The record alone exceeds the index's entry or byte bound.
     Oversized,
 }
@@ -695,6 +698,8 @@ pub(crate) struct IssuanceCounters {
     pub(crate) basis_refused: [u64; 6],
     /// Facts whose basis went stale before registration.
     pub(crate) stale_at_registration: u64,
+    /// Facts whose registration fence found no current view.
+    pub(crate) unsettled: u64,
     /// Records refused for exceeding a bound alone.
     pub(crate) oversized: u64,
 }
@@ -757,6 +762,7 @@ impl IssuedReferenceIndex {
                 &mut self.counters.basis_refused[basis_refusal_slot(refusal)]
             }
             IssueRefusal::StaleAtRegistration => &mut self.counters.stale_at_registration,
+            IssueRefusal::Unsettled => &mut self.counters.unsettled,
             IssueRefusal::Oversized => &mut self.counters.oversized,
         };
         *counter = counter.saturating_add(1);
@@ -895,8 +901,10 @@ fn commit_and_register_fact(
         })
         .collect();
     let keys = entries.iter().map(|(key, _)| *key).collect();
-    if admit_in_fresh_view(host, &basis).is_err() {
-        return Err(IssueRefusal::StaleAtRegistration);
+    match admit_in_fresh_view(host, &basis) {
+        Ok(()) => {}
+        Err(FreshAdmission::Stale(_)) => return Err(IssueRefusal::StaleAtRegistration),
+        Err(FreshAdmission::Unsettled(_)) => return Err(IssueRefusal::Unsettled),
     }
     host.typeinfo_issued_refs
         .lock()
@@ -904,13 +912,22 @@ fn commit_and_register_fact(
     Ok(keys)
 }
 
+/// Why a fresh-view fence admitted nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FreshAdmission {
+    /// The basis no longer describes the host's current inputs.
+    Stale(NativeBasisStale),
+    /// No current view settled, so the basis could not be checked. The
+    /// reference is not known to be dead.
+    Unsettled(crate::typeinfo::UnsettledInput),
+}
+
 /// Validate `basis` against a fresh current capture of `host`, through a
-/// request port over it. A host that cannot settle on a coherent view
-/// admits nothing.
-fn admit_in_fresh_view(host: &VerterHost, basis: &NativeFactBasis) -> Result<(), NativeBasisStale> {
-    let Some(current) = crate::typeinfo::current_store_view_for_query(host) else {
-        return Err(NativeBasisStale::Observation);
-    };
+/// request port over it. A host that cannot settle on a current view
+/// admits nothing and says so, apart from a stale basis.
+fn admit_in_fresh_view(host: &VerterHost, basis: &NativeFactBasis) -> Result<(), FreshAdmission> {
+    let current =
+        crate::typeinfo::current_store_view_for_query(host).map_err(FreshAdmission::Unsettled)?;
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     verter_audit::specialise!(crate::capture::installed_mode() => M, {
         let ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(host, &current, overlay);
@@ -919,6 +936,7 @@ fn admit_in_fresh_view(host: &VerterHost, basis: &NativeFactBasis) -> Result<(),
             &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx),
             basis,
         )
+        .map_err(FreshAdmission::Stale)
     })
 }
 
@@ -950,11 +968,13 @@ pub(crate) fn admit_issued_in_view(
 
 /// Re-validate `issued`'s committed basis against a fresh capture of
 /// `host`: the currentness fence an answer passes after its export. A
-/// host whose inputs moved while the answer was produced admits nothing.
+/// host whose inputs moved while the answer was produced admits nothing
+/// (`Stale`); a host that cannot settle on a current view admits nothing
+/// either, but the reference is not declared dead (`Unsettled`).
 pub(crate) fn admit_issued_in_fresh_view(
     host: &VerterHost,
     issued: &IssuedRef,
-) -> Result<(), NativeBasisStale> {
+) -> Result<(), FreshAdmission> {
     admit_in_fresh_view(host, &issued.record.basis)
 }
 

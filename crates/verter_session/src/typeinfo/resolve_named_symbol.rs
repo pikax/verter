@@ -524,24 +524,26 @@ fn resolve_named_symbol_request(
     // outer `run_stable_request` publish fence. So it MUST resolve against a
     // PROVEN-CURRENT snapshot — a known-stale (`ReturnOnly`) read would
     // resolve the query against already-superseded dependency state and
-    // return it as a normal result. Acquire a `CurrentHostStoreView` via a
-    // bounded retry; on sustained churn (`None`) surface a miss rather than
-    // computing against the stale view. A non-current settle is a non-fault
-    // miss (`Ok(None)`) — the FFI surface maps it to a `null` payload, so the
-    // consumer re-queries once the host settles.
-    // Every early-miss return below (the non-current view, a wire-arg
-    // lowering miss) reports the computed default mode, not a hardcoded
-    // `Navigate`, so the audit record records the mode the resolver would
-    // actually have used (`mode = None` on a non-generic decl defaults to
-    // `Expanded`, not `Navigate`).
-    let Some(current_view) = crate::typeinfo::current_store_view_for_query(host) else {
-        // No coherent view exists, so nothing resolves: the live inventory
-        // only labels the audited miss.
-        let mode = compute_effective_mode(requested_mode, || {
-            host.shallow_file_state(canonical_id)
-                .is_some_and(|state| declares_generic_carrier(&state, name))
-        });
-        return (Ok(None), mode);
+    // return it as a normal result. Take one `CurrentHostStoreView`; when
+    // none settles the request is the typed `UnstableState` fault, never a
+    // miss — the FFI surfaces it on its `error` field, so the consumer can
+    // tell churn from "no such declaration" and re-query.
+    // Every early return below (the unsettled view, a wire-arg lowering
+    // miss) reports the computed default mode, not a hardcoded `Navigate`,
+    // so the audit record records the mode the resolver would actually have
+    // used (`mode = None` on a non-generic decl defaults to `Expanded`, not
+    // `Navigate`).
+    let current_view = match crate::typeinfo::current_store_view_for_query(host) {
+        Ok(current_view) => current_view,
+        Err(unsettled) => {
+            // No current view exists, so nothing resolves: the live
+            // inventory only labels the audited mode.
+            let mode = compute_effective_mode(requested_mode, || {
+                host.shallow_file_state(canonical_id)
+                    .is_some_and(|state| declares_generic_carrier(&state, name))
+            });
+            return (Err(unsettled.into()), mode);
+        }
     };
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     verter_audit::specialise!(crate::capture::installed_mode() => M, {

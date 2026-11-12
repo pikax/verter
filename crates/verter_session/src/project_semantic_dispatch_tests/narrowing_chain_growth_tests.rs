@@ -169,6 +169,7 @@ fn chain_probe(source: &str) -> (Vec<TypeExpr>, Work) {
     let query_reads = DISPATCH_TRACE.with(|trace| trace.borrow().len()) as u64;
     let bytes = host
         .project_node_to_type_expr_json_bytes(&node)
+        .expect("a settled host")
         .expect("the answer projects");
     let answer: TypeExpr = serde_json::from_slice(&bytes).expect("a wire answer");
     let TypeExpr::Union(arms) = &answer else {

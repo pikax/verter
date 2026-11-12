@@ -424,6 +424,7 @@ fn named_mapped_index_completes_with_and_without_audit_capture() {
                 .expect("probe exists");
             let bytes = host
                 .project_node_to_type_expr_json_bytes(&node)
+                .expect("a settled host")
                 .expect("answer projects");
             let answer: TypeExpr = serde_json::from_slice(&bytes).expect("valid answer");
             let TypeExpr::Union(arms) = &answer else {

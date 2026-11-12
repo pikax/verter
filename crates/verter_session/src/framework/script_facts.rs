@@ -1163,7 +1163,8 @@ fn resolve_script_facts_inner<
                     )),
                 };
             }
-        } else if let Some(current_view) = crate::typeinfo::current_store_view_for_query(host) {
+        } else if let Some(current_view) = host.resolver_store_view_read().current() {
+            // ReturnOnly is a warm miss; the cold path fences itself.
             let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
             let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(
                 host,

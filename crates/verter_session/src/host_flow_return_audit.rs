@@ -75,9 +75,9 @@ pub enum FlowReturnError {
     /// control surface, torn state, empty recursive cycle, unmodeled
     /// demand point, budget exhaustion).
     Failure(FlowReturnFailure),
-    /// The host could not pin a proven-current store view within the
-    /// bounded retry window; the query was not resolved against
-    /// superseded state.
+    /// No proven-current store view settled within the store-view
+    /// manager's budget; the query was not resolved against superseded
+    /// state.
     UnstableState {
         /// Number of retry attempts made before giving up.
         attempts: u8,
@@ -252,8 +252,8 @@ impl VerterHost {
         };
 
         // Resolve against a PROVEN-CURRENT snapshot (this entry-point
-        // returns the value with no outer publish fence). On sustained
-        // churn surface the typed `UnstableState` error rather than
+        // returns the value with no outer publish fence). When none
+        // settles, surface the typed `UnstableState` error rather than
         // answering from superseded state.
         let request_clock = verter_audit::observe::Stopwatch::start_for(ctx.observe_mode());
         let outcome: Result<Arc<FlowReturnResult>, FlowReturnError> = if ctx.is_cancelled() {
@@ -263,7 +263,7 @@ impl VerterHost {
             Err(FlowReturnError::Cancelled)
         } else {
             match crate::typeinfo::current_store_view_for_query(self) {
-                Some(current_view) => {
+                Ok(current_view) => {
                     // Admission snapshots the selected request's capture
                     // receivers, so install it before constructing the resolver.
                     let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
@@ -280,9 +280,7 @@ impl VerterHost {
                     let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
                     run(&dispatch)
                 }
-                None => Err(FlowReturnError::UnstableState {
-                    attempts: crate::typeinfo::TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS as u8,
-                }),
+                Err(unsettled) => Err(unsettled.into()),
             }
         };
         #[cfg(feature = "test-support")]

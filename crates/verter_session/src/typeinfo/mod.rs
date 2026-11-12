@@ -71,50 +71,79 @@ pub(crate) mod vue_macro_codegen;
 // minting (each mint scope's whole reachable production module tree is
 // output-only) makes the output-materialization fence compiler-enforced.
 
-/// Bounded number of times a typeinfo query-returner re-reads the base
-/// store view trying to settle on a proven-[`crate::resolver_store::StoreViewRead::Current`]
-/// snapshot under churn before reporting a non-current miss.
-///
-/// A typeinfo query-returner builds a request-bound dispatch context from
-/// the base store view and RETURNS the resolved node — there is no outer
-/// `run_stable_request` publish fence to suppress a stale answer. So it MUST
-/// resolve against a CURRENT snapshot: a `ReturnOnly` read means the manager
-/// could not prove the snapshot coherent, and computing the query against it
-/// would return a result derived from already-superseded dependency state.
-/// The retry budget mirrors the store-view manager's own bounded
-/// no-torn-snapshot retries — a transient mutation burst settles within a
-/// few rounds; sustained churn exhausts the budget and the query-returner
-/// surfaces a miss (`None`) rather than a stale answer.
-pub(crate) const TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS: usize = 3;
-
-/// Acquire a proven-[`crate::resolver_store::CurrentHostStoreView`] for a
-/// typeinfo query-returner, retrying a bounded number of times when the
-/// store-view manager hands back a known-stale
-/// [`crate::resolver_store::StoreViewRead::ReturnOnly`] read under churn.
-///
-/// Returns `None` when every attempt within
-/// [`TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS`] observed a non-current read —
-/// the host is under sustained churn and the query CANNOT be answered
-/// against a coherent snapshot. `None` is the established typeinfo miss
-/// signal ("could not be resolved"): the FFI surface already maps it to a
-/// `null` payload, so the consumer re-queries on the next request once the
-/// host settles. The loop is bounded, so it always terminates — it never
-/// spins.
+/// The store-view manager could not prove a current view within its own
+/// bounded handoff. Not a miss and not an eligible refusal: nothing is
+/// published, warmed or issued under it. A request whose view never
+/// settles has no input basis, so a TypeInfo
+/// request answers it with the request-level `UnstableState` error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
+pub struct UnsettledInput {
+    reason: crate::resolver_store::StoreViewReturnOnlyReason,
+}
+
+impl UnsettledInput {
+    /// Manager rounds spent: the manager's budget when every build was
+    /// superseded or declined; 0 for a re-entrant build claim, where no
+    /// settle round ran.
+    #[must_use]
+    pub fn attempts(self) -> u8 {
+        use crate::resolver_store::StoreViewReturnOnlyReason;
+        match self.reason {
+            StoreViewReturnOnlyReason::PublishDeclined | StoreViewReturnOnlyReason::Superseded => {
+                u8::try_from(crate::resolver_store::STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS)
+                    .unwrap_or(u8::MAX)
+            }
+            StoreViewReturnOnlyReason::ReentrantBuildClaim => 0,
+        }
+    }
+}
+
+impl From<UnsettledInput> for verter_protocol::verter::v1::TypeInfoRequestError {
+    fn from(unsettled: UnsettledInput) -> Self {
+        Self {
+            kind: Some(
+                verter_protocol::verter::v1::type_info_request_error::Kind::UnstableState(
+                    verter_protocol::typeinfo::graph::wire_error_unstable_state(u32::from(
+                        unsettled.attempts(),
+                    )),
+                ),
+            ),
+        }
+    }
+}
+
+impl From<UnsettledInput> for crate::host_resolve_type_audit::TypeResolutionRequestError {
+    fn from(unsettled: UnsettledInput) -> Self {
+        Self::UnstableState {
+            attempts: unsettled.attempts(),
+        }
+    }
+}
+
+impl From<UnsettledInput> for crate::host_flow_return_audit::FlowReturnError {
+    fn from(unsettled: UnsettledInput) -> Self {
+        Self::UnstableState {
+            attempts: unsettled.attempts(),
+        }
+    }
+}
+
+/// Take the proven-current store view a typeinfo query-returner resolves
+/// against: exactly one manager read. The store-view manager is the single
+/// retry authority (its handoff already runs the bounded settle rounds and
+/// parks on another thread's build), so a non-current read is answered at
+/// once as [`UnsettledInput`], never retried here and never reported as a
+/// miss.
 pub(crate) fn current_store_view_for_query(
     host: &crate::VerterHost,
-) -> Option<crate::resolver_store::CurrentHostStoreView> {
-    for _ in 0..TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS {
-        if let Some(current) = host.resolver_store_view_read().current() {
-            return Some(current);
+) -> Result<crate::resolver_store::CurrentHostStoreView, UnsettledInput> {
+    match host.resolver_store_view_read() {
+        crate::resolver_store::StoreViewRead::Current(current) => Ok(current),
+        crate::resolver_store::StoreViewRead::ReturnOnly { reason, .. } => {
+            Err(UnsettledInput { reason })
         }
-        // Non-current read: the manager could not prove this snapshot
-        // coherent. Re-read — a transient mutation burst settles within
-        // the bounded budget. No sleep / yield: the manager's own
-        // build_coherent retry already absorbs the contention window, and
-        // a tight bounded re-read keeps the path non-blocking.
     }
-    None
 }
 
 pub use resolve_named_symbol::ResolveMode;

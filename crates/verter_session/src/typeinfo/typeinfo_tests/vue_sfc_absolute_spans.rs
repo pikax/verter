@@ -156,6 +156,7 @@ fn template_before_script_member_name_span_slices_raw_to_label() {
     let request = macro_request(&host, FILE, AnalyzedMacroKind::DefineProps);
     let macro_surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineProps<Props>() must resolve a macro surface");
     let surface = &macro_surface.surface;
 
@@ -228,6 +229,7 @@ fn dual_block_member_spans_slice_raw_from_both_blocks() {
     let request = macro_request(&host, FILE, AnalyzedMacroKind::DefineProps);
     let macro_surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineProps<Props>() must resolve a macro surface across the heritage edge");
     let surface = &macro_surface.surface;
 
@@ -354,6 +356,7 @@ fn defineslots_return_span_slices_raw_to_vnode_array() {
     let request = macro_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
     let macro_surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineSlots<...>() must resolve a macro surface");
 
     let fixture_dispatch_0 =
@@ -441,6 +444,7 @@ fn vue_member_jsdoc_description_span_slices_raw_to_doc_text() {
     let request = macro_request(&host, FILE, AnalyzedMacroKind::DefineProps);
     let macro_surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineProps<Props>() must resolve a macro surface");
     let surface = &macro_surface.surface;
 

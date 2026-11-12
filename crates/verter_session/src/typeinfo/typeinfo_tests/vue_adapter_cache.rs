@@ -110,6 +110,7 @@ fn vue_public_type_carries_synthesized_instance_members_without_component_meta()
 
     let public_surface = host
         .resolve_vue_public_type(FILE, TypeInfoQueryLevel::PublicType)
+        .expect("a settled host")
         .expect("a .vue with type-based macros has a public component type");
 
     let mut members: Vec<&str> = public_surface
@@ -146,6 +147,7 @@ fn vue_public_type_returns_none_for_plain_ts_file() {
     // public component type (negative).
     assert!(
         host.resolve_vue_public_type(FILE, TypeInfoQueryLevel::PublicType)
+            .expect("a settled host")
             .is_none(),
         "a plain .ts file has no .vue public component type"
     );
@@ -169,6 +171,7 @@ fn query_level_public_vs_full_metadata_produce_distinct_surfaces() {
 
     let public_surface = host
         .resolve_vue_public_type(FILE, TypeInfoQueryLevel::PublicType)
+        .expect("a settled host")
         .expect("public type resolves");
     let public_members: std::collections::BTreeSet<&str> = public_surface
         .members
@@ -179,6 +182,7 @@ fn query_level_public_vs_full_metadata_produce_distinct_surfaces() {
     let full_request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
     let full = host
         .resolve_vue_macro_surface(&full_request)
+        .expect("a settled host")
         .expect("full-metadata defineProps surface resolves");
     let full_members: std::collections::BTreeSet<&str> = full
         .surface
@@ -564,7 +568,10 @@ fn vue_macro_surface_carries_spans_not_owned_type_strings() {
     upsert(&host, FILE, VUE_PROPS);
 
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
-    let surface = host.resolve_vue_macro_surface(&request).expect("surface");
+    let surface = host
+        .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
+        .expect("surface");
 
     // The surface MUST carry members for this fixture (a stub returning an empty
     // surface would defeat the structural guard below).

@@ -99,6 +99,7 @@ fn define_props_normalizer_produces_fields_with_surface_readonly_and_jsdoc() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineProps<Props>() must resolve a macro surface");
     let fixture_dispatch_0 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -201,6 +202,7 @@ fn define_emits_normalizer_extracts_call_signature_events_and_strips_event_param
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineEmits must resolve a macro surface");
     let fixture_dispatch_1 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -288,6 +290,7 @@ fn define_emits_callsig_rich_params_mint_the_callable_occurrence_replay_source()
     let macro_index = request.macro_index;
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineEmits must resolve a macro surface");
     let fixture_dispatch_2 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -386,6 +389,7 @@ fn define_emits_normalizer_property_style_fallback() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("property-style defineEmits must resolve a surface");
     let fixture_dispatch_3 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -437,6 +441,7 @@ fn define_emits_normalizer_mixed_callsig_unions_property_members() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("mixed defineEmits resolves a surface");
     let fixture_dispatch_4 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -548,6 +553,7 @@ fn cross_file_emit_call_signature_payload_scope_is_base_file() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("imported emit interface resolves a surface");
     let fixture_dispatch_5 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -599,7 +605,10 @@ fn emit_call_signature_payload_type_is_stripped_payload_tuple() {
 
     let local_emits = {
         let request = props_request(&host, LOCAL, AnalyzedMacroKind::DefineEmits);
-        let surface = host.resolve_vue_macro_surface(&request).expect("surface");
+        let surface = host
+            .resolve_vue_macro_surface(&request)
+            .expect("a settled host")
+            .expect("surface");
 
         let fixture_dispatch_6 =
             verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -637,7 +646,10 @@ fn emit_call_signature_payload_type_is_stripped_payload_tuple() {
     upsert(&host, CROSS, VUE_EMITS_IMPORTED);
     let cross_emits = {
         let request = props_request(&host, CROSS, AnalyzedMacroKind::DefineEmits);
-        let surface = host.resolve_vue_macro_surface(&request).expect("surface");
+        let surface = host
+            .resolve_vue_macro_surface(&request)
+            .expect("a settled host")
+            .expect("surface");
         let fixture_dispatch_6 =
             verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
         emits_from_typeinfo_surface(
@@ -696,6 +708,7 @@ fn define_emits_callsig_carrier_event_name_union_resolves_both_names() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineEmits with an aliased event-name union resolves a surface");
     let fixture_dispatch_7 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -754,6 +767,7 @@ fn define_model_normalizer_produces_synthesized_model_prop_from_analyzer_facts()
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineModel);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineModel resolves an (empty-surface) VueMacroSurface");
     // The surface itself is EMPTY (defineModel's type arg is the model value
     // type, not a props object) — negative assertion.
@@ -833,6 +847,7 @@ fn with_defaults_normalizer_uses_inner_props_surface_with_raw_optionality() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("withDefaults' inner defineProps resolves a surface");
     let fixture_dispatch_9 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -895,7 +910,9 @@ fn with_defaults_outer_macro_resolves_inner_define_props_surface() {
         level: TypeInfoQueryLevel::FullMetadata,
     };
     assert!(
-        host.resolve_vue_macro_surface(&outer_request).is_none(),
+        host.resolve_vue_macro_surface(&outer_request)
+            .expect("a settled host")
+            .is_none(),
         "the outer withDefaults macro has no type arg, so it resolves no surface (negative)"
     );
     // And its DTO bundle is empty — the props are NOT double-counted here.
@@ -960,6 +977,7 @@ fn cross_file_heritage_props_surface_with_own_body_vs_heritage_provenance() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("cross-file heritage defineProps resolves a surface");
     let fixture_dispatch_10 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -1052,6 +1070,7 @@ fn generic_inherited_member_type_expr_scope_is_deriving_file() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("generic heritage defineProps resolves a surface");
     let fixture_dispatch_11 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -1094,6 +1113,7 @@ fn generic_inherited_member_type_expr_scope_is_deriving_file() {
     // the base file would Miss.
     let resolved = host
         .resolve_shallow_surface(FILE, "Local")
+        .expect("a settled host")
         .expect("Local resolves in the deriving SFC scope");
     let resolved_members: Vec<&str> = resolved
         .members
@@ -1143,6 +1163,7 @@ fn define_emits_over_local_class_does_not_publish_non_public_members() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineEmits<Class> resolves a surface");
     let fixture_dispatch_12 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -1191,6 +1212,7 @@ fn define_emits_over_imported_class_does_not_publish_non_public_members() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineEmits);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineEmits<ImportedClass> resolves a surface");
     let fixture_dispatch_13 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -1234,6 +1256,7 @@ fn define_slots_over_class_does_not_publish_non_public_members() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineSlots<Class> resolves a surface");
     let fixture_dispatch_14 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -1277,6 +1300,7 @@ fn define_slots_navigated_class_param_does_not_publish_non_public_bindings() {
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineSlots);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("defineSlots resolves a surface");
     let fixture_dispatch_15 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
@@ -1335,6 +1359,7 @@ fn runtime_object_define_expose_publishes_real_members_not_a_memberless_surface(
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineExpose);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("a runtime-object defineExpose({...}) must resolve a macro surface, not None");
 
     let mut names: Vec<Arc<str>> = surface
@@ -1373,6 +1398,7 @@ fn runtime_object_define_props_publishes_real_members_not_a_memberless_surface()
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineProps);
     let surface = host
         .resolve_vue_macro_surface(&request)
+        .expect("a settled host")
         .expect("a runtime-object defineProps({...}) must resolve a macro surface, not None");
 
     let mut names: Vec<Arc<str>> = surface
@@ -1413,7 +1439,9 @@ defineExpose()
 
     let request = props_request(&host, FILE, AnalyzedMacroKind::DefineExpose);
     assert!(
-        host.resolve_vue_macro_surface(&request).is_none(),
+        host.resolve_vue_macro_surface(&request)
+            .expect("a settled host")
+            .is_none(),
         "a bare defineExpose() with no members has genuinely nothing to surface"
     );
 }

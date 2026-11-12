@@ -47,12 +47,16 @@ impl VerterHost {
     /// The surface is shallow-by-default: each member's `value` is a
     /// `SemanticNodeId` reference, not an expanded body. A consumer that needs a
     /// member's body issues a path projection rooted at that `value`.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// [`UnsettledInput`](crate::typeinfo::UnsettledInput) when no current
+    /// store view settles; nothing is resolved.
     pub fn resolve_shallow_surface(
         &self,
         canonical_id: &str,
         name: &str,
-    ) -> Option<TypeInfoSurface> {
+    ) -> Result<Option<TypeInfoSurface>, crate::typeinfo::UnsettledInput> {
         self.resolve_shallow_surface_for(&ShallowSurfaceRequest::new(
             Arc::from(canonical_id),
             Arc::from(name),
@@ -79,60 +83,67 @@ impl VerterHost {
     /// declaration scope is therefore selected from the file's exact
     /// synthesized-default owner fact for framework components, or the
     /// ordinary module owner otherwise; there is no cross-owner name fallback.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// [`UnsettledInput`](crate::typeinfo::UnsettledInput) when no current
+    /// store view settles; nothing is resolved.
     pub fn resolve_shallow_surface_for(
         &self,
         request: &ShallowSurfaceRequest,
-    ) -> Option<TypeInfoSurface> {
+    ) -> Result<Option<TypeInfoSurface>, crate::typeinfo::UnsettledInput> {
         // Query-RETURNER: it returns the shallow surface with no outer
         // publish fence, so it MUST resolve against a PROVEN-CURRENT
-        // snapshot. On sustained churn surface a miss (`None`) — the
-        // established surface miss signal — rather than a surface resolved
-        // against superseded state. The bounded retry terminates.
+        // snapshot, and answers `UnsettledInput` when none settles — never
+        // a miss and never a surface resolved against superseded state.
         let current_view = crate::typeinfo::current_store_view_for_query(self)?;
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            let host_ctx =
-                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
-            let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-            let default_owner = host_ctx
-                .shallow_file_state(request.canonical_id.as_ref())?
-                .default_semantic_owner();
+        Ok(
+            verter_audit::specialise!(crate::capture::installed_mode() => M, {
+              (|| {
+                let host_ctx =
+                    crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
+                let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+                let default_owner = host_ctx
+                    .shallow_file_state(request.canonical_id.as_ref())?
+                    .default_semantic_owner();
 
-            // Base = the declaration CARRIER (a `DeclPlaceholder`), NOT a
-            // pre-instantiated body. The empty-path Shallow synthesiser's decl-root
-            // unwrap re-establishes the consuming declaration's KIND (interface /
-            // class vs alias) and classifies its heritage arms.
-            let base = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                scope: ScopeId {
-                    canonical_id: verter_type_expr::OwnedStr::from(request.canonical_id.clone()),
-                    owner: default_owner,
-                    local_scope: None,
-                    binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
-                        default_owner,
+                // Base = the declaration CARRIER (a `DeclPlaceholder`), NOT a
+                // pre-instantiated body. The empty-path Shallow synthesiser's decl-root
+                // unwrap re-establishes the consuming declaration's KIND (interface /
+                // class vs alias) and classifies its heritage arms.
+                let base = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                    scope: ScopeId {
+                        canonical_id: verter_type_expr::OwnedStr::from(request.canonical_id.clone()),
+                        owner: default_owner,
+                        local_scope: None,
+                        binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                            default_owner,
+                        ),
+                    },
+                    name: verter_type_expr::OwnedStr::from(request.name.clone()),
+                })) {
+                    QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+                    QueryResult::Recursive(node) => node,
+                    QueryResult::Error(_) => return None,
+                };
+
+                // Public accessor adoption: an INCOMPLETE resolution records its
+                // fact causes before surfacing the established miss signal — a
+                // failed resolution never passes as "no such surface".
+                crate::typeinfo::surface_resolution::adopt_surface(
+                    crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
+                        &host_ctx,
+                        &dispatch,
+                        base,
+                        verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                        ProjectionReductionContext::published(ProjectionMode::Shallow),
+                        None,
                     ),
-                },
-                name: verter_type_expr::OwnedStr::from(request.name.clone()),
-            })) {
-                QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
-                QueryResult::Recursive(node) => node,
-                QueryResult::Error(_) => return None,
-            };
-
-            // Public accessor adoption: an INCOMPLETE resolution records its
-            // fact causes before surfacing the established miss signal — a
-            // failed resolution never passes as "no such surface".
-            crate::typeinfo::surface_resolution::adopt_surface(
-                crate::typeinfo::shallow_surface::project_shallow_surface_from_base(
-                    &host_ctx,
-                    &dispatch,
-                    base,
-                    verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
-                    ProjectionReductionContext::published(ProjectionMode::Shallow),
-                    None,
-                ),
-            )
-        })
+                )
+              })()
+            }),
+        )
     }
 
     /// Project a resolved base node to its span-rich one-level

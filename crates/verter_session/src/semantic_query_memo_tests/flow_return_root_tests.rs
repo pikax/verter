@@ -73,6 +73,7 @@ fn materialize(host: &VerterHost, result: &FlowReturnResult) -> String {
         .expect("a delivered result roots its return");
     let bytes = host
         .project_node_to_type_expr_json_bytes(&root)
+        .expect("a settled host")
         .expect("the owned root projects");
     String::from_utf8(bytes).expect("UTF-8 TypeExpr JSON")
 }
@@ -138,7 +139,10 @@ fn an_undelivered_or_foreign_return_root_projects_nothing() {
     let result = deliver(&host, None).expect("the return resolves");
     let root = result.return_root().expect("rooted");
     let other = host_with(NUMBER_RETURN);
-    assert!(other.project_node_to_type_expr_json_bytes(&root).is_none());
+    assert!(other
+        .project_node_to_type_expr_json_bytes(&root)
+        .expect("a settled host")
+        .is_none());
 }
 
 /// Materializing a delivered return reads the node the lease already owns:

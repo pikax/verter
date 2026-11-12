@@ -889,6 +889,9 @@ pub enum MacroDtosRefusal {
     VueNotAdmitted,
     /// The owner file is a carrier (or adapter module) of another framework.
     IncompatibleCarrier,
+    /// No current store view settled within the store-view manager's
+    /// budget. Churn, not a query fault.
+    UnsettledInput,
 }
 
 impl MacroDtosRefusal {
@@ -896,16 +899,32 @@ impl MacroDtosRefusal {
     /// marked PARTIAL, so the enclosing result is never admitted as complete.
     #[must_use]
     pub fn into_partial_read(self) -> MacroDtosRead {
+        use verter_type_engine::semantic_query::{FactStatus, PartialReason, PartialReasonSet};
+        let (guarantee, reasons) = match self {
+            Self::VueNotAdmitted | Self::IncompatibleCarrier => (
+                crate::typeinfo::surface_resolution::unavailable_query_fault_guarantee(),
+                PartialReasonSet::SEMANTIC_QUERY_FAULT,
+            ),
+            // Churn is not a query fault: the read is unavailable because the
+            // view was unstable.
+            Self::UnsettledInput => (
+                crate::typeinfo::surface_resolution::metadata_guarantee(
+                    FactStatus::Unavailable(
+                        verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::of(
+                            PartialReason::UnstableState,
+                        ),
+                    ),
+                    true,
+                ),
+                PartialReasonSet::UNSTABLE_STATE,
+            ),
+        };
         MacroDtosRead {
             dtos: std::sync::Arc::new(MacroSurfaceDtos {
-                domain_guarantee: Some(
-                    crate::typeinfo::surface_resolution::unavailable_query_fault_guarantee(),
-                ),
+                domain_guarantee: Some(guarantee),
                 ..MacroSurfaceDtos::default()
             }),
-            completeness: verter_type_engine::semantic_query::ResultCompleteness::partial(
-                verter_type_engine::semantic_query::PartialReasonSet::SEMANTIC_QUERY_FAULT,
-            ),
+            completeness: verter_type_engine::semantic_query::ResultCompleteness::partial(reasons),
         }
     }
 }

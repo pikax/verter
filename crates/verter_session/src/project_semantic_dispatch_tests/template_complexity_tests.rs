@@ -491,6 +491,7 @@ fn named_template_probe(
         .expect("the probe exists");
     let bytes = host
         .project_node_to_type_expr_json_bytes(&node)
+        .expect("a settled host")
         .expect("the answer projects");
     (
         serde_json::from_slice(&bytes).expect("a wire answer"),

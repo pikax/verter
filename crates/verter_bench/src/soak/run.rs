@@ -721,7 +721,13 @@ fn deliver_return(host: &VerterHost, file: &str, symbol: &str) -> (Outcome, Opti
 
 /// The digest of a held return's exact value, or why it has none.
 fn return_digest(host: &VerterHost, held: &FlowReturnResult) -> String {
-    exact_return_digest(host, held).unwrap_or_else(|_| "unmaterialised".into())
+    exact_return_digest(host, held).unwrap_or_else(|detail| {
+        if detail == super::verify::UNSETTLED {
+            super::verify::UNSETTLED.into()
+        } else {
+            super::verify::UNMATERIALISED.into()
+        }
+    })
 }
 
 /// A demand's outcome and, for a value, its root. An answer whose wire
@@ -750,18 +756,26 @@ fn demand(
 }
 
 fn is_unknown_answer(host: &VerterHost, node: &NodeRoot) -> bool {
-    host.project_node_to_type_expr_json_bytes(node)
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .is_some_and(|wire| wire["kind"] == "unknown")
+    match host.project_node_to_type_expr_json_bytes(node) {
+        Ok(Some(bytes)) => serde_json::from_slice::<serde_json::Value>(&bytes)
+            .is_ok_and(|wire| wire["kind"] == "unknown"),
+        // A miss projects nothing; an unsettled view is not an answer either
+        // way, and `digest` records it as such.
+        Ok(None) | Err(_) => false,
+    }
 }
 
-/// The digest of an answer's wire bytes, or of why it has none.
+/// The digest of an answer's wire bytes, or of why it has none: nothing to
+/// project, or a projection view that never settled.
 fn digest(host: &VerterHost, node: Option<&NodeRoot>) -> String {
-    let bytes = match node.and_then(|n| host.project_node_to_type_expr_json_bytes(n)) {
-        Some(bytes) => bytes,
-        None => return "unmaterialised".into(),
+    let Some(node) = node else {
+        return super::verify::UNMATERIALISED.into();
     };
-    super::manifest::sha256_hex(&bytes)
+    match host.project_node_to_type_expr_json_bytes(node) {
+        Ok(Some(bytes)) => super::manifest::sha256_hex(&bytes),
+        Ok(None) => super::verify::UNMATERIALISED.into(),
+        Err(_) => super::verify::UNSETTLED.into(),
+    }
 }
 
 /// Install `text` as the soak project's configuration on `host`.
@@ -804,9 +818,11 @@ fn exact_return_digest(host: &VerterHost, result: &FlowReturnResult) -> Result<S
     let root = result
         .return_root()
         .map_err(|err| format!("no return root: {err:?}"))?;
-    host.project_node_to_type_expr_json_bytes(&root)
-        .map(|bytes| super::manifest::sha256_hex(&bytes))
-        .ok_or_else(|| "the return root projects nothing".to_string())
+    match host.project_node_to_type_expr_json_bytes(&root) {
+        Ok(Some(bytes)) => Ok(super::manifest::sha256_hex(&bytes)),
+        Ok(None) => Err("the return root projects nothing".to_string()),
+        Err(_) => Err(super::verify::UNSETTLED.to_string()),
+    }
 }
 
 impl Engine {
@@ -1316,11 +1332,10 @@ impl Engine {
                 // reader released.
                 if *warm {
                     let (outcome, precharge) = deliver_return(&host, file, symbol);
-                    record.digests.push(
-                        precharge
-                            .as_ref()
-                            .map_or_else(|| "unmaterialised".into(), |h| return_digest(&host, h)),
-                    );
+                    record.digests.push(precharge.as_ref().map_or_else(
+                        || super::verify::UNMATERIALISED.into(),
+                        |h| return_digest(&host, h),
+                    ));
                     drop(precharge);
                     self.settle_releases(&mut record);
                     if outcome != Outcome::Value {
@@ -1329,10 +1344,10 @@ impl Engine {
                     }
                 }
                 let (outcome, held) = deliver_return(&host, file, symbol);
-                record.digests.push(
-                    held.as_ref()
-                        .map_or_else(|| "unmaterialised".into(), |h| return_digest(&host, h)),
-                );
+                record.digests.push(held.as_ref().map_or_else(
+                    || super::verify::UNMATERIALISED.into(),
+                    |h| return_digest(&host, h),
+                ));
                 record.outcome = outcome;
                 let mut allocations = Allocations::default();
                 record.ownership.push(owner_step(

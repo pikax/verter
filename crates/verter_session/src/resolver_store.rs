@@ -365,7 +365,7 @@ use verter_session_query::inputs::route_surface::hash16_from_sorted;
 /// genuinely contended host; the builder then reports the build as
 /// [`SnapshotBuildOutcome::Superseded`] rather than publishing a view
 /// whose roots and token could be torn across a mutation.
-const STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS: usize = 3;
+pub(crate) const STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS: usize = 3;
 
 /// Re-exported under the resolver-store-local name `OverlayIdentity`.
 /// `StoreViewOverlayIdentity` is named distinctly to avoid colliding with

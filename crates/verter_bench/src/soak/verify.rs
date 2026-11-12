@@ -590,9 +590,7 @@ pub fn check_ownership(
     };
     let step = |kind: OwnerStepKind| steps.iter().find(|s| s.step == kind);
     let projects_held = |s: Option<&OwnerStep>| {
-        s.is_some_and(|s| {
-            s.projected.as_ref() == held && held.is_some_and(|h| h != "unmaterialised")
-        })
+        s.is_some_and(|s| s.projected.as_ref() == held && held.is_some_and(|h| is_answer_digest(h)))
     };
     fn witness(s: Option<&OwnerStep>) -> Option<&WitnessFigures> {
         s.and_then(|s| s.held.as_ref())
@@ -884,6 +882,16 @@ pub fn check_pressure_outcomes(
 
 /// The digest a surge records for a component the host delivered nothing for.
 pub const ABSENT_DELIVERY: &str = "absent";
+/// The digest recorded for an answer that projects nothing.
+pub const UNMATERIALISED: &str = "unmaterialised";
+/// The digest recorded for an answer whose projection view never settled:
+/// churn, never equal to a delivered answer.
+pub const UNSETTLED: &str = "unsettled";
+
+/// Whether `digest` names a delivered answer rather than its absence.
+fn is_answer_digest(digest: &str) -> bool {
+    digest != ABSENT_DELIVERY && digest != UNMATERIALISED && digest != UNSETTLED
+}
 /// The account's former advisory active target: admitted work is expected to
 /// cross it without any refusal of the active class.
 pub const FORMER_ACTIVE_TARGET_BYTES: u64 = 512 * 1024 * 1024;
@@ -1077,10 +1085,7 @@ fn check_outcomes(expected: &Manifest, summary: &SoakSummary, failures: &mut Vec
         };
         if let Some(promised) = promised {
             if record.digests.len() != promised
-                || record
-                    .digests
-                    .iter()
-                    .any(|d| d == ABSENT_DELIVERY || d == "unmaterialised")
+                || record.digests.iter().any(|d| !is_answer_digest(d))
             {
                 failures.push(wrong(
                     record.index,
@@ -1089,7 +1094,7 @@ fn check_outcomes(expected: &Manifest, summary: &SoakSummary, failures: &mut Vec
                         record
                             .digests
                             .iter()
-                            .filter(|d| *d != ABSENT_DELIVERY && *d != "unmaterialised")
+                            .filter(|d| is_answer_digest(d))
                             .count()
                     ),
                 ));

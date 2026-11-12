@@ -58,7 +58,10 @@ fn named_answer(source: &str) -> String {
         Ok(Some(node)) => node,
         other => return format!("no answer: {other:?}"),
     };
-    let Some(wire) = host.project_node_to_type_expr_json_bytes(&node) else {
+    let Some(wire) = host
+        .project_node_to_type_expr_json_bytes(&node)
+        .expect("a settled host")
+    else {
         return "no wire answer".into();
     };
     let value: serde_json::Value = serde_json::from_slice(&wire).expect("the wire answer is JSON");

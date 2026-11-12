@@ -281,6 +281,7 @@ fn assert_named_answers(source: &str, rows: &[(&str, &str)]) {
                         .expect("probe exists");
                     let bytes = host
                         .project_node_to_type_expr_json_bytes(&node)
+                        .expect("a settled host")
                         .expect("variance answer projects");
                     let answer: TypeExpr = serde_json::from_slice(&bytes).expect("typed answer");
                     let expected = PrimitiveName::parse(expected).map_or_else(

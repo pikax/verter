@@ -4259,12 +4259,10 @@ impl NapiVerterHost {
             // JSON internally (the reverse materialization runs through the
             // sealed output capability inside `verter_session`); the FFI
             // adapter only wraps the bytes in a `Buffer`.
-            let type_expr_buf = match resolved {
-                Some(node_id) => host
-                    .project_node_to_type_expr_json_bytes(&node_id)
-                    .map(Buffer::from),
-                None => None,
-            };
+            let (type_expr_bytes, projection_error) =
+                typeinfo::project_resolved_root(&host, resolved);
+            let type_expr_buf = type_expr_bytes.map(Buffer::from);
+            let error = error.or(projection_error);
             let audit_buf = typeinfo::encode_stored_audit_record(&record)?;
             Ok(typeinfo::NapiTypeInfoResolveResult {
                 typeExpr: type_expr_buf,
@@ -4296,12 +4294,10 @@ impl NapiVerterHost {
             // Bytes facade: the `TypeExpr` is wire-encoded inside
             // `verter_session` through the sealed output capability; the FFI
             // adapter only wraps the bytes in a `Buffer`.
-            let type_expr_buf = match resolved {
-                Some(node_id) => host
-                    .project_node_to_type_expr_json_bytes(&node_id)
-                    .map(Buffer::from),
-                None => None,
-            };
+            let (type_expr_bytes, projection_error) =
+                typeinfo::project_resolved_root(&host, resolved);
+            let type_expr_buf = type_expr_bytes.map(Buffer::from);
+            let error = error.or(projection_error);
             let audit_buf = typeinfo::encode_stored_audit_record(&record)?;
             Ok(typeinfo::NapiTypeInfoResolveResult {
                 typeExpr: type_expr_buf,

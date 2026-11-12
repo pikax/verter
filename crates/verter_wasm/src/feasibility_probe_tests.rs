@@ -149,6 +149,7 @@ pub(crate) fn native_feasibility_receipt() -> Value {
     let type_expr = match resolved {
         Some(node_id) => host
             .project_node_to_type_expr_json_bytes(&node_id)
+            .expect("a settled host")
             .map(|bytes| serde_json::from_slice::<Value>(&bytes).expect("typeexpr json")),
         None => None,
     };

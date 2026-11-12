@@ -34,8 +34,8 @@
 //!    not a second resolver. Resolution, export and reference issuance
 //!    share ONE captured view.
 //! 5. **Bounded export** — the resolved node raises through the sealed
-//!    output capability (the in-view sibling of
-//!    [`VerterHost::project_node_to_semantic_type_graph`]) and the
+//!    output capability (`raise::project_ordinal_to_semantic_type_graph`,
+//!    under the request's own view) and the
 //!    terminal `TypeExpr` encodes into the wire
 //!    [`SemanticTypeGraph`] under the request's closure budgets (the
 //!    inherently bounded closure kinds bound the exported walk's depth
@@ -59,7 +59,9 @@
 //! engine and the replayed node exports under the request's closure
 //! budgets; and a currentness fence re-admits the basis against a fresh
 //! capture before the answer is published (a host that moved meanwhile is
-//! `StaleBasis`, never a superseded answer). The exported root carries the
+//! `StaleBasis`, never a superseded answer; a fence that cannot take a
+//! current view is `UnstableState` and leaves the reference live). The
+//! exported root carries the
 //! presented reference.
 
 #[cfg(feature = "semantic-observe")]
@@ -323,13 +325,24 @@ impl VerterHost {
         let budgets = closure_budgets(resolve.closure.as_ref());
         let query = query_identity(&resolve);
 
-        let graph = match self.resolve_symbol_graph_in_one_view(
+        let answer = match self.resolve_symbol_graph_in_one_view(
             &resolve.canonical_id,
             &resolve.name,
             mode,
             &budgets,
             resolve.include_diagnostics,
         ) {
+            Ok(answer) => answer,
+            // No current view settled: the request has no basis and is
+            // refused whole, never answered as a miss.
+            Err(unsettled) => {
+                return (
+                    error_response(unsettled.into()),
+                    TypeInfoGraphPayload::from_unsettled_input(GraphOperationTag::ResolveSymbol),
+                );
+            }
+        };
+        let graph = match answer {
             SymbolGraphAnswer::Graph(mut graph) => {
                 graph.query = Some(query);
                 *graph
@@ -356,10 +369,11 @@ impl VerterHost {
     /// it resolved under the same view and construction scope. Both run
     /// under one native fact trace, so the basis committed for the
     /// reference is exactly what the answer observed; issuance adds no
-    /// semantic traversal. A host that cannot settle on a coherent view
-    /// answers a non-fault miss. Issuance never changes the answer: a fact
-    /// whose basis cannot commit, or went stale before registration, is
-    /// answered unaddressed.
+    /// semantic traversal. A host that cannot settle on a current view
+    /// computes nothing and answers [`UnsettledInput`](crate::typeinfo::UnsettledInput).
+    /// Issuance never changes the answer: a fact whose basis cannot commit,
+    /// or went stale or unsettled before registration, is answered
+    /// unaddressed.
     fn resolve_symbol_graph_in_one_view(
         &self,
         canonical_id: &str,
@@ -367,14 +381,12 @@ impl VerterHost {
         mode: ProjectionMode,
         budgets: &GraphExportBudgets,
         include_diagnostics: bool,
-    ) -> SymbolGraphAnswer {
+    ) -> Result<SymbolGraphAnswer, crate::typeinfo::UnsettledInput> {
         // The entry owner is materialised BEFORE the view is captured, so the
         // view vouches for the owner source the trace observes; a cold owner
         // materialised inside the request could not commit a basis.
         let _ = self.ensure_indexed_ready_serve(canonical_id);
-        let Some(current) = crate::typeinfo::current_store_view_for_query(self) else {
-            return SymbolGraphAnswer::Miss;
-        };
+        let current = crate::typeinfo::current_store_view_for_query(self)?;
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
             let ctx =
@@ -419,7 +431,7 @@ impl VerterHost {
                     publish_root_node_ref(graph, &key);
                 }
             }
-            answer
+            Ok(answer)
         })
     }
 
@@ -490,15 +502,15 @@ impl VerterHost {
         // The owner is materialised BEFORE the view is captured, exactly as
         // the issuing request did, so the view vouches for its source.
         let _ = self.ensure_indexed_ready_serve(issued.entry_canonical());
-        let Some(current) = crate::typeinfo::current_store_view_for_query(self) else {
-            return rejected(TypeInfoRequestError {
-                kind: Some(type_info_request_error::Kind::UnstableState(
-                    wire::wire_error_unstable_state(
-                        u32::try_from(crate::typeinfo::TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS)
-                            .unwrap_or(u32::MAX),
-                    ),
-                )),
-            });
+        let unsettled = |unsettled: crate::typeinfo::UnsettledInput| {
+            (
+                error_response(unsettled.into()),
+                TypeInfoGraphPayload::from_unsettled_input(GraphOperationTag::ExpandAround),
+            )
+        };
+        let current = match crate::typeinfo::current_store_view_for_query(self) {
+            Ok(current) => current,
+            Err(cause) => return unsettled(cause),
         };
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         let replayed = verter_audit::specialise!(crate::capture::installed_mode() => M, {
@@ -532,9 +544,12 @@ impl VerterHost {
             }
         });
         // CURRENTNESS FENCE — the answer publishes only while the issued
-        // basis still describes the host's inputs.
-        if crate::typeinfo::node_refs::admit_issued_in_fresh_view(self, &issued).is_err() {
-            return stale(presented);
+        // basis still describes the host's inputs. A fence that cannot take
+        // a current view says so; only moved inputs kill the reference.
+        if let Err(admission) =
+            crate::typeinfo::node_refs::admit_issued_in_fresh_view(self, &issued)
+        {
+            return expand_fence_refusal(admission, presented);
         }
         let graph = match replayed {
             SymbolGraphAnswer::Graph(mut graph) => {
@@ -572,8 +587,7 @@ fn publish_root_node_ref(
 enum SymbolGraphAnswer {
     /// The bounded export of the resolved declaration.
     Graph(Box<SemanticTypeGraph>),
-    /// A non-fault miss: nothing resolved, no coherent view, or a raise
-    /// miss.
+    /// A non-fault miss: nothing resolved, or a raise miss.
     Miss,
     /// A dispatch fault.
     Fault(TypeResolutionRequestError),
@@ -875,6 +889,30 @@ fn graph_response(graph: SemanticTypeGraph) -> TypeInfoGraphResponse {
     }
 }
 
+/// The expand-around currentness fence's refusal. Moved inputs kill the
+/// reference (`StaleBasis`); a fence that could not take a current view is
+/// `UnstableState` and leaves the reference live, so the client asks
+/// again instead of re-asking the originating question.
+fn expand_fence_refusal(
+    admission: crate::typeinfo::node_refs::FreshAdmission,
+    presented: wire::NodeRef,
+) -> (TypeInfoGraphResponse, TypeInfoGraphPayload) {
+    match admission {
+        crate::typeinfo::node_refs::FreshAdmission::Stale(_) => (
+            error_response(TypeInfoRequestError {
+                kind: Some(type_info_request_error::Kind::StaleBasis(
+                    wire::wire_error_stale_basis(presented),
+                )),
+            }),
+            TypeInfoGraphPayload::from_validation_error(GraphOperationTag::ExpandAround),
+        ),
+        crate::typeinfo::node_refs::FreshAdmission::Unsettled(cause) => (
+            error_response(cause.into()),
+            TypeInfoGraphPayload::from_unsettled_input(GraphOperationTag::ExpandAround),
+        ),
+    }
+}
+
 fn error_response(error: TypeInfoRequestError) -> TypeInfoGraphResponse {
     TypeInfoGraphResponse {
         kind: Some(type_info_graph_response::Kind::Error(error)),
@@ -968,6 +1006,56 @@ mod tests {
     use crate::host_resolve_type_audit::TypeResolutionRequestError;
     use verter_session_query::inputs::budget::BudgetDomain as SessionBudgetDomain;
     use verter_session_query::inputs::budget::BudgetExceededFailure;
+
+    /// The fence's verdict: an unsettled currentness fence answers
+    /// `UnstableState` with the manager's budget and the
+    /// unstable-publication audit tag; only moved inputs answer
+    /// `StaleBasis`. (The churn knobs supersede every build, so the
+    /// expand route's first read already refuses under them; the fence's
+    /// own verdict is pinned here.)
+    #[test]
+    fn an_unsettled_expand_fence_is_unstable_state_and_only_moved_inputs_are_stale() {
+        use crate::typeinfo::node_refs::FreshAdmission;
+        use verter_audit::payloads::typeinfo_graph::TypeInfoDegradationReasonTag;
+
+        let presented = wire::NodeRef::default();
+        let unsettled = crate::typeinfo::UnsettledInput {
+            reason: crate::resolver_store::StoreViewReturnOnlyReason::Superseded,
+        };
+        let (response, payload) =
+            expand_fence_refusal(FreshAdmission::Unsettled(unsettled), presented.clone());
+        let budget = u32::try_from(crate::resolver_store::STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS)
+            .expect("a small budget");
+        match response.kind {
+            Some(type_info_graph_response::Kind::Error(TypeInfoRequestError {
+                kind: Some(type_info_request_error::Kind::UnstableState(unstable)),
+            })) => assert_eq!(unstable.attempts, budget),
+            other => {
+                panic!("an unsettled fence must be UnstableState, never StaleBasis: {other:?}")
+            }
+        }
+        assert!(payload.degraded);
+        assert_eq!(
+            payload.degradation_reasons,
+            vec![TypeInfoDegradationReasonTag::UnstablePublicationFence]
+        );
+
+        let (response, _) = expand_fence_refusal(
+            FreshAdmission::Stale(crate::typeinfo::native_basis::NativeBasisStale::Observation),
+            presented,
+        );
+        assert!(
+            matches!(
+                response.kind,
+                Some(type_info_graph_response::Kind::Error(
+                    TypeInfoRequestError {
+                        kind: Some(type_info_request_error::Kind::StaleBasis(_)),
+                    }
+                ))
+            ),
+            "moved inputs kill the reference: {response:?}"
+        );
+    }
 
     #[test]
     fn a_projection_operation_budget_fault_never_aliases_a_closed_wire_domain() {

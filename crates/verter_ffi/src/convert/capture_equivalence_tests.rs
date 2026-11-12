@@ -197,6 +197,7 @@ fn run(audit_enabled: bool, entry: Entry) -> Run {
     .expect("Probe resolves");
     let probe = host
         .project_node_to_type_expr_json_bytes(&probe_node)
+        .expect("a settled host")
         .expect("Probe projects");
 
     let component_meta = String::from_utf8(component_meta).expect("a UTF-8 rendering");

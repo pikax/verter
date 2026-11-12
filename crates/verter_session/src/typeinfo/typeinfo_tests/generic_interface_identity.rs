@@ -43,6 +43,7 @@ fn published_arguments(
         .expect("named type");
     let bytes = host
         .project_node_to_type_expr_json_bytes(&root)
+        .expect("a settled host")
         .expect("wire publication");
     let expr: TypeExpr = serde_json::from_slice(&bytes).expect("typed wire payload");
     if args.is_empty() {
@@ -51,6 +52,7 @@ fn published_arguments(
             .expect("bare named type");
         let named = host
             .project_node_to_type_expr_json_bytes(&root)
+            .expect("a settled host")
             .expect("named publication");
         let named: TypeExpr = serde_json::from_slice(&named).expect("typed named payload");
         assert_eq!(expr, named, "named and wire publication: {name}");

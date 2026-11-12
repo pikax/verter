@@ -556,8 +556,13 @@ fn wire_node_counts(root: &serde_json::Value) -> (usize, Vec<String>, usize) {
 /// The wire bytes of `node`'s answer, or why there are none.
 fn wire_bytes(host: &VerterHost, node: Option<&NodeRoot>) -> Result<Vec<u8>, String> {
     let node = node.ok_or_else(|| "no value to observe".to_string())?;
-    host.project_node_to_type_expr_json_bytes(node)
-        .ok_or_else(|| "the answer did not materialise".to_string())
+    match host.project_node_to_type_expr_json_bytes(node) {
+        Ok(Some(bytes)) => Ok(bytes),
+        Ok(None) => Err("the answer did not materialise".to_string()),
+        Err(unsettled) => Err(format!(
+            "the answer's projection view did not settle ({unsettled:?})"
+        )),
+    }
 }
 
 fn observe(bytes: Result<&[u8], String>) -> Observation {

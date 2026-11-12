@@ -251,6 +251,7 @@ fn named_probe_measured(source: &str, probe: &str, operations: usize) -> Measure
     );
     let bytes = host
         .project_node_to_type_expr_json_bytes(&node)
+        .expect("a settled host")
         .expect("the answer projects");
     let answer: TypeExpr = serde_json::from_slice(&bytes).expect("a wire answer");
     let arms = match &answer {

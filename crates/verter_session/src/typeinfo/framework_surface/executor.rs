@@ -391,10 +391,9 @@ impl VerterHost {
                 // thread it through EVERY demand resolver — so all of a single
                 // response's props / emits / slots / model resolve against ONE
                 // coherent owner version, never a mix from different versions
-                // under churn. On sustained churn the view capture fails and the
-                // adapter normalizes an EMPTY resolved set (the established
-                // query-returner miss → every supported kind decodes
-                // supported-empty).
+                // under churn. When no current view settles the request has no
+                // basis: it is refused whole as `UnstableState`, never answered
+                // as supported-empty kinds.
                 //
                 // Resolution and normalization run under ONE native fact
                 // trace; once the response is encoded, every exported member
@@ -409,7 +408,7 @@ impl VerterHost {
                 // leave a cold request's basis uncommittable.
                 let _ = self.ensure_indexed_ready_serve(resolved_selector.canonical.as_ref());
                 match crate::typeinfo::current_store_view_for_query(self) {
-                    Some(current_view) => {
+                    Ok(current_view) => {
                         let overlay =
                             Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
                         verter_audit::specialise!(crate::capture::installed_mode() => M, {
@@ -471,7 +470,14 @@ impl VerterHost {
                             return (response, payload);
                         })
                     }
-                    None => NormalizedSurfaces::default(),
+                    Err(unsettled) => {
+                        return (
+                            error_response(unsettled.into()),
+                            TypeInfoGraphPayload::from_unsettled_input(
+                                GraphOperationTag::FrameworkSurfaces,
+                            ),
+                        );
+                    }
                 }
             }
         };

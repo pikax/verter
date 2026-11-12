@@ -7977,6 +7977,7 @@ defineSlots<{ header(props: { meta: { label: { text: string } } }): any }>()
     // one sanctioned route to the authored member type.
     let deepened = host
         .deepen_synthetic_slot_binding("/src/SlotCarrier.vue", key)
+        .expect("a settled host")
         .expect("a live same-generation carrier deepens");
     assert!(
         !matches!(
@@ -8025,7 +8026,8 @@ defineSlots<{ header(props: { meta: { label: { text: string } } }): any }>()
         ..(**key).clone()
     });
     assert_eq!(
-        host.deepen_synthetic_slot_binding("/src/SlotCarrier.vue", &same_identity_bogus_ordinal),
+        host.deepen_synthetic_slot_binding("/src/SlotCarrier.vue", &same_identity_bogus_ordinal)
+            .expect("a settled host"),
         Some(deepened.clone()),
         "the content-free identity serves the warm deepened entry regardless of the ordinal"
     );
@@ -8040,7 +8042,8 @@ defineSlots<{ header(props: { meta: { label: { text: string } } }): any }>()
         ..(**key).clone()
     });
     assert_eq!(
-        host.deepen_synthetic_slot_binding("/src/SlotCarrier.vue", &stale),
+        host.deepen_synthetic_slot_binding("/src/SlotCarrier.vue", &stale)
+            .expect("a settled host"),
         None,
         "a stale/unresolvable carrier fails closed — the caller keeps the refusal"
     );

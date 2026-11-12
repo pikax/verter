@@ -42,6 +42,26 @@ pub(crate) fn split_resolve_outcome(
     }
 }
 
+/// Project a resolved root to its wire `TypeExpr` bytes. The projection
+/// takes its own view after the audited resolve; when that view cannot
+/// settle the answer is the `UnstableState` fault on the `error` channel,
+/// never a silent `null` that reads as a non-fault miss.
+pub(crate) fn project_resolved_root(
+    host: &verter_session::VerterHost,
+    resolved: Option<NodeRoot>,
+) -> (Option<Vec<u8>>, Option<String>) {
+    let Some(node) = resolved else {
+        return (None, None);
+    };
+    match host.project_node_to_type_expr_json_bytes(&node) {
+        Ok(bytes) => (bytes, None),
+        Err(unsettled) => (
+            None,
+            Some(format!("{:?}", TypeResolutionRequestError::from(unsettled))),
+        ),
+    }
+}
+
 /// Combined response shape for `resolveSymbolWithAudit` /
 /// `evaluateTypeExpressionWithAudit`. Both JSON Buffers — the consumer
 /// decodes whichever it needs.

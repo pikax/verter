@@ -94,7 +94,8 @@ pub enum TypeResolutionRequestError {
     },
     /// The resolver hit one of its structured safety rails.
     BudgetExceeded(verter_session_query::inputs::budget::BudgetExceededFailure),
-    /// The completion fence exhausted its retry budget.
+    /// No proven-current store view settled within the store-view
+    /// manager's budget, or the completion fence exhausted its retries.
     UnstableState {
         /// Number of retry attempts the fence made before giving up.
         attempts: u8,
@@ -291,15 +292,13 @@ impl VerterHost {
         //
         // Query-RETURNER: it returns the resolved node with no outer
         // `run_stable_request` publish fence, so it MUST resolve against a
-        // PROVEN-CURRENT snapshot. Acquire a `CurrentHostStoreView` via a
-        // bounded retry; on sustained churn surface a typed non-current
-        // result (`QueryError::UnstableState`) rather than resolving the
-        // query against already-superseded state and returning it as a
-        // normal answer. `UnstableState` decodes to `resolved = None` below,
-        // and the audit record still emits with the unstable signal.
+        // PROVEN-CURRENT snapshot. Take one `CurrentHostStoreView`; when none
+        // settles the request is the typed `UnstableState` fault rather than
+        // a resolution against already-superseded state, and the audit
+        // record still emits with the unstable signal.
         let request_clock = verter_audit::observe::Stopwatch::start_for(ctx.observe_mode());
         let result = match crate::typeinfo::current_store_view_for_query(self) {
-            Some(current_view) => {
+            Ok(current_view) => {
                 // Resolver admission must snapshot this request's receivers.
                 let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
                 // Bind the dispatch ctor to a request-scoped
@@ -307,7 +306,7 @@ impl VerterHost {
                 // dispatch chain inherit the overlay-aware view instead of
                 // paying a fresh workspace-sweep cost per call.
                 let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                verter_audit::specialise!(ctx.observe_mode() => M, {
+                Ok(verter_audit::specialise!(ctx.observe_mode() => M, {
                     let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(
                         self,
                         &current_view,
@@ -318,25 +317,25 @@ impl VerterHost {
                     > = &host_ctx;
                     let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
                     dispatch.execute_type_node(query)
-                })
+                }))
             }
-            None => verter_type_engine::semantic_query::QueryResult::Error(
-                verter_type_engine::semantic_query::QueryError::UnstableState {
-                    attempts: crate::typeinfo::TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS as u8,
-                },
-            ),
+            Err(unsettled) => Err(unsettled),
         };
         // Decode the dispatch result into the carrier outcome:
+        // - no current view → Err(UnstableState).
         // - Value / Recursive → Ok(Some(node)).
         // - Error(non-fault miss) → Ok(None).
         // - Error(request fault) → Err(fault).
         let outcome: Result<Option<TypeResolutionResult>, TypeResolutionRequestError> =
             match &result {
-                verter_type_engine::semantic_query::QueryResult::Value(
+                Err(unsettled) => Err(TypeResolutionRequestError::from(*unsettled)),
+                Ok(verter_type_engine::semantic_query::QueryResult::Value(
                     verter_type_engine::semantic_query::SemanticQueryOutput { value: node, .. },
-                ) => Ok(Some(*node)),
-                verter_type_engine::semantic_query::QueryResult::Recursive(node) => Ok(Some(*node)),
-                verter_type_engine::semantic_query::QueryResult::Error(err) => {
+                )) => Ok(Some(*node)),
+                Ok(verter_type_engine::semantic_query::QueryResult::Recursive(node)) => {
+                    Ok(Some(*node))
+                }
+                Ok(verter_type_engine::semantic_query::QueryResult::Error(err)) => {
                     match TypeResolutionRequestError::from_query_error(err) {
                         Some(fault) => Err(fault),
                         None => Ok(None),
