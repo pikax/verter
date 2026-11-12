@@ -608,32 +608,25 @@ fn assert_ts2589(source: &str, probe: &str, basis: RecoveryBasis) {
     }
 }
 
-/// The lib `Awaited<T>` conditional's tail run goes on past the checker's
-/// 1,000th step to its answer (the one run of that length here: each step
-/// of `P` copies the counter tuple built so far, so a run's cost grows with
-/// the square of its length, and the runs under the checker's limit are
-/// [`an_awaited_tail_run_fails_at_verters_budget`]'s shorter ones).
-///
-/// TypeScript 7.0.2, all four `strictNullChecks` × `noImplicitAny`
-/// settings, over [`THENABLES`]: `Awaited<P<999>>` is `"done"` and
-/// `Awaited<P<1000>>` is `any` under TS2589, the checker's limit, where
-/// Verter's full answer is `"done"`.
-#[test]
-fn an_awaited_tail_run_answers_past_the_checker_step() {
-    let failures = mismatches(THENABLES, &[("Awaited<P<1000>>", r#""done""#)]);
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
-
 /// The lib `Awaited<T>` conditional's tail run takes Verter's tail budget:
 /// just inside it the run answers, and at the budget's step it is the
 /// checker's TS2589. A far lower budget than production's stands in for it
-/// on the same path, so the runs stay quick.
+/// on the same path, so the runs stay quick; production's budget is past the
+/// checker's limit of 1,000 steps, so a run past that limit answers (the
+/// 1,000-step run itself is
+/// [`nightly_scale::an_awaited_tail_run_answers_past_the_checker_step`]).
 ///
 /// TypeScript 7.0.2, over [`THENABLES`]: `Awaited<P<K>>` is `"done"` for
 /// every `K` below the checker's limit of 1,000.
 #[test]
 fn an_awaited_tail_run_fails_at_verters_budget() {
     const BUDGET: u32 = 200;
+    const {
+        assert!(
+            super::connected_demand::MAX_CONNECTED_TAIL_STEPS > 1_000,
+            "Verter's tail budget reaches past the checker's tail limit"
+        );
+    }
     let _budget = super::connected_demand::TailBudgetForTests::install(BUDGET);
     let inside = BUDGET - 1;
     let failures = mismatches(
@@ -704,4 +697,25 @@ fn a_tail_budget_recovery_is_never_kept_in_the_memo() {
         !is_ts2589("Rep<200>"),
         "under the production budget Rep<200> answers, not the kept recovery"
     );
+}
+
+mod nightly_scale {
+    use super::*;
+
+    /// The lib `Awaited<T>` conditional's tail run goes on past the checker's
+    /// 1,000th step to its answer (the one run of that length here: each step
+    /// of `P` copies the counter tuple built so far, so a run's cost grows with
+    /// the square of its length, and the runs under the checker's limit are
+    /// [`super::an_awaited_tail_run_fails_at_verters_budget`]'s shorter ones, its
+    /// gate version).
+    ///
+    /// TypeScript 7.0.2, all four `strictNullChecks` × `noImplicitAny`
+    /// settings, over [`THENABLES`]: `Awaited<P<999>>` is `"done"` and
+    /// `Awaited<P<1000>>` is `any` under TS2589, the checker's limit, where
+    /// Verter's full answer is `"done"`.
+    #[test]
+    fn an_awaited_tail_run_answers_past_the_checker_step() {
+        let failures = mismatches(THENABLES, &[("Awaited<P<1000>>", r#""done""#)]);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
 }

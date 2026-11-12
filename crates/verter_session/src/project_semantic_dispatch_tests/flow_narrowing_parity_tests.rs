@@ -2042,8 +2042,52 @@ fn messages_print_tuple_elements_and_object_members_as_the_checker_does() {
 /// a primitive. Every line is TypeScript 7.1.0-beta's on this fixture,
 /// identical with `strictNullChecks` off; tsc reports nothing for each
 /// empty row.
+///
+/// Each leaf kind is its own test over the whole fixture, so each checks
+/// two chains of about 100 levels, cold and warm, in both roots.
 #[test]
-fn deep_chains_report_until_the_checker_relation_stack_overflows() {
+fn deep_object_leaves_report_until_the_checker_relation_stack_overflows() {
+    assert_deep_chains_report_until_the_checker_relation_stack_overflows([
+        "object_leaf_99",
+        "object_leaf_100",
+    ]);
+}
+
+/// An object type against a primitive at the end of a long property path;
+/// see [`deep_object_leaves_report_until_the_checker_relation_stack_overflows`].
+#[test]
+fn deep_object_to_primitive_leaves_report_until_the_checker_relation_stack_overflows() {
+    assert_deep_chains_report_until_the_checker_relation_stack_overflows([
+        "object_to_primitive_99",
+        "object_to_primitive_100",
+    ]);
+}
+
+/// Two primitives at the end of a long property path; see
+/// [`deep_object_leaves_report_until_the_checker_relation_stack_overflows`].
+#[test]
+fn deep_primitive_leaves_report_until_the_checker_relation_stack_overflows() {
+    assert_deep_chains_report_until_the_checker_relation_stack_overflows([
+        "primitive_leaf_100",
+        "primitive_leaf_101",
+    ]);
+}
+
+/// A primitive against an intersection at the end of a long property path;
+/// see [`deep_object_leaves_report_until_the_checker_relation_stack_overflows`].
+#[test]
+fn deep_intersection_targets_report_until_the_checker_relation_stack_overflows() {
+    assert_deep_chains_report_until_the_checker_relation_stack_overflows([
+        "intersection_98",
+        "intersection_99",
+    ]);
+}
+
+/// The `checked` rows of the deep-chain fixture report as the checker does,
+/// cold and warm, in both roots; the fixture holds every row, so each
+/// reported position is the one the whole fixture gives.
+#[track_caller]
+fn assert_deep_chains_report_until_the_checker_relation_stack_overflows(checked: [&str; 2]) {
     let nest = |inner: &str, depth: usize| {
         let mut ty = inner.to_owned();
         for _ in 0..depth {
@@ -2113,11 +2157,20 @@ fn deep_chains_report_until_the_checker_relation_stack_overflows() {
         ),
         ("intersection_99", Vec::new()),
     ];
+    for name in checked {
+        assert!(
+            expected.iter().any(|(function, _)| *function == name),
+            "`{name}` is a row of the fixture"
+        );
+    }
     let host = host_with(&source);
     let mut mismatches = Vec::new();
     for pass in ["cold", "warm"] {
         for root in [STRICT_ROOT, LOOSE_ROOT] {
-            for (function, expected) in &expected {
+            for (function, expected) in expected
+                .iter()
+                .filter(|(function, _)| checked.contains(function))
+            {
                 let reported = super::signature_predicate_inference_tests::checker_report(
                     &host, root, function, &source,
                 );
