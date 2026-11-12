@@ -1192,12 +1192,12 @@ fn lazy_undecided_lows_close_every_window_as_eager_lowering_does() {
     };
     let mut closes = 0_u32;
     let mut deep_closes = 0_u32;
-    for _ in 0..400 {
+    for sequence in 0..400 {
         let mut lazy = ResolveCallDomainRuntime::default();
         let mut eager = EagerUndecidedWindows::default();
         let mut open: Vec<(UndecidedWindowMark, (u64, u64, usize))> = Vec::new();
         let mut deltas: Vec<UndecidedRelationDelta> = Vec::new();
-        for _ in 0..64 {
+        for step in 0..64 {
             match next(6) {
                 0 => {
                     let by = next(3) + 1;
@@ -1216,7 +1216,11 @@ fn lazy_undecided_lows_close_every_window_as_eager_lowering_does() {
                     let (lazy_mark, eager_mark) = open[at];
                     open.truncate(at);
                     let got = lazy.close_undecided_window(lazy_mark);
-                    assert_eq!(got, eager.close(eager_mark), "every close delta is equal");
+                    assert_eq!(
+                        got,
+                        eager.close(eager_mark),
+                        "sequence {sequence} step {step}: every close delta is equal"
+                    );
                     closes += 1;
                     if let Some(delta) = got {
                         deep_closes += u32::from(delta.depth > 0);
@@ -1230,18 +1234,25 @@ fn lazy_undecided_lows_close_every_window_as_eager_lowering_does() {
                 }
                 4 if !deltas.is_empty() => {
                     let delta = deltas[usize::try_from(next(deltas.len() as u64)).expect("small")];
-                    assert_eq!(lazy.replay_undecided_delta(delta), eager.replay(delta));
+                    assert_eq!(
+                        lazy.replay_undecided_delta(delta),
+                        eager.replay(delta),
+                        "sequence {sequence} step {step}: a replay is equal"
+                    );
                 }
                 _ => {}
             }
-            assert_eq!(lazy.undecided_relations, eager.count);
-            assert_eq!(lazy.undecided_saturations, eager.saturations);
+            assert_eq!(
+                (lazy.undecided_relations, lazy.undecided_saturations),
+                (eager.count, eager.saturations),
+                "sequence {sequence} step {step}: the count and saturations are equal"
+            );
         }
         while let Some((lazy_mark, eager_mark)) = open.pop() {
             assert_eq!(
                 lazy.close_undecided_window(lazy_mark),
                 eager.close(eager_mark),
-                "every close delta is equal"
+                "sequence {sequence}: every close delta is equal"
             );
             closes += 1;
         }
