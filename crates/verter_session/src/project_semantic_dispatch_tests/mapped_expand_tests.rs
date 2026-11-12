@@ -844,20 +844,40 @@ fn rtk_slice_arrow_reducer_actions_answer_completely_and_grow_linearly() {
     assert_rtk_slice_actions_grow_linearly(true);
 }
 
-/// The action union of a ten-reducer slice differs from the checker's only
-/// in its member order (semantic-difference ledger, `VerterStableV1`
-/// order-induced). The checker prints the members in reducer order, `"s/r0"`
-/// to `"s/r9"`; the live answer holds the same members in the stable-key
-/// order. On a fresh host whose store reverses ONLY the union order, the
-/// members are unchanged and their order is exactly reversed, so no member
-/// depends on the order; a fresh host under the stable order answers the
-/// stable order again.
+/// The action union of a three-reducer slice differs from the checker's
+/// only in its member order: the gate version of the ten-reducer test in the
+/// nightly scale tier (semantic-difference ledger SDL-90), with the same
+/// assertions: the stable-key order of `"s/r0"`, `"s/r1"` and `"s/r2"` is
+/// already not their reducer order.
 #[test]
 fn rtk_slice_actions_differ_from_the_checker_only_in_union_order() {
-    const COUNT: usize = 10;
+    assert_rtk_slice_actions_differ_only_in_union_order(3);
+}
+
+mod nightly_scale {
+    use super::*;
+
+    /// The action union of a ten-reducer slice differs from the checker's
+    /// only in its member order (semantic-difference ledger SDL-90,
+    /// `VerterStableV1` order-induced); its gate version is
+    /// [`super::rtk_slice_actions_differ_from_the_checker_only_in_union_order`].
+    #[test]
+    fn rtk_slice_actions_of_ten_reducers_differ_from_the_checker_only_in_union_order() {
+        assert_rtk_slice_actions_differ_only_in_union_order(10);
+    }
+}
+
+/// The action union of a `count`-reducer slice differs from the checker's
+/// only in its member order (`VerterStableV1` order-induced). The checker
+/// prints the members in reducer order, `"s/r0"` onwards; the live answer
+/// holds the same members in the stable-key order. On a fresh host whose
+/// store reverses ONLY the union order, the members are unchanged and their
+/// order is exactly reversed, so no member depends on the order; a fresh
+/// host under the stable order answers the stable order again.
+fn assert_rtk_slice_actions_differ_only_in_union_order(count: usize) {
     let members = |reverse_union_order: bool| -> Vec<String> {
         let answer = named_answer_in_union_order(
-            &rtk_slice(COUNT, false),
+            &rtk_slice(count, false),
             "ReturnType<Actions[keyof Actions]>",
             None,
             true,
@@ -868,7 +888,7 @@ fn rtk_slice_actions_differ_from_the_checker_only_in_union_order() {
         };
         members.iter().map(display).collect()
     };
-    let checker: Vec<String> = (0..COUNT)
+    let checker: Vec<String> = (0..count)
         .map(|i| {
             let payload = if i % 2 == 0 {
                 format!("'l{i}'")
@@ -886,7 +906,7 @@ fn rtk_slice_actions_differ_from_the_checker_only_in_union_order() {
             .collect::<std::collections::BTreeSet<_>>()
     };
     assert_eq!(sorted(&stable), sorted(&checker), "the checker's members");
-    assert_eq!(sorted(&stable), rtk_actions(COUNT), "the checker's members");
+    assert_eq!(sorted(&stable), rtk_actions(count), "the checker's members");
     assert_ne!(stable, checker, "the stable order is not the checker's");
     let reversed = members(true);
     let mut expected_reversed = stable.clone();

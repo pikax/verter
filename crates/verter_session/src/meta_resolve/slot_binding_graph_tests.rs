@@ -1924,20 +1924,49 @@ defineProps<{ msg: MyStr }>()
 // Test #20 — REGRESSION
 // ---------------------------------------------------------------------------
 //
-// 512-arm intersection over the Shallow surface. The walker must terminate
+// A wide intersection over the Shallow surface. The walker must terminate
 // without consuming host stack per structural arm. This exercises the public
-// `get_component_meta` path end-to-end in an isolated 2 MiB subprocess, so an
-// abort cannot take down the parent harness.
+// `get_component_meta` path end-to-end on a worker stack in an isolated
+// subprocess, so an abort cannot take down the parent harness.
+//
+// The gate runs 128 arms on 512 KiB: at most 4 KiB an arm, as 512 arms on
+// 2 MiB allow, and less once the walk's fixed need is taken out, so a walk
+// that spends stack per arm overflows here wherever it overflows the full
+// size. The 512-arm, 2 MiB run is in the nightly scale tier.
 #[test]
-fn walker_stack_safe_for_512_intersection_on_2_mib() {
+fn walker_stack_safe_for_128_intersection_on_512_kib() {
+    assert_walker_stack_safe(
+        "meta_resolve::slot_binding_graph_tests::walker_stack_safe_for_128_intersection_on_512_kib",
+        128,
+        512 << 10,
+    );
+}
+
+mod nightly_scale {
+    use super::*;
+
+    /// The 512-arm intersection on a 2 MiB worker stack, the full size of
+    /// [`super::walker_stack_safe_for_128_intersection_on_512_kib`].
+    #[test]
+    fn walker_stack_safe_for_512_intersection_on_2_mib() {
+        assert_walker_stack_safe(
+            "meta_resolve::slot_binding_graph_tests::nightly_scale::walker_stack_safe_for_512_intersection_on_2_mib",
+            512,
+            2 << 20,
+        );
+    }
+}
+
+/// `get_component_meta` over a component whose slots are an intersection of
+/// `arms` interfaces resolves on a worker of `stack` bytes, in a child
+/// process that re-runs `test` (its own full path).
+fn assert_walker_stack_safe(test: &str, arms: usize, stack: usize) {
     const CHILD_MARKER: &str = "VERTER_SLOT_INTERSECTION_STACK_CHILD";
     if std::env::var_os(CHILD_MARKER).is_none() {
         let exe = std::env::current_exe().expect("current unit-test executable");
         let status = Command::new(exe)
             .arg("--exact")
-            .arg(
-                "meta_resolve::slot_binding_graph_tests::walker_stack_safe_for_512_intersection_on_2_mib",
-            )
+            .arg(test)
             .arg("--nocapture")
             .env(CHILD_MARKER, "1")
             .env_remove("RUST_MIN_STACK")
@@ -1945,7 +1974,7 @@ fn walker_stack_safe_for_512_intersection_on_2_mib() {
             .expect("spawn isolated slot-intersection stack child");
         assert!(
             status.success(),
-            "the isolated 2 MiB slot-intersection child must exit cleanly; status={status}"
+            "the isolated {arms}-arm slot-intersection child must exit cleanly; status={status}"
         );
         return;
     }
@@ -1953,10 +1982,9 @@ fn walker_stack_safe_for_512_intersection_on_2_mib() {
     let host = build_test_host();
     let mut decls = String::new();
     let mut intersection = String::new();
-    for i in 0..512 {
+    for i in 0..arms {
         decls.push_str(&format!(
-            "export interface S{i} {{ default(props: {{ tag{i}: string }}): any }}\n",
-            i = i,
+            "export interface S{i} {{ default(props: {{ tag{i}: string }}): any }}\n"
         ));
         if i > 0 {
             intersection.push_str(" & ");
@@ -1976,26 +2004,27 @@ defineSlots<Slots>()
 "#,
     );
 
-    // A 512-arm intersection is a legitimate finite resolution. The public
-    // component-meta path must iterate it on a normal 2 MiB worker stack;
-    // structural depth is not an operational limit. The subprocess isolates
-    // an aborting stack regression from the parent test runner.
+    // A wide intersection is a legitimate finite resolution. The public
+    // component-meta path must iterate it on a worker stack; structural depth
+    // is not an operational limit. The subprocess isolates an aborting stack
+    // regression from the parent test runner.
     let host_for_thread = Arc::clone(&host);
     let join = std::thread::Builder::new()
-        .name("slot-intersection-stack-2mib".to_string())
-        .stack_size(2 * 1024 * 1024)
+        .name("slot-intersection-stack".to_string())
+        .stack_size(stack)
         .spawn(move || {
             host_for_thread
                 .get_component_meta("/src/Comp.vue")
                 .map(|_| ())
         })
-        .expect("spawn 2 MiB slot-intersection worker");
+        .expect("spawn the slot-intersection worker");
     let outcome = join
         .join()
-        .expect("2 MiB slot-intersection worker must not panic");
+        .expect("the slot-intersection worker must not panic");
     assert!(
         outcome.is_some(),
-        "512-arm intersection through the public component-meta entry must resolve on a 2 MiB stack"
+        "a {arms}-arm intersection through the public component-meta entry must resolve on a {} KiB stack",
+        stack >> 10
     );
 }
 

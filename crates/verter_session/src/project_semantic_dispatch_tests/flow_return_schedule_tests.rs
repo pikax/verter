@@ -627,14 +627,23 @@ fn module_chain_across_a_middle_edit(levels: usize) -> (Outcome, Outcome) {
     (before, witness(&host))
 }
 
-/// An edit to the middle module of a 101-module chain reaches the top: the
-/// gate version of the 201-module test in the nightly scale tier. Fifty
+/// An edit to the middle module of a 64-module chain reaches the top: the
+/// gate version of the 201-module test in the nightly scale tier. Thirty-one
 /// modules sit above the edit, past the connected query depth a stale
-/// candidate used to answer within, and the chain is past the checker's
-/// instantiation depth.
+/// candidate used to answer within; counting a stale candidate as answered,
+/// the edited chain misses at 64 modules, as at 128 and 201. A chain past
+/// the checker's instantiation depth is
+/// [`a_generic_chain_across_101_modules_answers_without_a_refusal`].
 #[test]
-fn an_edit_in_the_middle_of_a_101_module_chain_reaches_the_top() {
-    assert_a_middle_edit_reaches_the_top(101);
+fn an_edit_in_the_middle_of_a_64_module_chain_reaches_the_top() {
+    const LEVELS: usize = 64;
+    const {
+        assert!(
+            LEVELS - 1 - LEVELS / 2 > MAX_CONNECTED_QUERY_DEPTH as usize,
+            "the modules above the edit reach past the connected query depth"
+        );
+    }
+    assert_a_middle_edit_reaches_the_top(LEVELS);
 }
 
 /// After its middle module is edited, a `levels`-module chain's witness is a
