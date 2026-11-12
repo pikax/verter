@@ -1121,3 +1121,145 @@ fn undecided_relation_windows_close_with_their_inner_windows() {
         Some(UndecidedRelationDelta { net: 1, depth: 0 })
     );
 }
+
+/// The eager form of the undecided windows, kept only as the oracle of the
+/// lazy one: every discard and replay lowers the low of EVERY open window.
+#[derive(Default)]
+struct EagerUndecidedWindows {
+    count: u64,
+    lows: Vec<u64>,
+    saturations: u64,
+}
+
+impl EagerUndecidedWindows {
+    fn discard(&mut self, count: u64) {
+        if count > self.count {
+            self.saturations += 1;
+        }
+        self.count = self.count.saturating_sub(count);
+        for low in &mut self.lows {
+            *low = (*low).min(self.count);
+        }
+    }
+
+    fn open(&mut self) -> (u64, u64, usize) {
+        let mark = (self.count, self.saturations, self.lows.len());
+        self.lows.push(self.count);
+        mark
+    }
+
+    fn close(
+        &mut self,
+        (count, saturations, place): (u64, u64, usize),
+    ) -> Option<UndecidedRelationDelta> {
+        let low = self.lows.get(place).copied();
+        self.lows.truncate(place);
+        let low = low?;
+        (self.saturations == saturations).then(|| UndecidedRelationDelta {
+            net: i64::try_from(self.count).unwrap_or(i64::MAX)
+                - i64::try_from(count).unwrap_or(i64::MAX),
+            depth: count - low.min(count),
+        })
+    }
+
+    fn replay(&mut self, delta: UndecidedRelationDelta) -> bool {
+        if self.count < delta.depth {
+            return false;
+        }
+        let lowest = self.count - delta.depth;
+        for low in &mut self.lows {
+            *low = (*low).min(lowest);
+        }
+        let moved = i64::try_from(self.count).unwrap_or(i64::MAX) + delta.net;
+        self.count = u64::try_from(moved).unwrap_or(0);
+        true
+    }
+}
+
+/// Lazy lowering (only the innermost window's low moves; a closing window
+/// folds its low into its parent's) closes every window with exactly the
+/// delta the eager form gives, over random sequences of increments, opens,
+/// closes (an outer one with inner windows left open included), discards
+/// (saturating ones included) and replays of measured deltas.
+#[test]
+fn lazy_undecided_lows_close_every_window_as_eager_lowering_does() {
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = move |bound: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % bound
+    };
+    let mut closes = 0_u32;
+    let mut deep_closes = 0_u32;
+    for sequence in 0..400 {
+        let mut lazy = ResolveCallDomainRuntime::default();
+        let mut eager = EagerUndecidedWindows::default();
+        let mut open: Vec<(UndecidedWindowMark, (u64, u64, usize))> = Vec::new();
+        let mut deltas: Vec<UndecidedRelationDelta> = Vec::new();
+        for step in 0..64 {
+            match next(6) {
+                0 => {
+                    let by = next(3) + 1;
+                    lazy.undecided_relations += by;
+                    eager.count += by;
+                }
+                1 => open.push((lazy.open_undecided_window(), eager.open())),
+                2 if !open.is_empty() => {
+                    // Mostly the innermost; sometimes an outer one, closing
+                    // the windows left open inside it with it.
+                    let at = if next(4) == 0 {
+                        usize::try_from(next(open.len() as u64)).expect("small")
+                    } else {
+                        open.len() - 1
+                    };
+                    let (lazy_mark, eager_mark) = open[at];
+                    open.truncate(at);
+                    let got = lazy.close_undecided_window(lazy_mark);
+                    assert_eq!(
+                        got,
+                        eager.close(eager_mark),
+                        "sequence {sequence} step {step}: every close delta is equal"
+                    );
+                    closes += 1;
+                    if let Some(delta) = got {
+                        deep_closes += u32::from(delta.depth > 0);
+                        deltas.push(delta);
+                    }
+                }
+                3 => {
+                    let count = next(4);
+                    lazy.discard_undecided_relations(count);
+                    eager.discard(count);
+                }
+                4 if !deltas.is_empty() => {
+                    let delta = deltas[usize::try_from(next(deltas.len() as u64)).expect("small")];
+                    assert_eq!(
+                        lazy.replay_undecided_delta(delta),
+                        eager.replay(delta),
+                        "sequence {sequence} step {step}: a replay is equal"
+                    );
+                }
+                _ => {}
+            }
+            assert_eq!(
+                (lazy.undecided_relations, lazy.undecided_saturations),
+                (eager.count, eager.saturations),
+                "sequence {sequence} step {step}: the count and saturations are equal"
+            );
+        }
+        while let Some((lazy_mark, eager_mark)) = open.pop() {
+            assert_eq!(
+                lazy.close_undecided_window(lazy_mark),
+                eager.close(eager_mark),
+                "sequence {sequence}: every close delta is equal"
+            );
+            closes += 1;
+        }
+        assert!(lazy.undecided_lows.is_empty());
+    }
+    assert!(
+        closes > 1_000 && deep_closes > 100,
+        "the sequences exercise nested lowering"
+    );
+}

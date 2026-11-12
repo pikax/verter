@@ -2900,8 +2900,12 @@ pub struct ResolveCallDomainRuntime {
     /// decided, so the call's relation obligations have no decided
     /// evidence to claim.
     pub(crate) undecided_relations: u64,
-    /// For each measurement window open on the count, the lowest value it
-    /// has held since the window opened, the outermost first.
+    /// For each measurement window open on the count, the outermost first,
+    /// the lowest value the count held while that window was the innermost
+    /// one open, its closed inner windows' lows folded in. Lowering is lazy:
+    /// a discard or replay lowers only the innermost entry, and a window
+    /// closing folds its low into its parent's, so a window's own low is the
+    /// least of its entry and every entry after it, read only at its close.
     undecided_lows: Vec<u64>,
     /// How many discards of the count asked for more than it held.
     undecided_saturations: u64,
@@ -2978,8 +2982,14 @@ impl ResolveCallDomainRuntime {
             self.undecided_saturations += 1;
         }
         self.undecided_relations = self.undecided_relations.saturating_sub(count);
-        for low in &mut self.undecided_lows {
-            *low = (*low).min(self.undecided_relations);
+        self.lower_innermost_undecided_low(self.undecided_relations);
+    }
+
+    /// Lower the innermost open window's low to `value`: every window around
+    /// it takes that low when the windows inside it close.
+    fn lower_innermost_undecided_low(&mut self, value: u64) {
+        if let Some(low) = self.undecided_lows.last_mut() {
+            *low = (*low).min(value);
         }
     }
 
@@ -3001,9 +3011,15 @@ impl ResolveCallDomainRuntime {
         &mut self,
         opened: UndecidedWindowMark,
     ) -> Option<UndecidedRelationDelta> {
-        let low = self.undecided_lows.get(opened.place).copied();
+        // The window's low is the least of its own entry and those of the
+        // windows still open inside it; it folds into the window around it.
+        let low = self
+            .undecided_lows
+            .get(opened.place..)
+            .and_then(|inside| inside.iter().copied().min());
         self.undecided_lows.truncate(opened.place);
         let low = low?;
+        self.lower_innermost_undecided_low(low);
         (self.undecided_saturations == opened.saturations).then(|| UndecidedRelationDelta {
             net: i64::try_from(self.undecided_relations).unwrap_or(i64::MAX)
                 - i64::try_from(opened.count).unwrap_or(i64::MAX),
@@ -3017,10 +3033,7 @@ impl ResolveCallDomainRuntime {
         if self.undecided_relations < delta.depth {
             return false;
         }
-        let lowest = self.undecided_relations - delta.depth;
-        for low in &mut self.undecided_lows {
-            *low = (*low).min(lowest);
-        }
+        self.lower_innermost_undecided_low(self.undecided_relations - delta.depth);
         let moved = i64::try_from(self.undecided_relations).unwrap_or(i64::MAX) + delta.net;
         self.undecided_relations = u64::try_from(moved).unwrap_or(0);
         true
