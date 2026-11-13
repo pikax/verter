@@ -181,12 +181,12 @@ not copy an owner or a receiving acceptance.
 | Op | Operation | Selectors | Region claim | Route class | Execution owner | Served at the head |
 | -- | --------- | --------- | ------------ | ----------- | --------------- | ------------------ |
 | `OP01` | `ResolveSymbol` | FileName, ProjectName, WorkspaceName | whole operation | Native | `ProjectSemanticDispatch` | yes |
-| `OP02` | `ProjectPath` | FileName, ProjectName, NodeRef | whole operation | Native | `ProjectSemanticDispatch` | validated, no executor |
-| `OP03` | `EvaluateTypeExpression` | FileName | whole operation | Native | `ProjectSemanticDispatch` | serde entry only |
+| `OP02` | `ProjectPath` | FileName, ProjectName, NodeRef | whole operation | Native | `ProjectSemanticDispatch` | refused, `UnsupportedOperation` |
+| `OP03` | `EvaluateTypeExpression` | FileName | whole operation | Native | `ProjectSemanticDispatch` | serde entry only; the envelope refuses it, `UnsupportedOperation` |
 | `OP04` | `ExpandAround` | NodeRef | whole operation | Native | `ProjectSemanticDispatch` | yes, schema 12 (`resolve_symbol_graph_with_audit`) |
-| `OP05` | `FlowNarrowingAt` | Position | whole operation | Native | `ProjectSemanticDispatch` (flow substrate) | validated, no executor |
-| `OP06` | `ContextualTypeAt` | Position | whole operation | Native | `ProjectSemanticDispatch` | validated, no executor |
-| `OP07` | `Relate` | NodeRef, FileName | whole operation | Native | `ProjectSemanticDispatch` (relation oracle) | rejected as `MalformedPayload` |
+| `OP05` | `FlowNarrowingAt` | Position | whole operation | Native | `ProjectSemanticDispatch` (flow substrate) | refused, `UnsupportedOperation` |
+| `OP06` | `ContextualTypeAt` | Position | whole operation | Native | `ProjectSemanticDispatch` | refused, `UnsupportedOperation` |
+| `OP07` | `Relate` | NodeRef, FileName | whole operation | Native | `ProjectSemanticDispatch` (relation oracle) | refused, `UnsupportedOperation` |
 | `OP08` | `ListSymbols` | FileName | shallow symbol inventory | Native | `IndexedReady` shallow inventory | `list_file_symbols` |
 | `OP09` | `ShallowSurface` | FileName, NodeRef | whole operation | Native | `ProjectSemanticDispatch` | `resolve_shallow_surface` |
 | `OP10` | `ComponentFacets` | Component | no requested facet needs a TypeScript fact | Native | `ProjectSemanticDispatch` | `resolve_framework_surface_with_audit` |
@@ -276,9 +276,12 @@ Because those predicates are complements, every accepted input matches
 exactly one region, and that region has exactly one route class and one
 execution owner. Every composed child does too, so the charter's abort
 condition ("an operation lacks exactly one ratified execution owner") does
-not fire. Four rows are validated today without an executor; that is
-displaced route `TIF-D06`, not a missing owner. `OP04` left that set at
-schema 12, served by the graph entry that serves `OP01`.
+not fire. The five rows the host does not serve (`OP02`, `OP03`, `OP05`,
+`OP06` and `OP07`) are refused by the request validator, before any payload
+check and at every accepted schema version, with the `UnsupportedOperation`
+request error (field 16), which echoes the operation; `TIF-D06` is replaced.
+`OP04` left that set at schema 12, served by the graph entry that serves
+`OP01`.
 
 ### Result DTOs (subblock 5)
 
@@ -415,7 +418,7 @@ production-capable deletion owner, TIF1 (`TIF1-AC1`).
 | `TIF-D03` | `GraphQueryIdentity` mixes semantic arguments, presentation, serialization, env hashes and versions in one untyped echo; the graph executor fills the env and project fields with empty values and the framework-surface graph has no query | replace with the `QueryIdentity` digest, `PresentationProfileId`, `SerializationProfileId` and basis provenance |
 | `TIF-D04` | Five public entry vocabularies beside the graph envelope: `list_file_symbols`, `resolve_named_symbol(_wire)_with_audit`, `evaluate_type_expression_with_audit`, `resolve_shallow_surface(_for)`, and `resolve_symbol_graph_with_audit` (no production caller) | replace with one `TypeInfoRequest` over `OP01`–`OP12` |
 | `TIF-D05` | `current_store_view_for_query` reports a non-current view as `None`, the same signal as "could not be resolved" | replace with `Unavailable { UnsettledInput }` — done: the helper makes one store-view read and returns `Result<CurrentHostStoreView, UnsettledInput>` (the store-view manager is the only retry authority; `TYPEINFO_CURRENT_VIEW_RETRY_ATTEMPTS` and its loop are deleted). Every TypeInfo graph route refuses an unsettled request whole as `UnstableState` (resolve-symbol, framework surface, both expand-around reads, where the fence's churn is no longer `StaleBasis`); the audited resolve/evaluate entries answer `Err(UnstableState)`; the host projection and deepen entries return the typed cause |
-| `TIF-D06` | Five operations pass validation and reach no executor; `Relate` is rejected as `MalformedPayload` | replace: one execution owner per row, a typed `Unsupported` for unserved rows |
+| `TIF-D06` | Five operations pass validation and reach no executor; `Relate` is rejected as `MalformedPayload` | replace: one execution owner per row, a typed `Unsupported` for unserved rows — done: the validator's exhaustive served-operation table refuses all five as `UnsupportedOperation{operation}` (field 16, schema 12, every accepted version) before the floor and payload checks; a validated request carries the served operation, so neither entry can represent an unserved one |
 
 TIF0 references these routes owned elsewhere. Deletion owner and receiving
 acceptance stay in the owning product. This table records only the TIF0-side

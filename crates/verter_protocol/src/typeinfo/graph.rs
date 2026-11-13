@@ -368,7 +368,10 @@ pub use wire::UniqueSymbolKeyExpr;
 /// position by `node_ref` (field 8); `GraphHandle` and `GraphTypeNodeRef`
 /// are deleted. The expand-around operation's floor is 12, and its two new
 /// rejections are the `StaleBasis` (tag 14) and `UnknownNodeRef` (tag 15)
-/// error arms. v11 stays accepted for every other operation.
+/// error arms. v11 stays accepted for every other operation. v12 also adds
+/// the `UnsupportedOperation` (tag 16) error arm, which answers an operation
+/// the host does not serve at every accepted version: no earlier arm states
+/// that refusal truthfully, and those operations never had an executor.
 pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 12;
 
 /// Byte length of a [`FrameworkProfileRef::digest`]: the canonical digest
@@ -459,6 +462,16 @@ pub fn wire_error_unknown_node_ref(
     Box::new(wire::TypeInfoRequestErrorUnknownNodeRef {
         node_ref: Some(node_ref),
     })
+}
+
+/// Build an `UnsupportedOperation` error variant payload echoing the
+/// requested operation the host does not serve.
+pub fn wire_error_unsupported_operation(
+    operation: Operation,
+) -> wire::TypeInfoRequestErrorUnsupportedOperation {
+    wire::TypeInfoRequestErrorUnsupportedOperation {
+        operation: operation as i32,
+    }
 }
 
 /// Build an `OmittedRoots` error variant payload.

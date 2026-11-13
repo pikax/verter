@@ -15,8 +15,8 @@
 //! - structural well-formedness of the carried
 //!   `StructuredTypeExpression` (no detectable infinite cycle, no
 //!   missing required sub-payloads);
-//! - operation-kind special cases (`relate` requires both endpoints,
-//!   `listSymbols` ignores the expression payload).
+//! - the served-operation table: an operation the host does not serve
+//!   is refused as `UnsupportedOperation` before its payload is read.
 //!
 //! No semantic execution. No resolver invocation. No file IO.
 //! Producers downstream of this module can assume the request is
@@ -140,7 +140,9 @@ pub const SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS: &[u32] = &[
 /// request below 11 is rejected with
 /// [`TypeInfoRequestError::MalformedPayload`] (NOT `UnknownSchemaVersion`:
 /// 3..=10 stay globally supported for the legacy operations, and a v3..v10
-/// framework-surface client could not decode a new error arm).
+/// framework-surface client could not decode a new error arm). That rule
+/// covers a served operation below its floor; an operation the host does
+/// not serve is answered `UnsupportedOperation` at every accepted version.
 pub const FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION: u32 = 11;
 
 /// Minimum schema version the expand-around operation accepts: 12, the
@@ -172,9 +174,45 @@ pub const MAX_STRUCTURED_EXPRESSION_DEPTH: u32 = 256;
 #[derive(Debug, Clone)]
 pub struct ValidatedTypeInfoGraphRequest {
     request: TypeInfoGraphRequest,
+    operation: ServedOperation,
+}
+
+/// An operation this host serves through the typeinfo graph envelope.
+/// A validated request carries one, so an executor matches exhaustively
+/// over the served set and cannot represent an unserved operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServedOperation {
+    /// `GRAPH_OPERATION_RESOLVE_SYMBOL`.
+    ResolveSymbol,
+    /// `GRAPH_OPERATION_EXPAND_AROUND`.
+    ExpandAround,
+    /// `GRAPH_OPERATION_FRAMEWORK_SURFACES`.
+    FrameworkSurfaces,
+}
+
+/// The one table of served operations. Exhaustive with no wildcard, so a
+/// new wire operation fails to compile until it is decided here. `None`
+/// is answered with [`TypeInfoRequestError`]'s `UnsupportedOperation` arm.
+fn served_operation(operation: WireOperation) -> Option<ServedOperation> {
+    match operation {
+        WireOperation::ResolveSymbol => Some(ServedOperation::ResolveSymbol),
+        WireOperation::ExpandAround => Some(ServedOperation::ExpandAround),
+        WireOperation::FrameworkSurfaces => Some(ServedOperation::FrameworkSurfaces),
+        WireOperation::EvaluateExpression
+        | WireOperation::ProjectPath
+        | WireOperation::Relate
+        | WireOperation::FlowNarrowingAt
+        | WireOperation::ContextualTypeAt => None,
+    }
 }
 
 impl ValidatedTypeInfoGraphRequest {
+    /// The served operation the request names.
+    #[must_use]
+    pub fn operation(&self) -> ServedOperation {
+        self.operation
+    }
+
     /// Borrow the validated request.
     #[must_use]
     pub fn inner(&self) -> &TypeInfoGraphRequest {
@@ -192,44 +230,41 @@ impl ValidatedTypeInfoGraphRequest {
 /// `ValidatedTypeInfoGraphRequest` on success or a closed
 /// `TypeInfoRequestError` on rejection.
 ///
+/// The checks run in a fixed order: the global schema version, the
+/// operation number, whether the host serves the operation, the
+/// operation's schema floor, then the payload. An operation the host does
+/// not serve is answered `UnsupportedOperation` whatever its payload, so
+/// no unserved request is shape-checked and then dropped.
+///
 /// # Errors
 ///
-/// Returns a typed `TypeInfoRequestError` when the request is missing
-/// a required field, carries an out-of-range expansion budget, has
-/// a malformed `StructuredTypeExpression`, omits a required path /
-/// span / endpoint, or carries an unsupported schema version.
+/// Returns a typed `TypeInfoRequestError` when the request names an
+/// operation the host does not serve, is missing a required field,
+/// carries an out-of-range expansion budget, has a malformed
+/// `StructuredTypeExpression`, omits a required path / span / reference,
+/// or carries an unsupported schema version.
 pub fn validate_type_info_graph_request(
     request: &TypeInfoGraphRequest,
 ) -> Result<ValidatedTypeInfoGraphRequest, TypeInfoRequestError> {
     validate_schema_version(request.schema_version)?;
     let operation = decode_operation(request.operation).ok_or_else(invalid_mode_error)?;
+    let served =
+        served_operation(operation).ok_or_else(|| unsupported_operation_error(operation))?;
     validate_schema_version_for_operation(operation, request.schema_version)?;
     let payload = request
         .payload
         .as_ref()
         .ok_or_else(malformed_payload_error_with_detail("missing payload"))?;
 
-    // Operation discriminator MUST match the payload's variant tag.
-    match (operation, payload) {
-        (WireOperation::ResolveSymbol, wire_request::Payload::ResolveSymbol(r)) => {
+    // The served operation MUST match the payload's variant tag.
+    match (served, payload) {
+        (ServedOperation::ResolveSymbol, wire_request::Payload::ResolveSymbol(r)) => {
             validate_resolve_symbol_graph_request(r)?;
         }
-        (WireOperation::EvaluateExpression, wire_request::Payload::EvaluateTypeExpression(r)) => {
-            validate_evaluate_type_expression_graph_request(r)?;
-        }
-        (WireOperation::ProjectPath, wire_request::Payload::ProjectPath(r)) => {
-            validate_project_path_graph_request(r)?;
-        }
-        (WireOperation::FlowNarrowingAt, wire_request::Payload::FlowNarrowing(r)) => {
-            validate_flow_narrowing_request(r)?;
-        }
-        (WireOperation::ContextualTypeAt, wire_request::Payload::ContextualType(r)) => {
-            validate_contextual_type_request(r)?;
-        }
-        (WireOperation::ExpandAround, wire_request::Payload::ExpandAround(r)) => {
+        (ServedOperation::ExpandAround, wire_request::Payload::ExpandAround(r)) => {
             validate_expand_graph_around_request(r)?;
         }
-        (WireOperation::FrameworkSurfaces, wire_request::Payload::FrameworkSurface(r)) => {
+        (ServedOperation::FrameworkSurfaces, wire_request::Payload::FrameworkSurface(r)) => {
             // The framework-surface payload echoes the schema version;
             // an envelope/payload mismatch is malformed (the payload
             // version decides which response arms the client can
@@ -243,11 +278,9 @@ pub fn validate_type_info_graph_request(
             }
             validate_framework_surface_request(r)?;
         }
-        (WireOperation::Relate, _) | (_, _) => {
-            // Relate has a dedicated request shape outside the graph
-            // envelope; receiving a `Relate` operation through this
-            // path is a payload mismatch. Other (op, payload)
-            // discriminator mismatches are equally malformed.
+        (_, _) => {
+            // A served operation whose payload arm belongs to another
+            // operation is a client bug, not an unserved request.
             return Err(malformed_payload_error_with_detail(
                 "operation discriminator does not match payload arm",
             )());
@@ -256,6 +289,7 @@ pub fn validate_type_info_graph_request(
 
     Ok(ValidatedTypeInfoGraphRequest {
         request: request.clone(),
+        operation: served,
     })
 }
 
@@ -267,7 +301,11 @@ pub fn validate_type_info_graph_request(
 /// minimum is [`TypeInfoRequestError::MalformedPayload`] with detail —
 /// NOT `UnknownSchemaVersion` (the version stays globally supported
 /// for the legacy operations) and NOT a new error oneof arm (clients
-/// at the older version could not decode one).
+/// at the older version could not decode one). This floor applies to a
+/// served operation: [`validate_type_info_graph_request`] answers an
+/// operation the host does not serve with `UnsupportedOperation` before
+/// consulting it, at every accepted version, because no older arm states
+/// that refusal truthfully.
 ///
 /// Schema 2 is legacy-operations-only: every pre-existing operation
 /// accepts `[2, 3]`; the framework-surface operation requires
@@ -1338,6 +1376,14 @@ fn missing_display_policy_error() -> TypeInfoRequestError {
     TypeInfoRequestError {
         kind: Some(type_info_request_error::Kind::MissingDisplayPolicy(
             wire::wire_error_missing_display_policy(),
+        )),
+    }
+}
+
+fn unsupported_operation_error(operation: WireOperation) -> TypeInfoRequestError {
+    TypeInfoRequestError {
+        kind: Some(type_info_request_error::Kind::UnsupportedOperation(
+            wire::wire_error_unsupported_operation(operation),
         )),
     }
 }

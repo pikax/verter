@@ -910,7 +910,9 @@ message TypeInfoGraphResponse {
 // The two scalar / projection-bypass operations (`listSymbols` and
 // `relate`) have dedicated request types declared separately. The
 // closed `operation` discriminator decides which payload arm
-// carries the call.
+// carries the call. The host serves resolve-symbol, expand-around and
+// framework-surfaces; a request for any other operation is answered with
+// `TypeInfoRequestError.unsupported_operation` whatever its payload.
 message TypeInfoGraphRequest {
   uint32 schema_version = 1;
   GraphOperation operation = 2;
@@ -1766,9 +1768,9 @@ message ExprNoInfer { StructuredTypeExpression inner = 1; }
 message TypeInfoRequestError {
   // Wire-compat reservation: field number 11 and the name
   // `missing_relate_endpoint` inside `kind` are reserved and must
-  // not be reused for a different variant. The request dispatcher
-  // surfaces invalid `Relate` envelopes through `MalformedPayload`,
-  // so no producer ever emits a dedicated variant in slot 11.
+  // not be reused for a different variant. A `Relate` request is
+  // answered with `unsupported_operation`, so no producer ever emits a
+  // dedicated variant in slot 11.
   // Proto3 forbids `reserved` inside an `oneof` block, so the
   // directive lives at the enclosing message scope.
   reserved 11;
@@ -1788,6 +1790,7 @@ message TypeInfoRequestError {
     TypeInfoRequestErrorUnknownFrameworkProfile unknown_framework_profile = 13;
     TypeInfoRequestErrorStaleBasis stale_basis = 14;
     TypeInfoRequestErrorUnknownNodeRef unknown_node_ref = 15;
+    TypeInfoRequestErrorUnsupportedOperation unsupported_operation = 16;
   }
 }
 
@@ -1805,6 +1808,15 @@ message TypeInfoRequestErrorStaleBasis {
 // issued tuple in any component.
 message TypeInfoRequestErrorUnknownNodeRef {
   NodeRef node_ref = 1;
+}
+
+// Typed error for a well-formed request naming an operation this host
+// does not serve. It answers before any payload check, at every accepted
+// schema version, and echoes the requested operation. The host serves
+// resolve-symbol, expand-around and framework-surfaces; asking again with
+// a different payload cannot succeed.
+message TypeInfoRequestErrorUnsupportedOperation {
+  GraphOperation operation = 1;
 }
 
 // Typed error for a well-formed `FrameworkProfileRef` (32 bytes) that

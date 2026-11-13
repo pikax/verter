@@ -702,9 +702,16 @@ describe("typeinfo proto TS bindings", () => {
           },
         },
       },
+      // A non-default operation, so a lost field cannot decode back equal.
+      {
+        kind: {
+          case: "unsupportedOperation",
+          value: { operation: GraphOperation.RELATE },
+        },
+      },
     ];
 
-    expect(variants.length).toBe(14);
+    expect(variants.length).toBe(15);
 
     for (const init of variants) {
       const err = create(TypeInfoRequestErrorSchema, init);

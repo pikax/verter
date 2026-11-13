@@ -136,6 +136,7 @@ fn err_label(err: &wire::TypeInfoRequestError) -> &'static str {
         type_info_request_error::Kind::UnknownFrameworkProfile(_) => "UnknownFrameworkProfile",
         type_info_request_error::Kind::StaleBasis(_) => "StaleBasis",
         type_info_request_error::Kind::UnknownNodeRef(_) => "UnknownNodeRef",
+        type_info_request_error::Kind::UnsupportedOperation(_) => "UnsupportedOperation",
     }
 }
 
@@ -331,12 +332,13 @@ fn every_closure_variant_has_concrete_resource_bound() {
 
 // ───────────────── static: error union consistency across sections ────────
 
-/// The closed `TypeInfoRequestError` union — exactly these 14 active
+/// The closed `TypeInfoRequestError` union — exactly these 15 active
 /// variant selectors (proto field 11 / `missing_relate_endpoint` is
 /// retired via `reserved`; field 13 / `unknown_framework_profile` is the
 /// schema-11 typed rejection of an unadmitted framework profile; fields 14
 /// and 15 / `stale_basis` and `unknown_node_ref` are the schema-12
-/// expand-around rejections of a node reference).
+/// expand-around rejections of a node reference; field 16 /
+/// `unsupported_operation` refuses an operation the host does not serve).
 const REQUEST_ERROR_VARIANTS: &[&str] = &[
     "missing_projection_context",
     "missing_display_policy",
@@ -352,6 +354,7 @@ const REQUEST_ERROR_VARIANTS: &[&str] = &[
     "unknown_framework_profile",
     "stale_basis",
     "unknown_node_ref",
+    "unsupported_operation",
 ];
 
 #[test]
@@ -397,7 +400,7 @@ fn typeinfo_request_error_union_is_consistent_across_sections() {
     expected.sort();
     assert_eq!(
         proto_arms, expected,
-        "the proto TypeInfoRequestError oneof must carry exactly the 14 closed \
+        "the proto TypeInfoRequestError oneof must carry exactly the 15 closed \
          error selectors",
     );
 
@@ -415,8 +418,8 @@ fn typeinfo_request_error_union_is_consistent_across_sections() {
     // here ties the validator surface to the proto count.
     assert_eq!(
         REQUEST_ERROR_VARIANTS.len(),
-        14,
-        "the validator-side error union mirror must list exactly 14 variants",
+        15,
+        "the validator-side error union mirror must list exactly 15 variants",
     );
 }
 
@@ -544,11 +547,12 @@ fn list_symbols_is_scalar() {
 fn relate_has_no_closure_field() {
     // `relate` is a relation-check operation, not a graph-projection
     // request. It is NOT one of the `TypeInfoGraphRequest.payload` oneof
-    // arms, and routing the RELATE operation through the graph envelope
-    // is a typed MalformedPayload error. There is therefore no closure
-    // field carried for relate. Discriminating: add a `relate` arm to the
-    // payload oneof and this fails; or change the validator to accept
-    // RELATE through the graph path and the behavioral assertion fails.
+    // arms, and the host does not serve the RELATE operation through the
+    // graph envelope: it is a typed UnsupportedOperation error. There is
+    // therefore no closure field carried for relate. Discriminating: add a
+    // `relate` arm to the payload oneof and this fails; or change the
+    // validator to accept RELATE through the graph path and the
+    // behavioral assertion fails.
     let proto = read_proto();
 
     // (1) RELATE is NOT a payload oneof arm of TypeInfoGraphRequest.
@@ -561,8 +565,8 @@ fn relate_has_no_closure_field() {
          not a graph-projection request and carries no closure",
     );
 
-    // (2) The validator rejects the RELATE operation routed through the
-    // graph envelope (MalformedPayload) rather than carrying a closure
+    // (2) The validator refuses the RELATE operation routed through the
+    // graph envelope (UnsupportedOperation) rather than carrying a closure
     // for it.
     let relate_through_graph = wire::TypeInfoGraphRequest {
         schema_version: TYPEINFO_GRAPH_SCHEMA_VERSION,
@@ -575,9 +579,9 @@ fn relate_has_no_closure_field() {
         .expect_err("RELATE through the graph envelope must be rejected");
     assert_eq!(
         err_label(&err),
-        "MalformedPayload",
-        "routing RELATE through the graph payload must fail with MalformedPayload — \
-         relate has no graph-projection closure",
+        "UnsupportedOperation",
+        "routing RELATE through the graph payload must fail with UnsupportedOperation — \
+         the host serves no relate operation and relate has no graph-projection closure",
     );
 }
 

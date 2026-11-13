@@ -530,12 +530,13 @@ fn structured_type_expression_taxonomy_proto_ts_parity() {
 
 #[test]
 fn type_info_request_error_taxonomy_proto_ts_parity() {
-    // 14 active arms (13 = schema 11's unknown_framework_profile; 14 and 15 =
-    // schema 12's stale_basis and unknown_node_ref); field 11
+    // 15 active arms (13 = schema 11's unknown_framework_profile; 14 and 15 =
+    // schema 12's stale_basis and unknown_node_ref; 16 = unsupported_operation);
+    // field 11
     // is reserved for wire compatibility —
     // see the proto `reserved 11;` directive on the
     // `TypeInfoRequestError` oneof.
-    assert_proto_ts_parity("TypeInfoRequestError", "TypeInfoRequestError", "kind", 14);
+    assert_proto_ts_parity("TypeInfoRequestError", "TypeInfoRequestError", "kind", 15);
 }
 
 #[test]
