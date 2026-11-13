@@ -1,7 +1,5 @@
 # Verter
 
-[![hotpath-cloud](https://img.shields.io/endpoint?url=https://hotpath.rs/badge-cloud.json)](https://hotpath.rs/app/repos/pikax/verter)
-
 A Vue compiler, Language Server Protocol (LSP) implementation, and build tool — built as a hybrid Rust + TypeScript monorepo.
 
 > [!NOTE]

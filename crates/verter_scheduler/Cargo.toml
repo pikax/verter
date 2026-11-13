@@ -54,7 +54,7 @@ test-support = ["verter_execution/test-support"]
 verter_execution = { path = "../verter_execution" }
 verter_debug_assert = { workspace = true }
 arc-swap = "1.9"
-hotpath = { version = "0.31", optional = true }
+hotpath = { version = "0.23", optional = true }
 parking_lot = "0.13.0"
 # The parking_lot major hotpath's instrumented wrapper accepts. Only the
 # observed DAG lock is built from it, and only under `semantic-observe`,
@@ -71,7 +71,7 @@ verter_span = { path = "../verter_span" }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The profiler itself is native-only: on wasm32 `hotpath` stays in its
 # no-op mode, so `semantic-observe` builds for every target.
-hotpath = { version = "0.31", optional = true, features = ["hotpath"] }
+hotpath = { version = "0.23", optional = true, features = ["hotpath"] }
 rayon = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
