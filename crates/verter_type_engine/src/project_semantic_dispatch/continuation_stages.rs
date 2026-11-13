@@ -54,11 +54,22 @@ pub(super) struct ReduceIntersectionBuild {
 
 /// An overload set's resolution between its stages: its callee's signature
 /// list of one kind, read first and then settled one composite candidate at
-/// a time.
+/// a time, and — under explicit type arguments — its candidates instantiated
+/// one at a time.
 pub(super) struct OverloadSetBuild {
-    callee: SemanticNodeId,
-    kind: crate::semantic_query::SignatureKind,
-    list: SignatureListRead,
+    pub(super) callee: SemanticNodeId,
+    pub(super) kind: crate::semantic_query::SignatureKind,
+    pub(super) type_args: Arc<[SemanticNodeId]>,
+    pub(super) stage: OverloadSetStage,
+}
+
+/// Where an overload set's resolution stands.
+pub(super) enum OverloadSetStage {
+    /// Reading the callee's signature list.
+    List(SignatureListRead),
+    /// Instantiating the settled candidates under the explicit type
+    /// arguments, the one standing at a read retained.
+    Candidates(Box<super::explicit_instantiation::ExplicitCandidates>),
 }
 
 /// One shared signature list being read as a continuation: the subject's
@@ -140,12 +151,33 @@ impl SignatureListRead {
 
 impl OverloadSetBuild {
     /// Whether the read this set waits on was named from handles a
-    /// kernel-epoch replacement retired while it waited.
+    /// kernel-epoch replacement retired while it waited. A candidate's
+    /// read is named from graph nodes the list was consumed into, which no
+    /// replacement retires.
     pub(super) fn awaits_retired_read<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         stage: &ContinuationStage<'_, '_, C>,
     ) -> bool {
-        self.list.awaits_retired_result(stage)
+        match &self.stage {
+            OverloadSetStage::List(list) => list.awaits_retired_result(stage),
+            OverloadSetStage::Candidates(_) => false,
+        }
+    }
+
+    /// Whether the set waits on a read a candidate's substitution names.
+    pub(super) fn instantiates_candidates(&self) -> bool {
+        matches!(self.stage, OverloadSetStage::Candidates(_))
+    }
+
+    /// Release the substitution walk the candidate standing at a read
+    /// holds.
+    pub(super) fn release<C: crate::resolver_core::ResolverCapabilities>(
+        &mut self,
+        dispatch: &super::ProjectSemanticDispatch<'_, C>,
+    ) {
+        if let OverloadSetStage::Candidates(candidates) = &mut self.stage {
+            candidates.release(dispatch);
+        }
     }
 }
 
@@ -853,11 +885,14 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
     /// settlement, alias and constraint hops, apparent globals and the
     /// union and intersection procedures, and the kernel owns the order;
     /// the set chooses nothing.
+    /// Explicit type arguments instantiate each candidate in turn once the
+    /// list is read ([`super::ProjectSemanticDispatch::resume_overload_set`]).
     #[inline(never)]
     pub(super) fn begin_resolve_overload_set(
         &self,
         callee: SemanticNodeId,
         kind: crate::semantic_query::SignatureKind,
+        type_args: Arc<[SemanticNodeId]>,
     ) -> FamilyStep {
         self.graph().record_continuation_begun();
         let (list, read) = SignatureListRead::begin(callee, kind, true);
@@ -866,33 +901,10 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
             Box::new(FamilyBuild::OverloadSet(OverloadSetBuild {
                 callee,
                 kind,
-                list,
+                type_args,
+                stage: OverloadSetStage::List(list),
             })),
         )
-    }
-
-    /// Resume an overload set's resolution with the read it waited on: its
-    /// callee's signature list, or the result the composite candidate it
-    /// prepared applies. Once every candidate is a node the set is built.
-    #[inline(never)]
-    pub(super) fn resume_resolve_overload_set(
-        &self,
-        mut build: OverloadSetBuild,
-        read: crate::semantic_query::CacheRead<
-            QueryResult<crate::semantic_query::SemanticQueryValue>,
-        >,
-    ) -> FamilyStep {
-        match self.advance_signature_list(&mut build.list, read) {
-            ListProgress::Read(key) => {
-                FamilyStep::Need(key, Box::new(FamilyBuild::OverloadSet(build)))
-            }
-            ListProgress::Nodes(nodes) => FamilyStep::Done(Box::new(self.overload_set_output(
-                build.callee,
-                build.kind,
-                nodes,
-            ))),
-            ListProgress::Unsettled => FamilyStep::Done(Box::new(Self::unsettled_overload_set())),
-        }
     }
 
     /// Carry a signature list on with the read it waited on: its
@@ -1622,16 +1634,16 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
         )
             .into()
     }
+}
 
-    /// The miss an unsettled candidate list answers: never admitted, so the
-    /// next read settles it again.
-    fn unsettled_overload_set() -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
-            QueryResult::Error(QueryError::Miss),
-            super::empty_signature(),
-        )
-            .into();
-        output.cache_suppress = true;
-        output
-    }
+/// The miss an unsettled candidate list answers: never admitted, so the
+/// next read settles it again.
+pub(super) fn unsettled_overload_set() -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+    let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
+        QueryResult::Error(QueryError::Miss),
+        super::empty_signature(),
+    )
+        .into();
+    output.cache_suppress = true;
+    output
 }

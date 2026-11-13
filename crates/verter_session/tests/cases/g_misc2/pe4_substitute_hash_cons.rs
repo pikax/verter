@@ -255,8 +255,8 @@ fn distinct_triples_miss_hash_cons_memo() {
     let miss_delta = after.substitute_memo_misses - baseline.substitute_memo_misses;
     let hit_delta = after.substitute_memo_hits - baseline.substitute_memo_hits;
 
-    // Both the top-level entry AND the recursive
-    // `substitute_with_change_tracking` helper probe the SAME
+    // Both the top-level entry AND the substitution walk's child
+    // arrivals probe the SAME
     // store-owned `substitute_memo`. The unified memo is keyed by
     // `(node, parameter_node, arg)`, which is identical key
     // composition at both layers, so a top-level call now produces

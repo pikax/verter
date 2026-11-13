@@ -390,8 +390,8 @@ change; never weaken the test.
    `signature_kernel::discovery::merged_declaration_signatures` — every
    declaration's signatures in declaration order, identical ones included —
    which the signature utilities and conditional inference read (the LAST
-   signature). Call resolution alone reads
-   `shared_signature_nodes_in_resolution_order`, the kernel's
+   signature). Call resolution alone reads its
+   overload set's list pinned in the kernel's
    `resolution_order` (TypeScript's `reorderCandidates`): a later
    declaration's group before an earlier one's, and a signature whose
    parameter is WRITTEN as a literal type (`FunctionParam::declared_literal`,

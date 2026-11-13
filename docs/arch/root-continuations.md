@@ -1141,11 +1141,13 @@ bare-name resolver as a port, which applies the full route policy, so the
 declaration the lookup settles on is the one it always settled on), macro payloads
 (`ResolveMacroPayload`: owner file, then the props intersection or the
 emits/slots/model projection), ordered intersection reductions
-(`ReduceIntersection`: each nested subgroup) and overload sets without
-explicit type arguments (`ResolveOverloadSet`: the callee's
+(`ReduceIntersection`: each nested subgroup), overload sets
+(`ResolveOverloadSet`: the callee's
 `SignaturesOfType` list, then the `ReadSignatureResult` each composite
 candidate's node form applies, one at a time; a list a kernel-epoch
-replacement retired is read once more) and apparent types (`ApparentType`:
+replacement retired is read once more; with explicit type arguments, each
+candidate of the settled list in turn through explicit instantiation,
+below, the ones that cannot take the arguments dropping) and apparent types (`ApparentType`:
 the anchor walk's signature lists of an object surface, the base's call and
 construct lists choosing a `strictBindCallApply` interface, the global
 interface lookup with its `Function` fallback — itself a continuation,
@@ -1165,6 +1167,29 @@ order — a declared base's own `Static` surface read as a query, a value
 base's constructor surface composed in place — and the composed surface
 with its `prototype` property and type-argument specialization) are written
 this way.
+Substitution (`substitute.rs`) is one owned walk, `SubstitutionWalk`: a
+flat stack of the cold levels it has opened, each with the node's payload,
+its children in visit order, the children substituted so far, its cost
+scope's recording flag and the evidence epoch it opened under, plus a
+signature level's capture-avoidance or binder-rebind draft. A memo hit, a
+binder that is the node and a node the binder cannot reach answer at
+arrival without opening a level. Its one request is a changed closed
+template literal's `TemplateLiteralReduce`: the walk names that read and
+settles the level from its delivery when resumed. The public entry
+(`substitute_semantic_type_param`) drives the walk in place, reading each
+request where it stands; its callers are unchanged. Explicit instantiation
+(`explicit_instantiation.rs`) is the owned machine that binds a callable's
+clause to explicit type arguments parameter by parameter (the supplied
+argument or the default instantiated under the earlier bindings, then the
+argument substituted for each binder occurrence; a deferred callable's own
+parameters and source images), holding the one walk it stands in. Driven
+in place it is `apply_typeof_instantiation_args`; an overload set with
+explicit type arguments drives it as a continuation, its walk's template
+read being the set's need. Whether a candidate takes the arguments at all
+is read from its clause alone (`explicit_clause_fit`), the drop the
+machine itself starts with, so a call walk pairs its raw candidates with
+the set's survivors without instantiating them a second time.
+
 Path projections (`ProjectPath`; `ProjectPathBuild` and `PathWalker` in
 `walk.rs`) are written this way as well, for the hops listed here. The walk
 keeps its frame and result stacks, cycle sets, arm probes, partiality,
@@ -1299,9 +1324,11 @@ each seam held under test: declaration lookups (each route hop's load,
 including a barrel beyond the scope's own imports; the defining
 declaration), macro payloads (owner load; props intersection or
 emits/slots/model projection), intersection reductions (each nested
-subgroup, first or later), overload sets without explicit type arguments
+subgroup, first or later), overload sets
 (the list; each composite's result, including a retirement while it is
-held), apparent types (anchor, call and construct lists; the global
+held; with explicit type arguments, each template-literal reduction a
+candidate's substitution reads: the first, a later one inside the same
+candidate, and a later candidate's), apparent types (anchor, call and construct lists; the global
 lookup's library or contributor load; the interface's instantiation) and
 class instance surfaces (the declaring file's load; the instantiation). A
 class's static surface is written the same way but is not certified: its
@@ -1985,7 +2012,7 @@ evaluated inside other synchronous adapters still require continuation conversio
 
 Family continuations (above) cover declaration lookups along their
 import/export route, macro payloads, intersection reductions, overload
-sets without explicit type arguments, apparent types with their global
+sets, apparent types with their global
 lookup, and class instance and static surfaces. What a converted family
 still reads in place is confined to its ports: a route specifier's
 workspace resolution (`PortRead::Dependency`), the bare-name resolver for a
@@ -2110,10 +2137,20 @@ inventoried for conversion by its owner:
   a re-discharge) and a relation a seam joined below a drive's root, which
   demand nothing first.
 
+The substitution walk suspends only at its template-literal reduction, and
+only where its holder forwards the read: an overload set with explicit
+type arguments. Inside the walk these still read in place: a changed
+order-safe intersection's `ReduceIntersection` (made through the crate's
+one composite-construction funnel), an index key's deferred evaluation,
+the `NoInfer` genericness test and its `Instantiate`, and a
+signature-bearing object's instantiation buckets (`SignaturesOfType` and
+composite results). Every other holder of a substitution or an explicit
+instantiation (the call walk and executor, relations, signature discovery,
+carriers, the evaluator, path walks and flow returns) drives the same
+walk in place.
+
 Every other family a frame or cold build reaches still builds in one
-synchronous step: mapped types, `keyof`, template literals, overload sets with explicit type arguments (each candidate instantiates
-through the substitution engine, whose template-literal fold reads in
-place), signature discovery,
+synchronous step: mapped types, `keyof`, template literals, signature discovery,
 object-spread projection, locator lowering, a relation's reduction below
 its operand demands, flow returns and the call walk below a suspension
 point. Their nested query reads and resolver

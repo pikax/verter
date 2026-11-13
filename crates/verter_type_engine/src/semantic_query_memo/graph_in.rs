@@ -355,6 +355,27 @@ impl<M: ObserveExec> GraphIn<'_, M> {
             self.store.record_intersection_product_built();
         }
     }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_explicit_candidate(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_explicit_candidate();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_binder_substitution(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_binder_substitution();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_substitution_child_visit(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_substitution_child_visit();
+        }
+    }
     /// Record a path sample only for captured execution or test work accounting.
     #[inline(always)]
     pub fn record_path_length(self, length: u32) {

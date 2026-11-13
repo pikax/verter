@@ -6634,65 +6634,73 @@ mod semantic_poll_contract {
     #[test]
     fn every_converted_seam_suspends_and_resumes_elsewhere_to_the_synchronous_read() {
         for seam in &HELD_SEAMS {
-            let (synchronous, synchronous_stages) = synchronous_across(seam);
-            assert_eq!(
-                synchronous_stages, seam.in_all,
-                "{}: the synchronous entry runs each stage once",
-                seam.seam
-            );
-            assert!(
-                !synchronous.3 && synchronous.5.is_some(),
-                "{}: premise: a complete, priced answer: {synchronous:?}",
-                seam.seam
-            );
-
-            let (host, run) = poll_across(seam);
-            assert!(run.yielded, "{}: the root yields at the seam", seam.seam);
-            assert_eq!(
-                run.held_stages, seam.before_seam,
-                "{}: the stages before the seam ran once and the build waits",
-                seam.seam
-            );
-            assert_eq!(run.frames, Some(1), "{}: the root's frame waits", seam.seam);
-            assert_eq!(
-                run.pending_elsewhere,
-                Some(true),
-                "{}: its task stays pending on another thread while held",
-                seam.seam
-            );
-            assert!(run.woken, "{}: the release wakes the root", seam.seam);
-            assert_eq!(
-                run.stages, seam.in_all,
-                "{}: no stage runs again across the wait",
-                seam.seam
-            );
-            let dispatch = ProjectSemanticDispatch::new(&*host);
-            assert_eq!(
-                read_summary(&dispatch, &run.read),
-                synchronous,
-                "{}",
-                seam.seam
-            );
-
-            let mut dispatch = dispatch;
-            let _scope = dispatch.enter_construction_scope();
-            let (root, _) = (seam.keys)(&host, &dispatch);
-            let (warm, stages) = stages_of(&host, || {
-                let mut entry = dispatch.poll_query(root.clone());
-                match entry.poll(Waker::noop()) {
-                    Poll::Ready(read) => read,
-                    Poll::Pending => panic!("{}: a warm root answers on its first poll", seam.seam),
-                }
-            });
-            let warm_sync = dispatch.execute_via_cold_build_helper(root);
-            assert_eq!(
-                read_summary(&dispatch, &warm),
-                read_summary(&dispatch, &warm_sync),
-                "{}",
-                seam.seam
-            );
-            assert_eq!(stages, (0, 0), "{}: a warm root runs no stage", seam.seam);
+            assert_seam_suspends_and_resumes(seam);
         }
+    }
+
+    /// `seam`'s root on fresh hosts: it yields at its held dependency having
+    /// run exactly the stages before the seam, waits in one frame, stays
+    /// pending on another thread, resumes there at the stage it retained to
+    /// what the synchronous entry reads, and warm runs no stage.
+    fn assert_seam_suspends_and_resumes(seam: &HeldSeam) {
+        let (synchronous, synchronous_stages) = synchronous_across(seam);
+        assert_eq!(
+            synchronous_stages, seam.in_all,
+            "{}: the synchronous entry runs each stage once",
+            seam.seam
+        );
+        assert!(
+            !synchronous.3 && synchronous.5.is_some(),
+            "{}: premise: a complete, priced answer: {synchronous:?}",
+            seam.seam
+        );
+
+        let (host, run) = poll_across(seam);
+        assert!(run.yielded, "{}: the root yields at the seam", seam.seam);
+        assert_eq!(
+            run.held_stages, seam.before_seam,
+            "{}: the stages before the seam ran once and the build waits",
+            seam.seam
+        );
+        assert_eq!(run.frames, Some(1), "{}: the root's frame waits", seam.seam);
+        assert_eq!(
+            run.pending_elsewhere,
+            Some(true),
+            "{}: its task stays pending on another thread while held",
+            seam.seam
+        );
+        assert!(run.woken, "{}: the release wakes the root", seam.seam);
+        assert_eq!(
+            run.stages, seam.in_all,
+            "{}: no stage runs again across the wait",
+            seam.seam
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(
+            read_summary(&dispatch, &run.read),
+            synchronous,
+            "{}",
+            seam.seam
+        );
+
+        let mut dispatch = dispatch;
+        let _scope = dispatch.enter_construction_scope();
+        let (root, _) = (seam.keys)(&host, &dispatch);
+        let (warm, stages) = stages_of(&host, || {
+            let mut entry = dispatch.poll_query(root.clone());
+            match entry.poll(Waker::noop()) {
+                Poll::Ready(read) => read,
+                Poll::Pending => panic!("{}: a warm root answers on its first poll", seam.seam),
+            }
+        });
+        let warm_sync = dispatch.execute_via_cold_build_helper(root);
+        assert_eq!(
+            read_summary(&dispatch, &warm),
+            read_summary(&dispatch, &warm_sync),
+            "{}",
+            seam.seam
+        );
+        assert_eq!(stages, (0, 0), "{}: a warm root runs no stage", seam.seam);
     }
 
     /// At every suspension seam, a root released while it waits — dropped
@@ -6703,75 +6711,89 @@ mod semantic_poll_contract {
     #[test]
     fn a_root_released_or_cancelled_at_any_converted_seam_leaves_nothing_open() {
         for seam in &HELD_SEAMS {
-            let (synchronous, _) = synchronous_across(seam);
-            for cancelled in [false, true] {
-                let host = (seam.host)();
-                let mut dispatch = ProjectSemanticDispatch::new(&*host);
-                let _scope = dispatch.enter_construction_scope();
-                let graph = host.project_type_store().semantic_graph();
-                let (root, held) = (seam.keys)(&host, &dispatch);
-                let (tasks, leases) = hold_seam(&host, graph, held, seam.expression_site);
-                let counter = Arc::new(CountingWaker::default());
-                let waker = Waker::from(Arc::clone(&counter));
-                let (pending, stopped, flights) = while_held(leases, || {
-                    if cancelled {
-                        let request = budgeted_request(1);
-                        let _request =
-                            verter_type_engine::request_context::RequestContextGuard::install(
-                                Arc::clone(&request),
-                            );
-                        dispatch
-                            .with_semantic_task_for_tests(root.clone(), |slot| {
-                                let task = slot.as_mut().expect("the task is lent");
-                                let pending = task.poll_for_tests(&waker).is_pending();
-                                let before = counter.0.load(std::sync::atomic::Ordering::SeqCst);
-                                request.cancel();
-                                let woken =
-                                    counter.0.load(std::sync::atomic::Ordering::SeqCst) > before;
-                                let stopped = woken
-                                    && matches!(
-                                        task.poll_for_tests(&waker),
-                                        Poll::Ready(TaskOutcomeForTests::Stopped)
-                                    )
-                                    && task.live_frames_for_tests() == 0;
-                                (
-                                    pending,
-                                    stopped,
-                                    graph.resident_flight_keys_for_tests().len(),
+            assert_seam_releases(seam);
+        }
+    }
+
+    /// `seam`'s root released while it waits — dropped, or stopped by its
+    /// request's cancellation — leaves nothing open, and the dispatcher then
+    /// reads it as the synchronous entry does.
+    fn assert_seam_releases(seam: &HeldSeam) {
+        let (synchronous, _) = synchronous_across(seam);
+        for cancelled in [false, true] {
+            let host = (seam.host)();
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let _scope = dispatch.enter_construction_scope();
+            let graph = host.project_type_store().semantic_graph();
+            let request = budgeted_request(1);
+            let (root, held) = if cancelled {
+                let _request = verter_type_engine::request_context::RequestContextGuard::install(
+                    Arc::clone(&request),
+                );
+                (seam.keys)(&host, &dispatch)
+            } else {
+                (seam.keys)(&host, &dispatch)
+            };
+            let (tasks, leases) = hold_seam(&host, graph, held, seam.expression_site);
+            let counter = Arc::new(CountingWaker::default());
+            let waker = Waker::from(Arc::clone(&counter));
+            let (pending, stopped, flights) = while_held(leases, || {
+                if cancelled {
+                    let _request =
+                        verter_type_engine::request_context::RequestContextGuard::install(
+                            Arc::clone(&request),
+                        );
+                    dispatch
+                        .with_semantic_task_for_tests(root.clone(), |slot| {
+                            let task = slot.as_mut().expect("the task is lent");
+                            let pending = task.poll_for_tests(&waker).is_pending();
+                            let before = counter.0.load(std::sync::atomic::Ordering::SeqCst);
+                            request.cancel();
+                            let woken =
+                                counter.0.load(std::sync::atomic::Ordering::SeqCst) > before;
+                            let stopped = woken
+                                && matches!(
+                                    task.poll_for_tests(&waker),
+                                    Poll::Ready(TaskOutcomeForTests::Stopped)
                                 )
-                            })
-                            .expect("the cold root runs as a task")
-                    } else {
-                        let mut entry = dispatch.poll_query(root.clone());
-                        let pending = entry.poll(&waker).is_pending();
-                        drop(entry);
-                        (pending, true, graph.resident_flight_keys_for_tests().len())
-                    }
-                });
-                let label = format!("{}, cancelled={cancelled}", seam.seam);
-                assert!(pending, "{label}: the root yields at the seam");
-                assert!(
-                    stopped,
-                    "{label}: the cancellation wakes the waiting root, which stops"
-                );
-                assert_eq!(
-                    flights, 1,
-                    "{label}: only the holders' flight of the held dependency remains"
-                );
-                assert_eq!(
-                    dispatch.open_request_state_for_tests(),
-                    NOTHING_OPEN,
-                    "{label}"
-                );
-                assert_eq!(graph.wait_graph_counts_for_tests().1, 0, "{label}");
-                drop(tasks);
-                let read = dispatch.execute_via_cold_build_helper(root);
-                assert_eq!(
-                    decision(read_summary(&dispatch, &read)),
-                    decision(synchronous.clone()),
-                    "{label}"
-                );
-            }
+                                && task.live_frames_for_tests() == 0;
+                            (
+                                pending,
+                                stopped,
+                                graph.resident_flight_keys_for_tests().len(),
+                            )
+                        })
+                        .expect("the cold root runs as a task")
+                } else {
+                    let mut entry = dispatch.poll_query(root.clone());
+                    let pending = entry.poll(&waker).is_pending();
+                    drop(entry);
+                    (pending, true, graph.resident_flight_keys_for_tests().len())
+                }
+            });
+            let label = format!("{}, cancelled={cancelled}", seam.seam);
+            assert!(pending, "{label}: the root yields at the seam");
+            assert!(
+                stopped,
+                "{label}: the cancellation wakes the waiting root, which stops"
+            );
+            assert_eq!(
+                flights, 1,
+                "{label}: only the holders' flight of the held dependency remains"
+            );
+            assert_eq!(
+                dispatch.open_request_state_for_tests(),
+                NOTHING_OPEN,
+                "{label}"
+            );
+            assert_eq!(graph.wait_graph_counts_for_tests().1, 0, "{label}");
+            drop(tasks);
+            let read = dispatch.execute_via_cold_build_helper(root);
+            assert_eq!(
+                decision(read_summary(&dispatch, &read)),
+                decision(synchronous.clone()),
+                "{label}"
+            );
         }
     }
 
@@ -7959,35 +7981,57 @@ mod semantic_poll_contract {
             .deferred_steps_evaluated
     }
 
-    /// The physical work a held read is measured by.
+    /// The physical work a held read is measured by: path hops, admission
+    /// stages and evaluator steps, and the candidates explicit overload sets
+    /// began instantiating, the substitutions their clauses began and the
+    /// children substitution walks visited.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct Work {
         hops: u64,
         admission: u64,
         deferred: u64,
+        candidates: u64,
+        binders: u64,
+        visits: u64,
+    }
+
+    impl Work {
+        /// The work done since `before`.
+        fn minus(self, before: Work) -> Work {
+            Work {
+                hops: self.hops - before.hops,
+                admission: self.admission - before.admission,
+                deferred: self.deferred - before.deferred,
+                candidates: self.candidates - before.candidates,
+                binders: self.binders - before.binders,
+                visits: self.visits - before.visits,
+            }
+        }
     }
 
     fn work(host: &crate::VerterHost) -> Work {
+        let stats = host.project_type_store().semantic_graph().stats_snapshot();
         Work {
             hops: projection_hops(host),
             admission: admission_stages(host),
             deferred: deferred_steps(host),
+            candidates: stats.explicit_candidates_instantiated,
+            binders: stats.binder_substitutions,
+            visits: stats.substitution_child_visits,
         }
     }
 
     fn work_since(host: &crate::VerterHost, before: Work) -> Work {
-        let now = work(host);
-        Work {
-            hops: now.hops - before.hops,
-            admission: now.admission - before.admission,
-            deferred: now.deferred - before.deferred,
-        }
+        work(host).minus(before)
     }
 
     const NO_WORK: Work = Work {
         hops: 0,
         admission: 0,
         deferred: 0,
+        candidates: 0,
+        binders: 0,
+        visits: 0,
     };
 
     /// What a polled root did while one of its dependencies was held.
@@ -8030,12 +8074,22 @@ mod semantic_poll_contract {
         host: fn() -> Arc<crate::VerterHost>,
         keys: impl FnOnce(&crate::VerterHost, &HostDispatch<'_>) -> (SemanticQueryKey, SemanticQueryKey),
     ) -> (Arc<crate::VerterHost>, HeldRead) {
+        poll_root_holding_at(host, keys, false)
+    }
+
+    /// The same, the held read also held at the site an expression claims
+    /// it when `expression_site`.
+    fn poll_root_holding_at(
+        host: fn() -> Arc<crate::VerterHost>,
+        keys: impl FnOnce(&crate::VerterHost, &HostDispatch<'_>) -> (SemanticQueryKey, SemanticQueryKey),
+        expression_site: bool,
+    ) -> (Arc<crate::VerterHost>, HeldRead) {
         let host = host();
         let mut dispatch = ProjectSemanticDispatch::new(&*host);
         let scope = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
         let (root, held) = keys(&host, &dispatch);
-        let (other, lease) = hold_producer(&host, graph, held);
+        let (other, lease) = hold_seam(&host, graph, held, expression_site);
         let counter = Arc::new(CountingWaker::default());
         let waker = Waker::from(Arc::clone(&counter));
         let before = work(&host);
@@ -8065,11 +8119,7 @@ mod semantic_poll_contract {
                     })
                 });
                 let total = work_since(&host, before);
-                let repoll = Work {
-                    hops: total.hops - at_hold.hops,
-                    admission: total.admission - at_hold.admission,
-                    deferred: total.deferred - at_hold.deferred,
-                };
+                let repoll = total.minus(at_hold);
                 (
                     first,
                     at_hold,
@@ -10349,7 +10399,16 @@ mod semantic_poll_contract {
     /// The reads `keys`'s path names, its build driven in place on a
     /// scratch host: the case's reads must be exactly its first ones.
     fn assert_site_reads(keys: SiteKeys<'_>, label: &str) -> Vec<SemanticQueryKey> {
-        let host = sites_host();
+        assert_site_reads_on(sites_host, keys, label)
+    }
+
+    /// The same, on a fresh host `host` makes.
+    fn assert_site_reads_on(
+        host: fn() -> Arc<crate::VerterHost>,
+        keys: SiteKeys<'_>,
+        label: &str,
+    ) -> Vec<SemanticQueryKey> {
+        let host = host();
         let dispatch = ProjectSemanticDispatch::new(&*host);
         let _scope = dispatch.enter_construction_scope();
         let (root, reads) = keys(&host, &dispatch);
@@ -10369,16 +10428,33 @@ mod semantic_poll_contract {
     /// hop, admission stage and evaluator step once (absolute counts). The
     /// work the first poll computed is returned.
     fn assert_site_suspends(keys: SiteKeys<'_>, held: usize, label: &str) -> Work {
+        assert_site_suspends_on(sites_host, keys, held, false, label).0
+    }
+
+    /// The same, on a fresh host `host` makes, the held read also held at
+    /// the site an expression claims it when `expression_site`: the work
+    /// the first poll computed, and the work the whole read computed.
+    fn assert_site_suspends_on(
+        host: fn() -> Arc<crate::VerterHost>,
+        keys: SiteKeys<'_>,
+        held: usize,
+        expression_site: bool,
+        label: &str,
+    ) -> (Work, Work) {
         let (synchronous, synchronous_work) =
-            synchronous_root_on(sites_host, |host, dispatch| keys(host, dispatch).0);
+            synchronous_root_on(host, |host, dispatch| keys(host, dispatch).0);
         assert!(
             !synchronous.3 && synchronous.5.is_some(),
             "{label}: premise: a complete, priced answer: {synchronous:?}"
         );
-        let (host, run) = poll_root_holding_on(sites_host, |host, dispatch| {
-            let (root, reads) = keys(host, dispatch);
-            (root, reads[held].clone())
-        });
+        let (host, run) = poll_root_holding_at(
+            host,
+            |host, dispatch| {
+                let (root, reads) = keys(host, dispatch);
+                (root, reads[held].clone())
+            },
+            expression_site,
+        );
         // No dependency of the walk is joined or driven in place. Only a
         // `DeclLowering` wait is allowed: an instantiation frame's begin
         // lowers its declaration and augmentations in place (see the
@@ -10410,7 +10486,7 @@ mod semantic_poll_contract {
         );
         let dispatch = ProjectSemanticDispatch::new(&*host);
         assert_eq!(read_summary(&dispatch, &run.read), synchronous, "{label}");
-        run.at_hold
+        (run.at_hold, run.total)
     }
 
     /// The case's path released while it waits on its held read `held`
@@ -10418,14 +10494,25 @@ mod semantic_poll_contract {
     /// cost recording, no carrier left on the normalization record — and
     /// the dispatcher reads it afterwards as the synchronous entry does.
     fn assert_site_releases(keys: SiteKeys<'_>, held: usize, label: &str) {
-        let (synchronous, _) =
-            synchronous_root_on(sites_host, |host, dispatch| keys(host, dispatch).0);
-        let host = sites_host();
+        assert_site_releases_on(sites_host, keys, held, false, label);
+    }
+
+    /// The same, on a fresh host `host` makes, the held read also held at
+    /// the site an expression claims it when `expression_site`.
+    fn assert_site_releases_on(
+        host: fn() -> Arc<crate::VerterHost>,
+        keys: SiteKeys<'_>,
+        held: usize,
+        expression_site: bool,
+        label: &str,
+    ) {
+        let (synchronous, _) = synchronous_root_on(host, |host, dispatch| keys(host, dispatch).0);
+        let host = host();
         let mut dispatch = ProjectSemanticDispatch::new(&*host);
         let _scope = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
         let (root, reads) = keys(&host, &dispatch);
-        let (other, lease) = hold_producer(&host, graph, reads[held].clone());
+        let (other, lease) = hold_seam(&host, graph, reads[held].clone(), expression_site);
         let mut entry = dispatch.poll_query(root.clone());
         let pending = while_held(lease, || {
             let pending = entry.poll(Waker::noop()).is_pending();
@@ -11028,6 +11115,434 @@ mod semantic_poll_contract {
         assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
         assert!(graph.resident_flight_keys_for_tests().is_empty());
         drop(scope);
+    }
+
+    const EXPLICIT_FILE: &str = "/semantic-task/explicit.ts";
+
+    /// Generic functions whose instantiated signatures build template
+    /// literals — one candidate with one template, one candidate with two,
+    /// and two candidates — and a call naming the first with an explicit
+    /// type argument.
+    const EXPLICIT: &str = "declare function one<T extends string>(x: T): `prefix${T}`;\n\
+                            declare function two<T extends string>(x: `a${T}`): `b${T}`;\n\
+                            declare function many<T extends string>(x: T): `p${T}`;\n\
+                            declare function many<T extends string, U = T>(x: T, y: U): `q${T}`;\n\
+                            export const r = one<\"x\">(\"x\");\n";
+
+    fn explicit_host() -> Arc<crate::VerterHost> {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            EXPLICIT_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(EXPLICIT),
+            crate::FileLanguage::script_ts(),
+        );
+        host.ensure_indexed_ready(EXPLICIT_FILE)
+            .expect("the declarations have indexed input before a read is held");
+        host
+    }
+
+    /// The value `name` the explicit file declares, read in `mode`.
+    fn explicit_value(
+        dispatch: &HostDispatch<'_>,
+        name: &str,
+        mode: ProjectionMode,
+    ) -> SemanticQueryKey {
+        dispatch.typeof_key_for(
+            ValueRootKey {
+                scope: ScopeId::file(
+                    EXPLICIT_FILE,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+                name: verter_type_expr::OwnedStr::from(name),
+            },
+            ProjectionReductionContext::published(mode),
+        )
+    }
+
+    /// The template reduction a candidate's substitution of `"x"` for its
+    /// clause parameter builds `head${T}` through: the template's one hole
+    /// closed to the explicit argument.
+    fn explicit_template(dispatch: &HostDispatch<'_>, head: &str) -> SemanticQueryKey {
+        SemanticQueryKey::TemplateLiteralReduce {
+            pattern: verter_type_expr::OwnedSlice::from(vec![
+                verter_type_expr::OwnedStr::from(head),
+                verter_type_expr::OwnedStr::from(""),
+            ]),
+            args: Arc::from([sites_literal(dispatch, "x")]),
+            context: dispatch.template_literal_reduce_context(),
+        }
+    }
+
+    /// The template reduction the call `one<"x">("x")` builds `prefix${T}`
+    /// through: its overload set substitutes the call's own type argument,
+    /// the literal `"x"` as the explicit file lowers it, scoped to that
+    /// file.
+    fn explicit_call_template(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> SemanticQueryKey {
+        let scope = verter_type_engine::semantic_query::NodeScopeId::File {
+            canonical_id: EXPLICIT_FILE.into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: host
+                .shallow_file_state(EXPLICIT_FILE)
+                .expect("the declarations are indexed")
+                .whole_hash,
+            local_scope: None,
+        };
+        let argument = dispatch.graph_arc().intern_node_with_scope(
+            SemanticNodeData::Literal(verter_type_engine::semantic_query::LiteralValue::String(
+                "x".into(),
+            )),
+            scope,
+        );
+        SemanticQueryKey::TemplateLiteralReduce {
+            pattern: verter_type_expr::OwnedSlice::from(vec![
+                verter_type_expr::OwnedStr::from("prefix"),
+                verter_type_expr::OwnedStr::from(""),
+            ]),
+            args: Arc::from([argument]),
+            context: dispatch.template_literal_reduce_context(),
+        }
+    }
+
+    /// The overload set of `name`'s call signatures under the explicit type
+    /// argument `"x"`, and the reads its build names: the callee's
+    /// signature list, then the template reduction each head in `heads`
+    /// builds through, in order.
+    fn explicit_set(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+        name: &str,
+        heads: &[&str],
+    ) -> SiteRead {
+        let value = dispatch.execute_read(explicit_value(dispatch, name, ProjectionMode::Expanded));
+        let QueryResult::Value(callee) = value.value() else {
+            panic!("`{name}` has a type: {value:?}");
+        };
+        let kind = verter_type_engine::semantic_query::SignatureKind::Call;
+        let set = SemanticQueryKey::ResolveOverloadSet {
+            callee: *callee,
+            kind,
+            type_args: Arc::from([sites_literal(dispatch, "x")]),
+            context: verter_type_engine::semantic_query::OverloadSetContext {
+                resolve_env_hash: host
+                    .host_view_env_hashes_for(EXPLICIT_FILE)
+                    .resolve_env_hash,
+                ..Default::default()
+            },
+        };
+        let mut reads = vec![SemanticQueryKey::SignaturesOfType {
+            subject: *callee,
+            kind,
+            context: verter_type_engine::semantic_query::SemanticContextId::production(),
+        }];
+        reads.extend(heads.iter().map(|head| explicit_template(dispatch, head)));
+        (set, reads)
+    }
+
+    /// `one<"x">`: one candidate, whose return template reads one reduction.
+    fn explicit_one(host: &crate::VerterHost, dispatch: &HostDispatch<'_>) -> SiteRead {
+        explicit_set(host, dispatch, "one", &["prefix"])
+    }
+
+    /// `two<"x">`: one candidate, whose parameter and return templates each
+    /// read a reduction.
+    fn explicit_two(host: &crate::VerterHost, dispatch: &HostDispatch<'_>) -> SiteRead {
+        explicit_set(host, dispatch, "two", &["a", "b"])
+    }
+
+    /// `many<"x">`: two candidates, each with a return template; the second
+    /// fills its defaulted parameter from the first.
+    fn explicit_many(host: &crate::VerterHost, dispatch: &HostDispatch<'_>) -> SiteRead {
+        explicit_set(host, dispatch, "many", &["p", "q"])
+    }
+
+    /// The explicit-argument part of a read's work: the candidates its sets
+    /// began instantiating, the substitutions their clauses began, and the
+    /// children its substitution walks visited.
+    fn explicit_work(work: Work) -> (u64, u64, u64) {
+        (work.candidates, work.binders, work.visits)
+    }
+
+    /// The template reductions an explicit overload set's candidate
+    /// substitutions read: its only one, the first and the later one inside
+    /// one candidate, and a later candidate's.
+    const EXPLICIT_SEAMS: [HeldSeam; 4] = [
+        HeldSeam {
+            seam: "an explicit overload set's template reduction",
+            host: explicit_host,
+            keys: |host, dispatch| {
+                let (set, reads) = explicit_one(host, dispatch);
+                (set, reads[1].clone())
+            },
+            expression_site: true,
+            // The set begins and reads its callee's list before the wait.
+            before_seam: (1, 1),
+            // The reduction begins its own build; the set resumes once with
+            // it.
+            in_all: (2, 2),
+        },
+        HeldSeam {
+            seam: "an explicit candidate's first template reduction",
+            host: explicit_host,
+            keys: |host, dispatch| {
+                let (set, reads) = explicit_two(host, dispatch);
+                (set, reads[1].clone())
+            },
+            expression_site: true,
+            before_seam: (1, 1),
+            // Each reduction begins its own build; the set resumes with
+            // each.
+            in_all: (3, 3),
+        },
+        HeldSeam {
+            seam: "an explicit candidate's later template reduction",
+            host: explicit_host,
+            keys: |host, dispatch| {
+                let (set, reads) = explicit_two(host, dispatch);
+                (set, reads[2].clone())
+            },
+            expression_site: true,
+            // The parameter's reduction is built and taken before the wait.
+            before_seam: (2, 2),
+            in_all: (3, 3),
+        },
+        HeldSeam {
+            seam: "a later explicit candidate's template reduction",
+            host: explicit_host,
+            keys: |host, dispatch| {
+                let (set, reads) = explicit_many(host, dispatch);
+                (set, reads[2].clone())
+            },
+            expression_site: true,
+            // The first candidate's reduction is built and taken before the
+            // wait.
+            before_seam: (2, 2),
+            in_all: (3, 3),
+        },
+    ];
+
+    /// An overload set with an explicit type argument instantiates its
+    /// candidates as a continuation. At a template reduction a candidate's
+    /// substitution reads that another task is producing — the set's only
+    /// one, the first or a later one inside one candidate, or a later
+    /// candidate's — the polled set yields without joining the producer in
+    /// place; a repoll that forbids every wait stays pending and computes
+    /// nothing, and so does its task polled on another thread. Released, it
+    /// resumes there from what it retained and reads exactly what the
+    /// synchronous entry reads, receipt tree included: no candidate, binder
+    /// substitution or walk child is computed again, and the synchronous
+    /// entry itself computes each once.
+    #[test]
+    fn an_explicit_overload_set_suspends_at_each_template_reduction_and_resumes_to_the_synchronous_read(
+    ) {
+        let label = "an explicit set's only template reduction";
+        let reads = assert_site_reads_on(explicit_host, &explicit_one, label);
+        assert_eq!(
+            reads.len(),
+            2,
+            "{label}: premise: the set names its callee's list and one reduction: {reads:#?}"
+        );
+        let (at_hold, in_all) =
+            assert_site_suspends_on(explicit_host, &explicit_one, 1, true, label);
+        assert_eq!(
+            explicit_work(at_hold),
+            (1, 1, 3),
+            "{label}: the candidate began, its binder substitution began, and the parameter, the return and its hole were visited before the wait"
+        );
+        assert_eq!(
+            explicit_work(in_all),
+            (1, 1, 4),
+            "{label}: each is computed once, the clause constraint visited after the reduction"
+        );
+
+        let label = "an explicit candidate's two template reductions";
+        let reads = assert_site_reads_on(explicit_host, &explicit_two, label);
+        assert_eq!(
+            reads.len(),
+            3,
+            "{label}: premise: the set names its callee's list and two reductions: {reads:#?}"
+        );
+        let (first, in_all) = assert_site_suspends_on(explicit_host, &explicit_two, 1, true, label);
+        assert_eq!(
+            explicit_work(first),
+            (1, 1, 2),
+            "{label}: the parameter template and its hole were visited before the first wait"
+        );
+        assert_eq!(
+            explicit_work(in_all),
+            (1, 1, 5),
+            "{label}: the parameter, the return, both holes and the constraint are each visited once"
+        );
+        let (later, _) = assert_site_suspends_on(explicit_host, &explicit_two, 2, true, label);
+        assert_eq!(
+            explicit_work(later),
+            (1, 1, 4),
+            "{label}: the parameter's reduction was taken and the return's hole visited before the later wait"
+        );
+
+        let label = "a later explicit candidate's template reduction";
+        let reads = assert_site_reads_on(explicit_host, &explicit_many, label);
+        assert_eq!(
+            reads.len(),
+            3,
+            "{label}: premise: the set names its callee's list and one reduction per candidate: {reads:#?}"
+        );
+        let (at_hold, in_all) =
+            assert_site_suspends_on(explicit_host, &explicit_many, 2, true, label);
+        assert_eq!(
+            (at_hold.candidates, at_hold.binders),
+            (2, 2),
+            "{label}: the first candidate finished and the second began its first binder before the wait"
+        );
+        assert_eq!(
+            (in_all.candidates, in_all.binders),
+            (2, 4),
+            "{label}: the second candidate's default and its own binder follow the wait, each once"
+        );
+        assert!(
+            at_hold.visits < in_all.visits,
+            "{label}: the second candidate's walk continues after the wait: {at_hold:?} {in_all:?}"
+        );
+    }
+
+    /// At each template reduction an explicit overload set's candidates
+    /// read, the polled set runs exactly the stages before the reduction,
+    /// waits in one frame, resumes elsewhere at the stage it retained, and
+    /// reads what the synchronous entry reads; warm, both entries answer
+    /// alike running no stage.
+    #[test]
+    fn an_explicit_overload_set_resumes_each_template_reduction_at_the_stage_it_retained() {
+        for seam in &EXPLICIT_SEAMS {
+            assert_seam_suspends_and_resumes(seam);
+        }
+    }
+
+    /// An explicit overload set released, or stopped by its request's
+    /// cancellation, while a candidate stands at a template reduction leaves
+    /// nothing open — no cost recording its substitution walk opened, no
+    /// wait, no flight but the holders' — and the dispatcher then reads it
+    /// as the synchronous entry does.
+    #[test]
+    fn an_explicit_set_released_or_cancelled_at_a_template_reduction_leaves_nothing_open() {
+        for seam in &EXPLICIT_SEAMS {
+            assert_seam_releases(seam);
+        }
+    }
+
+    /// A call with an explicit type argument whose overload set reads a
+    /// template reduction another task is producing yields instead of
+    /// blocking: the call's walk requests the set, which the runtime builds
+    /// as a continuation standing at the reduction. Released, it resumes to
+    /// exactly what the synchronous entry reads. The set instantiates the
+    /// call's one candidate once, and the call instantiates again only the
+    /// candidate it selects: the raw candidates it pairs back to are
+    /// filtered without instantiating any.
+    #[test]
+    fn a_call_with_explicit_type_arguments_yields_while_its_overload_set_waits() {
+        let label = "a call with an explicit type argument";
+        let (synchronous, synchronous_work) = {
+            let host = explicit_host();
+            // The call is demanded by a request on its own file, as a root a
+            // request reads from its file is.
+            let _request =
+                verter_type_engine::request_context::install_test_request_for(EXPLICIT_FILE);
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let _scope = dispatch.enter_construction_scope();
+            let call = explicit_value(&dispatch, "r", ProjectionMode::Navigate);
+            let before = work(&host);
+            let read = dispatch.execute_via_cold_build_helper(call);
+            let work = work_since(&host, before);
+            assert_eq!(
+                host.project_type_store()
+                    .semantic_graph()
+                    .slot_candidate_count_for_tests(&explicit_call_template(&host, &dispatch)),
+                1,
+                "{label}: premise: the call's overload set reads this template reduction"
+            );
+            (read_summary(&dispatch, &read), work)
+        };
+        assert!(
+            !synchronous.3 && synchronous.5.is_some(),
+            "{label}: premise: a complete, priced answer: {synchronous:?}"
+        );
+        assert_eq!(
+            synchronous_work.candidates, 1,
+            "{label}: the set instantiates the call's one candidate once"
+        );
+        assert_eq!(
+            synchronous_work.binders, 2,
+            "{label}: the set's binder substitution and the selected candidate's; 3 means the raw pairing instantiated its candidate"
+        );
+
+        let host = explicit_host();
+        let _request = verter_type_engine::request_context::install_test_request_for(EXPLICIT_FILE);
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let call = explicit_value(&dispatch, "r", ProjectionMode::Navigate);
+        let held = explicit_call_template(&host, &dispatch);
+        let (tasks, leases) = hold_seam(&host, graph, held, true);
+        let counter = Arc::new(CountingWaker::default());
+        let waker = Waker::from(Arc::clone(&counter));
+        let before = work(&host);
+        let mut entry = dispatch.poll_query(call);
+        let (first, first_waits, pending_elsewhere) = while_held(leases, || {
+            let (first, first_waits) = {
+                let probe = verter_execution::blocking::WaitProbe::record();
+                let first = entry.poll(&waker);
+                (first, probe.reached())
+            };
+            let pending_elsewhere = first.is_pending().then(|| {
+                entry.task().map(|task| {
+                    assert_send(task);
+                    std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| task.poll(&waker).is_pending())
+                            .join()
+                            .expect("the pending poll returns")
+                    })
+                })
+            });
+            (first, first_waits, pending_elsewhere.flatten())
+        });
+        let woken = counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1;
+        let yielded = first.is_pending();
+        let read = match first {
+            Poll::Ready(read) => read,
+            Poll::Pending => resume_elsewhere(&mut entry),
+        };
+        drop(entry);
+        let total = work_since(&host, before);
+        assert!(
+            first_waits
+                .iter()
+                .all(|family| *family == verter_execution::blocking::WaitFamily::DeclLowering),
+            "{label}: the first poll joins no dependency in place: {first_waits:?}"
+        );
+        assert!(
+            yielded,
+            "{label}: the call yields while its set's template reduction is held"
+        );
+        assert_eq!(pending_elsewhere, Some(true), "{label}");
+        assert!(woken, "{label}: the producer going away wakes the call");
+        assert_eq!(
+            total, synchronous_work,
+            "{label}: nothing completed before the wait is computed again"
+        );
+        assert_eq!(
+            dispatch.open_request_state_for_tests(),
+            NOTHING_OPEN,
+            "{label}"
+        );
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0, "{label}");
+        drop(tasks);
+        drop(scope);
+        drop(dispatch);
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &read), synchronous, "{label}");
     }
 }
 

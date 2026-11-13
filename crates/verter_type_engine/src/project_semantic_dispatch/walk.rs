@@ -1853,7 +1853,7 @@ impl WalkState {
 /// G4.4 convention (bounded): every `IndexKey::Number` producer
 /// (source lowering at `lower::shallow_lower_type_expr`, node
 /// normalisation at `evaluate::normalized_index_key_node`, generic
-/// substitution at `substitute::substitute_index_key_with_change_tracking`)
+/// substitution at the substitution walk's index-key rebuild)
 /// folds through the single `build::integer_convention_index_key`
 /// predicate: a literal is admitted ONLY when the i64's `Display` IS
 /// its canonical `js_number_to_string` spelling, which also forces
@@ -7317,7 +7317,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // Every `IndexKey::Number` producer
                     // (`lower::shallow_lower_type_expr`,
                     // `evaluate::normalized_index_key_node`,
-                    // `substitute::substitute_index_key_with_change_tracking`)
+                    // the substitution walk's index-key rebuild)
                     // folds through the bounded
                     // `build::integer_convention_index_key`
                     // predicate, which admits an integer

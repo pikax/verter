@@ -1,5 +1,5 @@
-//! Discriminator tests for the RECURSIVE-helper hash-cons memo on
-//! `substitute_with_change_tracking`.
+//! Discriminator tests for the hash-cons memo probed at a substitution
+//! walk's child arrivals.
 //!
 //! The store-owned `substitute_memo` (DashMap, keyed by
 //! `(node, parameter_node, arg)`) is consulted at BOTH the public

@@ -293,10 +293,21 @@ struct PlanStage {
     callee: SemanticNodeId,
     explicit_type_args: Arc<[SemanticNodeId]>,
     session_watermark: usize,
-    /// The visible candidate list, once read.
-    visible: Option<verter_session_query::retention::owned::OwnedSlice<SignatureRef>>,
-    /// The candidate list read the walk waits on.
-    awaiting: Option<SemanticQueryKey>,
+    lists: PlanLists,
+}
+
+/// The candidate lists a plan reads, each with the read it waits on: a
+/// delivery answers only the list standing at its read.
+enum PlanLists {
+    /// Reading the visible list: the overload set under the explicit type
+    /// arguments.
+    Visible { awaiting: Option<SemanticQueryKey> },
+    /// The visible list read; reading the raw list each visible candidate
+    /// pairs back to, the overload set without type arguments.
+    Raw {
+        visible: verter_session_query::retention::owned::OwnedSlice<SignatureRef>,
+        awaiting: Option<SemanticQueryKey>,
+    },
 }
 
 /// Where a call's candidate walk stands: the pass and candidate it checks
@@ -1871,8 +1882,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             callee,
             explicit_type_args,
             session_watermark,
-            visible: None,
-            awaiting: None,
+            lists: PlanLists::Visible { awaiting: None },
         }))
     }
 
@@ -1906,13 +1916,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let bucket = signature_bucket(key.kind);
         let callee = plan.callee;
         let session_watermark = plan.session_watermark;
-        if plan.visible.is_none() {
+        if let PlanLists::Visible { awaiting } = &mut plan.lists {
             let visible = match self.call_candidate_list(
                 callee,
                 bucket,
                 &plan.explicit_type_args,
                 key.context.resolve_env_hash,
-                &mut plan.awaiting,
+                awaiting,
                 delivery.take(),
                 drive,
             ) {
@@ -1938,9 +1948,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ResolveCallFailure::NotCallable,
                 )));
             }
-            plan.visible = Some(visible);
+            plan.lists = PlanLists::Raw {
+                visible,
+                awaiting: None,
+            };
         }
-        let visible = plan.visible.clone().expect("the visible list is read");
+        let PlanLists::Raw { visible, awaiting } = &mut plan.lists else {
+            unreachable!("the visible list is read before the raw list")
+        };
+        let visible = visible.clone();
         let raw = if key.explicit_type_args.is_empty() {
             visible.clone()
         } else {
@@ -1949,7 +1965,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 bucket,
                 &Arc::<[SemanticNodeId]>::from([]),
                 key.context.resolve_env_hash,
-                &mut plan.awaiting,
+                awaiting,
                 delivery.take(),
                 drive,
             ) {
@@ -1958,12 +1974,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // accept them, so the raw bucket takes the same drop before
                 // it is paired positionally: a ROOTLESS candidate has no
                 // occurrence to pair by, and its raw form is the candidate
-                // at the same position in the equally-filtered list.
+                // at the same position in the equally-filtered list. The
+                // drop is the read-free test the set's own instantiation
+                // begins with, so nothing is instantiated here.
                 Ok(CallCandidates::Candidates(raw)) => raw
                     .iter()
                     .filter(|candidate| {
-                        self.instantiate_call_candidate(candidate.node, &plan.explicit_type_args)
-                            .is_some()
+                        self.explicit_candidate_fits(candidate.node, &plan.explicit_type_args)
                     })
                     .cloned()
                     .collect(),
@@ -5381,24 +5398,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         for binding in bindings {
             node = self.substitute_semantic_type_param(node, binding.param, binding.bound);
-        }
-        node
-    }
-
-    pub(crate) fn substitute_canonical(
-        &self,
-        mut node: SemanticNodeId,
-        substitution: &CanonicalTypeSubstitution,
-    ) -> SemanticNodeId {
-        // bounded-loop: at most one substitution-closure pass per canonical binding.
-        for _ in 0..=substitution.bindings().len() {
-            let before = node;
-            for (param, bound) in substitution.bindings() {
-                node = self.substitute_semantic_type_param(node, *param, *bound);
-            }
-            if node == before {
-                break;
-            }
         }
         node
     }
