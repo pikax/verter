@@ -182,10 +182,15 @@ What each root suspends on today:
   same diagnostics a proved-absent dependency reports; a proved-absent one
   stays `Refused`. On that failure path the verdict's walk to the export
   (`ensure_indexed_ready_serve` on each file along the route) still runs
-  synchronously inside the poll. The profile-derived lanes run the same
-  hydration through its synchronous entry (`hydrate_compile_blockers`),
-  which loads each blocker in place with `ensure_loaded` as before, and
-  keep their diagnostics.
+  synchronously inside the poll. The profile-derived lanes (the
+  virtual-file lane and the runtime render lane) run the same hydration
+  through its synchronous entry (`hydrate_compile_blockers`), which loads
+  each blocker in place with `ensure_loaded` as before, and keep their
+  diagnostics. They take their input through the same
+  `capture_compile_input`, handing it the outcome of their own hydration;
+  no lane assembles a compile input of its own. The capture also returns
+  the block-content stamp a publishing lane fences its publication on,
+  and mints the source witness only when the lane asks for it.
 
 Evidence in `verter_session`'s `root_continuations_tests` and
 `root_continuation::tests`: a root begun by a function that returns it is

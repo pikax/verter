@@ -23,7 +23,7 @@ use rustc_hash::FxHashMap;
 
 use super::compile_inputs::{
     prepare_execution_inputs_pollable, CapturedCompileInput, CompileInputsFailure,
-    ExecutionInputDemand, SharedDependencyAxis,
+    ExecutionInputDemand, SharedDependencyAxis, SourceWitnessDemand,
 };
 use super::compile_request_build::{
     execute_supplied_host_request, no_carrier_artifact_diagnostics, HostProductsFailure,
@@ -120,7 +120,12 @@ impl VerterHost {
         // needs external preprocessing and has no default-bucket override
         // still refuses as unavailable.
         let captured = self
-            .capture_compile_input(&canonical, SuppliedBlockScope::Unprofiled, hydration)
+            .capture_compile_input(
+                &canonical,
+                SuppliedBlockScope::Unprofiled,
+                hydration,
+                SourceWitnessDemand::Skip,
+            )
             .map_err(CompileRequestFailure::Host)?;
         let compile_input = &captured.input;
         let source_snap = &captured.source;

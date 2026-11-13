@@ -3,7 +3,7 @@
 //! Contains:
 //! - lock-free reads from the scheduler's `ArcSwap`-backed source,
 //!   analysis, and artifact snapshots
-//! - request-pinned projections of raw file state, style analyses, and meta
+//! - request-pinned projections of raw file state and style analyses
 //!
 //! These methods do not mutate the scheduler or compile cache; they are
 //! the read surface consumers use to assemble compile inputs.
@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use crate::host_executor;
-use crate::types::{DiagnosticsSnapshot, EffectiveFileState, FileMeta};
+use crate::types::{DiagnosticsSnapshot, EffectiveFileState};
 use crate::VerterHost;
 
 /// The content identity of one committed source record: its whole hash.
@@ -293,17 +293,5 @@ impl VerterHost {
         let raw = &ad.style_analyses;
 
         Some(raw.as_ref().clone())
-    }
-
-    /// Return the carrier meta from the request's pinned source snapshot.
-    /// Processed block metadata is projected directly into compiler inputs and
-    /// never mutates or overlays this authored carrier metadata.
-    pub(crate) fn effective_meta_from_base(
-        &self,
-        meta: FileMeta,
-        _canonical_id: &str,
-        _profile: Option<u64>,
-    ) -> FileMeta {
-        meta
     }
 }
