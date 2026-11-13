@@ -1,30 +1,32 @@
-//! The published TypeScript declaration of the host compile request is
-//! byte-pinned to the Rust declarations that decode it.
+//! The published TypeScript declarations of the host compile request and
+//! response are byte-pinned to the Rust declarations the bindings decode
+//! and serialise.
 //!
-//! `packages/native/host-compile-request.generated.ts` is rendered from
-//! the framework-tagged and product-tagged request unions and the DTOs
-//! their arms carry. Nothing binds a hand-written declaration to a schema
-//! it sits beside: deleting a field, mis-casing a key, adding a slot the
-//! decoder has no room for, or turning a required slot optional all type
-//! check and then refuse at run time. This pin is that binding.
+//! Each generated file — the request, the native response and the browser
+//! response — is rendered from the unions and DTOs the binding actually
+//! reaches. Nothing binds a hand-written declaration to a schema it sits
+//! beside: deleting a field, mis-casing a key, adding a slot or an arm, or
+//! turning a required slot optional all type check and then misbehave at
+//! run time. This pin is that binding.
 //!
 //! It renders IN MEMORY and byte-compares. It never writes: a check that
 //! regenerates the file it is checking can only ever pass. Regenerate
 //! deliberately, with `pnpm gen:host-request-ts`.
 //!
-//! The decode round-trips below are the other half. The render names each
-//! arm's tag and each struct arm's wire keys; those names are only true if
-//! the decoder answers to them, so each arm is decoded from a payload
-//! built out of the rendered metadata and matched against the variant it
-//! claims. A tag or key that drifts from serde's own fails here rather
-//! than shipping a declaration the decoder refuses.
+//! The decode round-trips below are the other half for the request. The
+//! render names each arm's tag and each struct arm's wire keys; those names
+//! are only true if the decoder answers to them, so each arm is decoded
+//! from a payload built out of the rendered metadata and matched against
+//! the variant it claims. A tag or key that drifts from serde's own fails
+//! here rather than shipping a declaration the decoder refuses.
 
 use std::path::PathBuf;
 
 use serde_json::{json, Map, Value};
 
 use verter_napi::host_compile_request_ts::{
-    render_host_compile_request_ts, ArmShape, TaggedUnion, HOST_COMPILE_REQUEST_TS_PATH,
+    generated_declarations, ArmShape, TaggedUnion, BROWSER_COMPILE_RESPONSE_TS_PATH,
+    HOST_COMPILE_REQUEST_TS_PATH, HOST_COMPILE_RESPONSE_TS_PATH,
 };
 use verter_napi::{decode_host_compile_request, NapiHostCompileRequest, NapiRequestedProduct};
 
@@ -39,10 +41,13 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-#[test]
-fn generated_declaration_is_byte_equal_to_the_rendered_rust_schema() {
-    let rendered = render_host_compile_request_ts();
-    let committed_path = workspace_root().join(HOST_COMPILE_REQUEST_TS_PATH);
+/// The committed file at `path` is byte-equal to its render.
+fn assert_committed_matches_render(path: &str) {
+    let rendered = generated_declarations()
+        .into_iter()
+        .find_map(|(generated, rendered)| (generated == path).then_some(rendered))
+        .unwrap_or_else(|| panic!("`{path}` is not a generated declaration"));
+    let committed_path = workspace_root().join(path);
     let committed = std::fs::read_to_string(&committed_path).unwrap_or_else(|error| {
         panic!(
             "`{}` must be readable: {error}. Generate it with \
@@ -53,10 +58,43 @@ fn generated_declaration_is_byte_equal_to_the_rendered_rust_schema() {
 
     assert!(
         committed == rendered,
-        "`{HOST_COMPILE_REQUEST_TS_PATH}` no longer matches the Rust declarations that decode \
-         the host compile request. Regenerate it with `pnpm gen:host-request-ts` and commit \
-         the result.\n{}",
+        "`{path}` no longer matches the Rust declarations it is rendered from. Regenerate it \
+         with `pnpm gen:host-request-ts` and commit the result.\n{}",
         first_difference(&committed, &rendered),
+    );
+}
+
+#[test]
+fn generated_declaration_is_byte_equal_to_the_rendered_rust_schema() {
+    assert_committed_matches_render(HOST_COMPILE_REQUEST_TS_PATH);
+}
+
+#[test]
+fn generated_native_response_declaration_is_byte_equal_to_the_rendered_rust_schema() {
+    assert_committed_matches_render(HOST_COMPILE_RESPONSE_TS_PATH);
+}
+
+#[test]
+fn generated_browser_response_declaration_is_byte_equal_to_the_rendered_rust_schema() {
+    assert_committed_matches_render(BROWSER_COMPILE_RESPONSE_TS_PATH);
+}
+
+#[test]
+fn every_generated_declaration_is_pinned() {
+    let mut generated: Vec<&str> = generated_declarations()
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect();
+    generated.sort_unstable();
+    let mut pinned = vec![
+        HOST_COMPILE_REQUEST_TS_PATH,
+        HOST_COMPILE_RESPONSE_TS_PATH,
+        BROWSER_COMPILE_RESPONSE_TS_PATH,
+    ];
+    pinned.sort_unstable();
+    assert_eq!(
+        generated, pinned,
+        "every generated declaration needs its own byte pin above",
     );
 }
 
@@ -85,8 +123,8 @@ fn first_difference(committed: &str, rendered: &str) -> String {
 #[test]
 fn rendering_is_deterministic() {
     assert_eq!(
-        render_host_compile_request_ts(),
-        render_host_compile_request_ts(),
+        generated_declarations(),
+        generated_declarations(),
         "the render must not depend on environment or iteration order",
     );
 }
@@ -150,7 +188,9 @@ fn sample_for(ts_type: &str) -> Value {
 fn probe_payload(union: &TaggedUnion, arm_index: usize) -> Value {
     let arm = &union.arms[arm_index];
     let mut object = Map::new();
-    object.insert(union.tag_key.to_string(), json!(arm.tag_value));
+    let tag_key = union.tag_key.expect("a request union is tagged");
+    let tag_value = arm.tag_value.expect("a request arm carries a tag");
+    object.insert(tag_key.to_string(), json!(tag_value));
     match &arm.shape {
         ArmShape::Payload(payload) => {
             let Value::Object(fields) = sample_for(payload) else {
@@ -191,7 +231,7 @@ fn every_rendered_product_arm_decodes_to_the_variant_it_names() {
             panic!("a `vue` request must decode to the Vue arm");
         };
         assert_eq!(
-            product_variant_tag(&products[0]),
+            Some(product_variant_tag(&products[0])),
             union.arms[index].tag_value,
             "the rendered arm `{}` names a tag the decoder routes elsewhere",
             union.arms[index].ts_name,
@@ -214,7 +254,7 @@ fn every_rendered_request_arm_decodes_to_the_variant_it_names() {
             )
         });
         assert_eq!(
-            request_variant_tag(&decoded),
+            Some(request_variant_tag(&decoded)),
             union.arms[index].tag_value,
             "the rendered arm `{}` names a tag the decoder routes elsewhere",
             union.arms[index].ts_name,

@@ -2052,8 +2052,8 @@ fn typed_host_failure_preserves_diagnostics_and_utf16_offsets() {
         Some("😀"),
     );
 
-    assert_eq!(projected.diagnostics.diagnostics.len(), 1);
-    let diagnostic = &projected.diagnostics.diagnostics[0];
+    assert_eq!(projected.diagnostics().diagnostics.len(), 1);
+    let diagnostic = &projected.diagnostics().diagnostics[0];
     assert_eq!(diagnostic.severity, "error");
     assert_eq!(diagnostic.code, "HOST_NATIVE_BINDING_UNAVAILABLE");
     assert_eq!(diagnostic.message, "native binding unavailable");
@@ -2062,7 +2062,7 @@ fn typed_host_failure_preserves_diagnostics_and_utf16_offsets() {
         (Some(0), Some(2))
     );
     assert_eq!(diagnostic.spanEncoding, "utf16.v1");
-    assert!(projected.diagnostics.hasErrors);
+    assert!(projected.diagnostics().hasErrors);
 }
 
 // @ai-generated - A warning must not become the terminal message when an error follows it.
@@ -2099,5 +2099,5 @@ fn typed_failure_message_prefers_the_first_error_diagnostic() {
         Some(""),
     );
 
-    assert_eq!(projected.message, "error second");
+    assert_eq!(projected.message(), "error second");
 }

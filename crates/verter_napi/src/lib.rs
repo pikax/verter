@@ -79,6 +79,10 @@ use compile_request_response::{
     failure_canonical_id, host_diagnostics_to_napi, host_diagnostics_to_napi_with,
     host_ide_to_napi,
 };
+pub use compile_request_response::{
+    JsNull, NapiCompileRequestFailure, NapiCompileRequestsEntry, NapiCompiledProduct,
+    RequestedProductKind, Serialized,
+};
 #[doc(hidden)]
 pub use js_value_graph::{
     materialize_js_value, materialize_js_value_with_budget, JsObjectKeys, JsValueClass,
@@ -1438,6 +1442,8 @@ pub struct NapiIdeResponse {
 
 /// One separately-addressed output of a typed runtime compile product.
 #[napi(object)]
+#[derive(ts_rs::TS)]
+#[ts(rename = "HostCompileVirtualNode", optional_fields)]
 pub struct NapiCompileRequestVirtualNode {
     pub node: NapiVirtualNodeKind,
     pub code: String,
@@ -1446,45 +1452,14 @@ pub struct NapiCompileRequestVirtualNode {
     pub meta: NapiVirtualMeta,
 }
 
-/// One product row in a typed compile response.
-///
-/// Exactly one payload field is present, selected by `kind`.
-#[napi(object)]
-pub struct NapiCompileRequestProduct {
-    pub kind: String,
-    pub nodes: Option<Vec<NapiCompileRequestVirtualNode>>,
-    pub ide: Option<NapiIdeResponse>,
-    /// JSON rendering of the host analysis payload.
-    pub analysis: Option<String>,
-}
-
-/// Complete typed compile response.
-#[napi(object)]
+/// Complete response for one typed request.
+#[napi(object, object_from_js = false)]
+#[derive(ts_rs::TS)]
+#[ts(rename = "HostCompileResponse")]
 pub struct NapiCompileRequestResponse {
     pub canonicalId: String,
     pub diagnostics: NapiDiagnosticsSnapshot,
-    pub products: Vec<NapiCompileRequestProduct>,
-}
-
-/// Typed terminal failure for one batch entry.
-#[napi(object)]
-pub struct NapiCompileRequestFailure {
-    pub kind: String,
-    pub canonicalId: String,
-    pub message: String,
-    pub diagnostics: NapiDiagnosticsSnapshot,
-    pub requestedFramework: Option<String>,
-    pub registeredFramework: Option<String>,
-    pub productKind: Option<String>,
-    pub diagnosticCode: Option<String>,
-}
-
-/// One batch result at its original input position.
-#[napi(object, use_nullable = true)]
-pub struct NapiCompileRequestsEntry {
-    pub canonicalId: String,
-    pub response: Option<NapiCompileRequestResponse>,
-    pub failure: Option<NapiCompileRequestFailure>,
+    pub products: Vec<NapiCompiledProduct>,
 }
 
 /// TSC output for TypeScript declaration generation (macro-extraction only).
@@ -2625,7 +2600,10 @@ impl NapiVerterHost {
     }
 
     /// Register and execute one typed request per batch entry.
-    #[napi(js_name = "compileRequests")]
+    #[napi(
+        js_name = "compileRequests",
+        ts_return_type = "Array<import('./host-compile-response.generated').HostCompileRequestsEntry>"
+    )]
     pub fn compile_requests(
         &self,
         env: Env,
@@ -2927,28 +2905,25 @@ impl NapiVerterHost {
             }
             output[position] = Some(match entry.outcome {
                 Ok(response) => match compile_request_response_to_napi(response, source.as_ref()) {
-                    Ok(response) => NapiCompileRequestsEntry {
+                    Ok(response) => NapiCompileRequestsEntry::Response {
                         canonicalId: entry.canonical_id,
-                        response: Some(response),
-                        failure: None,
+                        response,
+                        failure: JsNull,
                     },
-                    Err(error) => NapiCompileRequestsEntry {
+                    Err(error) => NapiCompileRequestsEntry::Failure {
                         canonicalId: entry.canonical_id.clone(),
-                        response: None,
-                        failure: Some(binding_failure_to_napi(
-                            entry.canonical_id,
-                            error.reason.clone(),
-                        )),
+                        response: JsNull,
+                        failure: binding_failure_to_napi(entry.canonical_id, error.reason.clone()),
                     },
                 },
-                Err(failure) => NapiCompileRequestsEntry {
+                Err(failure) => NapiCompileRequestsEntry::Failure {
                     canonicalId: entry.canonical_id.clone(),
-                    response: None,
-                    failure: Some(compile_request_failure_to_napi(
+                    response: JsNull,
+                    failure: compile_request_failure_to_napi(
                         failure,
                         entry.canonical_id,
                         Some(source.as_ref()),
-                    )),
+                    ),
                 },
             });
         }
@@ -4671,8 +4646,8 @@ mod tests {
             registered: "vue".to_string(),
         };
         let projected = compile_request_failure_to_napi(failure, "/src/App.vue".to_string(), None);
-        assert!(!projected.diagnostics.hasErrors);
-        assert!(projected.diagnostics.diagnostics.is_empty());
+        assert!(!projected.diagnostics().hasErrors);
+        assert!(projected.diagnostics().diagnostics.is_empty());
     }
 
     /// A compile whose macro type dependencies are incomplete projects its
@@ -4705,18 +4680,77 @@ mod tests {
         assert_eq!(compile_request_failure_status(&failure), Status::InvalidArg);
         assert_eq!(failure_canonical_id(&failure, "fallback"), "/src/App.vue");
         let projected = compile_request_failure_to_napi(failure, "fallback".to_string(), None);
-        assert_eq!(projected.kind, "dependenciesIncomplete");
-        assert_eq!(projected.canonicalId, "/src/App.vue");
-        assert_eq!(projected.message, message);
-        assert!(projected.diagnostics.hasErrors);
+        assert_eq!(projected.tag(), Some("dependenciesIncomplete"));
+        assert_eq!(projected.message(), message);
+        assert!(projected.diagnostics().hasErrors);
         assert_eq!(
             projected
-                .diagnostics
+                .diagnostics()
                 .diagnostics
                 .iter()
                 .map(|diagnostic| diagnostic.code.as_str())
                 .collect::<Vec<_>>(),
             ["HOST_MISSING_MACRO_TYPE_DEP"]
+        );
+        let NapiCompileRequestFailure::DependenciesIncomplete { canonicalId, .. } = projected
+        else {
+            panic!("an incomplete-dependencies failure projects its own arm");
+        };
+        assert_eq!(canonicalId, "/src/App.vue");
+    }
+
+    /// Every gap an incomplete-dependencies failure names reaches the wire
+    /// as one `missingInputs` row, in the host's order, with each kind's
+    /// own fields under their wire keys.
+    ///
+    /// Mutation recipes:
+    /// - Emit `missingInputs` as an empty list: the row comparison goes red.
+    /// - Drop or reorder an arm of the gap conversion, or rename a wire key:
+    ///   the row comparison goes red.
+    #[test]
+    fn a_dependencies_incomplete_failure_lists_each_gap_on_the_wire() {
+        let failure = host::CompileRequestFailure::DependenciesIncomplete {
+            canonical_id: "/src/App.vue".to_string(),
+            gaps: vec![
+                host::CompileDependencyGap::Route {
+                    importer: "/src/types/index.ts".to_string(),
+                    specifier: "./video".to_string(),
+                    refused: false,
+                },
+                host::CompileDependencyGap::File {
+                    canonical: "/src/types/media.ts".to_string(),
+                },
+                host::CompileDependencyGap::Lookup {
+                    import_source: "./props".to_string(),
+                    type_name: "Props".to_string(),
+                },
+            ],
+            diagnostics: host::DiagnosticsSnapshot::default(),
+        };
+
+        let projected = compile_request_failure_to_napi(failure, "fallback".to_string(), None);
+        assert_eq!(projected.tag(), Some("dependenciesIncomplete"));
+        let NapiCompileRequestFailure::DependenciesIncomplete {
+            missingInputs: Serialized(missing_inputs),
+            ..
+        } = projected
+        else {
+            panic!("an incomplete-dependencies failure projects its own arm");
+        };
+        // The rows' JS value is their serde serialisation, so this is the
+        // value a caller reads.
+        assert_eq!(
+            serde_json::to_value(&missing_inputs).expect("missing inputs serialise"),
+            serde_json::json!([
+                {
+                    "kind": "route",
+                    "importer": "/src/types/index.ts",
+                    "specifier": "./video",
+                    "refused": false,
+                },
+                { "kind": "file", "canonicalId": "/src/types/media.ts" },
+                { "kind": "lookup", "importSource": "./props", "typeName": "Props" },
+            ])
         );
     }
 
@@ -4825,7 +4859,7 @@ mod tests {
         ));
         let projected =
             compile_request_failure_to_napi(failure, "/src/A.vue".to_string(), Some("a😀b"));
-        let diagnostic = &projected.diagnostics.diagnostics[0];
+        let diagnostic = &projected.diagnostics().diagnostics[0];
         assert_eq!(
             (diagnostic.spanStart, diagnostic.spanEnd),
             (Some(1), Some(3))

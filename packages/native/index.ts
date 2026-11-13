@@ -383,49 +383,35 @@ export interface CompileBatchEntry {
   downgradeReason?: DowngradeReason;
 }
 
-/** One separately-addressed output of a typed runtime compile product. */
-export interface HostCompileVirtualNode {
-  node: import("./host-types").HostVirtualNodeKind;
-  code: string;
-  sourceMap?: string;
-  lang?: string;
-  meta: import("./host-types").HostVirtualMeta;
-}
+// The typed compile response — every product row, every failure arm and
+// the batch entry — is RENDERED from the Rust declarations the binding
+// serialises; see `host-compile-response.generated.ts`.
+export type {
+  HostMissingRoute,
+  HostMissingFile,
+  HostMissingLookup,
+  HostMissingInput,
+  HostCompileVirtualNode,
+  HostRuntimeCompiledProduct,
+  HostIdeCompiledProduct,
+  HostAnalysisCompiledProduct,
+  HostCompiledProduct,
+  HostCompileResponse,
+  HostCompilePlainFailure,
+  HostCompileFrameworkMismatchFailure,
+  HostCompileProductFailure,
+  HostCompileRuntimeSurfaceFailure,
+  HostCompileDependenciesIncompleteFailure,
+  HostCompileFailure,
+  HostCompileRequestsResponseEntry,
+  HostCompileRequestsFailureEntry,
+  HostCompileRequestsEntry,
+} from "./host-compile-response.generated";
 
-export interface HostRuntimeCompiledProduct {
-  kind: "runtimeClient" | "runtimeServer";
-  nodes: HostCompileVirtualNode[];
-}
-
-export interface HostIdeCompiledProduct {
-  kind: "ideCompanion";
-  ide: import("./host-types").HostIdeResponse;
-}
-
-/**
- * `analysis` is a JSON-stringified `TemplateAnalysisSnapshot` (template
- * components, binding occurrences, unresolved bindings, defined slots,
- * template refs). It is a different, narrower payload than `getAnalysis()`,
- * which returns a JSON-stringified `FileAnalysisSnapshot` (script-level
- * imports, bindings, macros, and macro type dependencies) — the two share
- * their JSON-string transport, not their shape.
- */
-export interface HostAnalysisCompiledProduct {
-  kind: "analysis";
-  analysis: string;
-}
-
-export type HostCompiledProduct =
-  | HostRuntimeCompiledProduct
-  | HostIdeCompiledProduct
-  | HostAnalysisCompiledProduct;
-
-/** Complete response for one typed request. */
-export interface HostCompileResponse {
-  canonicalId: string;
-  diagnostics: import("./host-types").HostDiagnosticsSnapshot;
-  products: HostCompiledProduct[];
-}
+import type {
+  HostCompileRequestsEntry,
+  HostCompileResponse,
+} from "./host-compile-response.generated";
 
 /** One source carrier beside one typed request. */
 export interface HostCompileRequestsInput {
@@ -437,41 +423,6 @@ export interface HostCompileRequestsInput {
 export interface HostCompileRequestsOptions {
   priority?: "interactive" | "background";
 }
-
-interface HostCompileFailureBase {
-  canonicalId: string;
-  message: string;
-  diagnostics: import("./host-types").HostDiagnosticsSnapshot;
-}
-
-/** Typed terminal failure for one plural-route entry. */
-export type HostCompileFailure =
-  | (HostCompileFailureBase & {
-      kind: "host" | "refused" | "dependenciesIncomplete" | "binding";
-    })
-  | (HostCompileFailureBase & {
-      kind: "frameworkMismatch";
-      requestedFramework: string;
-      registeredFramework: string;
-    })
-  | (HostCompileFailureBase & {
-      kind: "unsupportedProduct" | "productNotProduced";
-      productKind:
-        | "runtimeClient"
-        | "runtimeServer"
-        | "ideCompanion"
-        | "publicApi"
-        | "declarations"
-        | "analysis";
-    })
-  | (HostCompileFailureBase & {
-      kind: "runtimeSurfaceRefused";
-      diagnosticCode: string;
-    });
-
-export type HostCompileRequestsEntry =
-  | { canonicalId: string; response: HostCompileResponse; failure: null }
-  | { canonicalId: string; response: null; failure: HostCompileFailure };
 
 // =============================================================================
 // VerterHost (in-memory virtual file host)

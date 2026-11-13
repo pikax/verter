@@ -152,7 +152,8 @@ Shared host request and response types (`HostConfig`, `HostUpsertRequest`,
 `HostCompileRequestResponse` are exported by this package: the browser wire
 form tags each arm by key (`{ vue: … }`) where the native one uses a
 `framework` field, so the prefix keeps the two from being mistaken for each
-other at an import site.
+other at an import site. The response declarations are rendered from the Rust
+types the browser binding serialises (`src/compile-response.generated.ts`).
 
 ## Development / Build
 
