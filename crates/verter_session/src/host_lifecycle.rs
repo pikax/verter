@@ -1405,6 +1405,17 @@ impl VerterHost {
     /// here instead: the load is not submitted again, and the reader answers
     /// as after a synchronous load that ended the same way.
     pub fn ensure_loaded(&self, canonical_id: &str) -> bool {
+        matches!(self.load_outcome(canonical_id), Some(Ok(true)))
+    }
+
+    /// [`Self::ensure_loaded`] with the load's own outcome: whether the
+    /// file was integrated, or the typed reason the load ended without it.
+    /// `None` when this reader already consumed a terminal outcome for the
+    /// file, so nothing was submitted.
+    pub(crate) fn load_outcome(
+        &self,
+        canonical_id: &str,
+    ) -> Option<Result<bool, crate::HostLoadError>> {
         if verter_type_engine::resolver_core::request_ports::consumed_load_end(|file| {
             file == canonical_id
                 || self.normalized_analysis_canonical(file)
@@ -1412,7 +1423,7 @@ impl VerterHost {
         })
         .is_some()
         {
-            return false;
+            return None;
         }
         #[cfg(test)]
         self.test_force
@@ -1435,9 +1446,7 @@ impl VerterHost {
                 std::sync::atomic::Ordering::Relaxed,
             );
         }
-        outcome
-            .and_then(|commit| commit.apply(self))
-            .unwrap_or(false)
+        Some(outcome.and_then(|commit| commit.apply(self)))
     }
     /// Resolve an alias to its canonical ID, or normalize the ID if no
     /// alias exists.

@@ -373,7 +373,9 @@ pub use wire::UniqueSymbolKeyExpr;
 /// input basis digests the graph's `NodeRef`s name. v12 also adds
 /// the `UnsupportedOperation` (tag 16) error arm, which answers an operation
 /// the host does not serve at every accepted version: no earlier arm states
-/// that refusal truthfully, and those operations never had an executor.
+/// that refusal truthfully, and those operations never had an executor. It
+/// also adds the `UnknownSource` (tag 17) error arm: a request subject naming
+/// a source the host does not know, answered before any resolution.
 pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 12;
 
 /// Byte length of a [`FrameworkProfileRef::digest`]: the canonical digest
@@ -473,6 +475,14 @@ pub fn wire_error_unsupported_operation(
 ) -> wire::TypeInfoRequestErrorUnsupportedOperation {
     wire::TypeInfoRequestErrorUnsupportedOperation {
         operation: operation as i32,
+    }
+}
+
+/// Build an `UnknownSource` error variant payload echoing the path the host
+/// does not know.
+pub fn wire_error_unknown_source(path: &str) -> wire::TypeInfoRequestErrorUnknownSource {
+    wire::TypeInfoRequestErrorUnknownSource {
+        path: path.to_string(),
     }
 }
 

@@ -339,6 +339,59 @@ fn an_op_payload_mismatch_is_rejected_by_the_envelope_validator() {
     ));
 }
 
+/// A subject naming a file the host does not know is refused as
+/// `UnknownSource`, echoing the path, never answered as a miss. A known
+/// file without the name stays a graph answer
+/// (`an_unresolved_symbol_is_a_typed_graph_fault_answer`).
+#[test]
+fn an_unknown_source_is_refused_as_unknown_source_never_a_miss() {
+    let host = host_with_fixture();
+    let (response, record) = host
+        .type_info_with_audit(resolve_envelope(
+            "/missing.ts",
+            "Foo",
+            ProjectionMode::Expanded,
+        ))
+        .into_parts();
+    let error = response.expect_err("an unknown source is a typed refusal");
+    match error.kind {
+        Some(type_info_request_error::Kind::UnknownSource(unknown)) => {
+            assert_eq!(unknown.path, "/missing.ts");
+        }
+        other => panic!("an unknown source is UnknownSource, got {other:?}"),
+    }
+    let verter_audit::RequestKindPayload::TypeInfoGraph(payload) = &record.kind_payload else {
+        panic!("the entry audits a TypeInfoGraph payload");
+    };
+    assert_eq!(
+        payload.degradation_reasons,
+        vec![TypeInfoDegradationReasonTag::RequestValidation],
+        "the refusal precedes execution"
+    );
+}
+
+/// Refusing an unknown source reads no store view.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
+#[test]
+fn an_unknown_source_is_refused_before_any_engine_read() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let host = host_with_fixture();
+    let before = host.provenance().store_view_from_host_reads.load(Relaxed);
+    let _ = host
+        .type_info_with_audit(resolve_envelope(
+            "/missing.ts",
+            "Foo",
+            ProjectionMode::Expanded,
+        ))
+        .into_parts();
+    assert_eq!(
+        host.provenance().store_view_from_host_reads.load(Relaxed),
+        before,
+        "an unknown source is refused before any store-view read"
+    );
+}
+
 #[test]
 fn an_unresolved_symbol_is_a_typed_graph_fault_answer() {
     let host = host_with_fixture();

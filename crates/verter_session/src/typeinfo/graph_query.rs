@@ -324,15 +324,25 @@ impl VerterHost {
         let budgets = closure_budgets(resolve.closure.as_ref());
         // The fact this request asks: known before resolution, so a hit, a
         // miss and a fault of the same request all name it.
+        // SUBJECT — the path is decoded once, before any resolution: a source
+        // the host does not know is a typed refusal, never a miss.
+        let subject = match self.decode_file_name(&resolve.canonical_id, &resolve.name) {
+            Ok(subject) => subject,
+            Err(error) => {
+                return (
+                    error_response(error),
+                    TypeInfoGraphPayload::from_validation_error(GraphOperationTag::ResolveSymbol),
+                );
+            }
+        };
         let query = crate::typeinfo::node_refs::resolve_symbol_query_digest(
-            &resolve.canonical_id,
-            &resolve.name,
+            subject.canonical(),
+            subject.name(),
             mode,
         );
 
         let answer = match self.resolve_symbol_graph_in_one_view(
-            &resolve.canonical_id,
-            &resolve.name,
+            &subject,
             mode,
             &budgets,
             resolve.include_diagnostics,
@@ -395,8 +405,7 @@ impl VerterHost {
     /// unaddressed.
     fn resolve_symbol_graph_in_one_view(
         &self,
-        canonical_id: &str,
-        name: &str,
+        subject: &crate::typeinfo::selector::FileNameSelector,
         mode: ProjectionMode,
         budgets: &GraphExportBudgets,
         include_diagnostics: bool,
@@ -404,6 +413,7 @@ impl VerterHost {
         // The entry owner is materialised BEFORE the view is captured, so the
         // view vouches for the owner source the trace observes; a cold owner
         // materialised inside the request could not commit a basis.
+        let (canonical_id, name) = (subject.canonical(), subject.name());
         let _ = self.ensure_indexed_ready_serve(canonical_id);
         let current = crate::typeinfo::current_store_view_for_query(self)?;
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());

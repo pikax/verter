@@ -100,6 +100,7 @@ fn err_variant_label(err: &wire::TypeInfoRequestError) -> &'static str {
         type_info_request_error::Kind::StaleBasis(_) => "StaleBasis",
         type_info_request_error::Kind::UnknownNodeRef(_) => "UnknownNodeRef",
         type_info_request_error::Kind::UnsupportedOperation(_) => "UnsupportedOperation",
+        type_info_request_error::Kind::UnknownSource(_) => "UnknownSource",
     }
 }
 

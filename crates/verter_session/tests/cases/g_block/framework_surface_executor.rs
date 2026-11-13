@@ -419,6 +419,24 @@ fn an_unminted_profile_reference_is_unknown_framework_profile() {
     assert_eq!(expect_unknown_profile(&result), forged);
 }
 
+/// A component whose owner file the host does not know is refused as
+/// `UnknownSource`, echoing the path, before any planning: never a
+/// structural answer for a component that is not there.
+#[test]
+fn an_unknown_component_source_is_refused_as_unknown_source() {
+    let host = build_host();
+    let result = host.type_info_with_audit(framework_envelope(&host, "/Missing.vue", "vue"));
+    let error = result
+        .as_result()
+        .expect_err("an unknown owner file is the Err outcome");
+    match &error.kind {
+        Some(type_info_request_error::Kind::UnknownSource(unknown)) => {
+            assert_eq!(unknown.path, "/Missing.vue");
+        }
+        other => panic!("an unknown owner file is UnknownSource, got {other:?}"),
+    }
+}
+
 /// The semantic work a host has done so far: the shared graph's cold builds,
 /// instantiations, relation checks, decided conditionals and substitutions,
 /// and the file artifacts it holds.

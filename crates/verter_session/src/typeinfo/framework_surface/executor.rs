@@ -137,7 +137,17 @@ impl VerterHost {
         // from the request bytes.
         let selector = admitted_selector_echo(request_selector, admitted);
 
-        let resolved_selector = self.resolve_component_selector(&selector, admitted);
+        // SUBJECT — the owner file is decoded once, before any planning: a
+        // source the host does not know is a typed refusal.
+        let resolved_selector = match self.resolve_component_selector(&selector, admitted) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let payload = TypeInfoGraphPayload::from_validation_error(
+                    GraphOperationTag::FrameworkSurfaces,
+                );
+                return (error_response(error), payload);
+            }
+        };
         // The fact every answer to this request names: the same query
         // identity its issued member references carry.
         let fact_query = crate::typeinfo::node_refs::component_facets_query_digest(
@@ -390,23 +400,24 @@ impl VerterHost {
     ///
     /// A selector with `has_export_name` resolves to a named export; otherwise
     /// it is the component's default export (the synthesized `default` for
-    /// carrier components).
+    /// carrier components). The owner file decodes through
+    /// [`VerterHost::decode_source`], so an unknown owner is `UnknownSource`.
     fn resolve_component_selector(
         &self,
         selector: &ComponentSelector,
         admitted: &RegisteredFrameworkProfile,
-    ) -> ResolvedComponentSelector {
-        let canonical: Arc<str> = Arc::from(selector.canonical_id.as_str());
+    ) -> Result<ResolvedComponentSelector, TypeInfoRequestError> {
+        let canonical = self.decode_source(&selector.canonical_id)?.canonical_arc();
         let export = if selector.has_export_name && !selector.export_name.is_empty() {
             ComponentExport::Named(Arc::from(selector.export_name.as_str()))
         } else {
             ComponentExport::Default
         };
-        ResolvedComponentSelector {
+        Ok(ResolvedComponentSelector {
             canonical,
             export,
             framework_profile: admitted.profile.clone(),
-        }
+        })
     }
 }
 

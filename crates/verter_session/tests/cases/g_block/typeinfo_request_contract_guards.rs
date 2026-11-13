@@ -137,6 +137,7 @@ fn err_label(err: &wire::TypeInfoRequestError) -> &'static str {
         type_info_request_error::Kind::StaleBasis(_) => "StaleBasis",
         type_info_request_error::Kind::UnknownNodeRef(_) => "UnknownNodeRef",
         type_info_request_error::Kind::UnsupportedOperation(_) => "UnsupportedOperation",
+        type_info_request_error::Kind::UnknownSource(_) => "UnknownSource",
     }
 }
 
@@ -332,13 +333,14 @@ fn every_closure_variant_has_concrete_resource_bound() {
 
 // ───────────────── static: error union consistency across sections ────────
 
-/// The closed `TypeInfoRequestError` union — exactly these 15 active
+/// The closed `TypeInfoRequestError` union — exactly these 16 active
 /// variant selectors (proto field 11 / `missing_relate_endpoint` is
 /// retired via `reserved`; field 13 / `unknown_framework_profile` is the
 /// schema-11 typed rejection of an unadmitted framework profile; fields 14
 /// and 15 / `stale_basis` and `unknown_node_ref` are the schema-12
 /// expand-around rejections of a node reference; field 16 /
-/// `unsupported_operation` refuses an operation the host does not serve).
+/// `unsupported_operation` refuses an operation the host does not serve;
+/// field 17 / `unknown_source` refuses a subject naming an unknown source).
 const REQUEST_ERROR_VARIANTS: &[&str] = &[
     "missing_projection_context",
     "missing_display_policy",
@@ -355,6 +357,7 @@ const REQUEST_ERROR_VARIANTS: &[&str] = &[
     "stale_basis",
     "unknown_node_ref",
     "unsupported_operation",
+    "unknown_source",
 ];
 
 #[test]
@@ -400,7 +403,7 @@ fn typeinfo_request_error_union_is_consistent_across_sections() {
     expected.sort();
     assert_eq!(
         proto_arms, expected,
-        "the proto TypeInfoRequestError oneof must carry exactly the 15 closed \
+        "the proto TypeInfoRequestError oneof must carry exactly the 16 closed \
          error selectors",
     );
 
@@ -418,8 +421,8 @@ fn typeinfo_request_error_union_is_consistent_across_sections() {
     // here ties the validator surface to the proto count.
     assert_eq!(
         REQUEST_ERROR_VARIANTS.len(),
-        15,
-        "the validator-side error union mirror must list exactly 15 variants",
+        16,
+        "the validator-side error union mirror must list exactly 16 variants",
     );
 }
 
