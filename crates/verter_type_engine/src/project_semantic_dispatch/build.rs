@@ -15672,20 +15672,38 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .strict_null_checks,
                 )
             });
-        let reduced = super::canonical_algebra::intern_written_intersection_charged(
-            self.graph(),
-            &surfaces,
-            nullability,
-            self.construction_meter(),
-        );
-        self.deposit_canonical_evidence(reduced.evidence);
-        match self.graph().node_data(reduced.node).as_deref() {
+        // The written reduction of the surfaces is the `ReduceIntersection`
+        // query's, so every later reader of the same operands reads one
+        // construction — its product built once, its receipt and evidence
+        // replayed on a hit — instead of building it again. A read that
+        // fails constructs it in place.
+        let reduced = match self
+            .execute_read(
+                crate::semantic_query::SemanticQueryKey::reduce_written_intersection_operands(
+                    self.graph().store(),
+                    &surfaces,
+                    nullability,
+                ),
+            )
+            .value
+        {
+            QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+            QueryResult::Error(_) => {
+                let reduced = super::canonical_algebra::intern_written_intersection_charged(
+                    self.graph(),
+                    &surfaces,
+                    nullability,
+                    self.construction_meter(),
+                );
+                self.deposit_canonical_evidence(reduced.evidence);
+                reduced.node
+            }
+        };
+        match self.graph().node_data(reduced).as_deref() {
             Some(SemanticNodeData::Primitive(
                 PrimitiveKind::Never | PrimitiveKind::Null | PrimitiveKind::Undefined,
-            )) => Some(reduced.node),
-            Some(SemanticNodeData::Opaque(error)) if is_certified_recovery(error) => {
-                Some(reduced.node)
-            }
+            )) => Some(reduced),
+            Some(SemanticNodeData::Opaque(error)) if is_certified_recovery(error) => Some(reduced),
             _ => None,
         }
     }

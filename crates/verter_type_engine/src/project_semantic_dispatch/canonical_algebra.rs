@@ -405,6 +405,98 @@ mod literal_provenance_tests {
     }
 }
 
+#[cfg(test)]
+mod divided_half_bound_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn graph_in(
+        graph: &SemanticGraphStore,
+    ) -> crate::semantic_query_memo::GraphIn<'_, verter_audit::observe::Uncaptured> {
+        crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(graph)
+    }
+
+    fn literal_in(graph: &SemanticGraphStore, value: &str, file: &str) -> SemanticNodeId {
+        graph.intern_node_with_scope(
+            SemanticNodeData::Literal(LiteralValue::String(value.into())),
+            NodeScopeId::File {
+                canonical_id: verter_type_expr::OwnedStr::from(file),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: [1; 16],
+                local_scope: None,
+            },
+        )
+    }
+
+    fn param(graph: &SemanticGraphStore, name: &str) -> SemanticNodeId {
+        graph.intern_node(SemanticNodeData::TypeParam {
+            decl: crate::semantic_query::DeclIdentity::synthetic(name),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: verter_type_expr::OwnedStr::from(name),
+        })
+    }
+
+    /// A half whose choice is itself an intersection is not bounded from
+    /// widths: built, that choice can distribute into more constituents
+    /// than the one its width counts, so the half is built.
+    #[test]
+    fn a_half_with_an_intersection_choice_has_no_width_bound() {
+        let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
+        let [p, q, r, s] = ["P", "Q", "R", "S"].map(|name| param(&graph, name));
+        let inner = intern_ordered_union(graph_in(&graph), &[q, r], NullabilityPolicy::Strict).node;
+        let carrier = graph.intern_node(SemanticNodeData::Intersection(
+            crate::semantic_query::composite::CompositeList::ordered_carrier_for_tests(Arc::from(
+                [p, inner],
+            )),
+        ));
+        let holding =
+            intern_ordered_union(graph_in(&graph), &[carrier, s], NullabilityPolicy::Strict).node;
+        let plain = intern_ordered_union(graph_in(&graph), &[q, s], NullabilityPolicy::Strict).node;
+        let mut evidence = CanonicalEvidence::default();
+        assert_eq!(
+            divided_half_width_bound(graph_in(&graph), &[plain, plain], &mut evidence),
+            Some(4),
+            "two choices by two"
+        );
+        assert_eq!(
+            divided_half_width_bound(graph_in(&graph), &[holding, plain], &mut evidence),
+            None,
+            "a choice that is an intersection holding a union is not bounded"
+        );
+    }
+
+    /// The bound walk reads every choice of the half, and records each
+    /// choice's file as inspected: a choice from another file than the arms
+    /// is a root of the weighing.
+    #[test]
+    fn the_width_bound_records_every_choice_it_reads() {
+        let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
+        let here = literal_in(&graph, "a", "/here.ts");
+        let there = literal_in(&graph, "b", "/there.ts");
+        let union =
+            intern_ordered_union(graph_in(&graph), &[here, there], NullabilityPolicy::Strict).node;
+        let mut evidence = CanonicalEvidence::default();
+        assert_eq!(
+            divided_half_width_bound(graph_in(&graph), &[union], &mut evidence),
+            Some(2)
+        );
+        let files: Vec<String> = evidence
+            .inspected_file_roots
+            .iter()
+            .map(|(file, _)| file.to_string())
+            .collect();
+        assert!(
+            files.iter().any(|file| file == "/there.ts")
+                && files.iter().any(|file| file == "/here.ts"),
+            "both choices' files are inspected roots: {files:?}"
+        );
+    }
+}
+
 /// The witness that a [`CompositeList`](crate::semantic_query::composite::CompositeList)
 /// member list was produced by THIS module's canonical builders. Its fields
 /// are private and no constructor is exported: only the canonical algebra
@@ -2327,6 +2419,52 @@ pub struct PaidConstruction {
     pub bytes: usize,
 }
 
+/// A test allowance of work units and construction bytes: a payment it
+/// cannot cover is refused whole, the work rail before the byte rail, as
+/// the connected-demand ledger refuses it.
+#[cfg(any(test, feature = "test-support"))]
+struct TestAllowance {
+    work: std::cell::Cell<usize>,
+    bytes: std::cell::Cell<usize>,
+    paid_work: std::cell::Cell<usize>,
+    paid_bytes: std::cell::Cell<usize>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl TestAllowance {
+    fn new(work: usize, bytes: usize) -> Self {
+        use std::cell::Cell;
+        Self {
+            work: Cell::new(work),
+            bytes: Cell::new(bytes),
+            paid_work: Cell::new(0),
+            paid_bytes: Cell::new(0),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ConstructionLedger for TestAllowance {
+    fn pay_construction(
+        &self,
+        units: usize,
+        bytes: usize,
+    ) -> Result<(), crate::semantic_query::PartialReasonSet> {
+        use crate::semantic_query::PartialReasonSet;
+        if units > self.work.get() {
+            return Err(PartialReasonSet::PROJECTION_WORK_LIMIT);
+        }
+        self.work.set(self.work.get() - units);
+        self.paid_work.set(self.paid_work.get() + units);
+        if bytes > self.bytes.get() {
+            return Err(PartialReasonSet::CONNECTED_MEMORY_LIMIT);
+        }
+        self.bytes.set(self.bytes.get() - bytes);
+        self.paid_bytes.set(self.paid_bytes.get() + bytes);
+        Ok(())
+    }
+}
+
 /// [`intern_ordered_intersection_charged`] paying an allowance of `work`
 /// units and `bytes` construction bytes, for the allocation canaries: a
 /// payment the allowance cannot cover is refused whole, the work rail
@@ -2338,35 +2476,7 @@ pub fn intern_ordered_intersection_paying_for_tests(
     work: usize,
     bytes: usize,
 ) -> PaidConstruction {
-    use crate::semantic_query::PartialReasonSet;
-    use std::cell::Cell;
-    struct Allowance {
-        work: Cell<usize>,
-        bytes: Cell<usize>,
-        paid_work: Cell<usize>,
-        paid_bytes: Cell<usize>,
-    }
-    impl ConstructionLedger for Allowance {
-        fn pay_construction(&self, units: usize, bytes: usize) -> Result<(), PartialReasonSet> {
-            if units > self.work.get() {
-                return Err(PartialReasonSet::PROJECTION_WORK_LIMIT);
-            }
-            self.work.set(self.work.get() - units);
-            self.paid_work.set(self.paid_work.get() + units);
-            if bytes > self.bytes.get() {
-                return Err(PartialReasonSet::CONNECTED_MEMORY_LIMIT);
-            }
-            self.bytes.set(self.bytes.get() - bytes);
-            self.paid_bytes.set(self.paid_bytes.get() + bytes);
-            Ok(())
-        }
-    }
-    let allowance = Allowance {
-        work: Cell::new(work),
-        bytes: Cell::new(bytes),
-        paid_work: Cell::new(0),
-        paid_bytes: Cell::new(0),
-    };
+    let allowance = TestAllowance::new(work, bytes);
     let composite = intern_ordered_intersection_charged(
         crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(graph),
         members,
@@ -2377,6 +2487,50 @@ pub fn intern_ordered_intersection_paying_for_tests(
         exhausted: composite.evidence.exhausted,
         work: allowance.paid_work.get(),
         bytes: allowance.paid_bytes.get(),
+    }
+}
+
+/// What [`intersection_cross_product_refused_paying_for_tests`] weighed.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone)]
+pub struct Weighing {
+    /// Whether the checker refuses the cross product (TS2590).
+    pub refused: bool,
+    /// The rails the allowance could not pay; empty when it paid for all.
+    pub exhausted: crate::semantic_query::PartialReasonSet,
+    /// Whether a comparison the weighing ran was incomplete.
+    pub incomplete: bool,
+    /// The work units paid.
+    pub work: usize,
+    /// The file roots the weighing inspected.
+    pub inspected_file_roots: Vec<ObservedGraphSelfRoot>,
+}
+
+/// [`intersection_cross_product_refused`] over `arms` paying an allowance of
+/// `work` units and `bytes` construction bytes ([`TestAllowance`]).
+#[cfg(any(test, feature = "test-support"))]
+pub fn intersection_cross_product_refused_paying_for_tests(
+    graph: &SemanticGraphStore,
+    arms: &[SemanticNodeId],
+    nullability: NullabilityPolicy,
+    work: usize,
+    bytes: usize,
+) -> Weighing {
+    let allowance = TestAllowance::new(work, bytes);
+    let mut evidence = CanonicalEvidence::default();
+    let refusal = intersection_cross_product_refused(
+        crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(graph),
+        arms,
+        nullability,
+        ConstructionMeter::charged(&allowance),
+        &mut evidence,
+    );
+    Weighing {
+        refused: refusal.is_some(),
+        exhausted: evidence.exhausted,
+        incomplete: evidence.incomplete,
+        work: allowance.paid_work.get(),
+        inspected_file_roots: evidence.inspected_file_roots,
     }
 }
 
@@ -2542,6 +2696,96 @@ fn stop_of(evidence: &CanonicalEvidence) -> Option<DistributionStop> {
     })
 }
 
+/// Whether the checker accepts a divided intersection whose halves are
+/// `parts`, decided without building either half — only for a reader of
+/// whether the checker refuses it ([`DistributionOrigin::Weighed`]).
+///
+/// Each half is weighed first, as the checker would intersect it, so a
+/// half the checker refuses on its own stops the weighing with that
+/// refusal, exactly as building it would. Then each half's constituents
+/// are bounded from widths alone ([`divided_half_width_bound`]); when the
+/// bounds' product is under the checker's limit, so is the product of the
+/// built halves, and the intersection is accepted with nothing built or
+/// paid for. `false` decides nothing: a bound over the limit, or a half
+/// whose constituents cannot be bounded, is built as the checker builds it.
+///
+/// Weighing pays no product, so it never exhausts the demand's rails, and
+/// it inherits no unbuilt constituent's incomplete comparison: what it
+/// accepts is accepted from widths, a proof. Every arm and choice it reads
+/// is an inspected root.
+fn divided_halves_accepted_unbuilt<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
+    parts: [&[SemanticNodeId]; 2],
+    nullability: NullabilityPolicy,
+    supertype_reduction: SupertypeReduction,
+    meter: ConstructionMeter<'_>,
+    evidence: &mut CanonicalEvidence,
+) -> Result<bool, DistributionStop> {
+    let mut bounds = [0usize; 2];
+    for (bound, part) in bounds.iter_mut().zip(parts) {
+        let weighed = canonicalize_with(
+            graph,
+            part,
+            false,
+            nullability,
+            supertype_reduction,
+            DistributionOrigin::Weighed,
+            meter,
+        );
+        let stop = stop_of(&weighed.evidence);
+        evidence.absorb(weighed.evidence);
+        if let Some(stop) = stop {
+            return Err(stop);
+        }
+        let Some(half) = divided_half_width_bound(graph, part, evidence) else {
+            return Ok(false);
+        };
+        *bound = half;
+    }
+    Ok(admit_cross_product(bounds.into_iter(), || 0, None).is_ok())
+}
+
+/// The most constituents the intersection of `part` has once built, from
+/// widths alone: the product of its factors' widths after the checker's
+/// strategies ahead of a cross product ([`presimplify_factors`]), plus one
+/// for each `null` / `undefined` member those strategies strip and add
+/// back. A nested division of `part` multiplies its halves' products, which
+/// are no wider. `None` when a choice is itself an intersection or a union:
+/// building it can splice more constituents than its width counts. Every
+/// arm and choice read is recorded as an inspected root.
+fn divided_half_width_bound<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
+    part: &[SemanticNodeId],
+    evidence: &mut CanonicalEvidence,
+) -> Option<usize> {
+    let mut factors: Vec<Vec<SemanticNodeId>> = Vec::with_capacity(part.len());
+    for arm in part {
+        evidence.record_file_root(graph.store(), *arm);
+        let choices = union_members(graph.store(), *arm)
+            .map_or_else(|| vec![*arm], |members| members.to_vec());
+        for choice in &choices {
+            evidence.record_file_root(graph.store(), *choice);
+            if matches!(
+                graph.node_data(*choice).as_deref(),
+                Some(SemanticNodeData::Intersection(_) | SemanticNodeData::Union(_))
+            ) {
+                return None;
+            }
+        }
+        factors.push(choices);
+    }
+    let (factors, added_back) = match presimplify_factors(graph, &factors) {
+        Some(presimplified) => (presimplified.factors, presimplified.nullish.len()),
+        None => (factors, 0),
+    };
+    Some(
+        factors
+            .iter()
+            .fold(1usize, |bound, factor| bound.saturating_mul(factor.len()))
+            .saturating_add(added_back),
+    )
+}
+
 /// The checker's intersection of `arms` when one of them is a union
 /// (`getIntersectionType`), as the distributed type: `Ok(None)` when no arm
 /// is a union, the TS2590 fact when a cross product reaches the checker's
@@ -2658,6 +2902,18 @@ fn intersect_over_unions<M: verter_audit::observe::ObserveExec>(
     // 3. Divide and conquer.
     if arms.len() >= 3 && written_len > 2 {
         let middle = arms.len() / 2;
+        if origin == DistributionOrigin::Weighed
+            && divided_halves_accepted_unbuilt(
+                graph,
+                [&arms[..middle], &arms[middle..]],
+                nullability,
+                supertype_reduction,
+                meter,
+                evidence,
+            )?
+        {
+            return Ok(Some(DistributedIntersection::unbuilt()));
+        }
         let mut halves = [arms[0]; 2];
         for (half, part) in halves.iter_mut().zip([&arms[..middle], &arms[middle..]]) {
             let intersected = canonicalize_with(
@@ -2722,6 +2978,7 @@ fn intersect_over_unions<M: verter_audit::observe::ObserveExec>(
     if !build || width == 0 {
         return Ok(Some(DistributedIntersection::unbuilt()));
     }
+    graph.record_intersection_product_built();
     let choices: Vec<Arc<[SemanticNodeId]>> = arms
         .iter()
         .zip(&unions)
