@@ -13,7 +13,8 @@
 //! × `noImplicitAny` settings agree on every probe.
 
 use super::checker_probe_lane_tests::{
-    mismatches, mismatches_in_one_host, with_probe, with_recovered_probe,
+    mismatches, mismatches_in_one_host, mismatches_on_host, probe_host, upsert_probe_files,
+    with_probe, with_probe_on_host, with_recovered_probe, ProbeProject,
 };
 use verter_type_engine::semantic_query::{
     CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, QueryError,
@@ -41,6 +42,26 @@ fn literal_union(name: &str, count: usize, quoted: bool, extra: &str) -> String 
         })
         .collect();
     format!("type {name} = {}{extra};\n", arms.join(" | "))
+}
+
+/// The probe module over the `A` and `B` an [`operands_host`] declares.
+const OVER_OPS: &str = "import type { A, B } from './ops';\n\
+                        type IsAny<T> = 0 extends 1 & T ? \"any\" : \"not-any\";\n\
+                        type R = A & B;\n";
+
+/// `ops.ts` exporting the declarations `a` and `b`.
+fn ops(a: String, b: String) -> String {
+    format!("export {a}export {b}")
+}
+
+/// A host whose `ops.ts` is `operands`, for every probe of one fixture to
+/// read: the operands' file stays as it is while each probe rewrites the
+/// probe module, so the probes read one reduction of their intersection
+/// and only the first pays for its cross product.
+fn operands_host(operands: &str) -> std::sync::Arc<crate::VerterHost> {
+    let host = probe_host(ProbeProject::default());
+    upsert_probe_files(&host, &[("ops.ts", operands)]);
+    host
 }
 
 /// Five unions of ten objects `U0 … U4`, with `R5 = U0 & … & U4` and `R4 =
@@ -117,49 +138,56 @@ fn the_ts2590_recovery_is_a_partial_holding_the_written_intersection() {
 ///
 /// Measured: `IsAny<R>` is `"not-any"` and `[R] extends [{ a: 0 }] ? 1 : 2`
 /// is `2` at 369 × 271; `any` and `1` under TS2590 at 400 × 250.
+///
+/// Each size is read on one host ([`operands_host`]), so its probes read
+/// one reduction of the intersection.
 #[test]
 fn two_object_unions_meet_the_limit_at_one_hundred_thousand() {
     for (a, b, is_any, relation) in [(369, 271, "\"not-any\"", "2"), (400, 250, "any", "1")] {
-        let source = format!(
-            "{IS_ANY}{}{}type R = A & B;\n",
-            object_union("A", "a", a),
-            object_union("B", "b", b)
-        );
-        let failures = mismatches(
-            &source,
+        let host = operands_host(&ops(object_union("A", "a", a), object_union("B", "b", b)));
+        let failures = mismatches_on_host(
+            &host,
+            ProbeProject::default(),
+            OVER_OPS,
             &[
                 ("IsAny<R>", is_any),
                 ("[R] extends [{ a: 0 }] ? 1 : 2", relation),
             ],
         );
         assert!(failures.is_empty(), "{a} × {b}: {}", failures.join("\n"));
-        with_probe(&source, "A & B", |dispatch, node| {
-            let data = dispatch.graph().node_data(node);
-            match data.as_deref() {
-                Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
-                    diagnostic,
-                    basis: verter_type_engine::semantic_query::RecoveryBasis::Budget,
-                    origin: Some(origin),
-                })) => {
-                    assert!(
-                        a * b >= 100_000,
-                        "{a} × {b} is under the limit, measured {data:?}"
-                    );
-                    assert_eq!(*diagnostic, TS2590);
-                    assert!(
-                        matches!(
-                            dispatch.graph().node_data(*origin).as_deref(),
-                            Some(SemanticNodeData::Intersection(arms)) if arms.len() == 2
-                        ),
-                        "its origin is the written `A & B`"
-                    );
+        with_probe_on_host(
+            &host,
+            ProbeProject::default(),
+            OVER_OPS,
+            "A & B",
+            |dispatch, node| {
+                let data = dispatch.graph().node_data(node);
+                match data.as_deref() {
+                    Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                        diagnostic,
+                        basis: verter_type_engine::semantic_query::RecoveryBasis::Budget,
+                        origin: Some(origin),
+                    })) => {
+                        assert!(
+                            a * b >= 100_000,
+                            "{a} × {b} is under the limit, measured {data:?}"
+                        );
+                        assert_eq!(*diagnostic, TS2590);
+                        assert!(
+                            matches!(
+                                dispatch.graph().node_data(*origin).as_deref(),
+                                Some(SemanticNodeData::Intersection(arms)) if arms.len() == 2
+                            ),
+                            "its origin is the written `A & B`"
+                        );
+                    }
+                    other => assert!(
+                        a * b < 100_000 && !matches!(other, Some(SemanticNodeData::Opaque(_))),
+                        "{a} × {b}: measured {other:?}"
+                    ),
                 }
-                other => assert!(
-                    a * b < 100_000 && !matches!(other, Some(SemanticNodeData::Opaque(_))),
-                    "{a} × {b}: measured {other:?}"
-                ),
-            }
-        });
+            },
+        );
     }
 }
 
@@ -280,30 +308,35 @@ fn unions_of_primitives_intersect_without_a_cross_product() {
 /// `any` and `[R] extends [{ a: 0 }] ? 1 : 2` is `1` under TS2590 (without
 /// `strictNullChecks` the unions hold no `undefined`, and the products are
 /// the same).
+///
+/// Each size is read on one host ([`operands_host`]), so its probes read
+/// one reduction of the intersection.
 #[test]
 fn unions_with_undefined_intersect_without_it() {
     let with_undefined = |name: &str, key: &str, count: usize| {
         object_union(name, key, count).replace(";\n", " | undefined;\n")
     };
-    let under = format!(
-        "{IS_ANY}{}{}type R = A & B;\n",
+    let under = operands_host(&ops(
         with_undefined("A", "a", 316),
-        with_undefined("B", "b", 316)
-    );
-    let over = format!(
-        "{IS_ANY}{}{}type R = A & B;\n",
+        with_undefined("B", "b", 316),
+    ));
+    let over = operands_host(&ops(
         with_undefined("A", "a", 317),
-        with_undefined("B", "b", 316)
-    );
-    let mut failures = mismatches(
+        with_undefined("B", "b", 316),
+    ));
+    let mut failures = mismatches_on_host(
         &under,
+        ProbeProject::default(),
+        OVER_OPS,
         &[
             ("[R] extends [{ a: 0 }] ? 1 : 2", "2"),
             ("[undefined] extends [R] ? 1 : 2", "1"),
         ],
     );
-    failures.extend(mismatches(
+    failures.extend(mismatches_on_host(
         &over,
+        ProbeProject::default(),
+        OVER_OPS,
         &[("IsAny<R>", "any"), ("[R] extends [{ a: 0 }] ? 1 : 2", "1")],
     ));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -561,4 +594,213 @@ fn a_shared_intersection_dag_is_charged_for_its_flattened_members() {
         PartialReasonSet::empty(),
         "the shallow form's allowance pays for the shared DAG"
     );
+}
+
+/// The cross products of intersections over unions built on `host`,
+/// wherever they ran.
+fn products_built(host: &crate::VerterHost) -> u64 {
+    host.project_type_store()
+        .semantic_graph()
+        .stats_snapshot()
+        .intersection_products_built
+}
+
+/// One intersection over unions is reduced once for all its readers on a
+/// host: the first relation from `A & B` builds its cross product, and every
+/// later probe of it — another relation, a conditional over it — reads that
+/// reduction instead of building the product again. The reduction is its
+/// operands': an edit to one operand builds the new operands' product once,
+/// and the answers read it.
+#[test]
+fn every_reader_of_one_intersection_reads_one_product() {
+    let five = || ops(object_union("A", "a", 5), object_union("B", "b", 4));
+    let host = operands_host(&five());
+    let read = |row: (&str, &str)| {
+        let before = products_built(&host);
+        let failures = mismatches_on_host(&host, ProbeProject::default(), OVER_OPS, &[row]);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        products_built(&host) - before
+    };
+    let within = "[R] extends [{ a: 0 | 1 | 2 | 3 | 4 }] ? 1 : 2";
+    let readers = |within_answer: &'static str| {
+        [
+            (within, within_answer),
+            ("[R] extends [{ a: 0 }] ? 1 : 2", "2"),
+            ("IsAny<R>", "\"not-any\""),
+            (within, within_answer),
+        ]
+    };
+    let first: Vec<u64> = readers("1").into_iter().map(read).collect();
+    assert_eq!(
+        first,
+        [1, 0, 0, 0],
+        "the first probe builds the product once, and every later reader reads it"
+    );
+    upsert_probe_files(
+        &host,
+        &[(
+            "ops.ts",
+            ops(object_union("A", "a", 6), object_union("B", "b", 4)).as_str(),
+        )],
+    );
+    let edited: Vec<u64> = readers("2").into_iter().map(read).collect();
+    assert_eq!(
+        edited,
+        [1, 0, 0, 0],
+        "an edited operand's product is built once and read for every answer"
+    );
+}
+
+/// `{ <key>: 0 } | … | { <key>: <count - 1> }`, written inline.
+fn inline_objects(key: &str, count: usize) -> String {
+    (0..count)
+        .map(|i| format!("{{ {key}: {i} }}"))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// The checker's weighing of whether it refuses the intersection of
+/// `probe`'s tuple elements (`intersection_cross_product_refused`), paying
+/// an allowance of `work` units, and the cross products built while it ran.
+fn weigh_tuple(
+    probe: &str,
+    work: usize,
+) -> (
+    verter_type_engine::project_semantic_dispatch::canonical_algebra::Weighing,
+    u64,
+) {
+    use verter_session_query::flow::policy::NullabilityPolicy;
+    use verter_type_engine::project_semantic_dispatch::canonical_algebra::intersection_cross_product_refused_paying_for_tests;
+    with_probe("", probe, |dispatch, node| {
+        let (_, elements) = tuple_factors(dispatch, node);
+        let store = dispatch.graph().store();
+        let before = store.stats_snapshot().intersection_products_built;
+        let weighing = intersection_cross_product_refused_paying_for_tests(
+            store,
+            &elements,
+            NullabilityPolicy::Strict,
+            work,
+            usize::MAX,
+        );
+        let built = store.stats_snapshot().intersection_products_built - before;
+        (weighing, built)
+    })
+}
+
+/// `[1, A | undefined, B | undefined]` over 316 objects a side: the
+/// checker divides it into `1` and `(A | undefined) & (B | undefined)`,
+/// whose 99,856 combinations and the `undefined` added back are under the
+/// limit, so `1 & …` is too.
+fn one_and_316_with_undefined() -> String {
+    format!(
+        "[1, {} | undefined, {} | undefined]",
+        inline_objects("a", 316),
+        inline_objects("b", 316)
+    )
+}
+
+/// Weighing whether the checker refuses a divided intersection builds
+/// neither half when their widths prove it under the limit: `1 & R` with
+/// `R` the 99,857-wide `(A | undefined) & (B | undefined)` is accepted with
+/// no cross product built. A whole `IsAny<R>` probe, which weighs it from
+/// every reader, builds at most the one product the relation reads.
+#[test]
+fn weighing_a_divided_intersection_builds_neither_half() {
+    let (weighing, built) = weigh_tuple(&one_and_316_with_undefined(), usize::MAX);
+    assert!(!weighing.refused, "1 × 99,857 is under the limit");
+    assert_eq!(built, 0, "the weighing builds no cross product");
+
+    let with_undefined = |name: &str, key: &str, count: usize| {
+        object_union(name, key, count).replace(";\n", " | undefined;\n")
+    };
+    let host = operands_host(&ops(
+        with_undefined("A", "a", 316),
+        with_undefined("B", "b", 316),
+    ));
+    let before = products_built(&host);
+    let failures = mismatches_on_host(
+        &host,
+        ProbeProject::default(),
+        OVER_OPS,
+        &[("IsAny<R>", "\"not-any\"")],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let built = products_built(&host) - before;
+    assert!(built <= 1, "the probe builds {built} cross products");
+}
+
+/// A weighing that cannot prove a divided intersection under the limit
+/// from widths builds it as the checker does, and answers what the built
+/// halves answer: `X & Y & Z` with `Y` 50 numbers and `{ y: 1 }` and `Z` 50
+/// strings and `{ z: 1 }` bounds `Y & Z` at 2,601 but builds 101, so at
+/// `|X|` 40 (4,040) it is accepted and at 991 (100,091) refused, as
+/// [`three_written_types_divide_before_the_product_is_checked`] measured.
+#[test]
+fn a_weighing_the_widths_cannot_decide_builds_the_halves() {
+    let numbers = (0..50)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let strings = (0..50)
+        .map(|i| format!("\"s{i}\""))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    for (x, refused) in [(40, false), (991, true)] {
+        let probe = format!(
+            "[{}, {numbers} | {{ y: 1 }}, {strings} | {{ z: 1 }}]",
+            inline_objects("x", x)
+        );
+        let (weighing, _) = weigh_tuple(&probe, usize::MAX);
+        assert_eq!(weighing.refused, refused, "|X| = {x}");
+    }
+}
+
+/// The bound adds back one constituent for each `null` / `undefined`
+/// member the checker strips: `W & (A | undefined) & (B | undefined)` with
+/// four objects in `W`, 39 in `A` and 641 in `B` divides into `W` and a
+/// half of 39 × 641 = 24,999 combinations and `undefined`, 25,000, and the
+/// halves' product, 100,000, is the checker's limit.
+#[test]
+fn a_stripped_nullish_member_counts_in_the_bound() {
+    let probe = format!(
+        "[{}, {} | undefined, {} | undefined]",
+        inline_objects("w", 4),
+        inline_objects("a", 39),
+        inline_objects("b", 641)
+    );
+    let (weighing, _) = weigh_tuple(&probe, usize::MAX);
+    assert!(weighing.refused, "4 × 25,000 reaches the limit");
+}
+
+/// A half the checker refuses on its own stops the weighing with that
+/// refusal before the other half is built: `X & Y & (A | undefined) & (B |
+/// undefined)` divides into `X & Y` (100) and a half of 317 × 316 =
+/// 100,172, which is refused, with no cross product built.
+#[test]
+fn a_half_refused_on_its_own_refuses_with_nothing_built() {
+    let probe = format!(
+        "[{}, {}, {} | undefined, {} | undefined]",
+        inline_objects("x", 10),
+        inline_objects("y", 10),
+        inline_objects("a", 317),
+        inline_objects("b", 316)
+    );
+    let (weighing, built) = weigh_tuple(&probe, usize::MAX);
+    assert!(weighing.refused, "the second half is over the limit");
+    assert_eq!(built, 0, "neither half is built");
+}
+
+/// Weighing pays for no product: an allowance far too small for the
+/// 99,856 combinations of `(A | undefined) & (B | undefined)` still weighs
+/// `1 & …` as accepted, complete, with nothing paid.
+#[test]
+fn weighing_a_divided_intersection_pays_for_no_product() {
+    let (weighing, _) = weigh_tuple(&one_and_316_with_undefined(), 10);
+    assert!(!weighing.refused, "1 × 99,857 is under the limit");
+    assert!(
+        weighing.exhausted.is_empty(),
+        "the weighing exhausts no rail: {:?}",
+        weighing.exhausted
+    );
+    assert_eq!(weighing.work, 0, "the weighing pays for no product");
 }

@@ -6657,6 +6657,12 @@ pub struct SemanticGraphStats {
     /// and its rollback. A step computed again — an evaluation restarted
     /// from its root, or re-entered with its answers cached — counts again.
     pub deferred_steps_evaluated: u64,
+    /// Cross products of an intersection over union arms built, by any
+    /// construction of it — a reduction, a distribution, a weighing: one
+    /// per product whose constituents are constructed, counted where its
+    /// product loop starts, outside every charge. The same product built
+    /// again for another reader counts again.
+    pub intersection_products_built: u64,
     // ── Path-length histogram percentiles (reservoir-sampled by the
     // `ProjectPath` builder).
     pub path_length_p50: u32,
@@ -13043,7 +13049,8 @@ mod tests {
     ///   substitute_memo_misses, evaluate_deferred_memo_hits,
     ///   evaluate_deferred_memo_misses, continuation_builds_begun,
     ///   continuation_stages_resumed, projection_hops_walked,
-    ///   admission_stages_walked, deferred_steps_evaluated.
+    ///   admission_stages_walked, deferred_steps_evaluated,
+    ///   intersection_products_built.
     /// - Exceptional-path: same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
@@ -13089,6 +13096,7 @@ mod tests {
             "relation_members_related",
             "admission_stages_walked",
             "deferred_steps_evaluated",
+            "intersection_products_built",
         ];
         for field in expected_to_fire {
             assert!(

@@ -1958,6 +1958,13 @@ impl SemanticGraphStore {
             .deferred_steps_evaluated
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped once per cross product an intersection construction
+    /// builds.
+    pub fn record_intersection_product_built(&self) {
+        self.stats
+            .intersection_products_built
+            .fetch_add(1, Ordering::Relaxed);
+    }
     pub fn record_conditional_decided(&self) {
         self.stats
             .conditional_decided_count

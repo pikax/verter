@@ -348,6 +348,13 @@ impl<M: ObserveExec> GraphIn<'_, M> {
             self.store.record_deferred_step();
         }
     }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_intersection_product_built(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_intersection_product_built();
+        }
+    }
     /// Record a path sample only for captured execution or test work accounting.
     #[inline(always)]
     pub fn record_path_length(self, length: u32) {
