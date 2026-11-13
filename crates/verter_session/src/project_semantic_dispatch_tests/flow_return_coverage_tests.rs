@@ -2323,7 +2323,7 @@ fn after_warm(
 /// `l0<T>`, a new instantiation of `l0` is read off its uninstantiated
 /// return.
 ///
-/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// Oracle (the pinned TypeScript checker, all four `strictNullChecks` x
 /// `noImplicitAny` settings alike): `w` is
 /// `{ v: boolean; f: <T>(a: T) => <T>(b: T) => T; }`.
 #[test]
@@ -2388,7 +2388,7 @@ fn a_nested_same_name_clause_declares_its_own_binders() {
 /// never a free `T` that merely shares its name, so a call infers through
 /// the bound.
 ///
-/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// Oracle (the pinned TypeScript checker, all four `strictNullChecks` x
 /// `noImplicitAny` settings alike): `r` is `number`.
 #[test]
 fn a_later_clause_bound_reads_the_clauses_own_earlier_binder() {
@@ -2524,7 +2524,7 @@ fn a_clause_constraint_reads_its_own_later_binder() {
 /// re-interned with its substituted bound, is the one the later default
 /// names, so a call that fixes the earlier one fixes the later.
 ///
-/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// Oracle (the pinned TypeScript checker, all four `strictNullChecks` x
 /// `noImplicitAny` settings alike): `w1` is `"s"`; `w` is `1`.
 #[test]
 fn an_instantiated_clause_keeps_later_bounds_on_its_rebound_binders() {
@@ -2609,7 +2609,7 @@ fn a_written_clause_binder_is_independent_of_position_and_path() {
 /// return and a call instantiates it, directly or through the function
 /// value whose type carries that return.
 ///
-/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// Oracle (the pinned TypeScript checker, all four `strictNullChecks` x
 /// `noImplicitAny` settings alike): `w` and `u` are `{ v: number; }`.
 #[test]
 fn a_body_derived_clause_keeps_the_name_keyed_binder_its_return_reads() {
@@ -2650,7 +2650,7 @@ fn a_body_derived_clause_keeps_the_name_keyed_binder_its_return_reads() {
 /// read off with `T` replaced everywhere, and `h` keeps its clause and its
 /// parameter.
 ///
-/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// Oracle (the pinned TypeScript checker, all four `strictNullChecks` x
 /// `noImplicitAny` settings alike): `w` is
 /// `{ x: number; h: <T>(y: T) => T; }`. Known gap, on main before the
 /// written-clause identity too: `h`'s body-derived return reads `number`,
@@ -2685,7 +2685,7 @@ fn a_root_function_returned_under_a_same_name_instantiation_keeps_its_clause() {
 /// declare distinct binders and are assignable both ways; two clauses of
 /// identical text share theirs.
 ///
-/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// Oracle (the pinned TypeScript checker, all four `strictNullChecks` x
 /// `noImplicitAny` settings alike): `w` is `{ v: boolean; id: F; }`, and
 /// each of `<T>(a: T) => T` and `<T>(b: T) => T` is assignable to the other.
 #[test]
