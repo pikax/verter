@@ -147,11 +147,23 @@ pub(crate) fn build_probe_candidate_list(
     let extensions = probe_extensions_list();
     let dotted_import_stem =
         apply_source_sibling && !extensions.iter().any(|extension| base.ends_with(extension));
-    let scanned_extensions = if !has_extension || dotted_import_stem {
-        extensions
-    } else {
-        &[]
-    };
+    let scans_extensions = !has_extension || dotted_import_stem;
+    const NONE: &[&str] = &[];
+    // A declaration-preferring request scans in TypeScript's two passes:
+    // every TypeScript and declaration file, the name's and then its
+    // directory's index, before any JavaScript one. `./lib` beside both
+    // `lib.d.ts` and `lib.js` names `lib.d.ts`. Any other request scans
+    // each list once, in its own order.
+    let [mut script_extensions, script_index, mut javascript_extensions, javascript_index] =
+        if prefers_declarations {
+            declaration_first_passes().each_ref().map(Vec::as_slice)
+        } else {
+            [extensions, PROBE_INDEX_FILES, NONE, NONE]
+        };
+    if !scans_extensions {
+        script_extensions = NONE;
+        javascript_extensions = NONE;
+    }
     let directory = base.trim_end_matches('/');
 
     source_exts
@@ -168,13 +180,54 @@ pub(crate) fn build_probe_candidate_list(
                 .into_iter()
                 .map(|base| spell([base, "", ""])),
         )
-        .chain(scanned_extensions.iter().map(|ext| spell([base, ext, ""])))
+        .chain(script_extensions.iter().map(|ext| spell([base, ext, ""])))
         .chain(
-            PROBE_INDEX_FILES
+            script_index
+                .iter()
+                .map(|index| spell([directory, "/", index])),
+        )
+        .chain(
+            javascript_extensions
+                .iter()
+                .map(|ext| spell([base, ext, ""])),
+        )
+        .chain(
+            javascript_index
                 .iter()
                 .map(|index| spell([directory, "/", index])),
         )
         .collect()
+}
+
+/// Whether `name` ends in a JavaScript extension.
+fn is_javascript_name(name: &str) -> bool {
+    [".js", ".jsx", ".mjs", ".cjs"]
+        .iter()
+        .any(|extension| name.ends_with(extension))
+}
+
+/// The probe extensions and index files in TypeScript's two resolution
+/// passes, each in its list's own order: the extensions without
+/// JavaScript, the index files without JavaScript, then the JavaScript
+/// extensions and index files.
+fn declaration_first_passes() -> &'static [Vec<&'static str>; 4] {
+    static CELL: std::sync::OnceLock<[Vec<&'static str>; 4]> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| {
+        let (javascript_extensions, script_extensions): (Vec<_>, Vec<_>) = probe_extensions_list()
+            .iter()
+            .copied()
+            .partition(|extension| is_javascript_name(extension));
+        let (javascript_index, script_index): (Vec<_>, Vec<_>) = PROBE_INDEX_FILES
+            .iter()
+            .copied()
+            .partition(|index| is_javascript_name(index));
+        [
+            script_extensions,
+            script_index,
+            javascript_extensions,
+            javascript_index,
+        ]
+    })
 }
 
 /// Ancestor-directory chain of `path`, spelled: the shared
