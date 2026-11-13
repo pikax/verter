@@ -3720,3 +3720,119 @@ fn project_reference_depth_budget_bounds_deep_chain() {
     );
     assert_eq!(resolved.resolution_kind, ResolutionKind::ProjectReference);
 }
+
+/// An extensionless type import whose name matches both a declaration and a
+/// JavaScript file resolves the declaration, with or without `allowJs`, as
+/// TypeScript's first resolution pass (TypeScript and declaration files
+/// before JavaScript ones) does: through a `paths` mapping, relative to the
+/// importer, and for a directory index declaration over a JavaScript file
+/// of the directory's name. A runtime import keeps the JavaScript file.
+#[test]
+fn extensionless_type_imports_resolve_declarations_before_javascript() {
+    for allow_js in [false, true] {
+        let mut configured = project(
+            "/workspace",
+            "/workspace",
+            Some("/workspace/tsconfig.json"),
+            ProjectMembership::MatchAll,
+        );
+        configured.compiler_options.base_url = Some("/workspace".to_string());
+        configured.compiler_options.allow_js = allow_js;
+        configured.compiler_options.paths.push((
+            "#app/*".to_string(),
+            vec!["node_modules/nuxt/dist/app/*".to_string()],
+        ));
+        let resolver = ModuleResolverCore::new(vec![configured]);
+        let reader = TestReader::with_files(&[
+            "/workspace/node_modules/nuxt/dist/app/nuxt.js",
+            "/workspace/node_modules/nuxt/dist/app/nuxt.d.ts",
+            "/workspace/lib/lib.js",
+            "/workspace/lib/lib.d.ts",
+            "/workspace/lib/dir.js",
+            "/workspace/lib/dir/index.d.ts",
+        ]);
+        let resolve = |specifier: &str, kind: ResolveRequestKind, phase: ResolvePhase| {
+            resolver
+                .resolve_with_reader(
+                    &reader,
+                    &ResolveRequest {
+                        importer_id: "/workspace/src/entry.ts".to_string(),
+                        specifier: specifier.to_string(),
+                        kind,
+                        phase,
+                    },
+                )
+                .map(|resolved| resolved.source_id)
+        };
+        for (specifier, declaration) in [
+            (
+                "#app/nuxt",
+                "/workspace/node_modules/nuxt/dist/app/nuxt.d.ts",
+            ),
+            ("../lib/lib", "/workspace/lib/lib.d.ts"),
+            ("../lib/dir", "/workspace/lib/dir/index.d.ts"),
+        ] {
+            for phase in [ResolvePhase::ProviderGraph, ResolvePhase::CodegenBlocker] {
+                assert_eq!(
+                    resolve(specifier, ResolveRequestKind::TypeImport, phase).as_deref(),
+                    Some(declaration),
+                    "{specifier} ({phase:?}, allowJs {allow_js})"
+                );
+            }
+        }
+        assert_eq!(
+            resolve(
+                "#app/nuxt",
+                ResolveRequestKind::EsmImport,
+                ResolvePhase::CodegenBlocker,
+            )
+            .as_deref(),
+            Some("/workspace/node_modules/nuxt/dist/app/nuxt.js"),
+            "a runtime import keeps the JavaScript file (allowJs {allow_js})"
+        );
+    }
+}
+
+/// A `paths` pattern for the exact specifier `vue` does not capture
+/// `vue/jsx-runtime`: with no pattern matching, resolution falls back to
+/// the `node_modules` walk from the importer, as TypeScript's does.
+#[test]
+fn an_exact_paths_pattern_leaves_a_subpath_to_node_modules() {
+    let mut configured = project(
+        "/workspace",
+        "/workspace",
+        Some("/workspace/tsconfig.json"),
+        ProjectMembership::MatchAll,
+    );
+    configured.compiler_options.base_url = Some("/workspace".to_string());
+    configured
+        .compiler_options
+        .paths
+        .push(("vue".to_string(), vec!["vendor/vue/index.d.ts".to_string()]));
+    let resolver = ModuleResolverCore::new(vec![configured]);
+    let reader = TestReader::with_files(&[
+        "/workspace/vendor/vue/index.d.ts",
+        "/workspace/node_modules/vue/jsx-runtime.d.ts",
+    ]);
+    let resolve = |specifier: &str| {
+        resolver
+            .resolve_with_reader(
+                &reader,
+                &ResolveRequest {
+                    importer_id: "/workspace/src/App.tsx".to_string(),
+                    specifier: specifier.to_string(),
+                    kind: ResolveRequestKind::TypeImport,
+                    phase: ResolvePhase::ProviderGraph,
+                },
+            )
+            .map(|resolved| resolved.source_id)
+    };
+    assert_eq!(
+        resolve("vue").as_deref(),
+        Some("/workspace/vendor/vue/index.d.ts")
+    );
+    assert_eq!(
+        resolve("vue/jsx-runtime").as_deref(),
+        Some("/workspace/node_modules/vue/jsx-runtime.d.ts")
+    );
+}
