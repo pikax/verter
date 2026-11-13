@@ -447,27 +447,30 @@ fn on_a_one_mebibyte_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'st
 /// `probe` over `source` displayed twice on one host: cold, then warm from
 /// what the cold evaluation kept.
 fn cold_and_warm_displays(source: &str, probe: &str) -> [String; 2] {
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    [(); 2].map(|()| display_on(&host, source, probe))
+}
+
+/// `probe` over `source` evaluated and displayed on `host`.
+fn display_on(host: &std::sync::Arc<crate::VerterHost>, source: &str, probe: &str) -> String {
     use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node;
     use verter_type_engine::semantic_query::{ProjectionMode, ProjectionReductionContext};
-    let host = super::checker_probe_lane_tests::default_probe_host();
-    [(); 2].map(|()| {
-        super::checker_probe_lane_tests::with_probe_on_host(
-            &host,
-            Default::default(),
-            source,
-            probe,
-            |dispatch, node| {
-                let value = dispatch
-                    .normalize_node_for_structural_fact_demand(
-                        node,
-                        ProjectionReductionContext::published(ProjectionMode::Expanded),
-                    )
-                    .into_usable_node()
-                    .expect("the probe answers");
-                render_node(dispatch, value, 0)
-            },
-        )
-    })
+    super::checker_probe_lane_tests::with_probe_on_host(
+        host,
+        Default::default(),
+        source,
+        probe,
+        |dispatch, node| {
+            let value = dispatch
+                .normalize_node_for_structural_fact_demand(
+                    node,
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                )
+                .into_usable_node()
+                .expect("the probe answers");
+            render_node(dispatch, value, 0)
+        },
+    )
 }
 
 /// Every row through 200 aliases, cold and warm alike, on the small stack:
@@ -716,33 +719,100 @@ fn conditional_chains_decide_cold_and_warm_on_a_small_stack() {
 
 /// A chain alternating a member projection, an instantiation, a flow return
 /// and a call at every level — `g<i>` returns `id(b["v"])` over
-/// `b: B<i-1>`, and `B<i>` projects `ReturnType<typeof g<i>>` — answers on
-/// a 1 MiB thread, cold and warm alike.
+/// `b: B<i-1>`, and `B<i>` projects `ReturnType<typeof g<i>>` — and its
+/// probe `ReturnType<typeof g<length>>`.
+fn alternating_chain(length: usize) -> (String, String) {
+    let mut source = String::from(
+        "declare function id<T>(x: T): T;\n\
+         function g0() { return \"ok\" as const; }\n\
+         type B0 = { v: ReturnType<typeof g0> };\n",
+    );
+    for level in 1..=length {
+        source.push_str(&format!(
+            "function g{level}(b: B{p}) {{ return id(b[\"v\"]); }}\n\
+             type B{level} = {{ v: ReturnType<typeof g{level}> }};\n",
+            p = level - 1
+        ));
+    }
+    (source, format!("ReturnType<typeof g{length}>"))
+}
+
+/// The stack the gate's 30-level alternating chain answers on: its
+/// measured need plus 16 KiB. Measured on the unoptimized test profile, a
+/// chain's stack need stops growing within ten levels — 30 and 150 levels
+/// need the same, between 996 and 1000 KiB — because a level is evaluated
+/// as its own demand, never nested natively under the level above it. With
+/// the need flat in the length, 16 KiB over it still fails a chain whose
+/// levels each grow the stack by more than about half a KiB, while an
+/// unrelated change to a frame's size does not break the gate.
+const ALTERNATING_CHAIN_STACK: usize = 1016 << 10;
+
+/// `alternating_chain(length)` displayed cold and then warm on one host,
+/// on the calling thread, with the work the cold display spent.
+fn alternating_chain_answers(length: usize) -> ([String; 2], Vec<(&'static str, u64)>) {
+    let (source, probe) = alternating_chain(length);
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let (cold, work) =
+        crate::scale_gate::measured_work(&host, || display_on(&host, &source, &probe));
+    let warm = display_on(&host, &source, &probe);
+    ([cold, warm], work)
+}
+
+/// The alternating chain is longer than Verter's connected query depth and
+/// answers the checker's `"ok"`, cold and warm alike.
+#[track_caller]
+fn assert_alternating_chain_answers(length: usize, displays: &[String; 2]) {
+    use super::connected_demand::MAX_CONNECTED_QUERY_DEPTH;
+    assert!(
+        length > usize::from(MAX_CONNECTED_QUERY_DEPTH),
+        "a {length}-level chain is past the connected query depth {MAX_CONNECTED_QUERY_DEPTH}"
+    );
+    assert_eq!(
+        displays[0], "\"ok\"",
+        "the {length}-level chain answers the checker's `\"ok\"` cold"
+    );
+    assert_eq!(displays[1], displays[0], "cold and warm answer alike");
+}
+
+/// Alternating chains of 4, 6 and 8 levels: every level costs the same
+/// work. Run on the calling thread.
+fn alternating_chain_work() -> crate::scale_gate::PolynomialWork<'static> {
+    const SIZES: [usize; 3] = [4, 6, 8];
+    let work = SIZES.map(|length| alternating_chain_answers(length).1);
+    crate::scale_gate::affine(
+        "alternating chains",
+        SIZES,
+        crate::scale_gate::counters(&work),
+    )
+}
+
+/// `length` levels of the alternating chain answer cold and warm alike, on
+/// the calling thread, spending exactly
+/// the work every level adds on [`alternating_chain_work`]'s line.
+fn assert_alternating_chain_answers_on_the_line(length: usize) {
+    let line = alternating_chain_work();
+    let (displays, work) = alternating_chain_answers(length);
+    assert_alternating_chain_answers(length, &displays);
+    assert_eq!(
+        work,
+        line.all_at(length),
+        "the {length}-level chain costs the work of 4, 6 and 8 levels extended to it"
+    );
+}
+
+/// A 30-level alternating chain, longer than Verter's connected query
+/// depth, answers cold and warm alike on [`ALTERNATING_CHAIN_STACK`] with
+/// exactly the work that chains of 4, 6 and 8 levels extend to 30: the gate
+/// version of the 150-level test in the nightly scale tier.
 ///
-/// TypeScript 7.0.2: `ReturnType<typeof g150>` is `"ok"`.
+/// TypeScript 7.0.2: `ReturnType<typeof g<n>>` is `"ok"`.
 #[test]
-fn alternating_projection_instantiation_flow_and_call_chains_answer_on_a_one_mebibyte_stack() {
+fn alternating_projection_instantiation_flow_and_call_chains_answer_past_the_connected_query_depth()
+{
     in_a_fresh_process(test_path!(), || {
-        const LENGTH: usize = 150;
-        let mut source = String::from(
-            "declare function id<T>(x: T): T;\n\
-             function g0() { return \"ok\" as const; }\n\
-             type B0 = { v: ReturnType<typeof g0> };\n",
-        );
-        for level in 1..=LENGTH {
-            source.push_str(&format!(
-                "function g{level}(b: B{p}) {{ return id(b[\"v\"]); }}\n\
-                 type B{level} = {{ v: ReturnType<typeof g{level}> }};\n",
-                p = level - 1
-            ));
-        }
-        let probe = format!("ReturnType<typeof g{LENGTH}>");
-        let displays = on_a_one_mebibyte_stack(move || cold_and_warm_displays(&source, &probe));
-        assert_eq!(
-            displays[0], "\"ok\"",
-            "the chain answers the checker's `\"ok\"` cold"
-        );
-        assert_eq!(displays[1], displays[0], "cold and warm answer alike");
+        on_a_stack_of(ALTERNATING_CHAIN_STACK, || {
+            assert_alternating_chain_answers_on_the_line(30);
+        });
     });
 }
 
@@ -1150,37 +1220,60 @@ fn a_typeof_over_an_alias_chain_reads_each_link_a_bounded_number_of_times() {
     );
 }
 
+/// The stack the gate's deep chains share one thread on: their measured
+/// need plus 16 KiB. Measured on the unoptimized test profile, the 101-alias,
+/// 97- and 168-deep chains and the full-size 200-alias, 97- and 500-deep
+/// chains alike need between 632 and 636 KiB, so the need is flat in the
+/// chains' length, and 16 KiB over it still fails chains whose levels each
+/// grow the stack by more than a tenth of a KiB, while an unrelated change
+/// to a frame's size does not break the gate.
+const DEEP_CHAINS_GATE_STACK: usize = 652 << 10;
+
 /// In a process of its own — nothing evaluated before it, on any stack —
-/// one small-stack thread evaluates a 200-alias chain, then conditional
-/// arguments nested 97 deep and 500 deep, displays each answer, and drops
+/// one small-stack thread evaluates a 101-alias chain, then conditional
+/// arguments nested 97 deep and 168 deep, displays each answer, and drops
 /// every host and dispatcher it built there: the three chains one after
-/// another on the thread the earlier ones left behind.
+/// another on the thread the earlier ones left behind. The gate version of
+/// the 200-alias, 97- and 500-deep test in the nightly scale tier; 101 and
+/// 168 are past the checker's instantiation depth of 100.
 ///
 /// TypeScript 7.0.2, `strict`: `typeof c` and `ReturnType<typeof gj>` over
-/// the 200-alias chain are `"ok" | undefined`; `E97<"ok">` is `"ok"`;
-/// `E500<"ok">` is TS2589, where Verter's full answer is `"ok"`.
+/// the 101-alias chain are `"ok" | undefined`; `E97<"ok">` is `"ok"`;
+/// `E168<"ok">` is TS2589, where Verter's full answer is `"ok"`.
 #[test]
 fn a_process_of_its_own_evaluates_deep_chains_on_one_small_stack_thread() {
     in_a_fresh_process(test_path!(), || {
-        on_a_small_stack(|| {
-            let mismatches = evaluated_mismatches(&alias_chain(200), ALIAS_CHAIN_ROWS);
-            assert_eq!(mismatches, Vec::<String>::new(), "a chain of 200 aliases");
-            for length in [97, 500] {
-                let shown = displayed_in(
-                    None,
-                    SETTINGS[0],
-                    conditional_argument_chain(length),
-                    &format!("E{length}<\"ok\">"),
-                    "\"ok\"",
-                )
-                .unwrap_or_else(|shown| panic!("E{length}<\"ok\"> displays as {shown}"));
-                assert!(
-                    shown.contains("ok"),
-                    "E{length}<\"ok\"> displays as {shown}"
-                );
-            }
+        on_a_stack_of(DEEP_CHAINS_GATE_STACK, || {
+            assert_deep_chains_on_one_thread(101, [97, 168]);
         });
     });
+}
+
+/// One small-stack thread evaluates an `aliases`-alias chain, then
+/// conditional arguments nested to each of `conditional`, displays each
+/// answer, and drops every host and dispatcher it built there: the chains
+/// one after another on the thread the earlier ones left behind.
+fn assert_deep_chains_on_one_thread(aliases: usize, conditional: [usize; 2]) {
+    let mismatches = evaluated_mismatches(&alias_chain(aliases), ALIAS_CHAIN_ROWS);
+    assert_eq!(
+        mismatches,
+        Vec::<String>::new(),
+        "a chain of {aliases} aliases"
+    );
+    for length in conditional {
+        let shown = displayed_in(
+            None,
+            SETTINGS[0],
+            conditional_argument_chain(length),
+            &format!("E{length}<\"ok\">"),
+            "\"ok\"",
+        )
+        .unwrap_or_else(|shown| panic!("E{length}<\"ok\"> displays as {shown}"));
+        assert!(
+            shown.contains("ok"),
+            "E{length}<\"ok\"> displays as {shown}"
+        );
+    }
 }
 
 /// Whether Verter's instantiation budget is reached depends on the chain
@@ -1582,6 +1675,33 @@ mod nightly_scale {
         in_a_fresh_process(test_path!(), || {
             let displays = on_a_one_mebibyte_stack(|| signature_chain_displays(500));
             assert_eq!(displays[0], displays[1], "cold and warm answer alike");
+        });
+    }
+
+    /// The full-size version of
+    /// [`super::alternating_projection_instantiation_flow_and_call_chains_answer_past_the_connected_query_depth`]:
+    /// a 150-level chain answers cold and warm alike on a 1 MiB thread,
+    /// with exactly the work chains of 4, 6 and 8 levels extend to 150.
+    ///
+    /// TypeScript 7.0.2: `ReturnType<typeof g150>` is `"ok"`.
+    #[test]
+    fn alternating_projection_instantiation_flow_and_call_chains_answer_on_a_one_mebibyte_stack() {
+        in_a_fresh_process(test_path!(), || {
+            on_a_one_mebibyte_stack(|| assert_alternating_chain_answers_on_the_line(150));
+        });
+    }
+
+    /// The full-size version of
+    /// [`super::a_process_of_its_own_evaluates_deep_chains_on_one_small_stack_thread`]:
+    /// a 200-alias chain, then conditional arguments nested 97 and 500 deep.
+    ///
+    /// TypeScript 7.0.2, `strict`: `typeof c` and `ReturnType<typeof gj>`
+    /// over the 200-alias chain are `"ok" | undefined`; `E97<"ok">` is
+    /// `"ok"`; `E500<"ok">` is TS2589, where Verter's full answer is `"ok"`.
+    #[test]
+    fn a_process_of_its_own_evaluates_200_aliases_and_500_conditional_arguments() {
+        in_a_fresh_process(test_path!(), || {
+            on_a_small_stack(|| assert_deep_chains_on_one_thread(200, [97, 500]));
         });
     }
 }
