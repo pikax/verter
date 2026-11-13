@@ -291,6 +291,12 @@ impl VerterHost {
         let selector = admitted_selector_echo(request_selector, admitted);
 
         let resolved_selector = self.resolve_component_selector(&selector, admitted);
+        // The fact every answer to this request names: the same query
+        // identity its issued member references carry.
+        let fact_query = crate::typeinfo::node_refs::component_facets_query_digest(
+            &resolved_selector,
+            requested,
+        );
 
         // A NAMED-export selector must name a real EXPORT of the owner. The
         // export table is authoritative (a private local that is not exported is
@@ -361,13 +367,15 @@ impl VerterHost {
                 && classified.carrier_language_id()
                     == registration.descriptor.carrier_language.as_ref();
             if !is_component_carrier {
-                let encoded = encode_framework_surfaces_with_unsupported_message(
+                let mut encoded = encode_framework_surfaces_with_unsupported_message(
                     &NormalizedSurfaces::default(),
                     requested,
                     &[] as &[FrameworkSurfaceKind],
                     "canonical is not a component carrier for this adapter \
                      (no component surface to resolve)",
                 );
+                encoded.graph.fact_identity =
+                    Some(crate::typeinfo::node_refs::fact_identity(fact_query, None));
                 let payload = framework_payload(&encoded.surfaces);
                 let response = framework_surface_response(
                     framework_request.schema_version,
@@ -456,9 +464,18 @@ impl VerterHost {
                                 requested,
                                 members,
                             );
-                            if let Ok(issued) = issued {
-                                publish_member_node_refs(&mut encoded.graph, issued);
-                            }
+                            // Every issued member shares the one committed basis;
+                            // an answer that addressed no member committed none.
+                            let basis = match issued {
+                                Ok(issued) => {
+                                    let basis = issued.first().map(|(_, key)| key.basis);
+                                    publish_member_node_refs(&mut encoded.graph, issued);
+                                    basis
+                                }
+                                Err(_) => None,
+                            };
+                            encoded.graph.fact_identity =
+                                Some(crate::typeinfo::node_refs::fact_identity(fact_query, basis));
                             let payload = framework_payload(&encoded.surfaces);
                             let response = framework_surface_response(
                                 framework_request.schema_version,
@@ -496,7 +513,7 @@ impl VerterHost {
         // A Deferred adapter's per-kind UNSUPPORTED diagnostic names the
         // intermediate state explicitly — the surfaces are not yet
         // registered, distinct from a supported adapter's per-kind unsupport.
-        let encoded = match &registration.surface {
+        let mut encoded = match &registration.surface {
             SurfaceRegistration::Deferred => encode_framework_surfaces_with_unsupported_message(
                 &normalized,
                 requested,
@@ -507,6 +524,8 @@ impl VerterHost {
                 encode_framework_surfaces(&normalized, requested, supported)
             }
         };
+        encoded.graph.fact_identity =
+            Some(crate::typeinfo::node_refs::fact_identity(fact_query, None));
 
         let payload = framework_payload(&encoded.surfaces);
         let response = framework_surface_response(

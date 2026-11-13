@@ -250,7 +250,7 @@ impl<'a> GraphExporter<'a> {
         } = self;
         SemanticTypeGraph {
             schema_version: TYPEINFO_GRAPH_SCHEMA_VERSION,
-            query: None,
+            fact_identity: None,
             nodes,
             symbols,
             signatures,

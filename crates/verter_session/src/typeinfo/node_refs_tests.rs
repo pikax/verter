@@ -199,7 +199,9 @@ fn exported(
 fn named_graph_issuance_uses_one_view() {
     let (workspace, host) = project_host();
     let mut answered = answered_graph(&host, "A");
-    answered.query = None;
+    // The replayed export below is the bare graph; the answer also names
+    // its fact.
+    answered.fact_identity = None;
     let keys = issued_keys_for_tests(&host);
     assert_eq!(keys.len(), 1, "one declaration root is issued");
     let key = keys[0];
@@ -340,7 +342,12 @@ fn record(basis: &NativeFactBasis, name: &str, entries: usize) -> (NativeFactRec
         effective_mode: ProjectionMode::Expanded,
         demand: ReductionDemand::Published,
     };
-    let query = resolve_symbol_query_identity(&locator);
+    let query = resolve_symbol_query_identity(
+        &locator.entry_canonical,
+        &locator.requested_name,
+        locator.effective_mode,
+        locator.demand,
+    );
     let root = IssuedRefKey {
         query: *query.digest().as_bytes(),
         basis: *basis.basis().id().digest().as_bytes(),
@@ -1019,12 +1026,13 @@ fn expand_error(
 #[test]
 fn expand_around_replays_an_issued_declaration_root() {
     let (_workspace, host) = project_host();
-    let mut answered = answered_graph(&host, "A");
+    let answered = answered_graph(&host, "A");
     let node_ref = root_node_ref(&answered).expect("the answer publishes its root reference");
 
     let expanded = expanded_graph(&host, node_ref.clone());
     assert_eq!(root_node_ref(&expanded), Some(node_ref));
-    answered.query = None;
+    // Equal whole, fact identity included: the expansion answers the
+    // reference's own fact under its committed basis.
     assert_eq!(
         expanded, answered,
         "the expansion is the answer's own root graph"
@@ -1445,4 +1453,168 @@ fn svelte_callback_event_exports_its_replayable_payload_tuple() {
     let expanded = expand_in(&host, node_ref, wire::ProjectionMode::Navigate)
         .unwrap_or_else(|error| panic!("the payload expands, got {error:?}"));
     assert_eq!(tuple_at(&expanded, expanded.root_ids[0]).elements.len(), 1);
+}
+
+/// The fact identity a graph answer carries.
+fn fact_of(graph: &SemanticTypeGraph) -> &wire::FactIdentity {
+    graph
+        .fact_identity
+        .as_ref()
+        .expect("every graph answer names its fact")
+}
+
+/// A resolve-symbol graph, an expand-around graph and a framework surface
+/// each name the fact their published references name: the same query
+/// identity digest and committed basis digest.
+#[test]
+fn a_graph_answer_names_the_fact_its_node_refs_name() {
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
+    let names_its_reference = |graph: &SemanticTypeGraph, node_ref: &wire::NodeRef, what: &str| {
+        let fact = fact_of(graph);
+        assert_eq!(
+            fact.query_identity_digest, node_ref.query_identity_digest,
+            "{what} names its reference's query"
+        );
+        assert_eq!(
+            fact.input_basis_digest, node_ref.input_basis_digest,
+            "{what} names its reference's basis"
+        );
+    };
+
+    let (_workspace, host) = project_host();
+    let answered = answered_graph(&host, "A");
+    let node_ref = root_node_ref(&answered).expect("the answer publishes its root reference");
+    names_its_reference(&answered, &node_ref, "a resolve-symbol graph");
+    let expanded = expanded_graph(&host, node_ref.clone());
+    names_its_reference(&expanded, &node_ref, "an expand-around graph");
+
+    let vue = vue_host();
+    let payload = framework_payload(&vue, SFC, "vue", &[FrameworkSurfaceKind::Props]);
+    let graph = payload.graph.as_ref().expect("the surface graph");
+    let member_ref = graph
+        .node_id_map
+        .iter()
+        .find_map(|entry| entry.node_ref.clone())
+        .expect("the surface publishes an issued member reference");
+    names_its_reference(graph, &member_ref, "a framework surface");
+}
+
+/// The query digest of the answer to `request`.
+fn fact_query_of(host: &VerterHost, request: wire::ResolveSymbolGraphRequest) -> Vec<u8> {
+    let mut wrapped = envelope(&request.name);
+    wrapped.payload = Some(type_info_graph_request::Payload::ResolveSymbol(request));
+    let (response, _) = host.resolve_symbol_graph_with_audit(wrapped).into_parts();
+    match response.expect("the graph arm").kind {
+        Some(type_info_graph_response::Kind::Graph(graph)) => {
+            fact_of(&graph).query_identity_digest.clone()
+        }
+        other => panic!("expected a graph answer, got {other:?}"),
+    }
+}
+
+/// The resolve-symbol request `envelope` builds for `name`.
+fn resolve_request(name: &str) -> wire::ResolveSymbolGraphRequest {
+    match envelope(name).payload {
+        Some(type_info_graph_request::Payload::ResolveSymbol(resolve)) => resolve,
+        other => panic!("expected a resolve-symbol payload, got {other:?}"),
+    }
+}
+
+/// Presentation and export options shape only the exported answer, so
+/// they never change the fact a request asks; its mode and its name do.
+#[test]
+fn presentation_and_export_options_do_not_change_the_fact_identity() {
+    let (_workspace, host) = project_host();
+    let base = fact_query_of(&host, resolve_request("A"));
+    assert_eq!(base.len(), 32);
+
+    let mut display = resolve_request("A");
+    display.display_policy = Some(wire::DisplayPolicy {
+        qualification: wire::DisplayQualification::Short as i32,
+        branding: wire::DisplayBranding::Off as i32,
+        budgets: Some(wire::DisplayBudgets {
+            max_string_length: 64,
+            max_depth: 2,
+        }),
+    });
+    let mut root_only = resolve_request("A");
+    root_only.closure = Some(wire::ClosurePolicy {
+        kind: Some(graph_closure_policy::Kind::RootOnly(
+            wire::ClosureRootOnly {},
+        )),
+    });
+    let mut expanded = resolve_request("A");
+    expanded.closure = Some(wire::ClosurePolicy {
+        kind: Some(graph_closure_policy::Kind::Expanded(
+            wire::ClosureExpanded {
+                node_budget: 64,
+                depth_budget: 4,
+            },
+        )),
+    });
+    let mut diagnostics = resolve_request("A");
+    diagnostics.include_diagnostics = true;
+    for (what, request) in [
+        ("another display policy", display),
+        ("a root-only closure", root_only),
+        ("an expanded closure", expanded),
+        ("diagnostics included", diagnostics),
+    ] {
+        assert_eq!(
+            fact_query_of(&host, request),
+            base,
+            "{what} does not change the fact identity"
+        );
+    }
+
+    let mut navigate = resolve_request("A");
+    navigate.context = Some(wire::ProjectionReductionContext {
+        mode: wire::ProjectionMode::Navigate as i32,
+        demand: wire::ReductionDemand::Published as i32,
+    });
+    assert_ne!(
+        fact_query_of(&host, navigate),
+        base,
+        "another mode is another fact"
+    );
+    assert_ne!(
+        fact_query_of(&host, resolve_request("DoesNotExist")),
+        base,
+        "another name is another fact"
+    );
+}
+
+/// A miss names the fact it was asked, the same digest a hit of that
+/// request would carry, and carries no basis: it issued no reference.
+#[test]
+fn a_miss_names_its_fact_and_carries_no_basis() {
+    let (_workspace, host) = project_host();
+    let answered = answered_graph(&host, "A");
+    assert_eq!(
+        fact_of(&answered).query_identity_digest,
+        resolve_symbol_query_digest(ENTRY, "A", ProjectionMode::Expanded).to_vec(),
+        "a hit names the digest of its request"
+    );
+
+    let missed = answered_graph(&host, "DoesNotExist");
+    let root = &missed.nodes[missed.root_ids[0] as usize];
+    assert!(
+        matches!(
+            root.kind.as_ref(),
+            Some(verter_protocol::verter::v1::graph_type_node::Kind::Opaque(
+                _
+            ))
+        ),
+        "a miss answers the opaque miss root"
+    );
+    let fact = fact_of(&missed);
+    assert_eq!(
+        fact.query_identity_digest,
+        resolve_symbol_query_digest(ENTRY, "DoesNotExist", ProjectionMode::Expanded).to_vec(),
+        "a miss names the digest of its request"
+    );
+    assert!(
+        fact.input_basis_digest.is_empty(),
+        "a miss commits no basis"
+    );
 }

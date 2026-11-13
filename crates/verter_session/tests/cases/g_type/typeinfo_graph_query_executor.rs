@@ -115,9 +115,12 @@ fn resolve_symbol_graph_answers_the_bounded_graph_arm() {
     };
     assert_eq!(graph.schema_version, TYPEINFO_GRAPH_SCHEMA_VERSION);
 
-    // Query identity echoes the operation that produced the graph.
-    let query = graph.query.as_ref().expect("query identity present");
-    assert_eq!(query.operation, Operation::ResolveSymbol as i32);
+    // The graph names the fact it answers by its 32-byte query digest.
+    let fact = graph
+        .fact_identity
+        .as_ref()
+        .expect("the graph names its fact");
+    assert_eq!(fact.query_identity_digest.len(), 32);
 
     // The resolved terminal type is the exported root: `{ msg: string }`.
     let root_id = graph.root_ids.first().copied().expect("one root");

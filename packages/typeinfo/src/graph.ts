@@ -44,7 +44,7 @@ import {
   type GraphNodeIdMapEntry,
   type GraphOriginEdge,
   type GraphNodeStatus,
-  type GraphQueryIdentity,
+  type GraphFactIdentity,
   type GraphRelationProofEntry,
   type GraphSignature,
   type GraphSymbolIdMapEntry,
@@ -206,8 +206,9 @@ function closureInit(closure: GraphClosureSpec): GraphClosurePolicy {
 /**
  * The decoded read-only view over a wire `SemanticTypeGraph`. Carries the
  * COMPLETE graph — every identity, provenance, and completeness field the
- * wire declares: the query identity (`query`), origin `edges`, per-node
- * `exactness`, `diagnostics`, the provenance maps (`nodeIdMap` /
+ * wire declares: the fact identity (`factIdentity`: the query identity and
+ * committed input basis digests the graph's references name), origin
+ * `edges`, per-node `exactness`, `diagnostics`, the provenance maps (`nodeIdMap` /
  * `symbolIdMap`; their identity carriers are populated only when the
  * request asked for provenance, while a `nodeIdMap` entry's schema-12
  * `nodeRef`, the host-issued address of an exactly replayable node such as
@@ -216,7 +217,7 @@ function closureInit(closure: GraphClosureSpec): GraphClosurePolicy {
  */
 export interface SemanticTypeGraphView {
   readonly schemaVersion: number;
-  readonly query: GraphQueryIdentity | undefined;
+  readonly factIdentity: GraphFactIdentity | undefined;
   readonly strings: readonly string[];
   readonly nodes: readonly GraphTypeNode[];
   readonly symbols: readonly GraphSymbolNode[];
@@ -251,7 +252,7 @@ export function decodeTypeInfoResult(bytes: Uint8Array): TypeInfoResult {
     const graph = kind.value as SemanticTypeGraph;
     const view: SemanticTypeGraphView = {
       schemaVersion: graph.schemaVersion,
-      query: graph.query,
+      factIdentity: graph.factIdentity,
       strings: graph.strings?.entries ?? [],
       nodes: graph.nodes,
       symbols: graph.symbols,

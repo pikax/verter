@@ -114,9 +114,13 @@ message SymbolEntryListDto {
 // SemanticTypeGraph — top-level wire envelope for every typeinfo
 // graph query response. Producers MUST set schema_version.
 message SemanticTypeGraph {
+  // Tag 2 / name `query` held the retired request echo. Reserved so the
+  // tag and name are never reused; a graph encoded with it decodes with
+  // `fact_identity` absent.
+  reserved 2;
+  reserved "query";
   // Bumped on incompatible additive changes (e.g., new oneof arms).
   uint32 schema_version = 1;
-  GraphQueryIdentity query = 2;
   // Indexed by GraphTypeNodeId.
   repeated GraphTypeNode nodes = 3;
   // Indexed by GraphSymbolId.
@@ -147,43 +151,21 @@ message SemanticTypeGraph {
   // arm is reserved at `GraphTypeNode` scope). A consumer that ignores
   // the new field keeps working.
   repeated GraphRelationProofEntry relation_proofs = 13;
+  // The fact this graph answers: the same query identity and committed
+  // input basis its issued `NodeRef`s name.
+  GraphFactIdentity fact_identity = 14;
 }
 
-// GraphQueryIdentity — identifies the query that produced the snapshot.
-message GraphQueryIdentity {
-  // Tag 2 / name `roots` held the retired env-LESS decl-slot roots
-  // carrier. The query-identity roots now ride the env-BEARING
-  // `GraphResolvedDeclSlotIdentity` on `resolved_roots` (tag 18). The
-  // tag and name are reserved so off-tree clients that decoded the
-  // original schema keep round-tripping the retired slot as an unknown
-  // field, and so neither the tag nor the name is ever reused. The
-  // directive lives at the enclosing message level because proto3
-  // forbids `reserved` inside an `oneof` block.
-  reserved 2;
-  reserved "roots";
-  GraphOperation operation = 1;
-  repeated GraphTypePathSegment path = 3;
-  GraphClosurePolicy closure = 4;
-  GraphProjectionReductionContext context = 5;
-  GraphDisplayPolicy display_policy = 6;
-  repeated GraphSubstitutionBinding substitutions = 7;
-  // Hash of the solver options applied to this query — included in
-  // the query identity so distinct options bypass the warm cache
-  // without colliding on the same identity slot.
-  bytes solver_options_hash = 8;
-  bytes parse_env_hash = 9;
-  bytes resolve_env_hash = 10;
-  bytes type_env_hash = 11;
-  bytes lib_env_hash = 12;
-  bytes project_identity = 13;
-  uint32 resolver_version = 14;
-  bool include_provenance = 15;
-  bool include_diagnostics = 16;
-  repeated GraphProjectionKind include_projection = 17;
-  // Env-BEARING query-identity roots. Supersedes the retired env-less
-  // `roots` (tag 2). Each carries the stable `whole_hash` so the query
-  // identity is rooted to the exact content version it resolved.
-  repeated GraphResolvedDeclSlotIdentity resolved_roots = 18;
+// The identity of the fact a graph answers. Each present digest is
+// exactly 32 bytes. Presentation and export options (display policy,
+// closure, include flags) never enter it.
+message GraphFactIdentity {
+  // The fact's descriptor-specific query identity digest.
+  bytes query_identity_digest = 1;
+  // The committed native input basis the answer's references are admitted
+  // under. Empty when the answer committed none (a miss, or no reference
+  // issued).
+  bytes input_basis_digest = 2;
 }
 
 // GraphTypeNode — the closed taxonomy of typeinfo graph nodes. The
@@ -873,12 +855,6 @@ message GraphDisplayPolicy {
 message GraphDisplayBudgets {
   uint32 max_string_length = 1;
   uint32 max_depth = 2;
-}
-
-message GraphSubstitutionBinding {
-  uint32 type_parameter_symbol_id = 1;
-  uint32 type_argument_node_id = 2;
-  GraphSubstitutionTag tag = 3;
 }
 
 // ----------- String table -----------

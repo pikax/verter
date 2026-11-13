@@ -10,7 +10,7 @@
 //!
 //! - the fact's descriptor-specific [`QueryIdentity`], minted from the
 //!   request's semantic material (selector subject, effective mode and
-//!   reduction demand), never from the wire query echo;
+//!   reduction demand), never from presentation or export options;
 //! - the committed [`NativeFactBasis`] the fact was observed under;
 //! - the digest of the producer's declaration slot;
 //! - for a nested position, the digest of its typed role (absent for a
@@ -32,6 +32,11 @@
 //! current view, and [`replay_issued_in_view`] replays the locator through
 //! the shared engine under that view. The expand-around executor
 //! (`graph_query.rs`) is their production caller.
+//!
+//! Every graph answer names the fact it answers on the wire as
+//! `SemanticTypeGraph.fact_identity` ([`fact_identity`]): the same query
+//! identity digest its references carry, and the committed basis digest
+//! when the answer committed one.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -70,6 +75,10 @@ pub(crate) enum ResolveSymbolFact {}
 /// The resolve-symbol descriptor's query-kind domain.
 const RESOLVE_SYMBOL_QUERY_DOMAIN: &str = "verter.typeinfo.fact.resolve_symbol.v1";
 
+/// The reduction demand every resolve-symbol fact is resolved and
+/// identified under.
+pub(crate) const RESOLVE_SYMBOL_DEMAND: ReductionDemand = ReductionDemand::Published;
+
 /// The whole tuple a reference presents. Every component is a 32-byte
 /// digest; `role` is absent exactly for a declaration root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -94,6 +103,11 @@ impl IssuedRefKey {
             decl_slot_digest: self.slot.to_vec(),
             role_digest: self.role.map(|role| role.to_vec()).unwrap_or_default(),
         }
+    }
+
+    /// The fact this key's answer names: its query and committed basis.
+    pub(crate) fn fact_identity(self) -> verter_protocol::typeinfo::graph::FactIdentity {
+        fact_identity(self.query, Some(self.basis))
     }
 
     /// The lookup key a presented wire reference names, or `None` when a
@@ -426,17 +440,22 @@ impl FactQuery {
 /// the export budgets, the display policy, the diagnostics and provenance
 /// flags and the wire version shape only the exported answer, so they are
 /// excluded: the same declaration fact is the same question under each.
-struct ResolveSymbolQuery<'a>(&'a DeclReplayLocator);
+struct ResolveSymbolQuery<'a> {
+    entry_canonical: &'a str,
+    requested_name: &'a str,
+    effective_mode: ProjectionMode,
+    demand: ReductionDemand,
+}
 
 impl CanonicalEncode for ResolveSymbolQuery<'_> {
     const DOMAIN_TAG: &'static str = "verter.typeinfo.fact.resolve_symbol.arguments.v1";
 
     fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
         encoder
-            .field_str(1, &self.0.entry_canonical)
-            .field_str(2, &self.0.requested_name)
-            .field_enum_discriminant(3, projection_mode_tag(self.0.effective_mode))
-            .field_enum_discriminant(4, reduction_demand_tag(self.0.demand));
+            .field_str(1, self.entry_canonical)
+            .field_str(2, self.requested_name)
+            .field_enum_discriminant(3, projection_mode_tag(self.effective_mode))
+            .field_enum_discriminant(4, reduction_demand_tag(self.demand));
     }
 }
 
@@ -471,15 +490,58 @@ const fn reduction_demand_tag(demand: ReductionDemand) -> u32 {
     }
 }
 
-/// The resolve-symbol query identity of `locator`'s request. It observes
-/// no framework profile.
-fn resolve_symbol_query_identity(locator: &DeclReplayLocator) -> QueryIdentity<ResolveSymbolFact> {
+/// The resolve-symbol query identity of a request for `requested_name` in
+/// `entry_canonical`. All four inputs are known before resolution, so a hit
+/// and a miss of the same request share it. It observes no framework
+/// profile.
+fn resolve_symbol_query_identity(
+    entry_canonical: &str,
+    requested_name: &str,
+    effective_mode: ProjectionMode,
+    demand: ReductionDemand,
+) -> QueryIdentity<ResolveSymbolFact> {
     QueryIdentity::compose(
         RESOLVE_SYMBOL_QUERY_DOMAIN,
-        ResolveSymbolQuery(locator).canonical_digest(),
+        ResolveSymbolQuery {
+            entry_canonical,
+            requested_name,
+            effective_mode,
+            demand,
+        }
+        .canonical_digest(),
         &[],
         &ResultContractId::from_canonical(&ResolveSymbolResultContract),
     )
+}
+
+/// The query identity digest of a resolve-symbol request, under the
+/// resolve-symbol demand. Equal to the digest the request's issued
+/// reference carries.
+pub(crate) fn resolve_symbol_query_digest(
+    entry_canonical: &str,
+    requested_name: &str,
+    effective_mode: ProjectionMode,
+) -> [u8; 32] {
+    FactQuery::ResolveSymbol(resolve_symbol_query_identity(
+        entry_canonical,
+        requested_name,
+        effective_mode,
+        RESOLVE_SYMBOL_DEMAND,
+    ))
+    .digest()
+}
+
+/// The wire identity of the fact a graph answers: its query identity
+/// digest, and the committed basis digest when the answer committed one
+/// (empty otherwise).
+pub(crate) fn fact_identity(
+    query: [u8; 32],
+    basis: Option<[u8; 32]>,
+) -> verter_protocol::typeinfo::graph::FactIdentity {
+    verter_protocol::typeinfo::graph::FactIdentity {
+        query_identity_digest: query.to_vec(),
+        input_basis_digest: basis.map(|basis| basis.to_vec()).unwrap_or_default(),
+    }
 }
 
 /// [`QueryIdentity`] marker of the component-facets fact descriptor.
@@ -535,6 +597,15 @@ impl CanonicalEncode for ComponentFacetsResultContract {
     fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
         encoder.field_str(1, "framework-surface.member-values.bounded");
     }
+}
+
+/// The query identity digest of one component-facets request. Equal to
+/// the digest its issued member references carry.
+pub(crate) fn component_facets_query_digest(
+    selector: &crate::typeinfo::framework_surface::plan::ResolvedComponentSelector,
+    requested: &[verter_protocol::typeinfo::graph::FrameworkSurfaceKind],
+) -> [u8; 32] {
+    FactQuery::ComponentFacets(component_facets_query_identity(selector, requested)).digest()
 }
 
 /// The component-facets query identity of one request.
@@ -853,7 +924,12 @@ fn commit_and_register(
     trace: NativeTrace,
     locator: DeclReplayLocator,
 ) -> Result<IssuedRefKey, IssueRefusal> {
-    let query = FactQuery::ResolveSymbol(resolve_symbol_query_identity(&locator));
+    let query = FactQuery::ResolveSymbol(resolve_symbol_query_identity(
+        &locator.entry_canonical,
+        &locator.requested_name,
+        locator.effective_mode,
+        locator.demand,
+    ));
     let slot = *locator.resolved_slot.canonical_digest().as_bytes();
     let entry_canonical = Arc::clone(&locator.entry_canonical);
     let keys = commit_and_register_fact(
