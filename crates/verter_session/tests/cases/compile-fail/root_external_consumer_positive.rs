@@ -1,9 +1,9 @@
 //! A pollable host root is production API an external driver consumes with
 //! neither `test-support` nor any private store access: it begins a root,
 //! polls it with its own waker, runs the dependency work the root hands it
-//! and polls again, all on one thread, until the root answers. Gating the
-//! roots, their polls or their work on a support feature fails this
-//! contract.
+//! (or advances that work by polling it with the same waker) and polls
+//! again, all on one thread, until the root answers. Gating the roots, their
+//! polls or their work on a support feature fails this contract.
 
 use std::sync::Arc;
 use std::task::{Poll, Wake, Waker};
@@ -34,6 +34,25 @@ fn run_or_park(work: Option<RootWork<'_>>) {
     }
 }
 
+/// Advance handed-out work by polling it until it answers; park while it
+/// waits, or when it made no progress.
+fn poll_or_park(work: Option<RootWork<'_>>, waker: &Waker) {
+    let Some(mut work) = work else {
+        std::thread::park();
+        return;
+    };
+    loop {
+        match work.poll(waker) {
+            Poll::Ready(true) => return,
+            Poll::Ready(false) => {
+                std::thread::park();
+                return;
+            }
+            Poll::Pending => std::thread::park(),
+        }
+    }
+}
+
 fn meta(mut root: ComponentMetaOutputRoot<'_>, waker: &Waker) -> bool {
     loop {
         if let Poll::Ready(answer) = root.poll(waker) {
@@ -48,7 +67,7 @@ fn compile(mut root: CompileRequestRoot<'_>, waker: &Waker) -> bool {
         if let Poll::Ready(answer) = root.poll(waker) {
             return answer.is_ok();
         }
-        run_or_park(root.take_work());
+        poll_or_park(root.take_work(), waker);
     }
 }
 

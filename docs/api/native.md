@@ -336,7 +336,11 @@ JavaScript envelopes diverge and are not interchangeable:
 
 - Native nests the IDE payload under `ide`, stringifies `analysis` as JSON, and
   throws a structured `Error` whose `kind` / `canonicalId` / `diagnostics`
-  fields carry the typed failure.
+  fields, plus each kind's own fields, carry the typed failure
+  (`HostCompileFailure`). A `dependenciesIncomplete` failure carries
+  `missingInputs`: one `HostMissingInput` row (`route`, `file` or `lookup`)
+  per input the compile could not establish, in the host's order and never
+  empty. A `compileRequests()` entry's `failure` is the same object.
 - WASM flattens the IDE DTO beside `kind`, returns `analysis` as an object, and
   throws the refusal as a string.
 

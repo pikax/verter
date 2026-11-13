@@ -24,11 +24,12 @@
 //! through `ReturnOnly` (never admitted, never `never`).
 
 /// Attribute the reads made until the enclosing block ends to `$site` in
-/// the body census ([`census`]); nothing outside test-support builds.
-macro_rules! census_site {
+/// the count of body reads ([`body_reads`]); nothing outside test-support
+/// builds.
+macro_rules! body_read_site {
     ($site:literal) => {
         #[cfg(any(test, feature = "test-support"))]
-        let _census_site = census::enter_site($site);
+        let _body_read_site = body_reads::enter_site($site);
     };
 }
 
@@ -2934,16 +2935,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// position publishes the carrier over the callee's function type,
     /// whose return is the callee's own carrier in turn, and every reader
     /// projects the whole nested chain again.
-    pub(super) fn resolve_closed_signature_utility(
+    ///
+    /// The instantiation that answers `node`, built from the graph alone;
+    /// `None` when `node` keeps its carrier. Its answer is read by
+    /// [`Self::read_requested`], the carrier kept when it answers no node.
+    /// The key is boxed, so a leaf that keeps its carrier, the common case,
+    /// carries no key-sized value.
+    pub(super) fn closed_signature_utility_read(
         &self,
         node: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
-    ) -> SemanticNodeId {
-        let Some(data) = self.graph().node_data(node) else {
-            return node;
-        };
+    ) -> Option<Box<SemanticQueryKey>> {
+        let data = self.graph().node_data(node)?;
         let SemanticNodeData::InstantiationRef { base, args } = data.as_ref() else {
-            return node;
+            return None;
         };
         let graph = self.graph();
         let closed = |argument: &SemanticNodeId| {
@@ -2957,9 +2962,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .is_none()
             || !args.iter().all(closed)
         {
-            return node;
+            return None;
         }
-        match self.execute_type_node(SemanticQueryKey::Instantiate(
+        Some(Box::new(SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(
                 self.type_slot_for(
                     base.canonical_id.clone(),
@@ -2969,9 +2974,38 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Arc::clone(args.as_arc()),
                 self.instantiate_context_for(&base.canonical_id, context),
             ),
-        )) {
-            QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => value,
-            _ => node,
+        )))
+    }
+
+    /// Read what a flow body requested (`wait`): the type node its query
+    /// answers, or `None` when it answers none. A request is read under the
+    /// checking site it was made under, as the body would read it at the
+    /// place it made it.
+    pub(super) fn read_requested(&self, wait: ReadWait) -> ReadDelivery {
+        let ReadWait {
+            key,
+            nesting,
+            checking_site,
+        } = wait;
+        match nesting {
+            ReadNesting::Frame => verter_debug_assert!(
+                matches!(
+                    *key,
+                    SemanticQueryKey::Instantiate(_) | SemanticQueryKey::TypeOf { .. }
+                ),
+                "a body's own frame requests an instantiation or a `typeof`, not {:?}",
+                key.tag()
+            ),
+        }
+        verter_debug_assert!(
+            self.checking_site.get() == checking_site,
+            "a request is answered under the checking site it was made under"
+        );
+        match self.execute_type_node(*key) {
+            QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => {
+                ReadDelivery(Some(value))
+            }
+            _ => ReadDelivery(None),
         }
     }
 
@@ -3835,17 +3869,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let undecided = super::dispatch_txn::HeldUndecidedRelationWindow::open(&self.dispatch_txn);
         let idx = self.flow_frame_open(key);
         // The root read's own body runs at the frame it opened: what it
-        // reads there itself, the census counts by site.
+        // reads there itself is counted by site.
         #[cfg(any(test, feature = "test-support"))]
-        let _body = census::open_body(&self.dispatch_txn.borrow());
+        let _body = body_reads::open_body(&self.dispatch_txn.borrow());
         {
-            census_site!("prepare");
+            body_read_site!("prepare");
             self.prepare_flow_return_demand(key, idx);
         }
         let evaluated = self.evaluate_flow_return(key);
         #[cfg(any(test, feature = "test-support"))]
         self.inject_unproven_flow_member_for_tests(idx);
-        census_site!("close");
+        body_read_site!("close");
         let closed = self.flow_frame_close_root(idx, evaluated);
         let _ = undecided.close(&self.dispatch_txn);
         self.check_flow_read_at_mark(mark);
@@ -6827,7 +6861,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: &FlowReturnKey,
     ) -> FlowEvaluationOutcome {
         verter_audit::attribute_scope!(FlowSliceCompute);
-        census_site!("prelude");
+        body_read_site!("prelude");
         use crate::semantic_query::demand::{MaterializedPoint, MaterializedSet};
         // The frame's installed demand carrier (installed by
         // `prepare_flow_return_demand` at frame open): the report at the
@@ -7414,12 +7448,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             nested::ActivationState { evaluator, run }
         });
-        let mut read = read::FlowRead::new(tables, root);
+        let mut read = read::FlowRead::begin(tables, root);
         let (outcome, body_falls_through) = {
-            census_site!("body");
-            read.evaluate(&flow_cx)
+            body_read_site!("body");
+            read.drive_in_place(&flow_cx)
         };
-        census_site!("finish");
+        body_read_site!("finish");
         // What finishing the value reads from the root's evaluator.
         struct RootEvaluated {
             holds: Vec<HeldCallee>,
@@ -7460,7 +7494,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             independent_returns,
             constructive_return,
             constructed_values,
-        } = read.with_root(|_, state, tables| {
+        } = read.finish(|_, state, tables| {
             let mut evaluator = FlowEvaluator::over(&flow_cx, state, tables);
             evaluator.report_receiver_reads(ir.receiver_reads.as_ref());
             evaluator.promote_pending_statement_gap();
@@ -10831,13 +10865,13 @@ impl verter_identity::encoding::CanonicalEncode for NestedFlowInputBasis<'_> {
 #[path = "flow_return_class.rs"]
 mod class_expression;
 
+#[cfg(any(test, feature = "test-support"))]
+#[path = "flow_return_body_reads.rs"]
+pub mod body_reads;
 #[path = "flow_return_branches.rs"]
 mod branches;
 #[path = "flow_return_call_stack.rs"]
 mod call_stack;
-#[cfg(any(test, feature = "test-support"))]
-#[path = "flow_return_census.rs"]
-pub mod census;
 #[path = "flow_return_nested.rs"]
 mod nested;
 #[path = "flow_return_rails.rs"]
@@ -10847,6 +10881,7 @@ mod read;
 use branches::{BranchStep, DeadPath, Entered};
 use nested::{NestedChildParts, NestedDemand, NestedSignatureStep};
 pub(super) use rails::{ClosedObservation, ClosedRecording, ObservationRail, RecordingRail};
+use read::{ReadDelivery, ReadNesting, ReadStep, ReadWait};
 #[path = "flow_return_operators.rs"]
 mod operators;
 pub(super) use call_stack::HeldContextualRoute;
@@ -10896,9 +10931,31 @@ use rustc_hash::FxHashMap;
 use verter_session_query::type_solver::host::ResolvedRootIdentity;
 use verter_type_expr::TypeExpr;
 
+/// The driver's reading operations a flow body makes as requests: each
+/// answers at once ([`ReadStep::Ready`]) or names the read it waits on
+/// ([`ReadStep::Wait`]), which the body's evaluation suspends at and its
+/// root read answers ([`Self::answer_read`]).
+pub(super) trait FlowReadDriver {
+    /// The value a body type's lowered carrier `node` denotes when it is a
+    /// closed signature utility
+    /// ([`ProjectSemanticDispatch::closed_signature_utility_read`]): the
+    /// carrier itself when it is none, otherwise the instantiation read
+    /// that answers it.
+    fn closed_signature_utility(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> ReadStep<SemanticNodeId>;
+    /// Answer a read the body requested and its root read answers.
+    fn answer_read(&self, wait: ReadWait) -> ReadDelivery;
+}
+
 /// Nested semantic demands always return to the existing driver. All calls
 /// are monomorphized; this is an internal execution facet, not a session port.
-pub(super) trait FlowDemandDriver {
+pub(super) trait FlowDemandDriver: FlowReadDriver {
+    /// Answer a read the body requested at once, where its evaluation
+    /// cannot suspend.
+    fn read_in_place(&self, wait: ReadWait) -> ReadDelivery;
     fn substitute_canonical(
         &self,
         node: SemanticNodeId,
@@ -11317,11 +11374,6 @@ pub(super) trait FlowDemandDriver {
         head: crate::semantic_query::CheckerDiagnostic,
         site: &verter_type_expr::IndexedReportSite,
     ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>>;
-    fn resolve_closed_signature_utility(
-        &self,
-        node: SemanticNodeId,
-        context: crate::semantic_query::ProjectionReductionContext,
-    ) -> SemanticNodeId;
     fn resolve_signature_source_carrier(
         &self,
         node: SemanticNodeId,
@@ -11493,37 +11545,68 @@ pub(super) trait FlowDemandDriver {
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite;
 }
+impl<C: crate::resolver_core::ResolverCapabilities> FlowReadDriver
+    for ProjectSemanticDispatch<'_, C>
+{
+    fn closed_signature_utility(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> ReadStep<SemanticNodeId> {
+        body_read_site!("closed_signature_utility");
+        match ProjectSemanticDispatch::closed_signature_utility_read(self, node, context) {
+            None => ReadStep::Ready(node),
+            Some(key) => ReadStep::Wait(ReadWait {
+                key,
+                nesting: ReadNesting::Frame,
+                checking_site: self.checking_site.get(),
+            }),
+        }
+    }
+    fn answer_read(&self, wait: ReadWait) -> ReadDelivery {
+        body_read_site!("answer_read");
+        // The read answers a request that reached the root read: the
+        // count of body reads leaves it out.
+        #[cfg(any(test, feature = "test-support"))]
+        let _answer = body_reads::enter_request_answer();
+        self.read_requested(wait)
+    }
+}
 impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     for ProjectSemanticDispatch<'_, C>
 {
+    fn read_in_place(&self, wait: ReadWait) -> ReadDelivery {
+        body_read_site!("read_in_place");
+        self.read_requested(wait)
+    }
     fn substitute_canonical(
         &self,
         node: SemanticNodeId,
         substitution: &crate::semantic_query::CanonicalTypeSubstitution,
     ) -> SemanticNodeId {
-        census_site!("substitute_canonical");
+        body_read_site!("substitute_canonical");
         ProjectSemanticDispatch::substitute_canonical(self, node, substitution)
     }
     fn probe_optional<T>(&self, probe: impl FnOnce() -> Option<T>) -> Option<T> {
-        census_site!("probe_optional");
+        body_read_site!("probe_optional");
         ProjectSemanticDispatch::probe_optional(self, probe)
     }
     fn observe_read<T>(
         &self,
         read: impl FnOnce() -> T,
     ) -> super::flow_return_fact::ObservedRead<T> {
-        census_site!("observe_read");
+        body_read_site!("observe_read");
         ProjectSemanticDispatch::observe_read(self, read)
     }
     fn preserve_read_reuse_evidence<T>(&self, read: &super::flow_return_fact::ObservedRead<T>) {
-        census_site!("preserve_read_reuse_evidence");
+        body_read_site!("preserve_read_reuse_evidence");
         read.preserve_reuse_evidence(self);
     }
     fn hold_read_observation(
         &self,
         rails: rails::ObservationRail,
     ) -> super::flow_return_fact::HeldReadObservation {
-        census_site!("hold_read_observation");
+        body_read_site!("hold_read_observation");
         ProjectSemanticDispatch::hold_read_observation(self, rails)
     }
     fn finish_held_read_observation(
@@ -11531,20 +11614,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         held: super::flow_return_fact::HeldReadObservation,
         closed: rails::ClosedObservation,
     ) -> super::flow_return_fact::ObservedRead<()> {
-        census_site!("finish_held_read_observation");
+        body_read_site!("finish_held_read_observation");
         ProjectSemanticDispatch::finish_held_read_observation(self, held, closed)
     }
     fn adopt_read<T>(
         &self,
         read: super::flow_return_fact::ObservedRead<T>,
     ) -> Result<T, crate::semantic_query::ExecutionAbort> {
-        census_site!("adopt_read");
+        body_read_site!("adopt_read");
         read.adopt(self)
     }
     fn held_transaction_read_policy(
         &self,
     ) -> Option<(verter_session_query::facts::policy::FactPolicy, u64)> {
-        census_site!("held_transaction_read_policy");
+        body_read_site!("held_transaction_read_policy");
         ProjectSemanticDispatch::held_transaction_read_policy(self)
     }
     fn hold_transaction_read(
@@ -11552,7 +11635,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         rails: rails::RecordingRail,
         evidence_epoch: u64,
     ) -> super::build::HeldTransactionReadRecording {
-        census_site!("hold_transaction_read");
+        body_read_site!("hold_transaction_read");
         ProjectSemanticDispatch::hold_transaction_read(self, rails, evidence_epoch)
     }
     fn finish_transaction_read(
@@ -11564,7 +11647,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         verter_session_query::facts::reuse::ReuseClass,
         super::dispatch_txn::FlowMemberReuse,
     )> {
-        census_site!("finish_transaction_read");
+        body_read_site!("finish_transaction_read");
         ProjectSemanticDispatch::finish_held_transaction_read(self, recording, closed, complete)
     }
     fn replay_transaction_read(
@@ -11572,7 +11655,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         reuse: &verter_session_query::facts::reuse::ReuseClass,
         replay: &super::dispatch_txn::FlowMemberReuse,
     ) {
-        census_site!("replay_transaction_read");
+        body_read_site!("replay_transaction_read");
         ProjectSemanticDispatch::replay_transaction_read(self, reuse, replay);
     }
     type Caps = C;
@@ -11580,7 +11663,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         &self,
         key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
     ) -> Option<verter_session_query::flow::bundle::SkeletonRef> {
-        census_site!("flow_slice_skeleton");
+        body_read_site!("flow_slice_skeleton");
         self.flow_slice_driver().skeleton_for(key)
     }
     fn flow_slice_lowered(
@@ -11590,21 +11673,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             crate::cache_runtime::flow_slice_node::PlannedFlowSlice,
         >,
     ) -> Option<verter_session_query::flow::flow_ir::SharedFlowSliceIR> {
-        census_site!("flow_slice_lowered");
+        body_read_site!("flow_slice_lowered");
         self.flow_slice_driver().lookup_lowered(key, planned)
     }
     fn flow_slice_hash(
         &self,
         key: crate::cache_runtime::flow_slice_node::FlowSliceHashKey,
     ) -> Option<crate::cache_runtime::flow_slice_node::FlowSliceHashOutcome> {
-        census_site!("flow_slice_hash");
+        body_read_site!("flow_slice_hash");
         self.flow_slice_driver().lookup_hash(key)
     }
     fn flow_bound_graph_for(
         &self,
         key: &verter_session_query::flow::bundle::FlowSliceFunctionKey,
     ) -> Option<verter_session_query::flow::bundle::BoundFlowGraph> {
-        census_site!("flow_bound_graph_for");
+        body_read_site!("flow_bound_graph_for");
         self.binding.flow_slice.bound_graph_for(key)
     }
     fn first_signature_param_occurrence(
@@ -11612,7 +11695,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         params: &[crate::semantic_query::FunctionParam],
         name: &str,
     ) -> Option<u32> {
-        census_site!("first_signature_param_occurrence");
+        body_read_site!("first_signature_param_occurrence");
         ProjectSemanticDispatch::first_signature_param_occurrence(self, params, name)
     }
     fn instantiate_clause_at_base_constraints<'n>(
@@ -11622,7 +11705,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         constraint_spelling: crate::semantic_query::ClauseSpelling,
         spelling: crate::semantic_query::ClauseSpelling,
     ) -> SemanticNodeId {
-        census_site!("instantiate_clause_at_base_constraints");
+        body_read_site!("instantiate_clause_at_base_constraints");
         ProjectSemanticDispatch::instantiate_clause_at_base_constraints(
             self,
             clause,
@@ -11637,21 +11720,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         extracted: SemanticNodeId,
         spelling: crate::semantic_query::ClauseSpelling,
     ) -> SemanticNodeId {
-        census_site!("instantiate_clause_params_at_call");
+        body_read_site!("instantiate_clause_params_at_call");
         ProjectSemanticDispatch::instantiate_clause_params_at_call(
             self, params, extracted, spelling,
         )
     }
     fn unresolved_head_is_authored_import(&self, scope: &NodeScopeId, name: &str) -> bool {
-        census_site!("unresolved_head_is_authored_import");
+        body_read_site!("unresolved_head_is_authored_import");
         ProjectSemanticDispatch::unresolved_head_is_authored_import(self, scope, name)
     }
     fn top_level_literals(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
-        census_site!("top_level_literals");
+        body_read_site!("top_level_literals");
         top_level_literal_nodes_in(self.graph().store(), node)
     }
     fn widened_literal(&self, node: SemanticNodeId) -> SemanticNodeId {
-        census_site!("widened_literal");
+        body_read_site!("widened_literal");
         ProjectSemanticDispatch::widened_literal(self, node)
     }
     fn literal_of_contextual_type(
@@ -11659,7 +11742,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         candidate: SemanticNodeId,
         contextual: SemanticNodeId,
     ) -> bool {
-        census_site!("literal_of_contextual_type");
+        body_read_site!("literal_of_contextual_type");
         ProjectSemanticDispatch::literal_of_contextual_type(self, candidate, contextual, &[])
     }
     fn subtype_reduced_union(
@@ -11667,7 +11750,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         members: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite {
-        census_site!("subtype_reduced_union");
+        body_read_site!("subtype_reduced_union");
         ProjectSemanticDispatch::subtype_reduced_union(self, members, nullability)
     }
     fn attach_function_kind_wrap(
@@ -11678,7 +11761,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         binder_env: &FlowBinderEnv,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> FlowReturnResult {
-        census_site!("attach_function_kind_wrap");
+        body_read_site!("attach_function_kind_wrap");
         ProjectSemanticDispatch::attach_function_kind_wrap(
             self,
             result,
@@ -11693,7 +11776,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         result: FlowReturnResult,
         predicate: Option<crate::semantic_query::SignaturePredicate>,
     ) -> FlowReturnResult {
-        census_site!("attach_inferred_predicate");
+        body_read_site!("attach_inferred_predicate");
         ProjectSemanticDispatch::attach_inferred_predicate(self, result, predicate)
     }
     fn authored_signatures_of(
@@ -11701,11 +11784,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         subject: SemanticNodeId,
         kind: SignatureKind,
     ) -> AuthoredSignatures {
-        census_site!("authored_signatures_of");
+        body_read_site!("authored_signatures_of");
         ProjectSemanticDispatch::authored_signatures_of(self, subject, kind)
     }
     fn awaited_normalize_for_flow(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        census_site!("awaited_normalize_for_flow");
+        body_read_site!("awaited_normalize_for_flow");
         ProjectSemanticDispatch::awaited_normalize_for_flow(self, node)
     }
     fn bind_callee_receiver(
@@ -11713,22 +11796,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         callee: SemanticNodeId,
         receiver: SemanticNodeId,
     ) -> SemanticNodeId {
-        census_site!("bind_callee_receiver");
+        body_read_site!("bind_callee_receiver");
         ProjectSemanticDispatch::bind_callee_receiver(self, callee, receiver)
     }
     fn bind_this_receiver(&self, node: SemanticNodeId, receiver: SemanticNodeId) -> SemanticNodeId {
-        census_site!("bind_this_receiver");
+        body_read_site!("bind_this_receiver");
         ProjectSemanticDispatch::bind_this_receiver(self, node, receiver)
     }
     fn canonical_is_module(&self, canonical: &str) -> bool {
-        census_site!("canonical_is_module");
+        body_read_site!("canonical_is_module");
         ProjectSemanticDispatch::canonical_is_module(self, canonical)
     }
     fn class_heritage_ancestry(
         &self,
         root: &crate::semantic_query::DeclIdentity,
     ) -> Arc<ClassAncestryReading> {
-        census_site!("class_heritage_ancestry");
+        body_read_site!("class_heritage_ancestry");
         ProjectSemanticDispatch::class_heritage_ancestry(self, root)
     }
     fn class_member_source(
@@ -11739,25 +11822,25 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         args: &[SemanticNodeId],
         name: &str,
     ) -> Option<SemanticNodeId> {
-        census_site!("class_member_source");
+        body_read_site!("class_member_source");
         ProjectSemanticDispatch::class_member_source(self, canonical, owner, class, args, name)
     }
     fn classify_truthiness_domain_read(
         &self,
         subject: SemanticNodeId,
     ) -> crate::semantic_query::CacheRead<crate::semantic_query::TruthinessDomain> {
-        census_site!("classify_truthiness_domain_read");
+        body_read_site!("classify_truthiness_domain_read");
         ProjectSemanticDispatch::classify_truthiness_domain_read(self, subject)
     }
     fn connected_demand_tripped(&self) -> bool {
-        census_site!("connected_demand_tripped");
+        body_read_site!("connected_demand_tripped");
         ProjectSemanticDispatch::connected_demand_tripped(self)
     }
     fn construct_signature_visibility(
         &self,
         signature: SemanticNodeId,
     ) -> Option<verter_type_expr::MemberVisibility> {
-        census_site!("construct_signature_visibility");
+        body_read_site!("construct_signature_visibility");
         ProjectSemanticDispatch::construct_signature_visibility(self, signature)
     }
 
@@ -11768,7 +11851,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
         ordered: bool,
     ) -> Option<DistributedIntersection> {
-        census_site!("distribute_intersection");
+        body_read_site!("distribute_intersection");
         ProjectSemanticDispatch::distribute_intersection(
             self,
             factors,
@@ -11782,7 +11865,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         node: SemanticNodeId,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> SemanticNodeId {
-        census_site!("erase_nullable_members");
+        body_read_site!("erase_nullable_members");
         ProjectSemanticDispatch::erase_nullable_members(self, node, nullability)
     }
     fn evaluate_indexed_value(
@@ -11792,7 +11875,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         expression: &verter_type_expr::IndexedValueExpression,
         hold_flow_result: bool,
     ) -> Option<IndexedValue> {
-        census_site!("evaluate_indexed_value");
+        body_read_site!("evaluate_indexed_value");
         ProjectSemanticDispatch::evaluate_indexed_value(
             self,
             canonical,
@@ -11802,7 +11885,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         )
     }
     fn execute_flow_return(&self, key: FlowReturnKey) -> FlowReturnStep {
-        census_site!("execute_flow_return");
+        body_read_site!("execute_flow_return");
         ProjectSemanticDispatch::execute_flow_return(self, key)
     }
     fn execute_function_return_source(
@@ -11810,11 +11893,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         source: &verter_type_expr::facts::FunctionReturnSource,
         scope_canonical_id: &str,
     ) -> FunctionReturnNode {
-        census_site!("execute_function_return_source");
+        body_read_site!("execute_function_return_source");
         ProjectSemanticDispatch::execute_function_return_source(self, source, scope_canonical_id)
     }
     fn materialize_returned_callable(&self, node: SemanticNodeId) -> SemanticNodeId {
-        census_site!("materialize_returned_callable");
+        body_read_site!("materialize_returned_callable");
         ProjectSemanticDispatch::materialize_returned_callable(self, node)
     }
     fn apply_signature_return_source(
@@ -11822,11 +11905,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         carrier: &crate::semantic_query::SignatureReturnCarrier,
         value: SemanticNodeId,
     ) -> SemanticNodeId {
-        census_site!("apply_signature_return_source");
+        body_read_site!("apply_signature_return_source");
         ProjectSemanticDispatch::apply_signature_return_source(self, carrier, value)
     }
     fn execute_relate_pair(&self, source: SemanticNodeId, target: SemanticNodeId) -> RelationStep {
-        census_site!("execute_relate_pair");
+        body_read_site!("execute_relate_pair");
         ProjectSemanticDispatch::execute_relate_pair(self, source, target)
     }
     fn execute_contextual_call(
@@ -11837,9 +11920,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         ResolveCallStep,
         Option<super::call_resolve::DeclaredCallResult>,
     ) {
-        census_site!("execute_contextual_call");
+        body_read_site!("execute_contextual_call");
         #[cfg(any(test, feature = "test-support"))]
-        let _stage = census::enter_call_stage("execute_contextual_call");
+        let _stage = body_reads::enter_call_stage("execute_contextual_call");
         // The call computation a non-blocking evaluator advances, driven
         // in place.
         let mut call = super::helper_continuation::CallRead::begin(key, std::mem::take(state));
@@ -11857,16 +11940,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         ResolveCallStep,
         Option<super::call_resolve::DeclaredCallResult>,
     ) {
-        census_site!("resume_contextual_call");
+        body_read_site!("resume_contextual_call");
         #[cfg(any(test, feature = "test-support"))]
-        let _stage = census::enter_call_stage("resume_contextual_call");
+        let _stage = body_reads::enter_call_stage("resume_contextual_call");
         ProjectSemanticDispatch::resume_contextual_call(self, key, args, position, state)
     }
     fn demand_type_node(
         &self,
         key: SemanticQueryKey,
     ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
-        census_site!("demand_type_node");
+        body_read_site!("demand_type_node");
         SemanticQueryApi::execute_type_node(self, key)
     }
     fn finalize_evolving_array(
@@ -11874,7 +11957,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         elements: &[super::flow_products::EvolvingElement],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite {
-        census_site!("finalize_evolving_array");
+        body_read_site!("finalize_evolving_array");
         ProjectSemanticDispatch::finalize_evolving_array(self, elements, nullability)
     }
     fn flow_binder_env(
@@ -11885,7 +11968,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         outer: Option<&FlowBinderEnv>,
         nested_at: Option<u32>,
     ) -> FlowBinderEnv {
-        census_site!("flow_binder_env");
+        body_read_site!("flow_binder_env");
         ProjectSemanticDispatch::flow_binder_env(
             self,
             canonical,
@@ -11899,7 +11982,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         &self,
         identity: &verter_type_expr::facts::FlowFunctionReturnIdentity,
     ) -> FlowReturnKey {
-        census_site!("flow_return_key_for");
+        body_read_site!("flow_return_key_for");
         ProjectSemanticDispatch::flow_return_key_for(self, identity)
     }
     fn flow_slice_demand_site(
@@ -11909,7 +11992,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         FlowSliceDemandSite<<C as crate::resolver_core::ResolverCapabilities>::ExpressionDemand>,
         FlowSliceDemandSiteError,
     > {
-        census_site!("flow_slice_demand_site");
+        body_read_site!("flow_slice_demand_site");
         ProjectSemanticDispatch::flow_slice_demand_site(self, key)
     }
     fn function_augmentations(
@@ -11918,14 +12001,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         decl_name: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<AugmentationContributions> {
-        census_site!("function_augmentations");
+        body_read_site!("function_augmentations");
         ProjectSemanticDispatch::function_augmentations(self, decl_canonical, decl_name, context)
     }
     fn transaction_indexed_record(
         &self,
         canonical: &str,
     ) -> Option<Arc<verter_session_query::inputs::indexed::IndexedInputRecord>> {
-        census_site!("transaction_indexed_record");
+        body_read_site!("transaction_indexed_record");
         ProjectSemanticDispatch::transaction_indexed_record(self, canonical)
     }
     fn global_named_type(
@@ -11934,11 +12017,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         owner: verter_type_expr::TopLevelOwnerId,
         name: &'static str,
     ) -> Option<SemanticNodeId> {
-        census_site!("global_named_type");
+        body_read_site!("global_named_type");
         ProjectSemanticDispatch::global_named_type(self, canonical, owner, name)
     }
     fn instance_member_read_widens(&self, instance: SemanticNodeId, member: &str) -> bool {
-        census_site!("instance_member_read_widens");
+        body_read_site!("instance_member_read_widens");
         ProjectSemanticDispatch::instance_member_read_widens(self, instance, member)
     }
     fn instantiate_call_candidate(
@@ -11946,7 +12029,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         signature: SemanticNodeId,
         type_args: &[SemanticNodeId],
     ) -> Option<SemanticNodeId> {
-        census_site!("instantiate_call_candidate");
+        body_read_site!("instantiate_call_candidate");
         ProjectSemanticDispatch::instantiate_call_candidate(self, signature, type_args)
     }
     fn intern_normalized_union(
@@ -11954,7 +12037,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         members: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> SemanticNodeId {
-        census_site!("intern_normalized_union");
+        body_read_site!("intern_normalized_union");
         ProjectSemanticDispatch::intern_normalized_union(self, members, nullability)
     }
     fn intern_normalized_union_or_intersection(
@@ -11962,19 +12045,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         members: &[SemanticNodeId],
         is_union: bool,
     ) -> SemanticNodeId {
-        census_site!("intern_normalized_union_or_intersection");
+        body_read_site!("intern_normalized_union_or_intersection");
         ProjectSemanticDispatch::intern_normalized_union_or_intersection(self, members, is_union)
     }
     fn is_enum_object_of(&self, node: SemanticNodeId, literal: &EnumLiteralType) -> bool {
-        census_site!("is_enum_object_of");
+        body_read_site!("is_enum_object_of");
         ProjectSemanticDispatch::is_enum_object_of(self, node, literal)
     }
     fn is_function_global_identity(&self, identity: &crate::semantic_query::DeclIdentity) -> bool {
-        census_site!("is_function_global_identity");
+        body_read_site!("is_function_global_identity");
         ProjectSemanticDispatch::is_function_global_identity(self, identity)
     }
     fn is_lib_environment_canonical(&self, canonical: &str) -> bool {
-        census_site!("is_lib_environment_canonical");
+        body_read_site!("is_lib_environment_canonical");
         ProjectSemanticDispatch::is_lib_environment_canonical(self, canonical)
     }
     fn join_flow_return_contributors(
@@ -11987,7 +12070,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         empty_completion: verter_session_query::flow::slice::EmptyCompletion,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> Result<(FlowReturnResult, bool), FlowReturnFailure> {
-        census_site!("join_flow_return_contributors");
+        body_read_site!("join_flow_return_contributors");
         ProjectSemanticDispatch::join_flow_return_contributors(
             self,
             contributors,
@@ -12007,7 +12090,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         args: Arc<[SemanticNodeId]>,
         context: ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
-        census_site!("lower_lib_global");
+        body_read_site!("lower_lib_global");
         ProjectSemanticDispatch::lower_lib_global(
             self,
             scope_canonical_id,
@@ -12024,7 +12107,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         expr: &verter_type_expr::TypeExpr,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
-        census_site!("lower_type_expr_in_owner_scope_with_context");
+        body_read_site!("lower_type_expr_in_owner_scope_with_context");
         let _type_node = self
             .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         ProjectSemanticDispatch::lower_type_expr_in_owner_scope_with_context(
@@ -12036,15 +12119,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         )
     }
     fn materialize_flow_return_wrap(&self, result: FlowReturnResult) -> FlowReturnResult {
-        census_site!("materialize_flow_return_wrap");
+        body_read_site!("materialize_flow_return_wrap");
         ProjectSemanticDispatch::materialize_flow_return_wrap(self, result)
     }
     fn mentions_node(&self, node: SemanticNodeId, target: SemanticNodeId) -> bool {
-        census_site!("mentions_node");
+        body_read_site!("mentions_node");
         ProjectSemanticDispatch::mentions_node(self, node, target)
     }
     fn nodes_comparable(&self, a: SemanticNodeId, b: SemanticNodeId) -> ComparabilityVerdict {
-        census_site!("nodes_comparable");
+        body_read_site!("nodes_comparable");
         ProjectSemanticDispatch::nodes_comparable(self, a, b)
     }
     fn normalize_node_for_structural_fact_demand(
@@ -12052,14 +12135,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> StructuralFactDemandOutcome {
-        census_site!("normalize_node_for_structural_fact_demand");
+        body_read_site!("normalize_node_for_structural_fact_demand");
         ProjectSemanticDispatch::normalize_node_for_structural_fact_demand(self, node, context)
     }
     fn declared_call_return_read(
         &self,
         node: SemanticNodeId,
     ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>> {
-        census_site!("declared_call_return_read");
+        body_read_site!("declared_call_return_read");
         self.indexed_call_return_key(node)
             .and_then(|key| self.read_declared_call_return(key))
     }
@@ -12069,23 +12152,23 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         canonical: &str,
         call_span: verter_span::Span,
     ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence> {
-        census_site!("bind_checker_recovery");
+        body_read_site!("bind_checker_recovery");
         ProjectSemanticDispatch::bind_checker_recovery(self, node, canonical, call_span)
     }
     fn print_checker_type(&self, node: SemanticNodeId) -> Option<String> {
-        census_site!("print_checker_type");
+        body_read_site!("print_checker_type");
         self.print_diagnostic_type(node)
     }
     fn print_checker_type_clipped(&self, node: SemanticNodeId) -> String {
-        census_site!("print_checker_type_clipped");
+        body_read_site!("print_checker_type_clipped");
         self.print_diagnostic_type_clipped(node)
     }
     fn global_object_declares(&self, name: &str, canonical: &str) -> bool {
-        census_site!("global_object_declares");
+        body_read_site!("global_object_declares");
         ProjectSemanticDispatch::global_object_declares(self, name, canonical)
     }
     fn apparent_wrapper_settles(&self, node: SemanticNodeId, canonical: &str) -> bool {
-        census_site!("apparent_wrapper_settles");
+        body_read_site!("apparent_wrapper_settles");
         ProjectSemanticDispatch::apparent_wrapper_settles(self, node, canonical)
     }
     fn class_proves_member_absent(
@@ -12096,17 +12179,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         args: &[SemanticNodeId],
         name: &str,
     ) -> bool {
-        census_site!("class_proves_member_absent");
+        body_read_site!("class_proves_member_absent");
         ProjectSemanticDispatch::class_proves_member_absent(
             self, canonical, owner, class, args, name,
         )
     }
     fn mark_return_cycle(&self, target: &FlowReturnKey) {
-        census_site!("mark_return_cycle");
+        body_read_site!("mark_return_cycle");
         ProjectSemanticDispatch::mark_return_cycle(self, target);
     }
     fn take_return_cycle(&self, key: &FlowReturnKey) -> bool {
-        census_site!("take_return_cycle");
+        body_read_site!("take_return_cycle");
         self.dispatch_txn.borrow_mut().circular_returns.remove(key)
     }
     fn normalize_expression_tuple_spread(
@@ -12114,7 +12197,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         elements: &[crate::semantic_query::TupleElement],
         readonly: bool,
     ) -> NormalizedTupleShape {
-        census_site!("normalize_expression_tuple_spread");
+        body_read_site!("normalize_expression_tuple_spread");
         ProjectSemanticDispatch::normalize_expression_tuple_spread(self, elements, readonly)
     }
     fn admit_expression_tuple_splice(
@@ -12122,15 +12205,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         prefix: usize,
         incoming: usize,
     ) -> super::build::ExpressionSplice {
-        census_site!("admit_expression_tuple_splice");
+        body_read_site!("admit_expression_tuple_splice");
         ProjectSemanticDispatch::admit_expression_tuple_splice(self, prefix, incoming)
     }
     fn opaque(&self, err: QueryError) -> SemanticNodeId {
-        census_site!("opaque");
+        body_read_site!("opaque");
         ProjectSemanticDispatch::opaque(self, err)
     }
     fn receiver_this_types(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
-        census_site!("receiver_this_types");
+        body_read_site!("receiver_this_types");
         ProjectSemanticDispatch::receiver_this_types(self, node)
     }
     fn contextual_object_this_type(
@@ -12138,15 +12221,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         node: SemanticNodeId,
         canonical: &str,
     ) -> Option<SemanticNodeId> {
-        census_site!("contextual_object_this_type");
+        body_read_site!("contextual_object_this_type");
         ProjectSemanticDispatch::contextual_object_this_type(self, node, canonical)
     }
     fn contextual_carrier_view(&self, node: SemanticNodeId) -> SemanticNodeId {
-        census_site!("contextual_carrier_view");
+        body_read_site!("contextual_carrier_view");
         ProjectSemanticDispatch::contextual_carrier_view(self, node)
     }
     fn contextual_error_type(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        census_site!("contextual_error_type");
+        body_read_site!("contextual_error_type");
         ProjectSemanticDispatch::contextual_error_type(self, node)
     }
     fn contextual_undeclared_names(
@@ -12154,7 +12237,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         node: SemanticNodeId,
         canonical: &str,
     ) -> Vec<crate::semantic_query::CheckerDiagnosticOccurrence> {
-        census_site!("contextual_undeclared_names");
+        body_read_site!("contextual_undeclared_names");
         ProjectSemanticDispatch::contextual_undeclared_names(self, node, canonical)
     }
     fn contextual_object_member(
@@ -12163,7 +12246,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         name: &str,
         value: Option<SemanticNodeId>,
     ) -> Result<Option<SemanticNodeId>, ResolveCallFailure> {
-        census_site!("contextual_object_member");
+        body_read_site!("contextual_object_member");
         ProjectSemanticDispatch::contextual_object_member(self, state, name, value)
     }
     fn contextual_object_order(
@@ -12172,7 +12255,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         names: &[Option<Arc<str>>],
         canonical: &str,
     ) -> Vec<usize> {
-        census_site!("contextual_object_order");
+        body_read_site!("contextual_object_order");
         ProjectSemanticDispatch::contextual_object_order(self, state, names, canonical)
     }
     fn reduce_arms_to_supertypes(
@@ -12180,7 +12263,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         arms: &[ReductionArm],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> ReunionReduction {
-        census_site!("reduce_arms_to_supertypes");
+        body_read_site!("reduce_arms_to_supertypes");
         ProjectSemanticDispatch::reduce_arms_to_supertypes(self, arms, nullability)
     }
     fn reduce_template_literal_nodes(
@@ -12189,21 +12272,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Result<SemanticNodeId, crate::semantic_query::PartialReasonSet> {
-        census_site!("reduce_template_literal_nodes");
+        body_read_site!("reduce_template_literal_nodes");
         ProjectSemanticDispatch::reduce_template_literal_nodes(self, quasis, args, eval_context)
     }
     fn relation_nominal_identity(
         &self,
         node: SemanticNodeId,
     ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
-        census_site!("relation_nominal_identity");
+        body_read_site!("relation_nominal_identity");
         ProjectSemanticDispatch::relation_nominal_identity(self, node)
     }
     fn resolve_call_context_for(
         &self,
         canonical: &str,
     ) -> crate::semantic_query::ResolveCallContext {
-        census_site!("resolve_call_context_for");
+        body_read_site!("resolve_call_context_for");
         ProjectSemanticDispatch::resolve_call_context_for(self, canonical)
     }
     fn print_relation_operands(
@@ -12211,7 +12294,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) -> Option<(String, String)> {
-        census_site!("print_relation_operands");
+        body_read_site!("print_relation_operands");
         ProjectSemanticDispatch::print_relation_operands(self, source, target)
     }
     fn checker_relation_failure(
@@ -12221,23 +12304,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         head: crate::semantic_query::CheckerDiagnostic,
         site: &verter_type_expr::IndexedReportSite,
     ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>> {
-        census_site!("checker_relation_failure");
+        body_read_site!("checker_relation_failure");
         ProjectSemanticDispatch::checker_relation_failure(self, source, target, head, site)
-    }
-    fn resolve_closed_signature_utility(
-        &self,
-        node: SemanticNodeId,
-        context: crate::semantic_query::ProjectionReductionContext,
-    ) -> SemanticNodeId {
-        census_site!("resolve_closed_signature_utility");
-        ProjectSemanticDispatch::resolve_closed_signature_utility(self, node, context)
     }
     fn resolve_signature_source_carrier(
         &self,
         node: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
-        census_site!("resolve_signature_source_carrier");
+        body_read_site!("resolve_signature_source_carrier");
         ProjectSemanticDispatch::resolve_signature_source_carrier(self, node, context)
     }
     fn resolve_typeinfo_surface_view(
@@ -12245,11 +12320,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         base: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<crate::semantic_query::SurfaceView> {
-        census_site!("resolve_typeinfo_surface_view");
+        body_read_site!("resolve_typeinfo_surface_view");
         ProjectSemanticDispatch::resolve_typeinfo_surface_view(self, base, context)
     }
     fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId {
-        census_site!("resolved_reduction_view");
+        body_read_site!("resolved_reduction_view");
         ProjectSemanticDispatch::resolved_reduction_view(self, view)
     }
     fn contextual_tuple(
@@ -12257,7 +12332,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         node: SemanticNodeId,
         elements: &[crate::semantic_query::TupleElement],
     ) -> super::contextual_tuple::ContextualTuple {
-        census_site!("contextual_tuple");
+        body_read_site!("contextual_tuple");
         ProjectSemanticDispatch::contextual_tuple(self, node, elements)
     }
     fn tuple_element_context(
@@ -12266,11 +12341,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         index: usize,
         shape: super::call_resolve::ArrayLiteralShape,
     ) -> super::contextual_tuple::TupleElementContext {
-        census_site!("tuple_element_context");
+        body_read_site!("tuple_element_context");
         ProjectSemanticDispatch::tuple_element_context(self, tuple, index, shape)
     }
     fn self_reference_declaration(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        census_site!("self_reference_declaration");
+        body_read_site!("self_reference_declaration");
         ProjectSemanticDispatch::self_reference_declaration(self, node)
     }
     fn shallow_lower_type_expr_with_context(
@@ -12284,7 +12359,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         reduction_context: ProjectionReductionContext,
     ) -> SemanticNodeId {
-        census_site!("shallow_lower_type_expr_with_context");
+        body_read_site!("shallow_lower_type_expr_with_context");
         let _type_node = self
             .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         ProjectSemanticDispatch::shallow_lower_type_expr_with_context(
@@ -12303,7 +12378,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         &self,
         subject: SemanticNodeId,
     ) -> Result<(Vec<SemanticNodeId>, Vec<SemanticNodeId>), IncompleteReason> {
-        census_site!("shared_signature_buckets");
+        body_read_site!("shared_signature_buckets");
         ProjectSemanticDispatch::shared_signature_buckets(self, subject)
     }
     fn shared_signature_nodes(
@@ -12311,7 +12386,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         subject: SemanticNodeId,
         kind: GraphSignatureKind,
     ) -> SharedSignatureNodes {
-        census_site!("shared_signature_nodes");
+        body_read_site!("shared_signature_nodes");
         ProjectSemanticDispatch::shared_signature_nodes(self, subject, kind)
     }
     fn substitute_semantic_type_param(
@@ -12320,7 +12395,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         parameter_node: SemanticNodeId,
         arg: SemanticNodeId,
     ) -> SemanticNodeId {
-        census_site!("substitute_semantic_type_param");
+        body_read_site!("substitute_semantic_type_param");
         ProjectSemanticDispatch::substitute_semantic_type_param(self, node, parameter_node, arg)
     }
     fn this_binder(
@@ -12330,15 +12405,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         class: &Arc<str>,
         instance: Option<SemanticNodeId>,
     ) -> SemanticNodeId {
-        census_site!("this_binder");
+        body_read_site!("this_binder");
         ProjectSemanticDispatch::this_binder(self, canonical, owner, class, instance)
     }
     fn type_parameter_apparent_receiver(&self, receiver: SemanticNodeId) -> SemanticNodeId {
-        census_site!("type_parameter_apparent_receiver");
+        body_read_site!("type_parameter_apparent_receiver");
         ProjectSemanticDispatch::type_parameter_apparent_receiver(self, receiver)
     }
     fn union_arms_of(&self, node: SemanticNodeId) -> Option<Vec<SemanticNodeId>> {
-        census_site!("union_arms_of");
+        body_read_site!("union_arms_of");
         ProjectSemanticDispatch::union_arms_of(self, node)
     }
     fn assignability_refuting_keys(
@@ -12346,26 +12421,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         target: SemanticNodeId,
         canonical: &str,
     ) -> Option<Vec<Arc<str>>> {
-        census_site!("assignability_refuting_keys");
+        body_read_site!("assignability_refuting_keys");
         ProjectSemanticDispatch::assignability_refuting_keys(self, target, canonical)
     }
     fn closed_object_own_string_keys(&self, source: SemanticNodeId) -> Option<Vec<Arc<str>>> {
-        census_site!("closed_object_own_string_keys");
+        body_read_site!("closed_object_own_string_keys");
         ProjectSemanticDispatch::closed_object_own_string_keys(self, source)
     }
     fn unique_symbol_identity_for_typeof_node(
         &self,
         node: SemanticNodeId,
     ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart> {
-        census_site!("unique_symbol_identity_for_typeof_node");
+        body_read_site!("unique_symbol_identity_for_typeof_node");
         ProjectSemanticDispatch::unique_symbol_identity_for_typeof_node(self, node)
     }
     fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap {
-        census_site!("unwrap_identity_carrier_for_relation");
+        body_read_site!("unwrap_identity_carrier_for_relation");
         ProjectSemanticDispatch::unwrap_identity_carrier_for_relation(self, id)
     }
     fn regularized_empty_object_program(&self, node: SemanticNodeId) -> SemanticNodeId {
-        census_site!("regularized_empty_object_program");
+        body_read_site!("regularized_empty_object_program");
         ProjectSemanticDispatch::regularized_empty_object_program(self, node)
     }
     fn value_read_widens(
@@ -12374,7 +12449,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         owner: verter_type_expr::TopLevelOwnerId,
         path: &[String],
     ) -> bool {
-        census_site!("value_read_widens");
+        body_read_site!("value_read_widens");
         ProjectSemanticDispatch::value_read_widens(self, canonical, owner, path)
     }
     fn resolve_scoped_argument_literal_provenance(
@@ -12387,88 +12462,88 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             verter_span::Span,
         ) -> super::call_resolve::ArgumentReadLiterals,
     ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>> {
-        census_site!("resolve_scoped_argument_literal_provenance");
+        body_read_site!("resolve_scoped_argument_literal_provenance");
         ProjectSemanticDispatch::resolve_scoped_argument_literal_provenance(
             self, canonical, owner, authored, reads,
         )
     }
     fn arena(&self) -> super::arena_ops::ArenaOps<'_, C::Observe> {
-        census_site!("arena");
+        body_read_site!("arena");
         super::arena_ops::ArenaOps::new(self.graph())
     }
     fn call_undecided_relations(&self) -> u64 {
-        census_site!("call_undecided_relations");
+        body_read_site!("call_undecided_relations");
         self.dispatch_txn.borrow().call.undecided_relations
     }
     fn discard_call_relation_observations(&self, count: u64) {
-        census_site!("discard_call_relation_observations");
+        body_read_site!("discard_call_relation_observations");
         self.dispatch_txn
             .borrow_mut()
             .call
             .discard_undecided_relations(count);
     }
     fn restore_call_relation_observations(&self, count: u64) {
-        census_site!("restore_call_relation_observations");
+        body_read_site!("restore_call_relation_observations");
         let mut txn = self.dispatch_txn.borrow_mut();
         txn.call.undecided_relations = txn.call.undecided_relations.saturating_add(count);
     }
     fn open_undecided_relation_window(&self) -> super::dispatch_txn::HeldUndecidedRelationWindow {
-        census_site!("open_undecided_relation_window");
+        body_read_site!("open_undecided_relation_window");
         super::dispatch_txn::HeldUndecidedRelationWindow::open(&self.dispatch_txn)
     }
     fn close_undecided_relation_window(
         &self,
         window: super::dispatch_txn::HeldUndecidedRelationWindow,
     ) -> Option<super::dispatch_txn::UndecidedRelationDelta> {
-        census_site!("close_undecided_relation_window");
+        body_read_site!("close_undecided_relation_window");
         window.close(&self.dispatch_txn)
     }
     fn replay_undecided_relation_delta(
         &self,
         delta: super::dispatch_txn::UndecidedRelationDelta,
     ) -> bool {
-        census_site!("replay_undecided_relation_delta");
+        body_read_site!("replay_undecided_relation_delta");
         self.dispatch_txn
             .borrow_mut()
             .call
             .replay_undecided_delta(delta)
     }
     fn open_inline_cost(&self) -> super::connected_demand::HeldInlineCost {
-        census_site!("open_inline_cost");
+        body_read_site!("open_inline_cost");
         self.connected_demand().hold_inline_cost()
     }
     fn close_inline_cost(
         &self,
         cost: super::connected_demand::HeldInlineCost,
     ) -> Option<super::connected_demand::InlineCost> {
-        census_site!("close_inline_cost");
+        body_read_site!("close_inline_cost");
         self.connected_demand().close_held_inline_cost(cost)
     }
     fn replay_inline_cost(&self, cost: &super::connected_demand::InlineCost) -> bool {
-        census_site!("replay_inline_cost");
+        body_read_site!("replay_inline_cost");
         self.connected_demand().replay_inline_cost(
             cost,
             crate::request_context::current_request_budget().as_deref(),
         )
     }
     fn outside_inline_costs<T>(&self, part: impl FnOnce() -> T) -> T {
-        census_site!("outside_inline_costs");
+        body_read_site!("outside_inline_costs");
         self.connected_demand().outside_inline_costs(part)
     }
     fn open_contextual_window(&self) -> bool {
-        census_site!("open_contextual_window");
+        body_read_site!("open_contextual_window");
         ProjectSemanticDispatch::open_contextual_window(self)
     }
     fn close_contextual_window(&self) {
-        census_site!("close_contextual_window");
+        body_read_site!("close_contextual_window");
         ProjectSemanticDispatch::close_contextual_window(self);
     }
     fn contextual_window_waits(&self) -> bool {
-        census_site!("contextual_window_waits");
+        body_read_site!("contextual_window_waits");
         ProjectSemanticDispatch::contextual_window_waits(self)
     }
     fn contextual_window_open(&self) -> bool {
-        census_site!("contextual_window_open");
+        body_read_site!("contextual_window_open");
         ProjectSemanticDispatch::contextual_window_open(self)
     }
     fn contextual_delivery_waits(
@@ -12476,19 +12551,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         state: &super::call_resolve::ContextualCallState,
         typed: SemanticNodeId,
     ) -> bool {
-        census_site!("contextual_delivery_waits");
+        body_read_site!("contextual_delivery_waits");
         ProjectSemanticDispatch::contextual_delivery_waits(self, state, typed)
     }
     fn hold_contextual_route(&self, route: HeldContextualRoute) {
-        census_site!("hold_contextual_route");
+        body_read_site!("hold_contextual_route");
         ProjectSemanticDispatch::hold_contextual_route(self, route);
     }
     fn take_held_contextual_route(&self, asked: &ResolveCallKey) -> Option<HeldContextualRoute> {
-        census_site!("take_held_contextual_route");
+        body_read_site!("take_held_contextual_route");
         ProjectSemanticDispatch::take_held_contextual_route(self, asked)
     }
     fn pending_obligation_count(&self) -> usize {
-        census_site!("pending_obligation_count");
+        body_read_site!("pending_obligation_count");
         self.dispatch_txn
             .borrow()
             .obligations
@@ -12496,14 +12571,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             .pending_len()
     }
     fn enter_lexical_demand(&self, canonical: Arc<str>) -> super::LexicalDemandScopeGuard<'_> {
-        census_site!("enter_lexical_demand");
+        body_read_site!("enter_lexical_demand");
         super::LexicalDemandScopeGuard::push(&self.lexical_demand_scope, canonical)
     }
     fn presence_intersection_for_flow(
         &self,
         members: &[Vec<crate::semantic_query::SurfaceMember>],
     ) -> Vec<crate::semantic_query::SurfaceMember> {
-        census_site!("presence_intersection_for_flow");
+        body_read_site!("presence_intersection_for_flow");
         let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
         let result = super::walk::presence_intersection_members(
             self.graph(),
@@ -12522,7 +12597,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         super::flow_products::LiteralProvenanceResult,
         verter_session_query::flow::policy::FlowGap,
     > {
-        census_site!("flow_literal_provenance");
+        body_read_site!("flow_literal_provenance");
         let (membership, evidence) = super::canonical_algebra::inspect_literal_provenance(
             self.graph().store(),
             inputs,
@@ -12541,7 +12616,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         members: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite {
-        census_site!("flow_canonical_union");
+        body_read_site!("flow_canonical_union");
         let composite = super::canonical_algebra::intern_ordered_union_charged(
             self.graph(),
             members,
@@ -12618,8 +12693,23 @@ impl<D: FlowDemandDriver> FlowCx<'_, D> {
         &self.arena
     }
 }
+impl<D: FlowDemandDriver> FlowReadDriver for FlowCx<'_, D> {
+    fn closed_signature_utility(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> ReadStep<SemanticNodeId> {
+        self.driver.closed_signature_utility(node, context)
+    }
+    fn answer_read(&self, wait: ReadWait) -> ReadDelivery {
+        self.driver.answer_read(wait)
+    }
+}
 impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     type Caps = D::Caps;
+    fn read_in_place(&self, wait: ReadWait) -> ReadDelivery {
+        self.driver.read_in_place(wait)
+    }
     fn probe_optional<T>(&self, probe: impl FnOnce() -> Option<T>) -> Option<T> {
         self.driver.probe_optional(probe)
     }
@@ -13223,13 +13313,6 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>> {
         self.driver
             .checker_relation_failure(source, target, head, site)
-    }
-    fn resolve_closed_signature_utility(
-        &self,
-        node: SemanticNodeId,
-        context: crate::semantic_query::ProjectionReductionContext,
-    ) -> SemanticNodeId {
-        self.driver.resolve_closed_signature_utility(node, context)
     }
     fn resolve_signature_source_carrier(
         &self,
@@ -14398,6 +14481,55 @@ pub fn instantiated_flow_evaluations_for_tests() -> usize {
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
+    /// How many reads flow bodies requested that their root read answered
+    /// on this thread ([`read::FlowRead::drive_in_place`]); test-only.
+    static FLOW_READ_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many reads flow bodies requested that their root read answered on
+/// this thread so far (test-only).
+#[cfg(any(test, feature = "test-support"))]
+pub fn flow_read_requests_for_tests() -> usize {
+    FLOW_READ_REQUESTS.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Whether flow bodies on this thread read their type leaves in place
+    /// even where their run could request them; test-only.
+    static TYPE_LEAVES_IN_PLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `body` with every flow body on this thread reading its type leaves
+/// in place, as a run that cannot suspend does (test-only), so a test can
+/// compare a requested read with the same read made in place.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_type_leaves_read_in_place_for_tests<R>(body: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TYPE_LEAVES_IN_PLACE.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(TYPE_LEAVES_IN_PLACE.with(|flag| flag.replace(true)));
+    body()
+}
+
+/// Whether a run that can suspend requests the reads its type leaves make.
+#[inline]
+fn type_leaves_request_reads() -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        !TYPE_LEAVES_IN_PLACE.with(std::cell::Cell::get)
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        true
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
     /// How many loop-body passes this thread evaluated
     /// ([`FlowEvaluator::begin_loop_pass`]); test-only.
     static LOOP_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -14962,13 +15094,43 @@ enum Waiting<'e> {
     CallFunction(Box<CallFunctionWait<'e>>),
     /// A class expression waiting on the child it asked for last.
     Class(Box<class_expression::ClassEvalFrame<'e>>),
+    /// A site waiting on the answer of the read it requested.
+    Read(ReadSite<'e>),
+}
+
+/// A site of an expression run waiting on the answer of a read it
+/// requested, with what its value is finished from.
+enum ReadSite<'e> {
+    /// A type leaf whose lowered `carrier` is a closed signature utility,
+    /// read as the utility's answer (the carrier kept when it answers no
+    /// node).
+    ClosedUtility {
+        leaf: &'e verter_session_query::flow::slice::GatedLeaf,
+        carrier: SemanticNodeId,
+    },
+}
+
+/// What a flow body's evaluation waits on where it suspends.
+enum BodyWait {
+    /// The value of a nested function value (see `flow_return_nested`).
+    Nested(NestedDemand),
+    /// The answer of a read it requests.
+    Read(ReadWait),
+}
+
+/// What a suspended flow body's evaluation resumes with.
+enum BodyDelivery {
+    /// The value of the nested function value it suspended at.
+    Nested(SemanticNodeId),
+    /// The answer of the read it requested.
+    Read(ReadDelivery),
 }
 
 /// What a resumed call takes next on an expression run.
 enum ResumedCall {
     Value(Positional<SemanticNodeId>),
     Descend,
-    Nested(NestedDemand),
+    Wait(BodyWait),
 }
 
 /// [`FlowEvaluator::run_expr`]'s explicit stack: the forms waiting on a
@@ -14993,8 +15155,9 @@ impl<'e> ExprRun<'e> {
 enum ExprProgress {
     /// Nothing: the expression's value.
     Done(Positional<SemanticNodeId>),
-    /// The value of a nested function value (see `flow_return_nested`).
-    Nested(NestedDemand),
+    /// The value of a nested function value (see `flow_return_nested`), or
+    /// the answer of a read.
+    Wait(BodyWait),
 }
 
 /// The frames around a nested function's evaluator, innermost first. A
@@ -15130,10 +15293,11 @@ struct PendingReturn<'r> {
 }
 
 /// What a region's evaluation needs next: a block's region evaluated, the
-/// value of a nested function value, or nothing — its outcome.
+/// value of a nested function value or the answer of a read, or nothing —
+/// its outcome.
 enum RegionEvalStep<'r> {
     EnterBlock(&'r verter_session_query::flow::slice::SliceRegion),
-    Nested(NestedDemand),
+    Wait(BodyWait),
     Done((Result<Vec<FlowContribution>, FlowReturnFailure>, bool)),
 }
 
@@ -15141,8 +15305,8 @@ enum RegionEvalStep<'r> {
 enum RegionDelivery {
     /// The outcome of the block it entered.
     Block((Result<Vec<FlowContribution>, FlowReturnFailure>, bool)),
-    /// The value of the nested function value it suspended at.
-    Nested(SemanticNodeId),
+    /// What the statement it suspended at waits on.
+    Wait(BodyDelivery),
 }
 
 /// A region's evaluation from an explicit stack of the regions being
@@ -15154,7 +15318,7 @@ struct RegionRun<'r> {
 /// What a region run needs next.
 enum RegionProgress {
     Done((Result<Vec<FlowContribution>, FlowReturnFailure>, bool)),
-    Nested(NestedDemand),
+    Wait(BodyWait),
 }
 
 /// An array literal's evaluation in progress, stepped by
@@ -19062,26 +19226,24 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// A ternary nested in a ternary's arm costs no native level: the arms
     /// are visited from `walk`'s explicit stack, each entered under its
     /// guard reading and left at its own narrowing mark, in order. With
-    /// `suspend`, a nested function value in an arm answers its demand with
-    /// `walk` suspended there, and `delivered` is its value on the next
-    /// entry; without, it evaluates in place and this answers `None` once
-    /// every arm has its part.
+    /// `suspend`, a nested function value or a requested read in an arm
+    /// answers what it waits on with `walk` suspended there, and
+    /// `delivered` is its answer on the next entry; without, it evaluates in
+    /// place and this answers `None` once every arm has its part.
     fn run_arm_walk<'e>(
         &mut self,
         walk: &mut ArmWalk<'e>,
-        delivered: Option<SemanticNodeId>,
+        delivered: Option<BodyDelivery>,
         suspend: bool,
-    ) -> Option<NestedDemand> {
+    ) -> Option<BodyWait> {
         use verter_session_query::flow::slice::{SliceExpr, SliceFreshness};
-        if let Some(node) = delivered {
+        if let Some(delivery) = delivered {
             let part = walk
                 .running
                 .take()
                 .expect("the part the walk is suspended at");
-            if let Some(demand) =
-                self.run_arm_part(walk, part, Some(Positional::Value(node)), suspend)
-            {
-                return Some(demand);
+            if let Some(wait) = self.run_arm_part(walk, part, Some(delivery), suspend) {
+                return Some(wait);
             }
         }
         while let Some(step) = walk.steps.pop() {
@@ -19131,8 +19293,8 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         holds_before: self.st.holds.len(),
                         run: ExprRun::new(expr),
                     };
-                    if let Some(demand) = self.run_arm_part(walk, part, None, suspend) {
-                        return Some(demand);
+                    if let Some(wait) = self.run_arm_part(walk, part, None, suspend) {
+                        return Some(wait);
                     }
                 }
                 ArmStep::EnterArm {
@@ -19176,20 +19338,20 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         None
     }
 
-    /// Run one part of [`Self::run_arm_walk`], `delivered` the value of the
-    /// nested function value it suspended at: its demand when it suspends
-    /// again, otherwise its [`EvolvingPart`] is collected.
+    /// Run one part of [`Self::run_arm_walk`], `delivered` the answer of
+    /// what it suspended at: what it waits on when it suspends again,
+    /// otherwise its [`EvolvingPart`] is collected.
     fn run_arm_part<'e>(
         &mut self,
         walk: &mut ArmWalk<'e>,
         mut part: ArmPartRun<'e>,
-        delivered: Option<Positional<SemanticNodeId>>,
+        delivered: Option<BodyDelivery>,
         suspend: bool,
-    ) -> Option<NestedDemand> {
+    ) -> Option<BodyWait> {
         match self.run_expr(&mut part.run, delivered, suspend) {
-            ExprProgress::Nested(demand) => {
+            ExprProgress::Wait(wait) => {
                 walk.running = Some(part);
-                Some(demand)
+                Some(wait)
             }
             ExprProgress::Done(outcome) => {
                 let evolving =
@@ -20760,6 +20922,35 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         leaf: &verter_session_query::flow::slice::GatedLeaf,
     ) -> Positional<SemanticNodeId> {
         let node = self.lower_body_type(leaf.ty());
+        self.finish_type_leaf(leaf, node)
+    }
+
+    /// Begin a type leaf's evaluation on `run`: the node it lowers to, or
+    /// the read that answers it, requested with the leaf waiting for the
+    /// answer on top of `run` ([`Waiting::Read`]).
+    #[inline(never)]
+    fn begin_type_leaf<'e>(
+        &self,
+        run: &mut ExprRun<'e>,
+        leaf: &'e verter_session_query::flow::slice::GatedLeaf,
+    ) -> ReadStep<SemanticNodeId> {
+        let carrier = self.lower_body_type_carrier(leaf.ty());
+        let step = self.body_type_read(carrier);
+        if matches!(step, ReadStep::Wait(_)) {
+            run.waiting
+                .push(Waiting::Read(ReadSite::ClosedUtility { leaf, carrier }));
+        }
+        step
+    }
+
+    /// Finish a type leaf's evaluation from `node`, the node it lowered to
+    /// or the answer of the read it requested.
+    #[inline(never)]
+    fn finish_type_leaf(
+        &mut self,
+        leaf: &verter_session_query::flow::slice::GatedLeaf,
+        node: SemanticNodeId,
+    ) -> Positional<SemanticNodeId> {
         if self.member_read_missed(Some(node)) {
             let recovered =
                 self.recovered_typeof_path(leaf.ty(), leaf.frame_root(), leaf.member_spans());
@@ -27007,10 +27198,22 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// leaf or a declarator's authored annotation) under the function's
     /// OWN binder environment — a body type referencing a root binder
     /// keeps the binder, never an outer same-name resolution.
+    ///
+    /// A closed signature utility's answer is read at once
+    /// ([`FlowDemandDriver::read_in_place`]).
     fn lower_body_type(&self, ty: &verter_type_expr::TypeExpr) -> SemanticNodeId {
+        let carrier = self.lower_body_type_carrier(ty);
+        match self.body_type_read(carrier) {
+            ReadStep::Ready(node) => node,
+            ReadStep::Wait(wait) => self.dispatch.read_in_place(wait).0.unwrap_or(carrier),
+        }
+    }
+
+    /// [`Self::lower_body_type`]'s carrier: the type lowered, before a
+    /// closed signature utility in it is read as its answer.
+    fn lower_body_type_carrier(&self, ty: &verter_type_expr::TypeExpr) -> SemanticNodeId {
         let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-        let context = crate::semantic_query::ProjectionReductionContext::structural_transit();
-        let node = self.dispatch.shallow_lower_type_expr_with_context(
+        self.dispatch.shallow_lower_type_expr_with_context(
             ty,
             &self.st.binder_env.env,
             &self.st.binder_env.scope,
@@ -27018,10 +27221,18 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             self.st.binder_env.scope_payload.as_ref(),
             &self.st.binder_env.shadowing,
             &mut substitutions,
-            context,
-        );
-        self.dispatch
-            .resolve_closed_signature_utility(node, context)
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )
+    }
+
+    /// The value a lowered body type `carrier` denotes: the carrier, or the
+    /// read that answers the closed signature utility it is
+    /// ([`FlowReadDriver::closed_signature_utility`]).
+    fn body_type_read(&self, carrier: SemanticNodeId) -> ReadStep<SemanticNodeId> {
+        self.dispatch.closed_signature_utility(
+            carrier,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        )
     }
 
     /// Whether the file OWNER SCOPE answers `name` in the name space it
@@ -27076,7 +27287,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     let child = self.region_eval_frame(block);
                     run.frames.push(child);
                 }
-                RegionEvalStep::Nested(demand) => return RegionProgress::Nested(demand),
+                RegionEvalStep::Wait(wait) => return RegionProgress::Wait(wait),
                 RegionEvalStep::Done(mut outcome) => {
                     // Statements past a path the evaluator proved dead
                     // evaluated on a dead path: the region does not
@@ -27359,7 +27570,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         // evaluate. The returned fall-through is the lowering's flag
         // ANDed with this — the override only ever narrows downward.
         let mut path_alive = frame.path_alive;
-        if let Some(RegionDelivery::Nested(node)) = delivered {
+        if let Some(RegionDelivery::Wait(delivery)) = delivered {
             let mut pending = match frame
                 .pending
                 .take()
@@ -27367,11 +27578,11 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             {
                 Pending::Return(pending) => pending,
                 Pending::ConditionalConst(mut pending) => {
-                    if let Some(demand) = self.run_arm_walk(&mut pending.walk, Some(node), true) {
+                    if let Some(wait) = self.run_arm_walk(&mut pending.walk, Some(delivery), true) {
                         frame.pending = Some(Pending::ConditionalConst(pending));
                         frame.contributors = contributors;
                         frame.path_alive = path_alive;
-                        return RegionEvalStep::Nested(demand);
+                        return RegionEvalStep::Wait(wait);
                     }
                     let PendingConditionalConst {
                         binding,
@@ -27382,12 +27593,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     return self.eval_region_statements_from(frame, contributors, path_alive);
                 }
                 Pending::Binding(mut pending) => {
-                    match self.run_expr(&mut pending.run, Some(Positional::Value(node)), true) {
-                        ExprProgress::Nested(demand) => {
+                    match self.run_expr(&mut pending.run, Some(delivery), true) {
+                        ExprProgress::Wait(wait) => {
                             frame.pending = Some(Pending::Binding(pending));
                             frame.contributors = contributors;
                             frame.path_alive = path_alive;
-                            return RegionEvalStep::Nested(demand);
+                            return RegionEvalStep::Wait(wait);
                         }
                         ExprProgress::Done(outcome) => {
                             let PendingBinding {
@@ -27413,12 +27624,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     return self.eval_region_statements_from(frame, contributors, path_alive);
                 }
             };
-            match self.run_expr(&mut pending.run, Some(Positional::Value(node)), true) {
-                ExprProgress::Nested(demand) => {
+            match self.run_expr(&mut pending.run, Some(delivery), true) {
+                ExprProgress::Wait(wait) => {
                     frame.pending = Some(Pending::Return(pending));
                     frame.contributors = contributors;
                     frame.path_alive = path_alive;
-                    return RegionEvalStep::Nested(demand);
+                    return RegionEvalStep::Wait(wait);
                 }
                 ExprProgress::Done(outcome) => {
                     let PendingReturn {
@@ -27761,7 +27972,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                             let mut run = ExprRun::new(expr);
                                             match self.run_expr(&mut run, None, true) {
                                                 ExprProgress::Done(outcome) => outcome,
-                                                ExprProgress::Nested(demand) => {
+                                                ExprProgress::Wait(wait) => {
                                                     frame.pending = Some(Pending::Return(
                                                         Box::new(PendingReturn {
                                                             expr,
@@ -27774,7 +27985,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                                     ));
                                                     frame.contributors = contributors;
                                                     frame.path_alive = path_alive;
-                                                    return RegionEvalStep::Nested(demand);
+                                                    return RegionEvalStep::Wait(wait);
                                                 }
                                             }
                                         }
@@ -28418,7 +28629,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                             // A nested function value in an arm evaluates
                             // from the caller's stack; the binding is made
                             // once every arm has its value.
-                            if let Some(demand) = self.run_arm_walk(&mut walk, None, true) {
+                            if let Some(wait) = self.run_arm_walk(&mut walk, None, true) {
                                 frame.pending = Some(Pending::ConditionalConst(Box::new(
                                     PendingConditionalConst {
                                         binding: *binding,
@@ -28428,7 +28639,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                 )));
                                 frame.contributors = contributors;
                                 frame.path_alive = path_alive;
-                                return RegionEvalStep::Nested(demand);
+                                return RegionEvalStep::Wait(wait);
                             }
                             self.bind_conditional_const(*binding, *kind, walk.parts);
                             continue;
@@ -28441,7 +28652,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                 // evaluates from the caller's stack; the
                                 // binding is made once the initializer has
                                 // its value.
-                                ExprProgress::Nested(demand) => {
+                                ExprProgress::Wait(wait) => {
                                     frame.pending =
                                         Some(Pending::Binding(Box::new(PendingBinding {
                                             binding: *binding,
@@ -28454,7 +28665,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                         })));
                                     frame.contributors = contributors;
                                     frame.path_alive = path_alive;
-                                    return RegionEvalStep::Nested(demand);
+                                    return RegionEvalStep::Wait(wait);
                                 }
                             }
                         };
@@ -29860,7 +30071,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         run.skips_context_sensitive_objects = skips_context_sensitive_objects;
         match self.run_expr(&mut run, None, false) {
             ExprProgress::Done(value) => value,
-            ExprProgress::Nested(_) => {
+            ExprProgress::Wait(_) => {
                 unreachable!("an expression evaluated in place never suspends")
             }
         }
@@ -29909,14 +30120,16 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     }
 
     /// [`Self::eval_expr`] from `run`'s explicit stack, with `delivered` the
-    /// value of the nested function value it suspended at. With `suspend`, a
-    /// nested function value anywhere on the stack suspends the run
-    /// ([`ExprProgress::Nested`]) for the caller to evaluate it
-    /// (`flow_return_nested`); without, it evaluates in place.
+    /// answer of what it suspended at. With `suspend`, a nested function
+    /// value anywhere on the stack suspends the run ([`ExprProgress::Wait`])
+    /// for the caller to evaluate it (`flow_return_nested`), and so does a
+    /// type leaf whose answer is a read, for the caller to request it, the
+    /// leaf waiting on top of the stack ([`Waiting::Read`]); without, both
+    /// evaluate in place.
     fn run_expr<'e>(
         &mut self,
         run: &mut ExprRun<'e>,
-        mut delivered: Option<Positional<SemanticNodeId>>,
+        mut delivered: Option<BodyDelivery>,
         suspend: bool,
     ) -> ExprProgress {
         use verter_session_query::flow::slice::SliceExpr;
@@ -29929,7 +30142,14 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         loop {
             let current = run.current;
             let mut value = match delivered.take() {
-                Some(value) => value,
+                Some(BodyDelivery::Nested(node)) => Positional::Value(node),
+                // The site that requested the read resumes with its answer.
+                Some(BodyDelivery::Read(delivery)) => match run.waiting.pop() {
+                    Some(Waiting::Read(ReadSite::ClosedUtility { leaf, carrier })) => {
+                        self.finish_type_leaf(leaf, delivery.0.unwrap_or(carrier))
+                    }
+                    _ => unreachable!("a read's delivery resumes the site that requested it"),
+                },
                 None => match current {
                     SliceExpr::Not { operand, widen } => {
                         run.waiting.push(Waiting::Not { widen: *widen });
@@ -29949,7 +30169,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         match self.class_step_on_run(run, frame, step, suspend) {
                             ResumedCall::Value(value) => value,
                             ResumedCall::Descend => continue,
-                            ResumedCall::Nested(demand) => return ExprProgress::Nested(demand),
+                            ResumedCall::Wait(wait) => return ExprProgress::Wait(wait),
                         }
                     }
                     SliceExpr::Awaited { operand } => {
@@ -30065,7 +30285,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                 let demand = wait.take_demand();
                                 run.waiting.push(Waiting::CallFunction(wait));
                                 if suspend {
-                                    return ExprProgress::Nested(demand);
+                                    return ExprProgress::Wait(BodyWait::Nested(demand));
                                 }
                                 Positional::Value(self.eval_nested_demand(demand))
                             }
@@ -30079,7 +30299,17 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         if let Some(gap) = gap {
                             self.record_degradation(FlowReturnDegradation::FlowGap(gap));
                         }
-                        return ExprProgress::Nested(demand);
+                        return ExprProgress::Wait(BodyWait::Nested(demand));
+                    }
+                    // A type leaf whose answer is a read suspends the run when
+                    // the caller requests reads; without, it reads in place.
+                    SliceExpr::Type(leaf) if suspend && type_leaves_request_reads() => {
+                        match self.begin_type_leaf(run, leaf) {
+                            ReadStep::Ready(node) => self.finish_type_leaf(leaf, node),
+                            ReadStep::Wait(wait) => {
+                                return ExprProgress::Wait(BodyWait::Read(wait));
+                            }
+                        }
                     }
                     other => self.eval_expr_unerased(other),
                 },
@@ -30087,6 +30317,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             loop {
                 match run.waiting.pop() {
                     None => return ExprProgress::Done(value),
+                    Some(Waiting::Read(_)) => {
+                        unreachable!("a site waiting on a read resumes only with its delivery")
+                    }
                     // A declared type enters the flow as the checker reads
                     // it: a positional indexed access resolved to the
                     // element it reads, then erased.
@@ -30217,7 +30450,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         match self.resumed_call_step(run, step, suspend) {
                             ResumedCall::Value(done) => value = done,
                             ResumedCall::Descend => break,
-                            ResumedCall::Nested(demand) => return ExprProgress::Nested(demand),
+                            ResumedCall::Wait(wait) => return ExprProgress::Wait(wait),
                         }
                     }
                     Some(Waiting::CallArgument(wait)) => {
@@ -30225,7 +30458,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         match self.resumed_call_step(run, step, suspend) {
                             ResumedCall::Value(done) => value = done,
                             ResumedCall::Descend => break,
-                            ResumedCall::Nested(demand) => return ExprProgress::Nested(demand),
+                            ResumedCall::Wait(wait) => return ExprProgress::Wait(wait),
                         }
                     }
                     Some(Waiting::Class(mut frame)) => {
@@ -30233,7 +30466,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         match self.class_step_on_run(run, *frame, step, suspend) {
                             ResumedCall::Value(done) => value = done,
                             ResumedCall::Descend => break,
-                            ResumedCall::Nested(demand) => return ExprProgress::Nested(demand),
+                            ResumedCall::Wait(wait) => return ExprProgress::Wait(wait),
                         }
                     }
                     Some(Waiting::CallFunction(wait)) => {
@@ -30241,7 +30474,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         match self.resumed_call_step(run, step, suspend) {
                             ResumedCall::Value(done) => value = done,
                             ResumedCall::Descend => break,
-                            ResumedCall::Nested(demand) => return ExprProgress::Nested(demand),
+                            ResumedCall::Wait(wait) => return ExprProgress::Wait(wait),
                         }
                     }
                 }
@@ -30271,7 +30504,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 }
                 class_expression::ClassStep::Nested(demand) if suspend => {
                     run.waiting.push(Waiting::Class(Box::new(frame)));
-                    return ResumedCall::Nested(demand);
+                    return ResumedCall::Wait(BodyWait::Nested(demand));
                 }
                 class_expression::ClassStep::Nested(demand) => {
                     let signature = self.eval_nested_demand(demand);
@@ -30302,7 +30535,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 let demand = wait.take_demand();
                 run.waiting.push(Waiting::CallFunction(wait));
                 if suspend {
-                    return ResumedCall::Nested(demand);
+                    return ResumedCall::Wait(BodyWait::Nested(demand));
                 }
                 ResumedCall::Value(Positional::Value(self.eval_nested_demand(demand)))
             }

@@ -1284,6 +1284,26 @@ routes above, and the two differ in WHO owns the demand:
   `FfiDiagnostic` carries exactly `severity`, `code`, `message`,
   `span_start` and `span_end`: a diagnostic publishes no argument list,
   so a consumer that needs a rendered value reads it out of `message`.
+- **Missing inputs are typed rows on the native wire.** A
+  `CompileRequestFailure::DependenciesIncomplete`'s gaps convert through
+  `verter_ffi::convert::compile_dependency_gaps_to_ffi` (exhaustive, no
+  wildcard) into `verter_protocol::compile_response::FfiMissingInput` rows
+  (`route` / `file` / `lookup`), which the native binding publishes as the
+  failure's `missingInputs` — on the thrown `Error` and on a
+  `compileRequests` entry's `failure` alike. The browser binding still
+  throws its failures as strings.
+- **The response declarations are rendered, not written.**
+  `crates/verter_napi/src/host_compile_request_ts.rs` renders
+  `packages/native/host-compile-response.generated.ts` from the unions and
+  objects the native binding serialises (declared through
+  `js_object_union!` in `crates/verter_napi/src/compile_request_response.rs`),
+  and `packages/wasm/src/compile-response.generated.ts` from the `Browser*`
+  declarations in `verter_protocol::compile_response` that the browser
+  binding serialises. A new product arm is one more row in that union's
+  declaration list, which is its serialisation and its declaration at once;
+  regenerate with `pnpm gen:host-request-ts`, and the freshness pins in
+  `crates/verter_napi/tests/cases/host_compile_request_ts_freshness.rs`
+  byte-compare every generated file.
 
 `compile_request` is available on native and `wasm32`; the browser binding
 calls it synchronously after decoding one typed request. `compile_request_many`

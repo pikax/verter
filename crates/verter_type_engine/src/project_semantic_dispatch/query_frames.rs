@@ -543,9 +543,10 @@ impl Drop for ConditionalChildQueries<'_> {
 pub(super) struct NestedDecisionQuery<'d> {
     seam: Option<&'d verter_execution::sync_cell::SyncRefCell<Option<DecisionSeam>>>,
     flow: Option<&'d verter_execution::sync_cell::SyncRefCell<Option<FlowSeam>>>,
-    /// The root flow read's body extent's nesting, for its census.
+    /// The root flow read's body extent's nesting, for its count of body
+    /// reads.
     #[cfg(any(test, feature = "test-support"))]
-    _body: super::flow_return::census::InnerScope,
+    _body: super::flow_return::body_reads::InnerScope,
 }
 
 impl Drop for NestedDecisionQuery<'_> {
@@ -3013,7 +3014,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 &self.flow_seam
             }),
             #[cfg(any(test, feature = "test-support"))]
-            _body: super::flow_return::census::enter_nested(),
+            _body: super::flow_return::body_reads::enter_nested(),
         }
     }
 

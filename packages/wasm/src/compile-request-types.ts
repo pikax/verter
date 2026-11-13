@@ -18,16 +18,15 @@
 // error there rather than a shape that type-checks and then refuses at run
 // time.
 //
-// RESPONSE side — `@verter/native` now has a counterpart
-// (`HostCompileResponse` / `HostCompiledProduct`), but the JavaScript
-// envelopes diverge: native nests `ide`, stringifies `analysis`, and throws
-// a structured Error; this binding flattens the IDE DTO, returns `analysis`
-// as an object, and throws a string. Names here stay unprefixed and reuse
-// the shapes this package already re-exports from `@verter/native` wherever
-// the route serialises one, rather than restating them: a second copy is
-// only safe when something holds the two together, and these have the
-// strongest possible tie — the route serialises the very Rust struct those
-// declarations project.
+// RESPONSE side — `@verter/native` has a counterpart (`HostCompileResponse`
+// / `HostCompiledProduct`), but the JavaScript envelopes diverge: native
+// nests `ide`, stringifies `analysis`, and throws a structured Error; this
+// binding flattens the IDE DTO, returns `analysis` as an object, has no
+// `null` on optional fields, and throws a string. Names here stay
+// unprefixed. Every response declaration is RENDERED from the Rust types
+// this binding serialises (`compile-response.generated.ts`, byte-pinned
+// against them) and re-exported below; the shared leaf shapes it reaches
+// are imported from `@verter/native`'s host types, never restated.
 //
 // They live in a leaf module rather than in `index.ts` so `tsc` can check
 // them: `index.ts` imports the gitignored wasm-bindgen artifact and cannot
@@ -37,14 +36,9 @@
 import type {
   HostAnalysisProductOptions,
   HostCompileIdentity,
-  HostDiagnosticsSnapshot,
   HostIdeProductOptions,
-  HostIdeResponse,
   HostRuntimeProductOptions,
-  HostSpanEncoding,
   HostSvelteCompileOptions,
-  HostVirtualMeta,
-  HostVirtualNodeKind,
   HostVueCompileOptions,
 } from "@verter/native/host-types";
 
@@ -128,119 +122,19 @@ export type BrowserHostCompileRequest = ExactlyOneOf<{
 // The response
 // -----------------------------------------------------------------------------
 
-/**
- * One separately addressed output of a compiled runtime product.
- *
- * A runtime product is not one blob: the assembled main module, the script,
- * the compiled template, each style block and each custom block are distinct
- * modules a consumer loads and maps independently, so each row carries its
- * own code and its own map.
- *
- * The optional fields carry no `| null`: the route serialises through
- * `serde_wasm_bindgen`'s default serializer, where an absent value is
- * `undefined` and never `null`.
- */
-export interface HostCompiledVirtualNode {
-  /** Which node of the carrier this row is. */
-  node: HostVirtualNodeKind;
-  code: string;
-  /** This node's own JSON source map, when the request asked for maps. */
-  sourceMap?: string;
-  /** Output language (e.g. `"js"`, `"ts"`, `"css"`). */
-  lang?: string;
-  /** Block-specific metadata carried beside the node's bytes. */
-  meta: HostVirtualMeta;
-}
-
-export interface HostCompiledRuntimeProduct {
-  kind: "runtimeClient" | "runtimeServer";
-  nodes: HostCompiledVirtualNode[];
-}
+export type {
+  HostCompiledVirtualNode,
+  HostCompiledRuntimeProduct,
+  HostCompiledIdeProduct,
+  HostTemplateAnalysisSnapshot,
+  HostCompiledAnalysisProduct,
+  HostCompiledProduct,
+  HostCompileRequestResponse,
+} from "./compile-response.generated";
 
 /**
  * Where a `<script setup>` destructured-props block sits in the generated
- * IDE surface, and which bindings it declares.
- *
- * Declared here because the shared `HostIdeResponse` does not carry it,
- * while every binding that publishes an IDE projection does. Offsets are
- * UTF-16 code units, and each coordinate domain names its encoding.
+ * IDE surface, and which bindings it declares: the shared declaration the
+ * IDE row's `destructuredBlock` carries.
  */
-export interface HostDestructuredBlockMeta {
-  /** Binding spans in UTF-16 code units into the registered source. */
-  bindings: {
-    name: string;
-    sourceStart: number;
-    sourceEnd: number;
-    /** Encoding of `sourceStart`/`sourceEnd` (domain: the registered source). */
-    sourceEncoding: HostSpanEncoding;
-  }[];
-  /** UTF-16 start offset into the IDE product row's generated `code`. */
-  blockStart: number;
-  /** UTF-16 end offset into the IDE product row's generated `code`. */
-  blockEnd: number;
-  /** Encoding of `blockStart`/`blockEnd` (domain: the generated `code`). */
-  blockEncoding: HostSpanEncoding;
-}
-
-/**
- * The IDE projection row: the shared IDE response plus the destructured
- * block the shared declaration does not name.
- */
-export type HostCompiledIdeProduct = { kind: "ideCompanion" } & HostIdeResponse & {
-    destructuredBlock?: HostDestructuredBlockMeta;
-  };
-
-/**
- * The TEMPLATE analysis snapshot — binding occurrences, expression
- * diagnostics, and the rest of the template's facts.
- *
- * This is NOT what `getAnalysis()` returns. `getAnalysis()` publishes the
- * whole-file snapshot (imports, bindings, macros, styles, and a nested
- * `template`); this payload is that snapshot's `template` value and nothing
- * else. `@verter/language-shared` declares the same object as
- * `TemplateAnalysisSnapshot`; it stays unstructured here rather than
- * pulling an editor package into a browser binding's published types, and
- * the equivalence is proven at run time by the browser boundary tests
- * rather than asserted only in prose.
- *
- * Its spans are UTF-8 BYTE offsets into the SFC source. Diagnostics and
- * destructured binding source spans are UTF-16 offsets into that source;
- * destructured block bounds are UTF-16 offsets into the generated IDE code.
- */
-export type HostTemplateAnalysisSnapshot = Record<string, unknown>;
-
-export interface HostCompiledAnalysisProduct {
-  kind: "analysis";
-  /**
-   * Nested under its own key rather than flattened into the row, so no
-   * field of the payload can collide with the `kind` discriminant.
-   */
-  analysis: HostTemplateAnalysisSnapshot;
-}
-
-/**
- * One row of a response's product list, one-to-one with a requested product
- * kind and in request order, tagged with the same spelling the request used.
- */
-export type HostCompiledProduct =
-  | HostCompiledRuntimeProduct
-  | HostCompiledIdeProduct
-  | HostCompiledAnalysisProduct;
-
-/**
- * The result of executing one typed compile request.
- *
- * Complete-only: every requested product is present. A refusal at any stage
- * THROWS — there is no partial response, no `null`, and no boolean.
- */
-export interface HostCompileRequestResponse {
-  /** The canonical id the request executed against, after alias resolution. */
-  canonicalId: string;
-  /**
-   * The compile's diagnostics, deduplicated once across every product.
-   * Spans are UTF-16 offsets into the registered source.
-   */
-  diagnostics: HostDiagnosticsSnapshot;
-  /** One row per requested product kind, in request order. */
-  products: HostCompiledProduct[];
-}
+export type { HostDestructuredBlockMeta } from "@verter/native/host-types";

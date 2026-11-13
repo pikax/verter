@@ -14,6 +14,10 @@ use verter_type_engine::instant::Instant;
 // The runtime-render half of this module is native-only: the bound
 // framework backends, their refusal mappers and `Main` assembly all live
 // behind the same target gate as the render entry points that call them.
+use super::compile_inputs::{
+    prepare_execution_inputs, CapturedCompileInput, CompileInputsFailure, ExecutionInputDemand,
+    SharedDependencyAxis, SourceWitnessDemand,
+};
 use super::compile_request_build::{
     execute_bound_host_products, no_carrier_artifact_diagnostics, HostProductsFailure,
 };
@@ -29,6 +33,7 @@ use super::native_host_binding::BoundNativeHostRequest;
 use super::vue_script_extract::template_converter_inputs;
 use crate::hash::compile_profile_hash;
 use crate::id::{parse_raw_id, render_ids, render_single_id};
+use crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand;
 use crate::types::*;
 use crate::CompileTarget;
 use crate::VerterHost;
@@ -561,116 +566,6 @@ impl VerterHost {
         })
     }
 
-    /// Ensure a file is compiled and cached for the given profile.
-    ///
-    /// Unlike [`get_virtual_file`](Self::get_virtual_file), this does not require
-    /// specifying a `VirtualNodeKind`. It simply ensures the compilation cache is
-    /// populated so that subsequent `get_ide()`, `get_analysis()`, or
-    /// `get_virtual_file()` calls hit the cache.
-    ///
-    /// Returns `Ok(())` on success (cache hit or successful compilation).
-    /// Returns `Err(HostError)` if the file is missing or compilation fails.
-    pub(super) fn hydrate_compile_blockers(&self, canonical_id: &str) {
-        let Some(blockers) = self.get_compile_blockers(canonical_id) else {
-            return;
-        };
-
-        let mut blocker_ids = std::collections::BTreeSet::new();
-        let mut pending_routes = Vec::new();
-
-        // Blocker hydration and dependency edges are import-graph
-        // bookkeeping: they take every complete answer, retained or not.
-        for request in blockers.external_source_requests {
-            let resolved = match self
-                .resolve_for_persistent_state(
-                    canonical_id,
-                    &request.specifier,
-                    verter_session_query::resolution::ResolutionContext {
-                        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
-                        kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
-                    },
-                )
-                .into_delivered()
-            {
-                Some(resolution) => {
-                    let Some(resolution) = resolution else {
-                        if request.resolved_canonical_id != canonical_id {
-                            blocker_ids.insert(request.resolved_canonical_id);
-                        }
-                        continue;
-                    };
-                    pending_routes.push((
-                        request.specifier,
-                        resolution.source_id.clone(),
-                        verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
-                    ));
-                    resolution.source_id
-                }
-                None => return,
-            };
-            if resolved != canonical_id {
-                blocker_ids.insert(resolved);
-            }
-        }
-
-        for dep in blockers.macro_type_deps.iter() {
-            let type_resolution = self.resolve_for_persistent_state(
-                canonical_id,
-                &dep.import_source,
-                verter_session_query::resolution::ResolutionContext {
-                    phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
-                    kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
-                },
-            );
-            let resolved = match type_resolution.into_delivered() {
-                Some(resolution) => match resolution {
-                    Some(resolution) => {
-                        pending_routes.push((
-                            dep.import_source.clone(),
-                            resolution.source_id.clone(),
-                            verter_session_query::resolution::ResolveRequestKind::TypeImport,
-                        ));
-                        Some(resolution)
-                    }
-                    None => match self
-                        .resolve_for_persistent_state(
-                            canonical_id,
-                            &dep.import_source,
-                            verter_session_query::resolution::ResolutionContext {
-                                phase:
-                                    verter_session_query::resolution::ResolvePhase::CodegenBlocker,
-                                kind:
-                                    verter_session_query::resolution::ResolveRequestKind::EsmImport,
-                            },
-                        )
-                        .into_delivered()
-                    {
-                        Some(resolution) => resolution.inspect(|resolution| {
-                            pending_routes.push((
-                                dep.import_source.clone(),
-                                resolution.source_id.clone(),
-                                verter_session_query::resolution::ResolveRequestKind::EsmImport,
-                            ));
-                        }),
-                        None => return,
-                    },
-                },
-                None => return,
-            }
-            .map(|resolution| resolution.source_id);
-            if let Some(resolved) = resolved.filter(|resolved| resolved != canonical_id) {
-                blocker_ids.insert(resolved);
-            }
-        }
-
-        for (_specifier, resolved, _kind) in pending_routes {
-            self.record_resolved_dependency_edge(canonical_id, &resolved);
-        }
-        for blocker_id in blocker_ids {
-            let _ = self.ensure_loaded(&blocker_id);
-        }
-    }
-
     /// R3/R26/R28 cold-compute prefetch: resolve and load the cross-file
     /// dependency surface the compile-tier fact tracer will observe
     /// before the tracer is installed.
@@ -960,6 +855,15 @@ impl VerterHost {
         }
     }
 
+    /// Ensure a file is compiled and cached for the given profile.
+    ///
+    /// Unlike [`get_virtual_file`](Self::get_virtual_file), this does not require
+    /// specifying a `VirtualNodeKind`. It simply ensures the compilation cache is
+    /// populated so that subsequent `get_ide()`, `get_analysis()`, or
+    /// `get_virtual_file()` calls hit the cache.
+    ///
+    /// Returns `Ok(())` on success (cache hit or successful compilation).
+    /// Returns `Err(HostError)` if the file is missing or compilation fails.
     #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub fn ensure_compiled(
         &self,
@@ -1276,89 +1180,27 @@ impl VerterHost {
         // load those blockers before taking the coherent owner/content
         // capture below; `selected_block` is intentionally a read-only
         // selector and must not perform workspace or scheduler mutation.
-        self.hydrate_compile_blockers(&canonical);
-
-        // The SAME profile hash `apply_block_overrides` / `get_virtual_file`
-        // key validated supplied block content under. The bundler's
-        // preprocessor path (Pug / CoffeeScript templates+scripts, custom
-        // blocks, non-Vite styles) admits supplied artifacts for this profile
-        // immediately before rendering, so the private Vue worker must read
-        // the override-aware effective state — otherwise it compiles the RAW
-        // (un-preprocessed) block content.
-        let profile_hash = compile_profile_hash(profile);
-        let block_content_capture_fence = self.block_content.admission_fence.lock();
+        let hydration = self.hydrate_compile_blockers(&canonical);
 
         // ── ONE coherent source snapshot ──
-        // Every content-determined input derives from this single read
-        // (identical to the HostBacked cache-miss path), so the bytes and
-        // analysis cohere. The private Vue worker consults NO cache output
-        // node and runs NO classification; the override-aware reads below
-        // consume the SAME stored override layers the HostBacked cache-miss
-        // path does — host state, not the Stage-C session wrapper.
-        let source_snap =
-            self.scheduler
-                .try_get_source(&canonical)
-                .ok_or_else(|| HostError::MissingSource {
-                    canonical_id: canonical.clone(),
-                })?;
-        let efs = self
-            .effective_file_state_from_snapshot(&source_snap, &canonical, Some(profile_hash))
-            .ok_or_else(|| HostError::MissingSource {
-                canonical_id: canonical.clone(),
-            })?;
-
-        let compile_input = {
-            use crate::host_executor::HostSourceData;
-            let hd = source_snap
-                .downcast_data::<HostSourceData>()
-                .ok_or_else(|| HostError::MissingSource {
-                    canonical_id: canonical.clone(),
-                })?;
-            let parse = &hd.parse;
-            // Override-aware meta over the RAW snapshot meta — the SAME base
-            // the HostBacked path feeds `effective_meta_from_base` (style-lang
-            // overrides project over the raw parse meta).
-            let effective_meta =
-                self.effective_meta_from_base(parse.meta.clone(), &canonical, Some(profile_hash));
-            // The byte-load-bearing `CompileInput` — the SAME field mapping
-            // the HostBacked cache-miss path builds (source, macro deps,
-            // style v-bind vars from the same parse snapshot; override
-            // layers from the same host state).
-            // The SOUND OXC-derived roots recorded on each analyzed v-bind —
-            // never a text split of the expression.
-            let style_content = self.capture_compiler_style_content(
-                &canonical,
-                &parse.style_analyses,
-                crate::block_content::SuppliedBlockScope::Profile(profile),
-            );
-            let style_v_bind_vars = style_content.v_bind_vars;
-            let block_content = self.capture_compiler_block_content(
-                &canonical,
-                crate::block_content::SuppliedBlockScope::Profile(profile),
-            )?;
-            CompileInput {
-                canonical_id: canonical.clone(),
-                source: efs.source,
-                whole_hash: efs.whole_hash,
-                meta: effective_meta,
-                parse_diagnostics: parse.parse_diagnostics.clone(),
-                src_blocks: parse.src_blocks.clone(),
-                external_requests: parse.external_requests.clone(),
-                has_supplied_block_content: block_content.has_supplied,
-                block_content_inputs: block_content.inputs,
-                macro_type_deps: efs.script_analysis.macro_type_deps.clone(),
-                script_imports: efs.script_analysis.imports.clone(),
-                script_macros: efs.script_analysis.macros.clone(),
-                script_bindings: efs.script_analysis.bindings.clone(),
-                script_macro_usage: efs.script_analysis.macro_usage.clone(),
-                script_vue_api_calls: efs.script_analysis.vue_api_calls.clone(),
-                framework_parse: efs.framework_parse,
-                style_v_bind_vars,
-                style_v_bind_usage_complete: style_content.usage_complete,
-                prepared_styles: parse.prepared_styles.clone(),
-            }
-        };
-        drop(block_content_capture_fence);
+        // The capture reads the supplied block content under this
+        // profile's bucket — the bucket the bundler's preprocessor path
+        // (Pug / CoffeeScript templates+scripts, custom blocks, non-Vite
+        // styles) admits its artifacts to immediately before rendering — so
+        // the private Vue worker reads the override-aware block content;
+        // otherwise it would compile the RAW (un-preprocessed) block
+        // content. The private Vue worker consults NO cache output node and
+        // runs NO classification.
+        let CapturedCompileInput {
+            input: compile_input,
+            source: source_snap,
+            ..
+        } = self.capture_compile_input(
+            &canonical,
+            crate::block_content::SuppliedBlockScope::Profile(profile),
+            hydration,
+            SourceWitnessDemand::Skip,
+        )?;
 
         validate_registered_carrier_inputs(&compile_input, profile)?;
 
@@ -1535,7 +1377,7 @@ impl VerterHost {
         // stays outside the admission fence because loading publishes source
         // state; the capture and its post-compile currentness check provide
         // the atomicity boundary.
-        self.hydrate_compile_blockers(&canonical_id);
+        let hydration = self.hydrate_compile_blockers(&canonical_id);
         let (block_content_capture_fence, owner_has_module_augmentation) =
             self.lock_capture_with_augmentation_probe(&canonical_id, requested_mode);
 
@@ -1582,29 +1424,62 @@ impl VerterHost {
             block_content_stamp: BlockContentHashToken,
         }
 
+        // This profile's grammar must be the registered parse's grammar;
+        // a mismatch refuses before any input is captured.
+        let grammar_matches = profile
+            .delimiters
+            .as_ref()
+            .is_none_or(|value| value.0 == "{{" && value.1 == "}}")
+            && profile.custom_elements.as_ref().is_none_or(Vec::is_empty);
+        if !grammar_matches {
+            // An unregistered source answers `MissingSource` before the
+            // grammar refusal.
+            let registered = self
+                .scheduler
+                .try_get_source(&canonical_id)
+                .is_some_and(|source| {
+                    source
+                        .downcast_data::<crate::host_executor::HostSourceData>()
+                        .is_some()
+                });
+            if !registered {
+                return Err(HostError::MissingSource {
+                    canonical_id: canonical_id.clone(),
+                });
+            }
+            return Err(HostError::GrammarMismatch(
+                crate::carrier_publication_store::GrammarMismatch,
+            ));
+        }
+
         // The request's SINGLE scheduler source snapshot. ALL
         // content-determined inputs derive from this one coherent read:
-        // the compiled bytes and script analysis (via
-        // `effective_file_state_from_snapshot`), the style v-bind vars
-        // (`parse.style_analyses`), the effective meta base, the
-        // `Content` key's content hash, the Session slot's
-        // `semantic_hash`, and the artifact-commit generation.
-        // Independent re-reads could each observe a different source
-        // version, pairing bytes from one version with the key hash of
-        // another. The scheduler witness captured with it names the node
-        // incarnation the bytes came from; publication and artifact
+        // the compiled bytes and script analysis, the style v-bind vars,
+        // the effective meta, the `Content` key's content hash, the
+        // Session slot's `semantic_hash`, and the artifact-commit
+        // generation. Independent re-reads could each observe a different
+        // source version, pairing bytes from one version with the key hash
+        // of another. The scheduler witness captured with it names the
+        // node incarnation the bytes came from; publication and artifact
         // cleanup are fenced on it, so a delete/re-add or reset that
         // reuses the generation for the same content cannot accept this
         // flight's output.
-        let verter_scheduler::node::WitnessedSource {
-            snapshot: source_snap,
-            witness: source_witness,
-        } = self
-            .scheduler
-            .try_get_witnessed_source(&canonical_id)
-            .ok_or_else(|| HostError::MissingSource {
-                canonical_id: canonical_id.clone(),
-            })?;
+        //
+        // The capture reads supplied block content under this profile's
+        // bucket and stamps it; the publish below revalidates that stamp.
+        let CapturedCompileInput {
+            input: compile_input,
+            source: source_snap,
+            witness,
+            block_content_stamp,
+            ..
+        } = self.capture_compile_input(
+            &canonical_id,
+            crate::block_content::SuppliedBlockScope::Profile(profile),
+            hydration,
+            SourceWitnessDemand::Mint,
+        )?;
+        let source_witness = witness.expect("a minted-witness capture carries its witness");
 
         let cache_miss = {
             {
@@ -1617,17 +1492,6 @@ impl VerterHost {
                     })?;
                 let parse = &hd.parse;
 
-                let grammar_matches = profile
-                    .delimiters
-                    .as_ref()
-                    .is_none_or(|value| value.0 == "{{" && value.1 == "}}")
-                    && profile.custom_elements.as_ref().is_none_or(Vec::is_empty);
-                if !grammar_matches {
-                    return Err(HostError::GrammarMismatch(
-                        crate::carrier_publication_store::GrammarMismatch,
-                    ));
-                }
-
                 // Test-only seam: the snapshot→compile-input window.
                 // Fence tests land a content upsert here to prove the
                 // compiled bytes and the content-addressed key cohere
@@ -1638,39 +1502,27 @@ impl VerterHost {
                 // Cache hit check from compile_cache
                 let coh = 0;
 
-                // Build this request's effective compile input (override-
-                // aware) and classify the cache mode BEFORE any warm-hit
-                // consult. The classifier is the sole authority for the
-                // mode decision and it gates the cache read: a request that
-                // classifies to `Stateless` must not consult any host cache
-                // node, and a `Content` warm hit is valid only when the
-                // request actually classifies to `Content`. A request-time
-                // supplied block content removes the session slot but does
-                // not bump `whole_hash` nor evict the content-addressed
-                // entry, so consulting before classification would serve a
-                // stale `Content` entry for an input the override forces to
+                // Classify the cache mode from this request's effective
+                // compile input BEFORE any warm-hit consult. The classifier
+                // is the sole authority for the mode decision and it gates
+                // the cache read: a request that classifies to `Stateless`
+                // must not consult any host cache node, and a `Content`
+                // warm hit is valid only when the request actually
+                // classifies to `Content`. A request-time supplied block
+                // content removes the session slot but does not bump
+                // `whole_hash` nor evict the content-addressed entry, so
+                // consulting before classification would serve a stale
+                // `Content` entry for an input the override forces to
                 // downgrade. Classifying first closes that gap.
-                let efs = self
-                    .effective_file_state_from_snapshot(
-                        &source_snap,
-                        &canonical_id,
-                        Some(profile_hash),
-                    )
-                    .ok_or_else(|| HostError::MissingSource {
-                        canonical_id: canonical_id.clone(),
-                    })?;
+                //
                 // The content hash of the bytes the compile actually
-                // consumes — `efs` and `parse` derive from the same
-                // snapshot, and a `Content` request never carries a
+                // consumes — the captured input and `parse` derive from the
+                // same snapshot, and a `Content` request never carries a
                 // content override (`HasBlockOverride` downgrades it
                 // to `Stateless`), so for a `Content` publish this is
                 // the snapshot's `whole_hash`.
-                let effective_whole_hash = efs.whole_hash;
-                let effective_meta = self.effective_meta_from_base(
-                    parse.meta.clone(),
-                    &canonical_id,
-                    Some(profile_hash),
-                );
+                let effective_whole_hash = compile_input.whole_hash;
+                let effective_meta = compile_input.meta.clone();
 
                 // Fact-validated like the warm-hit consult below: a
                 // cross-file edit that invalidates the slot's recorded
@@ -1703,48 +1555,6 @@ impl VerterHost {
                             })
                     })
                 });
-
-                // Style v-bind vars from the SAME source snapshot the
-                // compiled bytes and the cache key derive from
-                // (override-independent). The analysis stage's
-                // `style_analyses` is a clone of this parse field; an
-                // independent analysis-snapshot read races the
-                // scheduler's Source→Analysis commit window and would
-                // compile — and publish warm under an unmoved key —
-                // EMPTY v-bind vars.
-                let style_content = self.capture_compiler_style_content(
-                    &canonical_id,
-                    &parse.style_analyses,
-                    crate::block_content::SuppliedBlockScope::Profile(profile),
-                );
-                let block_content = self.capture_compiler_block_content(
-                    &canonical_id,
-                    crate::block_content::SuppliedBlockScope::Profile(profile),
-                )?;
-
-                let compile_input = CompileInput {
-                    canonical_id: canonical_id.clone(),
-                    source: efs.source,
-                    whole_hash: effective_whole_hash,
-                    meta: effective_meta.clone(),
-                    parse_diagnostics: parse.parse_diagnostics.clone(),
-                    src_blocks: parse.src_blocks.clone(),
-                    external_requests: parse.external_requests.clone(),
-                    has_supplied_block_content: block_content.has_supplied,
-                    block_content_inputs: block_content.inputs,
-                    macro_type_deps: efs.script_analysis.macro_type_deps.clone(),
-                    script_imports: efs.script_analysis.imports.clone(),
-                    script_macros: efs.script_analysis.macros.clone(),
-                    script_bindings: efs.script_analysis.bindings.clone(),
-                    script_macro_usage: efs.script_analysis.macro_usage.clone(),
-                    script_vue_api_calls: efs.script_analysis.vue_api_calls.clone(),
-                    framework_parse: efs.framework_parse,
-                    // Compiler-only SOUND roots remain available even when
-                    // source-located facts fail closed for another space.
-                    style_v_bind_vars: style_content.v_bind_vars,
-                    style_v_bind_usage_complete: style_content.usage_complete,
-                    prepared_styles: parse.prepared_styles.clone(),
-                };
 
                 // Classify EXACTLY ONCE per compile, here under the read
                 // lock, so `actual_mode` is known before the warm-hit
@@ -1908,7 +1718,7 @@ impl VerterHost {
                     whole_hash: parse.whole_hash,
                     classification,
                     content_publish_stamp,
-                    block_content_stamp: block_content.stamp,
+                    block_content_stamp,
                 }
             }
         };
@@ -3411,23 +3221,60 @@ impl VerterHost {
             );
         }
 
+        // The execution inputs of the binding's own framework arm are
+        // prepared first, complete: the Vue macro bundle, the restated
+        // dependency axis, and the dependency verdict. The Vue macro bundle
+        // demand FOLLOWS the caller's target instead of always asking for
+        // the heaviest one. A TSX-only (IDE) compile takes the public binding
+        // names; only a target that renders the runtime `props` option
+        // object pays for per-member broad-runtime classification. Every Vue
+        // compile produces at least the names bundle, because the shared
+        // payload resolution underneath it is what yields this file's macro
+        // dependency diagnostics and its transitive macro type dependencies.
+        // These lanes have no typed failure channel for an incomplete
+        // dependency, so it refuses with the same diagnostics as a missing
+        // one.
+        let demand = match &binding {
+            BoundNativeHostRequest::Vue(_) => ExecutionInputDemand::Vue {
+                macros: VueMacroCodegenDemand::for_compile_target(profile.target)
+                    .unwrap_or(VueMacroCodegenDemand::RuntimeBindingNames),
+                axis: SharedDependencyAxis::Restate,
+            },
+            BoundNativeHostRequest::Svelte(_) => ExecutionInputDemand::Svelte {
+                css_hash_override: profile.svelte_css_hash_override.clone(),
+                axis: SharedDependencyAxis::Restate,
+            },
+        };
+        let inputs = match prepare_execution_inputs(self, snapshot, demand) {
+            Ok(inputs) => inputs,
+            Err(CompileInputsFailure::Missing(payload)) => {
+                return Err(diagnostics.merge(payload));
+            }
+            Err(CompileInputsFailure::Incomplete {
+                diagnostics: payload,
+                ..
+            }) => {
+                return Err(diagnostics.merge(payload));
+            }
+            Err(CompileInputsFailure::Aborted(abort)) => {
+                return Ok(CompileEntryOutcome::Aborted(abort));
+            }
+        };
+
         // One backend call per host-backed request: the consumed binding's
-        // catalog arm yields the backend, that arm prepares its own
-        // framework execution inputs, the backend issues the multi-product
-        // admission over the SAME presented artifact (an unsupported
-        // option, an unproducible demand, or a malformed Svelte token
-        // refuses typed at issuance, before any codegen input is built),
-        // and the product execution consumes the admission by value — one
-        // request, one backend call, one admitted population. Nothing
-        // above this call resolves, prepares, or refuses on any
-        // framework's semantic execution inputs.
+        // catalog arm yields the backend, the backend issues the
+        // multi-product admission over the SAME presented artifact (an
+        // unsupported option, an unproducible demand, or a malformed Svelte
+        // token refuses typed at issuance, before any codegen input is
+        // built), and the product execution consumes the admission by value
+        // — one request, one backend call, one admitted population.
         // See `compile_request_build::execute_bound_host_products`.
         let products = match execute_bound_host_products(
-            self,
             binding,
             artifact,
             profile,
             snapshot,
+            inputs,
             want_runtime,
             want_ide,
             want_template_data,
@@ -3437,9 +3284,6 @@ impl VerterHost {
             Ok(products) => products,
             Err(HostProductsFailure::Fatal(payload)) => {
                 return Err(diagnostics.merge(payload));
-            }
-            Err(HostProductsFailure::Aborted(abort)) => {
-                return Ok(CompileEntryOutcome::Aborted(abort));
             }
             // The backend fail-closed on the runtime surface THIS request
             // asked for (all-or-none), and the transaction ends here: no

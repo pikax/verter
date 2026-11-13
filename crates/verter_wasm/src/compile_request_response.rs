@@ -9,87 +9,29 @@
 //! REQUEST's spellings, so a caller matches an answer against what it sent
 //! without learning a second set of names.
 //!
+//! The envelope it fills is declared in `verter_protocol::compile_response`
+//! ([`BrowserCompileRequestResponse`] and its product rows), where the
+//! generator that renders this package's published TypeScript can reach
+//! it: the declaration a browser caller type-checks against is rendered
+//! from the very types serialised here.
+//!
 //! The payload shapes reuse the SHARED FFI output DTOs wherever one already
 //! exists ([`FfiDiagnosticsSnapshot`], [`FfiIdeResponse`],
-//! [`FfiVirtualNodeKind`], [`FfiVirtualMeta`]), so a diagnostic, a node kind
+//! `FfiVirtualNodeKind`, [`FfiVirtualMeta`]), so a diagnostic, a node kind
 //! and an IDE projection read identically on this route and on the legacy
 //! per-node reads beside it — including the UTF-16 offsets, which come from
 //! the same `host_diagnostics_to_ffi` conversion the legacy routes use.
-
-use serde::Serialize;
+//!
+//! [`FfiDiagnosticsSnapshot`]: verter_protocol::types::FfiDiagnosticsSnapshot
 
 use verter_ffi::convert::{host_diagnostics_to_ffi, host_error_to_string, host_node_kind_to_ffi};
+use verter_protocol::compile_response::{
+    BrowserCompileRequestResponse, BrowserCompiledProduct, BrowserCompiledVirtualNode,
+};
 use verter_protocol::types::{
-    FfiDestructuredBlockMeta, FfiDiagnosticsSnapshot, FfiIdeResponse, FfiVirtualMeta,
-    FfiVirtualNodeKind, Utf8SpanPayload,
+    FfiDestructuredBlockMeta, FfiIdeResponse, FfiVirtualMeta, Utf8SpanPayload,
 };
 use verter_session as host;
-
-/// One separately addressed output of a compiled runtime product.
-///
-/// A runtime product is not one blob: the carrier's assembled main module,
-/// its script, its compiled template, each style block and each custom
-/// block are distinct modules a consumer loads and maps independently, so
-/// each row keeps its own code and its own map.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct WasmCompiledVirtualNode {
-    node: FfiVirtualNodeKind,
-    code: String,
-    source_map: Option<String>,
-    lang: Option<String>,
-    meta: FfiVirtualMeta,
-}
-
-/// One row of a response's product list, one-to-one with a requested
-/// product kind and in request order.
-///
-/// Tagged by `kind` with the SAME spellings the request's product arms
-/// carry, so a caller matches a row against the product it asked for
-/// without learning a second vocabulary.
-///
-/// An arm may flatten its payload beside `kind` ONLY when that payload is
-/// a wire-owned DTO — one whose fields exist to be serialised and cannot
-/// gain a `kind` without this taxonomy being part of the change. That holds
-/// for [`FfiIdeResponse`], and the shared schema flattens its product
-/// options the same way.
-///
-/// Every other arm NESTS under its own key. A flattened arm over a payload
-/// this wire does not own is a latent collision: a field named `kind` added
-/// upstream is serialised into the same object as the discriminant, the
-/// later write wins, and every consumer's `kind === "…"` branch stops
-/// matching on a row that still carries its data. That is why the analysis
-/// arm nests its semantic-crate snapshot, as the runtime arms already nest
-/// their nodes.
-#[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub(crate) enum WasmCompiledProduct {
-    RuntimeClient {
-        nodes: Vec<WasmCompiledVirtualNode>,
-    },
-    RuntimeServer {
-        nodes: Vec<WasmCompiledVirtualNode>,
-    },
-    IdeCompanion(FfiIdeResponse),
-    Analysis {
-        analysis: Utf8SpanPayload<
-            Box<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
-        >,
-    },
-}
-
-/// The result of executing one caller-supplied typed compile request.
-///
-/// Complete-only, exactly as the session envelope is: every requested
-/// product is present, and a refusal is thrown instead of being reported as
-/// a partial response, a `null`, or a boolean.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct WasmCompileRequestResponse {
-    canonical_id: String,
-    diagnostics: FfiDiagnosticsSnapshot,
-    products: Vec<WasmCompiledProduct>,
-}
 
 /// Project a host IDE response, resolving the destructured block's mappings
 /// against the carrier source in UTF-16 offsets.
@@ -159,7 +101,7 @@ fn destructured_block_to_ffi(
 pub(crate) fn compile_request_response_to_wasm(
     response: host::CompileRequestResponse,
     sfc_source: Option<&str>,
-) -> Result<WasmCompileRequestResponse, String> {
+) -> Result<BrowserCompileRequestResponse, String> {
     let host::CompileRequestResponse {
         canonical_id,
         diagnostics,
@@ -169,7 +111,7 @@ pub(crate) fn compile_request_response_to_wasm(
         .into_iter()
         .map(|product| compiled_product_to_wasm(&canonical_id, product, sfc_source))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(WasmCompileRequestResponse {
+    Ok(BrowserCompileRequestResponse {
         canonical_id,
         diagnostics: host_diagnostics_to_ffi(&diagnostics, sfc_source),
         products,
@@ -180,15 +122,15 @@ fn compiled_product_to_wasm(
     canonical_id: &str,
     product: host::CompiledProduct,
     sfc_source: Option<&str>,
-) -> Result<WasmCompiledProduct, String> {
+) -> Result<BrowserCompiledProduct, String> {
     use verter_compiler::compile_request::ProductKind;
 
     Ok(match product {
         host::CompiledProduct::Runtime { kind, nodes } => {
             let nodes = nodes.into_iter().map(compiled_node_to_wasm).collect();
             match kind {
-                ProductKind::RuntimeClient => WasmCompiledProduct::RuntimeClient { nodes },
-                ProductKind::RuntimeServer => WasmCompiledProduct::RuntimeServer { nodes },
+                ProductKind::RuntimeClient => BrowserCompiledProduct::RuntimeClient { nodes },
+                ProductKind::RuntimeServer => BrowserCompiledProduct::RuntimeServer { nodes },
                 // Both runtime tags are matched by name, and the remaining
                 // kinds are listed rather than swept up by a wildcard: a
                 // product kind added upstream fails THIS build instead of
@@ -208,16 +150,16 @@ fn compiled_product_to_wasm(
             }
         }
         host::CompiledProduct::Ide(response) => {
-            WasmCompiledProduct::IdeCompanion(ide_response_to_ffi(&response, sfc_source)?)
+            BrowserCompiledProduct::IdeCompanion(ide_response_to_ffi(&response, sfc_source)?)
         }
-        host::CompiledProduct::Analysis(snapshot) => WasmCompiledProduct::Analysis {
+        host::CompiledProduct::Analysis(snapshot) => BrowserCompiledProduct::Analysis {
             analysis: Utf8SpanPayload::new(snapshot),
         },
     })
 }
 
-fn compiled_node_to_wasm(node: host::CompiledVirtualNode) -> WasmCompiledVirtualNode {
-    WasmCompiledVirtualNode {
+fn compiled_node_to_wasm(node: host::CompiledVirtualNode) -> BrowserCompiledVirtualNode {
+    BrowserCompiledVirtualNode {
         node: host_node_kind_to_ffi(&node.node),
         code: node.code.to_string(),
         source_map: node.source_map.as_ref().map(ToString::to_string),
@@ -281,6 +223,14 @@ pub(crate) fn compile_request_failure_to_string(failure: &host::CompileRequestFa
             diagnostics,
         } => format!(
             "refused host compile request for {canonical_id}{}",
+            rendered_diagnostics(diagnostics)
+        ),
+        Failure::DependenciesIncomplete {
+            canonical_id,
+            gaps: _,
+            diagnostics,
+        } => format!(
+            "incomplete dependencies for host compile request {canonical_id}{}",
             rendered_diagnostics(diagnostics)
         ),
     }

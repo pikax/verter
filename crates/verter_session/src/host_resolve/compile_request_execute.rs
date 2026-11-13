@@ -21,6 +21,10 @@
 
 use rustc_hash::FxHashMap;
 
+use super::compile_inputs::{
+    prepare_execution_inputs_pollable, CapturedCompileInput, CompileInputsFailure,
+    ExecutionInputDemand, SharedDependencyAxis, SourceWitnessDemand,
+};
 use super::compile_request_build::{
     execute_supplied_host_request, no_carrier_artifact_diagnostics, HostProductsFailure,
     SuppliedRequestFailure,
@@ -99,77 +103,32 @@ impl VerterHost {
         // never overwritten.
         request.bind_default_filename(&canonical);
 
-        // External block bytes are VFS-owned compiler inputs; resolve and
-        // load those blockers before taking the coherent owner/content
-        // capture below, exactly as the profile-derived lanes do.
-        self.hydrate_compile_blockers(&canonical);
-        let block_content_capture_fence = self.block_content.admission_fence.lock();
-
-        // ── ONE coherent source snapshot ──
-        // Every content-determined input derives from this single read, so
-        // the bytes and the analysis beside them cohere.
-        let source_snap = self.scheduler.try_get_source(&canonical).ok_or_else(|| {
-            CompileRequestFailure::Host(HostError::MissingSource {
-                canonical_id: canonical.clone(),
-            })
-        })?;
-        let efs = self
-            .effective_file_state_from_snapshot(&source_snap, &canonical, None)
-            .ok_or_else(|| {
-                CompileRequestFailure::Host(HostError::MissingSource {
-                    canonical_id: canonical.clone(),
-                })
-            })?;
-
-        let compile_input = {
-            use crate::host_executor::HostSourceData;
-            let hd = source_snap
-                .downcast_data::<HostSourceData>()
-                .ok_or_else(|| {
-                    CompileRequestFailure::Host(HostError::MissingSource {
-                        canonical_id: canonical.clone(),
-                    })
-                })?;
-            let parse = &hd.parse;
-            // This route reads supplied (externally preprocessed) block
-            // artifacts from the default-profile hash bucket — the bucket
-            // `apply_block_overrides` writes to when the caller names no
-            // compile profile. A named default-valued profile shares that
-            // bucket; artifacts admitted under a profile whose hash differs
-            // from the default stay invisible. A block whose authored dialect
-            // needs external preprocessing and has no default-bucket override
-            // still refuses as unavailable.
-            let style_content = self.capture_compiler_style_content(
+        // External block bytes and macro type dependencies are VFS-owned
+        // compiler inputs: hydration resolves and loads those blockers
+        // before the coherent owner/content capture, exactly as the
+        // profile-derived lanes do. Its loads suspend this root rather than
+        // park inside its poll.
+        let hydration = self
+            .hydrate_compile_blockers_pollable(&canonical, work)
+            .await;
+        // This route reads supplied (externally preprocessed) block
+        // artifacts from the default-profile hash bucket — the bucket
+        // `apply_block_overrides` writes to when the caller names no
+        // compile profile. A named default-valued profile shares that
+        // bucket; artifacts admitted under a profile whose hash differs
+        // from the default stay invisible. A block whose authored dialect
+        // needs external preprocessing and has no default-bucket override
+        // still refuses as unavailable.
+        let captured = self
+            .capture_compile_input(
                 &canonical,
-                &parse.style_analyses,
                 SuppliedBlockScope::Unprofiled,
-            );
-            let block_content = self
-                .capture_compiler_block_content(&canonical, SuppliedBlockScope::Unprofiled)
-                .map_err(CompileRequestFailure::Host)?;
-            CompileInput {
-                canonical_id: canonical.clone(),
-                source: efs.source,
-                whole_hash: efs.whole_hash,
-                meta: parse.meta.clone(),
-                parse_diagnostics: parse.parse_diagnostics.clone(),
-                src_blocks: parse.src_blocks.clone(),
-                external_requests: parse.external_requests.clone(),
-                has_supplied_block_content: block_content.has_supplied,
-                block_content_inputs: block_content.inputs,
-                macro_type_deps: efs.script_analysis.macro_type_deps.clone(),
-                script_imports: efs.script_analysis.imports.clone(),
-                script_macros: efs.script_analysis.macros.clone(),
-                script_bindings: efs.script_analysis.bindings.clone(),
-                script_macro_usage: efs.script_analysis.macro_usage.clone(),
-                script_vue_api_calls: efs.script_analysis.vue_api_calls.clone(),
-                framework_parse: efs.framework_parse,
-                style_v_bind_vars: style_content.v_bind_vars,
-                style_v_bind_usage_complete: style_content.usage_complete,
-                prepared_styles: parse.prepared_styles.clone(),
-            }
-        };
-        drop(block_content_capture_fence);
+                hydration,
+                SourceWitnessDemand::Skip,
+            )
+            .map_err(CompileRequestFailure::Host)?;
+        let compile_input = &captured.input;
+        let source_snap = &captured.source;
 
         // The host OWNS the cached-parse validity decision. The bound
         // backend executes over the artifact's own registered parse, so a
@@ -221,7 +180,7 @@ impl VerterHost {
                 Some(artifact),
                 &canonical,
                 compile_input.source.len() as u32,
-                &source_snap,
+                source_snap,
                 CompileCacheMode::Stateless,
             )
             .map_err(CompileRequestFailure::Host)?;
@@ -229,12 +188,9 @@ impl VerterHost {
         // The compile is one operation: a parse or walk-stack lease refused
         // its stack anywhere inside it fails the request with the fatal
         // `HOST_STACK_UNAVAILABLE` diagnostic, and no product publishes.
-        match verter_parser::oxc_parse::refusals_within_pollable(self.compile_request_entry(
-            &compile_input,
-            request,
-            binding,
-            work,
-        ))
+        match verter_parser::oxc_parse::refusals_within_pollable(
+            self.compile_request_entry(&captured, request, binding, work),
+        )
         .await
         {
             (compiled, None) => compiled,
@@ -263,13 +219,15 @@ impl VerterHost {
     /// one-to-one with a requested kind, in request order.
     async fn compile_request_entry<'h>(
         &'h self,
-        snapshot: &CompileInput,
+        captured: &CapturedCompileInput,
         request: verter_compiler::compile_request::CompileRequest,
         binding: Option<BoundNativeHostRequest>,
         work: &crate::root_continuation::RootWorkSlot<'h>,
     ) -> Result<CompileRequestResponse, CompileRequestFailure> {
+        use crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand;
         use verter_compiler::compile_request::{CompileProduct, ProductKind};
 
+        let snapshot = &captured.input;
         let canonical = snapshot.canonical_id.clone();
         let refused = |diagnostics: DiagnosticsSnapshot| CompileRequestFailure::Refused {
             canonical_id: canonical.clone(),
@@ -311,10 +269,60 @@ impl VerterHost {
                 .and_then(|vue| vue.runtime_module_name.clone()),
         };
 
+        // The execution inputs are prepared before the backend and its
+        // compile arena exist, so neither is held while the root suspends on
+        // the macro bundle. The Vue macro bundle depth follows the request's
+        // OWN product set: a runtime product renders the runtime `props` /
+        // `model` option objects and is the one demand that pays for
+        // per-member broad-runtime classification; every other demand takes
+        // the public binding names. This route publishes no cache slot, so
+        // it leaves the shared dependency axis untouched.
+        let demand = match &binding {
+            BoundNativeHostRequest::Vue(_) => ExecutionInputDemand::Vue {
+                macros: if requested.iter().any(|kind| {
+                    matches!(
+                        kind,
+                        ProductKind::RuntimeClient | ProductKind::RuntimeServer
+                    )
+                }) {
+                    VueMacroCodegenDemand::Runtime
+                } else {
+                    VueMacroCodegenDemand::RuntimeBindingNames
+                },
+                axis: SharedDependencyAxis::LeaveUntouched,
+            },
+            // The Svelte `cssHash` scope-class override is a host-resolved
+            // EXECUTION input with no canonical-request field, so this route
+            // leaves it unset and the carrier derives its own scope class. A
+            // caller that needs a specific class still has the
+            // profile-derived lane.
+            BoundNativeHostRequest::Svelte(_) => ExecutionInputDemand::Svelte {
+                css_hash_override: None,
+                axis: SharedDependencyAxis::LeaveUntouched,
+            },
+        };
+        let inputs = match prepare_execution_inputs_pollable(self, captured, demand, work).await {
+            Ok(inputs) => inputs,
+            Err(CompileInputsFailure::Missing(payload)) => {
+                return Err(refused(diagnostics.merge(payload)));
+            }
+            Err(CompileInputsFailure::Incomplete {
+                gaps,
+                diagnostics: payload,
+            }) => {
+                return Err(CompileRequestFailure::DependenciesIncomplete {
+                    canonical_id: canonical,
+                    gaps,
+                    diagnostics: diagnostics.merge(payload),
+                });
+            }
+            Err(CompileInputsFailure::Aborted(abort)) => {
+                return Err(CompileRequestFailure::Host(HostError::from(abort)));
+            }
+        };
+
         let products =
-            match execute_supplied_host_request(self, binding, artifact, request, snapshot, work)
-                .await
-            {
+            match execute_supplied_host_request(binding, artifact, request, snapshot, inputs) {
                 Ok(products) => products,
                 Err(SuppliedRequestFailure::FrameworkMismatch {
                     requested,
@@ -335,9 +343,6 @@ impl VerterHost {
                 }
                 Err(SuppliedRequestFailure::Products(HostProductsFailure::Fatal(payload))) => {
                     return Err(refused(diagnostics.merge(payload)));
-                }
-                Err(SuppliedRequestFailure::Products(HostProductsFailure::Aborted(abort))) => {
-                    return Err(CompileRequestFailure::Host(HostError::from(abort)));
                 }
                 // The backend fail-closed on the runtime surface this request
                 // asked for. All-or-none: the transaction ends here, no output

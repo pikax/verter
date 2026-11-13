@@ -262,10 +262,13 @@ The response types are unprefixed. Native now has a counterpart
 (`HostCompileResponse` / `HostCompiledProduct` on `@verter/native`), but the
 JavaScript envelopes are not the same object: native nests the IDE payload
 under `ide`, stringifies `analysis`, and throws a structured `Error`; this
-binding flattens the IDE DTO, returns `analysis` as an object, and throws a
-string. The types here reuse the re-exported shared shapes wherever the route
-serialises one (`HostDiagnosticsSnapshot`, `HostVirtualNodeKind`,
-`HostVirtualMeta`, `HostIdeResponse`) rather than restating them:
+binding flattens the IDE DTO, returns `analysis` as an object, leaves an
+absent optional field `undefined` (never `null`), and throws a string. The
+types are rendered from the Rust declarations the route serialises
+(`src/compile-response.generated.ts`, byte-pinned against them) and reuse the
+shared shapes wherever the route serialises one (`HostDiagnosticsSnapshot`,
+`HostVirtualNodeKind`, `HostVirtualMeta`, `HostIdeResponse`,
+`HostDestructuredBlockMeta`) rather than restating them:
 
 - `HostCompileRequestResponse`
 - `HostCompiledProduct`, `HostCompiledRuntimeProduct`, `HostCompiledIdeProduct`,

@@ -1,16 +1,25 @@
-//! The census of a root flow read's body reads, by site.
+//! The count of a root flow read's body reads, by site.
 //!
 //! A root flow read's body extent is open while its build runs: the checker
-//! transaction's frame depth its own body runs at, and how many queries it
-//! is evaluating in place now. A dispatcher read made at that depth, inside
-//! no query evaluated in place, is a read the body made itself, which the
-//! read's own frame answers as a seam read. The census counts them, each
-//! attributed to the site that made it: the [`super::FlowDemandDriver`]
-//! method the evaluator called, or, outside every driver method, the phase
-//! of the read's build. A read made inside a contextual call the evaluator
-//! starts or resumes is attributed to that call stage as well.
+//! transaction's frame depth its own body runs at, how many queries it is
+//! evaluating in place now, and how many of its body's requests it is
+//! answering now. A dispatcher read made at that depth, inside no query
+//! evaluated in place, is a read the body made itself, which the read's own
+//! frame answers as a seam read.
 //!
-//! Set `VERTER_FLOW_BODY_CENSUS` to report each stage, site and family on
+//! The count includes every such body read unless it is the answer to a
+//! request that reached the root read: a read the evaluator requests and
+//! the root read answers is not counted. A request answered below the root
+//! (by a run that cannot suspend, at once) is counted, under the site
+//! `read_in_place`.
+//!
+//! Each counted read is attributed to the site that made it: the
+//! [`super::FlowDemandDriver`] method the evaluator called, or, outside
+//! every driver method, the phase of the read's build. A read made inside a
+//! contextual call the evaluator starts or resumes is attributed to that
+//! call stage as well.
+//!
+//! Set `VERTER_FLOW_BODY_READS` to report each stage, site and family on
 //! standard error the first time the thread counts it (`bt` adds the
 //! evaluator frames that reached it), so a test run lists every site that
 //! makes a body read.
@@ -23,13 +32,14 @@ use crate::semantic_query::SemanticQueryKeyTag;
 
 /// One counted read: the call stage it was made in, if any; the site that
 /// made it; and the family read.
-pub type CensusSite = (Option<&'static str>, &'static str, SemanticQueryKeyTag);
+pub type BodyReadSite = (Option<&'static str>, &'static str, SemanticQueryKeyTag);
 
 /// The open root flow read's body (see the module documentation).
 #[derive(Clone, Copy)]
 struct BodyExtent {
     frame_depth: usize,
     nested: u32,
+    answering: u32,
 }
 
 thread_local! {
@@ -40,7 +50,7 @@ thread_local! {
     /// The outermost call stage open on this thread.
     static STAGE: Cell<Option<&'static str>> = const { Cell::new(None) };
     /// The reads counted on this thread, by site.
-    static HITS: RefCell<BTreeMap<CensusSite, u64>> = const { RefCell::new(BTreeMap::new()) };
+    static HITS: RefCell<BTreeMap<BodyReadSite, u64>> = const { RefCell::new(BTreeMap::new()) };
 }
 
 /// A root flow read's body extent, open until it drops; the extent around
@@ -61,6 +71,7 @@ pub(in crate::project_semantic_dispatch) fn open_body(
             body.replace(Some(BodyExtent {
                 frame_depth,
                 nested: 0,
+                answering: 0,
             }))
         }),
     }
@@ -104,12 +115,47 @@ impl Drop for InnerScope {
     }
 }
 
+/// The answer to a request of the open body its root read answers, open
+/// until it drops: the reads that answer it are not counted.
+#[must_use = "a request's answer is open while it is held"]
+pub(in crate::project_semantic_dispatch) struct AnswerScope {
+    counted: bool,
+}
+
+/// Enter the answer to a request the open body made, answered by its root
+/// read.
+pub(in crate::project_semantic_dispatch) fn enter_request_answer() -> AnswerScope {
+    let counted = BODY.with(|body| {
+        body.get().is_some_and(|mut extent| {
+            extent.answering += 1;
+            body.set(Some(extent));
+            true
+        })
+    });
+    AnswerScope { counted }
+}
+
+impl Drop for AnswerScope {
+    fn drop(&mut self) {
+        if self.counted {
+            BODY.with(|body| {
+                if let Some(mut extent) = body.get() {
+                    extent.answering -= 1;
+                    body.set(Some(extent));
+                }
+            });
+        }
+    }
+}
+
 /// Count a dispatcher read of `family` made at the checker transaction's
-/// frame depth `depth`, when the open body made it itself.
+/// frame depth `depth`, when the open body made it itself and it answers no
+/// request its root read is answering.
 pub(in crate::project_semantic_dispatch) fn count_read(depth: usize, family: SemanticQueryKeyTag) {
     let body_read = BODY.with(|body| {
-        body.get()
-            .is_some_and(|extent| extent.nested == 0 && extent.frame_depth == depth)
+        body.get().is_some_and(|extent| {
+            extent.nested == 0 && extent.answering == 0 && extent.frame_depth == depth
+        })
     });
     if body_read {
         record(family);
@@ -117,7 +163,7 @@ pub(in crate::project_semantic_dispatch) fn count_read(depth: usize, family: Sem
 }
 
 /// A site open on this thread until it drops, the site around it restored.
-#[must_use = "a census site is open while it is held"]
+#[must_use = "a body read site is open while it is held"]
 pub struct SiteScope {
     outer: &'static str,
 }
@@ -161,10 +207,10 @@ impl Drop for StageScope {
     }
 }
 
-/// How the census reports what it counts, read once per process.
+/// How the count reports what it counts, read once per process.
 fn report_mode() -> Option<&'static str> {
     static MODE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    MODE.get_or_init(|| std::env::var("VERTER_FLOW_BODY_CENSUS").ok())
+    MODE.get_or_init(|| std::env::var("VERTER_FLOW_BODY_READS").ok())
         .as_deref()
 }
 
@@ -192,17 +238,17 @@ fn record(family: SemanticQueryKeyTag) {
                 .take(24)
                 .collect();
             eprintln!(
-                "flow-body-census stage={stage} site={site} family={family:?}\n{}",
+                "flow-body-read stage={stage} site={site} family={family:?}\n{}",
                 frames.join("\n")
             );
         }
-        Some(_) => eprintln!("flow-body-census stage={stage} site={site} family={family:?}"),
+        Some(_) => eprintln!("flow-body-read stage={stage} site={site} family={family:?}"),
     }
 }
 
 /// The reads counted on this thread since the last take, by site; the count
 /// starts again from none.
-pub fn take() -> Vec<(CensusSite, u64)> {
+pub fn take() -> Vec<(BodyReadSite, u64)> {
     HITS.with(|hits| std::mem::take(&mut *hits.borrow_mut()))
         .into_iter()
         .collect()

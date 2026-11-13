@@ -2,6 +2,7 @@
 //! results, virtual files, resolved IDs, remove results, cross-file results,
 //! and host errors.
 
+use verter_protocol::compile_response::FfiMissingInput;
 use verter_session as host;
 
 use crate::types::*;
@@ -207,6 +208,39 @@ pub fn host_diagnostics_to_ffi_with(
             .collect(),
         has_errors: input.has_errors,
     }
+}
+
+/// The wire rows of a `DependenciesIncomplete` refusal's gaps, one per gap
+/// and in the host's order.
+///
+/// The match names every gap kind and has no wildcard, so a kind added to
+/// the session fails this build until the wire names it too.
+pub fn compile_dependency_gaps_to_ffi(
+    gaps: Vec<host::CompileDependencyGap>,
+) -> Vec<FfiMissingInput> {
+    gaps.into_iter()
+        .map(|gap| match gap {
+            host::CompileDependencyGap::Route {
+                importer,
+                specifier,
+                refused,
+            } => FfiMissingInput::Route {
+                importer,
+                specifier,
+                refused,
+            },
+            host::CompileDependencyGap::File { canonical } => FfiMissingInput::File {
+                canonicalId: canonical,
+            },
+            host::CompileDependencyGap::Lookup {
+                import_source,
+                type_name,
+            } => FfiMissingInput::Lookup {
+                importSource: import_source,
+                typeName: type_name,
+            },
+        })
+        .collect()
 }
 
 /// Convert a host update result to its FFI representation.

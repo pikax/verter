@@ -79,7 +79,7 @@ use verter_audit::{
     RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit,
 };
 use verter_protocol::typeinfo::graph::{
-    self as wire, Operation, TypeInfoGraphRequest, TypeInfoGraphResponse, TypeInfoRequestError,
+    self as wire, TypeInfoGraphRequest, TypeInfoGraphResponse, TypeInfoRequestError,
     TYPEINFO_GRAPH_SCHEMA_VERSION,
 };
 use verter_protocol::typeinfo::graph_export::GraphExportBudgets;
@@ -331,7 +331,13 @@ impl VerterHost {
             );
         }
         let budgets = closure_budgets(resolve.closure.as_ref());
-        let query = query_identity(&resolve);
+        // The fact this request asks: known before resolution, so a hit, a
+        // miss and a fault of the same request all name it.
+        let query = crate::typeinfo::node_refs::resolve_symbol_query_digest(
+            &resolve.canonical_id,
+            &resolve.name,
+            mode,
+        );
 
         let answer = match self.resolve_symbol_graph_in_one_view(
             &resolve.canonical_id,
@@ -352,17 +358,31 @@ impl VerterHost {
         };
         let graph = match answer {
             SymbolGraphAnswer::Graph(mut graph) => {
-                graph.query = Some(query);
+                // An issued root already named the fact with its committed
+                // basis; an unaddressed answer committed none.
+                if graph.fact_identity.is_none() {
+                    graph.fact_identity =
+                        Some(crate::typeinfo::node_refs::fact_identity(query, None));
+                }
                 *graph
             }
             // A non-fault miss is a typed graph answer: the opaque Miss
-            // root, never an empty graph and never a fabricated shape.
-            SymbolGraphAnswer::Miss => single_opaque_root_graph(miss_error(), None, Some(query)),
+            // root, never an empty graph and never a fabricated shape. It
+            // issues no reference, so it carries no basis.
+            SymbolGraphAnswer::Miss => single_opaque_root_graph(
+                miss_error(),
+                None,
+                Some(crate::typeinfo::node_refs::fact_identity(query, None)),
+            ),
             // A dispatch fault is a typed graph answer carrying the
             // fault — the envelope was valid; the resolution faulted.
             SymbolGraphAnswer::Fault(fault) => {
                 let (error, detail) = fault_error(&fault);
-                single_opaque_root_graph(error, detail, Some(query))
+                single_opaque_root_graph(
+                    error,
+                    detail,
+                    Some(crate::typeinfo::node_refs::fact_identity(query, None)),
+                )
             }
         };
         let payload = graph_payload(mode, &resolve, &graph);
@@ -437,6 +457,7 @@ impl VerterHost {
                 );
                 if let (Ok(key), SymbolGraphAnswer::Graph(graph)) = (issued, &mut answer) {
                     publish_root_node_ref(graph, &key);
+                    graph.fact_identity = Some(key.fact_identity());
                 }
             }
             Ok(answer)
@@ -559,15 +580,19 @@ impl VerterHost {
         {
             return expand_fence_refusal(admission, presented);
         }
+        // The expansion answers the admitted reference's fact, under its
+        // committed basis.
+        let fact = issued.key().fact_identity();
         let graph = match replayed {
             SymbolGraphAnswer::Graph(mut graph) => {
                 publish_root_node_ref(&mut graph, &issued.key());
+                graph.fact_identity = Some(fact);
                 *graph
             }
-            SymbolGraphAnswer::Miss => single_opaque_root_graph(miss_error(), None, None),
+            SymbolGraphAnswer::Miss => single_opaque_root_graph(miss_error(), None, Some(fact)),
             SymbolGraphAnswer::Fault(fault) => {
                 let (error, detail) = fault_error(&fault);
-                single_opaque_root_graph(error, detail, None)
+                single_opaque_root_graph(error, detail, Some(fact))
             }
         };
         let payload = expand_payload(mode, expand, &graph);
@@ -707,29 +732,6 @@ fn closure_budgets(closure: Option<&wire::ClosurePolicy>) -> GraphExportBudgets 
     GraphExportBudgets::new(node, depth).unwrap_or_else(GraphExportBudgets::capped)
 }
 
-/// Build the wire query identity echoed onto the exported graph.
-fn query_identity(resolve: &wire::ResolveSymbolGraphRequest) -> wire::QueryIdentity {
-    wire::QueryIdentity {
-        operation: Operation::ResolveSymbol as i32,
-        path: Vec::new(),
-        closure: resolve.closure.clone(),
-        context: resolve.context,
-        display_policy: resolve.display_policy,
-        substitutions: Vec::new(),
-        solver_options_hash: Vec::new(),
-        parse_env_hash: Vec::new(),
-        resolve_env_hash: Vec::new(),
-        type_env_hash: Vec::new(),
-        lib_env_hash: Vec::new(),
-        project_identity: Vec::new(),
-        resolver_version: 0,
-        include_provenance: resolve.include_provenance,
-        include_diagnostics: resolve.include_diagnostics,
-        include_projection: resolve.include_projection.iter().map(|p| p.kind).collect(),
-        resolved_roots: Vec::new(),
-    }
-}
-
 fn miss_error() -> GraphQueryError {
     GraphQueryError {
         kind: Some(graph_query_error::Kind::Miss(GraphQueryErrorMiss {})),
@@ -857,7 +859,7 @@ fn budget_domain_label(domain: verter_session_query::inputs::budget::BudgetDomai
 fn single_opaque_root_graph(
     error: GraphQueryError,
     detail: Option<String>,
-    query: Option<wire::QueryIdentity>,
+    fact_identity: Option<wire::FactIdentity>,
 ) -> SemanticTypeGraph {
     let mut strings = vec![String::new()];
     let mut error = error;
@@ -869,7 +871,7 @@ fn single_opaque_root_graph(
     }
     SemanticTypeGraph {
         schema_version: TYPEINFO_GRAPH_SCHEMA_VERSION,
-        query,
+        fact_identity,
         nodes: vec![
             GraphTypeNode { kind: None },
             GraphTypeNode {

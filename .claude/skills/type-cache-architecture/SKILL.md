@@ -2793,8 +2793,8 @@ is permitted.
   source. The env-less `GraphDeclSlotRef` query-identity wire slot HAS BEEN
   RETIRED (deleted from the proto and the `verter_protocol` typed surface) in
   favour of the env-BEARING `GraphResolvedDeclSlotIdentity`
-  (`GraphQueryIdentity.resolved_roots`, tag 18; `TYPEINFO_GRAPH_SCHEMA_VERSION`
-  bumped to 2, retired `roots` tag/name reserved at message scope). The
+  (`TYPEINFO_GRAPH_SCHEMA_VERSION` bumped to 2; the request echo that carried
+  the roots was later retired and `SemanticTypeGraph` reserves its tag). The
   `no_envless_semantic_query_env_key_envelope` guard now bans the
   `GraphDeclSlotRef` symbol across ALL `crates/*/src/**`, and
   `typeinfo_proto_retires_envless_decl_slot_ref` pins the proto surface.

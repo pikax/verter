@@ -60,7 +60,7 @@ fn structured_type_expression_roundtrip_covers_every_oneof_variant() {
 fn semantic_type_graph_roundtrip_preserves_envelope_shape() {
     let graph = g::SemanticTypeGraph {
         schema_version: g::TYPEINFO_GRAPH_SCHEMA_VERSION,
-        query: Some(sample_query_identity()),
+        fact_identity: Some(sample_fact_identity()),
         nodes: build_every_type_node_variant(),
         symbols: vec![g::SymbolNode {
             name_id: 1,
@@ -124,6 +124,38 @@ fn semantic_type_graph_roundtrip_preserves_envelope_shape() {
 /// cleanly under the v5 schema with an empty proof table — the v5 table is
 /// add-only, so old payloads remain valid decodes
 /// (`SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS` keeps 4).
+/// A graph encoded with the retired request echo (field 2) still decodes:
+/// the field is skipped, `fact_identity` is absent and every other field
+/// is intact.
+#[test]
+fn a_graph_carrying_the_retired_request_echo_decodes_without_a_fact_identity() {
+    let graph = g::SemanticTypeGraph {
+        schema_version: g::TYPEINFO_GRAPH_SCHEMA_VERSION,
+        nodes: build_every_type_node_variant(),
+        root_ids: vec![1],
+        ..Default::default()
+    };
+    let mut bytes = graph.encode_to_vec();
+    // Field 2, length-delimited: an old echo naming operation 1.
+    bytes.extend_from_slice(&[0x12, 0x02, 0x08, 0x01]);
+    let decoded = g::SemanticTypeGraph::decode(bytes.as_slice())
+        .expect("a graph carrying the retired field decodes");
+    assert_eq!(decoded.fact_identity, None);
+    assert_eq!(decoded, graph);
+}
+
+/// The fact identity's field numbers are the wire contract: the query
+/// digest is field 1 and the basis digest field 2.
+#[test]
+fn the_fact_identity_digests_keep_their_field_numbers() {
+    let bytes = sample_fact_identity().encode_to_vec();
+    assert_eq!(bytes.len(), 68);
+    assert_eq!(&bytes[..2], &[0x0a, 32], "the query digest is field 1");
+    assert_eq!(bytes[2], 0x11);
+    assert_eq!(&bytes[34..36], &[0x12, 32], "the basis digest is field 2");
+    assert_eq!(bytes[36], 0x22);
+}
+
 #[test]
 fn semantic_type_graph_v4_payload_decodes_under_v5_with_empty_relation_proofs() {
     // A v4 payload: schema_version 4, no field-13 bytes on the wire. The
@@ -307,7 +339,7 @@ fn framework_surface_payload_roundtrips() {
         framework: g::FrameworkTag::Vue as i32,
         graph: Some(g::SemanticTypeGraph {
             schema_version: g::TYPEINFO_GRAPH_SCHEMA_VERSION,
-            query: Some(sample_query_identity()),
+            fact_identity: Some(sample_fact_identity()),
             nodes: vec![g::TypeNode {
                 kind: Some(g::TypeNodeKind::Primitive(g::PrimitiveNode {
                     kind: g::PrimitiveKind::String as i32,
@@ -1120,42 +1152,12 @@ fn prim_string_expr() -> g::StructuredTypeExpression {
     }
 }
 
-fn sample_query_identity() -> g::QueryIdentity {
-    g::QueryIdentity {
-        operation: g::Operation::ResolveSymbol as i32,
-        resolved_roots: vec![g::ResolvedDeclSlotIdentityDto {
-            canonical_name_id: 1,
-            decl_name_id: 2,
-            whole_hash: vec![0xAB, 0xCD],
-            namespace: g::SymbolNamespace::Type as i32,
-        }],
-        path: vec![],
-        closure: Some(g::ClosurePolicy {
-            kind: Some(
-                verter_protocol::verter::v1::graph_closure_policy::Kind::Expanded(
-                    g::ClosureExpanded {
-                        node_budget: 4096,
-                        depth_budget: 64,
-                    },
-                ),
-            ),
-        }),
-        context: Some(g::ProjectionReductionContext {
-            mode: g::ProjectionMode::Expanded as i32,
-            demand: g::ReductionDemand::Published as i32,
-        }),
-        display_policy: Some(sample_display_policy()),
-        substitutions: vec![],
-        solver_options_hash: vec![0u8; 16],
-        parse_env_hash: vec![0u8; 16],
-        resolve_env_hash: vec![0u8; 16],
-        type_env_hash: vec![0u8; 16],
-        lib_env_hash: vec![0u8; 16],
-        project_identity: vec![0u8; 16],
-        resolver_version: 1,
-        include_provenance: true,
-        include_diagnostics: true,
-        include_projection: vec![g::ProjectionKind::Display as i32],
+/// A fact identity with two distinct 32-byte digests, so swapped field
+/// numbers cannot decode back equal.
+fn sample_fact_identity() -> g::FactIdentity {
+    g::FactIdentity {
+        query_identity_digest: vec![0x11; 32],
+        input_basis_digest: vec![0x22; 32],
     }
 }
 

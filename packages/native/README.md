@@ -167,6 +167,31 @@ const result = host.compileRequest(canonicalId, {
 });
 ```
 
+A refusal throws an `Error` whose `message` is the failure's message and which
+carries the rest of the typed failure (`HostCompileFailure`) as own properties:
+`kind`, `canonicalId`, `diagnostics`, and each kind's own fields. A
+`dependenciesIncomplete` failure (the compile could not prove its macro type
+dependencies present or absent from the inputs the host holds) also carries
+`missingInputs`, one `HostMissingInput` per input it could not establish, in
+the host's order and never empty:
+
+- `{ kind: "route", importer, specifier, refused }` — `specifier`, imported by
+  `importer`, has no route (`refused: false`) or its route could not be
+  admitted (`refused: true`);
+- `{ kind: "file", canonicalId }` — the route resolves to a file the host
+  cannot load;
+- `{ kind: "lookup", importSource, typeName }` — the lookup of `typeName`
+  ended early.
+
+The list is deterministic for a given host state, and supplying an input can
+let the compile proceed far enough to name a deeper one: retry only while you
+are supplying something new. An input you already supplied that is named again,
+or a list naming only `lookup` rows or refused `route` rows, is terminal.
+
+The response and failure types are rendered from the Rust declarations the
+binding serialises (`host-compile-response.generated.ts`) and exported from the
+package root.
+
 `host.compileRequests(inputs, options?)` is the source-registering batch form.
 Each input carries one `Buffer` source beside its typed request. It returns one
 ordered entry containing either `response` or a typed `failure`; one refusal

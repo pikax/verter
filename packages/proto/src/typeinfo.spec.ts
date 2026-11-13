@@ -934,6 +934,37 @@ describe("typeinfo proto TS bindings", () => {
     expect(decoded.relationProofs.length).toBe(4);
   });
 
+  it("SemanticTypeGraph carries its fact identity and skips the retired request echo", () => {
+    // Two distinct digests, so swapped field numbers cannot decode equal.
+    const graph = create(SemanticTypeGraphSchema, {
+      schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
+      rootIds: [1],
+      factIdentity: {
+        queryIdentityDigest: new Uint8Array(32).fill(0x11),
+        inputBasisDigest: new Uint8Array(32).fill(0x22),
+      },
+    });
+    const bytes = toBinary(SemanticTypeGraphSchema, graph);
+    expect(fromBinary(SemanticTypeGraphSchema, bytes)).toEqual(graph);
+
+    // A graph carrying the retired field 2 (an old echo naming operation 1)
+    // decodes with no fact identity and every other field intact.
+    const bare = create(SemanticTypeGraphSchema, {
+      schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
+      rootIds: [1],
+    });
+    const old = new Uint8Array([
+      ...toBinary(SemanticTypeGraphSchema, bare),
+      0x12,
+      0x02,
+      0x08,
+      0x01,
+    ]);
+    const decoded = fromBinary(SemanticTypeGraphSchema, old, { readUnknownFields: false });
+    expect(decoded.factIdentity).toBeUndefined();
+    expect(decoded).toEqual(bare);
+  });
+
   it("deep-equality roundtrip detects nested field corruption that case-match misses", () => {
     // Discriminator for the deep-equality contract: build two
     // distinct structured expressions that share the same outer

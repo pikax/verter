@@ -3288,8 +3288,7 @@ mode: ProjectionModeTag,
  */
 demand: ReductionDemandTag,
 /**
- * Number of declared roots in the request's
- * `GraphQueryIdentity`.
+ * Number of root nodes in the answered graph.
  */
 roots_count: number,
 /**
