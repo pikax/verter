@@ -2959,33 +2959,99 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // generic parameter, so the outer instantiation argument
                 // must NOT substitute into this function's params /
                 // return / type-param constraints+defaults. Each own
-                // parameter binds to its interned `TypeParam` BINDER node
-                // (the same file-scoped name-keyed identity the unbound
-                // `TypeExpr::TypeParameter` arm interns), so a body
-                // reference that reaches this lowering un-normalised — a
-                // prepared declaration signature carries `Ref("T")`, not
-                // `TypeParameter(T)` — lowers to the binder node instead
-                // of a `ResolveDecl` miss. The storage binding lives for
-                // the whole arm; `env` is re-bound to it only when the
-                // function declares its own type parameters (functions
-                // with none pay nothing — they keep the outer `env` by
-                // reference).
+                // parameter binds to its interned `TypeParam` BINDER node,
+                // so a body reference that reaches this lowering
+                // un-normalised — a prepared declaration signature carries
+                // `Ref("T")`, not `TypeParameter(T)` — lowers to the
+                // binder node instead of a `ResolveDecl` miss. The storage
+                // binding lives for the whole arm; `env` is re-bound to it
+                // only when the function declares its own type parameters
+                // (functions with none pay nothing — they keep the outer
+                // `env` by reference).
+                //
+                // The binder's identity is its declaring clause: the
+                // clause's span-blind content digest
+                // ([`clause_binder_decl_name`]) at the parameter's ordinal,
+                // so a same-name clause written inside a generic
+                // declaration (`const id: <T>(z: T) => T` in `l0<T>`) never
+                // shares the enclosing `T`'s node, and instantiating the
+                // one never reaches the other. A body-derived clause
+                // (`flow_return`) keeps the file-scoped name-keyed
+                // signature convention (`BinderIdentityMode::Signature`,
+                // ordinal 0): its return is the flow lane's node, built
+                // under the root frame's name-keyed binders, and the
+                // flow-return read-off finds them by name.
+                //
+                // [`clause_binder_decl_name`]: crate::mapper_binder_registry::clause_binder_decl_name
                 let scoped_env_storage;
                 let env: &FxHashMap<String, SemanticNodeId> = if func.type_parameters.is_empty() {
                     env
                 } else {
                     let mut scoped = env.clone();
-                    for tp in &func.type_parameters {
+                    let clause_decl_name = func.flow_return.is_none().then(|| {
+                        crate::mapper_binder_registry::clause_binder_decl_name(graph.store(), expr)
+                    });
+                    let identity = |ordinal: usize, display_name: &OwnedStr| match &clause_decl_name
+                    {
+                        Some(clause) => (
+                            crate::semantic_query::DeclIdentity::from_scope(
+                                scope,
+                                OwnedStr::from(Arc::clone(clause)),
+                            ),
+                            u16::try_from(ordinal).unwrap_or(u16::MAX),
+                        ),
+                        None => (
+                            crate::semantic_query::DeclIdentity::from_scope(
+                                scope,
+                                display_name.clone(),
+                            ),
+                            0,
+                        ),
+                    };
+                    // Every parameter predeclared as a bound-free binder,
+                    // as the shared binder-frame constructor does: the shell
+                    // a constraint's self or later-sibling reference names
+                    // (`T extends U` in `<T extends U, U>`), never an outer
+                    // or free binder of the same name.
+                    let shells: Vec<SemanticNodeId> = func
+                        .type_parameters
+                        .iter()
+                        .enumerate()
+                        .map(|(ordinal, tp)| {
+                            let display_name = OwnedStr::from(tp.name.as_str());
+                            let (decl, param_index) = identity(ordinal, &display_name);
+                            graph.intern_node_with_scope(
+                                SemanticNodeData::TypeParam {
+                                    decl,
+                                    param_index,
+                                    constraint: None,
+                                    default: None,
+                                    display_name,
+                                },
+                                scope.clone(),
+                            )
+                        })
+                        .collect();
+                    for (ordinal, tp) in func.type_parameters.iter().enumerate() {
                         let display_name = OwnedStr::from(tp.name.as_str());
-                        // Constraint / default lower under the OUTER env
-                        // (a constraint referencing an outer generic must
-                        // still substitute; the own binder is not in
-                        // scope for its own constraint head).
+                        // Bounds lower under the outer env and the clause's
+                        // earlier own binders, so a constraint referencing an
+                        // outer generic still substitutes and `K extends
+                        // keyof T` in `<T, K extends keyof T>` names this
+                        // clause's `T`. A constraint also sees this
+                        // parameter and the later ones as their shells; a
+                        // default sees the earlier ones only.
                         let constraint = tp.constraint.as_deref().map(|c| {
+                            let mut head = scoped.clone();
+                            for (later, shell) in
+                                func.type_parameters.iter().zip(&shells).skip(ordinal)
+                            {
+                                head.insert(later.name.clone(), *shell);
+                            }
                             self.lower_type_expr_with_infer_factory(
                                 infer_binders,
                                 c,
-                                env,
+                                &head,
                                 scope,
                                 name_resolution,
                                 scope_payload,
@@ -2998,7 +3064,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             self.lower_type_expr_with_infer_factory(
                                 infer_binders,
                                 d,
-                                env,
+                                &scoped,
                                 scope,
                                 name_resolution,
                                 scope_payload,
@@ -3007,17 +3073,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 reduction_context,
                             )
                         });
-                        let decl = crate::semantic_query::DeclIdentity::from_scope(
-                            scope,
-                            display_name.clone(),
-                        );
+                        let (decl, param_index) = identity(ordinal, &display_name);
                         let binder = graph.intern_node_with_scope(
                             SemanticNodeData::TypeParam {
                                 decl,
-                                // The shared signature-scoped binder
-                                // convention (`BinderIdentityMode::Signature`):
-                                // display-name-keyed at ordinal 0.
-                                param_index: 0,
+                                param_index,
                                 constraint,
                                 default,
                                 display_name,

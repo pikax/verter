@@ -6800,6 +6800,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn evaluate_flow_return(&self, key: &FlowReturnKey) -> FlowEvaluationOutcome {
         #[cfg(any(test, feature = "test-support"))]
         FLOW_EVALUATIONS.with(|evaluations| evaluations.set(evaluations.get() + 1));
+        #[cfg(any(test, feature = "test-support"))]
+        if !key.normalized_type_args.is_empty() {
+            INSTANTIATED_FLOW_EVALUATIONS
+                .with(|evaluations| evaluations.set(evaluations.get() + 1));
+        }
         let budget_epoch = self.operation_budget_epoch.get();
         let mut evaluated = self.with_relation_environment_of(
             &key.function.declaration_slot.defining_canonical,
@@ -14374,6 +14379,21 @@ thread_local! {
 #[cfg(any(test, feature = "test-support"))]
 pub fn flow_evaluations_for_tests() -> usize {
     FLOW_EVALUATIONS.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// How many flow-return bodies this thread evaluated under an
+    /// instantiation (a key with type arguments); test-only.
+    static INSTANTIATED_FLOW_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many flow-return bodies this thread evaluated under an
+/// instantiation so far (test-only): a return read off its uninstantiated
+/// one evaluates none.
+#[cfg(any(test, feature = "test-support"))]
+pub fn instantiated_flow_evaluations_for_tests() -> usize {
+    INSTANTIATED_FLOW_EVALUATIONS.with(std::cell::Cell::get)
 }
 
 #[cfg(any(test, feature = "test-support"))]

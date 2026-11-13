@@ -1443,13 +1443,10 @@ fn structural_root_is_an_unmaterialized_carrier() {
 // composite, never a bare name.
 //
 // A function's generic HEAD (its type-param constraint/default lowering) is
-// deliberately NOT part of this equivalence set: it INTENTIONALLY diverges.
-// The eager path lowers a binder-node's constraint/default under the OUTER
-// env, whereas the structural lowerer lowers them INCREMENTALLY (each head
-// binder sees the prior binders, per TS scoping — arguably more TS-correct).
-// So a no-resolution generic head like `<T, U extends T>(y: U) => void`
-// interns to a DIFFERENT id across the two paths and is pinned by the carrier
-// fixtures `generic_function_constraint_sees_prior_type_param_binder` /
+// NOT part of this equivalence set. Both paths lower it INCREMENTALLY (each
+// head binder sees the prior binders, per TS scoping), and the head is pinned
+// by the carrier fixtures
+// `generic_function_constraint_sees_prior_type_param_binder` /
 // `generic_function_default_sees_prior_type_param_binder`, NOT by this
 // structural-equivalence set.
 //

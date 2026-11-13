@@ -10,6 +10,7 @@ use super::*;
 use verter_type_engine::project_semantic_dispatch::connected_demand::{
     MAX_CONNECTED_PROJECTION_WORK, MAX_CONNECTED_QUERY_DEPTH,
 };
+use verter_type_engine::project_semantic_dispatch::flow_return::instantiated_flow_evaluations_for_tests;
 use verter_type_engine::project_semantic_dispatch::flow_return::schedule::disable_flow_return_schedule_for_tests;
 use verter_type_engine::semantic_query::PartialReasonSet;
 use verter_type_expr::ObjectMember;
@@ -1909,7 +1910,9 @@ fn a_101_level_chain_returning_a_same_name_function_type_answers() {
 }
 
 /// A new instantiation of a `levels`-level local-arrow chain whose head
-/// holds a function type with a same-name clause answers.
+/// holds a function type with a same-name clause answers, read off the
+/// warm uninstantiated return: the written clause is its binders'
+/// declaration, so its `T` is a node distinct from every level's `T`.
 fn assert_same_name_function_type_chain_answers(levels: usize) {
     let source = local_arrow_chain(levels).replacen(
         "function l0<T>(x: T) { return { v: x, tag: \"c\" as const }; }",
@@ -1999,7 +2002,9 @@ fn constructor_of_its_own_t(member: &TypeExpr) -> bool {
 /// `witness` answers `{ v: string | number; tag: "c"; <member> }` cold,
 /// and a new instantiation `second(v: boolean)` answers `{ v: boolean;
 /// tag: "c"; <member> }` on a `second_stack`-byte stack, clean and
-/// admitted, with `member` keeping its own clause.
+/// admitted, with `member` keeping its own clause. The new instantiation
+/// is read off the warm uninstantiated return: it evaluates no body under
+/// an instantiation.
 fn assert_same_name_generic_chain_answers(
     mut source: String,
     levels: usize,
@@ -2020,11 +2025,17 @@ fn assert_same_name_generic_chain_answers(
             })
         })
     };
-    let second = on_stack(second_stack, move || {
-        with_dispatch(&host, |dispatch| {
+    let (second, instantiated) = on_stack(second_stack, move || {
+        let before = instantiated_flow_evaluations_for_tests();
+        let second = with_dispatch(&host, |dispatch| {
             eval_key_on(&host, dispatch, key_of(dispatch, PATH, "second"))
-        })
+        });
+        (second, instantiated_flow_evaluations_for_tests() - before)
     });
+    assert_eq!(
+        instantiated, 0,
+        "`second` is read off the warm uninstantiated return, evaluating no body          under an instantiation"
+    );
     for (name, outcome, arms) in [
         ("witness", &witness, vec![number(), string()]),
         (

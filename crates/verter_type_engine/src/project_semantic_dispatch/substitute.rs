@@ -708,11 +708,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///
     /// A nested function value's clause interns its own binder identities
     /// (see the flow lane's binder environment), so a returned generic
-    /// function value re-declaring one of `names` keeps its own parameter.
-    /// A signature that declares one of the binders being replaced — the
-    /// same node, as a function TYPE written in the body with a same-name
-    /// clause lowers to — answers `None`, and so does an ordinal `args`
-    /// does not cover.
+    /// function value re-declaring one of `names` keeps its own parameter,
+    /// and so does a function TYPE written with its own clause, whose
+    /// binders are named by the clause's content. A signature that declares
+    /// one of the binders being replaced — the same node, as a same-file
+    /// generic function with a body-derived return holds when it is
+    /// returned by name (`return { x, h }` from `l0<T>` over `h<T>`) —
+    /// answers `None`, and so does an ordinal `args` does not cover.
     ///
     /// The binding is simultaneous: `g<A, B>` instantiated at `[B, A]`
     /// from a same-file `f<A, B>` (whose root clause shares `g`'s
@@ -1905,11 +1907,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     })
                 });
                 let mut new_type_parameters = Vec::with_capacity(type_parameters.len());
+                // Each earlier parameter whose binder was re-interned with
+                // moved bounds, as `(old, new)`: a later parameter's bounds
+                // name the earlier binder (`U = T` in `<T extends A, U = T>`),
+                // so they follow it as the signature's positions do below.
+                let mut rebound: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
+                let bound = |node: SemanticNodeId, rebound: &[(SemanticNodeId, SemanticNodeId)]| {
+                    let (mut sub, mut changed) =
+                        self.substitute_with_change_tracking(node, parameter_node, arg);
+                    for &(old, new) in rebound {
+                        let (next, moved) = self.substitute_with_change_tracking(sub, old, new);
+                        sub = next;
+                        changed |= moved;
+                    }
+                    (sub, changed)
+                };
                 for tp in type_parameters.iter() {
                     let new_constraint = match tp.constraint {
                         Some(c) => {
-                            let (sub, ch) =
-                                self.substitute_with_change_tracking(c, parameter_node, arg);
+                            let (sub, ch) = bound(c, &rebound);
                             any_changed |= ch;
                             Some(sub)
                         }
@@ -1917,8 +1933,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     };
                     let new_default = match tp.default {
                         Some(d) => {
-                            let (sub, ch) =
-                                self.substitute_with_change_tracking(d, parameter_node, arg);
+                            let (sub, ch) = bound(d, &rebound);
                             any_changed |= ch;
                             Some(sub)
                         }
@@ -1948,6 +1963,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             _ => tp.param,
                         }
                     };
+                    if param != tp.param {
+                        rebound.push((tp.param, param));
+                    }
                     new_type_parameters.push(TypeParamDecl {
                         name: tp.name.clone(),
                         param,
@@ -1963,12 +1981,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // substitution, which bind the exact binder node, reach them
                 // (`pick<S extends T>(x: S): S` over `Bx<string | number>`
                 // infers `S` from `x`).
-                for (old, new) in type_parameters
-                    .iter()
-                    .zip(new_type_parameters.iter())
-                    .filter(|(old, new)| old.param != new.param)
-                    .map(|(old, new)| (old.param, new.param))
-                {
+                for (old, new) in rebound {
                     for param in new_params.iter_mut() {
                         param.ty = self.substitute_with_change_tracking(param.ty, old, new).0;
                     }

@@ -451,10 +451,10 @@ fn lower_node<M: verter_audit::observe::ObserveExec>(
         //    `kind` preserves the spelling (`new () => R` stays distinct
         //    from `() => R`).
         TypeExpr::Function(func) => {
-            lower_function_signature(graph, func, scope, ctx, SignatureKind::Call)
+            lower_function_signature(graph, expr, func, scope, ctx, SignatureKind::Call)
         }
         TypeExpr::ConstructorType(func) => {
-            lower_function_signature(graph, func, scope, ctx, SignatureKind::Construct)
+            lower_function_signature(graph, expr, func, scope, ctx, SignatureKind::Construct)
         }
 
         // -- First-class type-parameter reference --
@@ -948,8 +948,15 @@ fn lower_union_or_intersection<M: verter_audit::observe::ObserveExec>(
 /// not itself or any following parameter — the first parameter's head
 /// therefore lowers under the OUTER context alone. An absent return
 /// annotation mirrors the eager `Opaque(Miss)` placeholder.
+///
+/// Each own binder's identity is the eager arm's: the declaring clause's
+/// content digest at the parameter's ordinal
+/// ([`crate::mapper_binder_registry::clause_binder_decl_name`]), or the
+/// name-keyed signature convention for a body-derived clause. `clause` is
+/// the `Function` / `ConstructorType` node carrying `func`.
 fn lower_function_signature<M: verter_audit::observe::ObserveExec>(
     graph: crate::semantic_query_memo::GraphIn<'_, M>,
+    clause: &TypeExpr,
     func: &FunctionExpr,
     scope: &NodeScopeId,
     ctx: &StructuralLowerContext<'_>,
@@ -957,11 +964,47 @@ fn lower_function_signature<M: verter_audit::observe::ObserveExec>(
 ) -> Result<SemanticNodeId, StructuralLowerError> {
     let mut own_frame = BinderScope::default();
     let mut type_parameters: Vec<TypeParamDecl> = Vec::with_capacity(func.type_parameters.len());
-    for tp in &func.type_parameters {
+    let clause_decl_name = (!func.type_parameters.is_empty() && func.flow_return.is_none())
+        .then(|| crate::mapper_binder_registry::clause_binder_decl_name(graph.store(), clause));
+    let identity = |ordinal: usize, display_name: &OwnedStr| match &clause_decl_name {
+        Some(clause) => (
+            DeclIdentity::from_scope(scope, OwnedStr::from(Arc::clone(clause))),
+            u16::try_from(ordinal).unwrap_or(u16::MAX),
+        ),
+        // The shared signature-scoped binder convention
+        // (`BinderIdentityMode::Signature`): display-name-keyed at
+        // ordinal 0.
+        None => (DeclIdentity::from_scope(scope, display_name.clone()), 0),
+    };
+    // Every parameter predeclared as a bound-free binder, as the shared
+    // binder-frame constructor does: the shell a constraint's self or
+    // later-sibling reference names (`T extends U` in `<T extends U, U>`).
+    let shells: Vec<(Arc<str>, SemanticNodeId)> = func
+        .type_parameters
+        .iter()
+        .enumerate()
+        .map(|(ordinal, tp)| {
+            let display_name = OwnedStr::from(tp.name.as_str());
+            let (decl, param_index) = identity(ordinal, &display_name);
+            let shell = graph.intern_node_with_scope(
+                SemanticNodeData::TypeParam {
+                    decl,
+                    param_index,
+                    constraint: None,
+                    default: None,
+                    display_name,
+                },
+                scope.clone(),
+            );
+            (Arc::<str>::from(tp.name.as_str()), shell)
+        })
+        .collect();
+    for (ordinal, tp) in func.type_parameters.iter().enumerate() {
         let display_name = OwnedStr::from(tp.name.as_str());
         // This parameter's constraint / default sees the PRIOR own binders in
         // this list (TS scoping), so build a head context over the outer stack
-        // plus the own-frame accumulated so far. The first parameter has no
+        // plus the own-frame accumulated so far; a constraint also sees this
+        // parameter and the later ones as their shells. The first parameter has no
         // prior own binders and lowers under the outer `ctx` directly
         // (`head_storage` outlives `head_ctx`'s borrow, mirroring the
         // `inner_storage` body shape below).
@@ -974,24 +1017,28 @@ fn lower_function_signature<M: verter_audit::observe::ObserveExec>(
             head_storage = frames;
             ctx.with_binders(&head_storage)
         };
-        let constraint = tp
-            .constraint
-            .as_deref()
-            .map(|c| lower_node(graph, c, scope, &head_ctx))
-            .transpose()?;
+        let constraint = match tp.constraint.as_deref() {
+            Some(c) => {
+                let mut head = own_frame.clone();
+                for (name, shell) in shells.iter().skip(ordinal) {
+                    head.bind(Arc::clone(name), *shell);
+                }
+                let mut frames: Vec<BinderScope> = ctx.binders.to_vec();
+                frames.push(head);
+                Some(lower_node(graph, c, scope, &ctx.with_binders(&frames))?)
+            }
+            None => None,
+        };
         let default = tp
             .default
             .as_deref()
             .map(|d| lower_node(graph, d, scope, &head_ctx))
             .transpose()?;
-        let decl = DeclIdentity::from_scope(scope, display_name.clone());
+        let (decl, param_index) = identity(ordinal, &display_name);
         let binder = graph.intern_node_with_scope(
             SemanticNodeData::TypeParam {
                 decl,
-                // The shared signature-scoped binder convention
-                // (`BinderIdentityMode::Signature`): display-name-keyed at
-                // ordinal 0.
-                param_index: 0,
+                param_index,
                 constraint,
                 default,
                 display_name: OwnedStr::from(&display_name),

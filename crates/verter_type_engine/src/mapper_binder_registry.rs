@@ -276,6 +276,47 @@ pub(crate) fn mapper_binder_decl_name_in<'t>(
     Arc::from(format!("{MAPPER_BINDER_DECL_PREFIX}{digest:032x}>"))
 }
 
+/// Leading text of every written-clause binder declaration name.
+const CLAUSE_BINDER_DECL_PREFIX: &str = "<clause-param ";
+
+/// The declaration name of the type parameters a written function or
+/// constructor type declares in its own clause (`<T>(z: T) => T`): a
+/// reproducible identity of the clause, never its position.
+///
+/// It is a 128-bit digest over the same span-blind structural walk
+/// [`mapper_binder_decl_name`] reads, over the whole clause (type
+/// parameters with their bounds, parameters, return and predicate). A
+/// clause is its binders' declaration, so its digest keeps them apart from
+/// a same-name binder of any enclosing clause (a tree never equals a proper
+/// subtree of itself), from the file-scoped name-keyed binders a
+/// declaration's root clause and a free occurrence intern, and from a
+/// sibling clause of different content. Two clauses of identical text in
+/// one file name one binder, exactly as two mappings of one shape do. Text
+/// moving above the clause, a span-cleared copy and a wire round-trip all
+/// give the same name. The binder's `param_index` is the parameter's
+/// ordinal in the clause.
+pub(crate) fn clause_binder_decl_name(
+    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    clause: &TypeExpr,
+) -> Arc<str> {
+    verter_debug_assert!(matches!(
+        clause,
+        TypeExpr::Function(_) | TypeExpr::ConstructorType(_)
+    ));
+    let mut events = crate::semantic_query::ExactHashEventRecorder::default();
+    let mut leaves = IdentityLeaves { graph };
+    b"ClauseBinderIdentity::v1".hash(&mut events);
+    walk_type_expr(clause, &mut events, &mut leaves, &mut FxHashMap::default());
+    let digest = xxhash_rust::xxh3::xxh3_128(&events.into_bytes());
+    Arc::from(format!("{CLAUSE_BINDER_DECL_PREFIX}{digest:032x}>"))
+}
+
+/// Whether `decl_name` names a written-clause binder minted by
+/// [`clause_binder_decl_name`].
+pub fn is_clause_binder_decl_name(decl_name: &str) -> bool {
+    decl_name.starts_with(CLAUSE_BINDER_DECL_PREFIX) && decl_name.ends_with('>')
+}
+
 /// Whether `decl_name` names a mapped binder minted by
 /// [`mapper_binder_decl_name`].
 pub fn is_mapper_binder_decl_name(decl_name: &str) -> bool {
