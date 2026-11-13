@@ -24423,7 +24423,7 @@ fn semantic_query_key_variant_set_is_structurally_pinned() {
 // (Intersection / Union / Mapped / Conditional / Alias /
 // InstantiationRef) instead of returning the raw carrier verbatim. The
 // existing walker only triggers terminal surface synthesis under
-// `Expanded` mode (see `expand_empty_path_terminal` in `walk.rs`); the
+// `Expanded` mode (see `run_expansion` in `walk.rs`); the
 // `Shallow` arm currently returns the base node verbatim, which is the
 // behavior these tests characterize and assert against.
 //

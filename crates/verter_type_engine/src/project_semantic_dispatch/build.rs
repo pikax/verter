@@ -13032,64 +13032,289 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Bounded loop: exact-identity cycle detection plus the shared
         // connected work envelope, both typed-partial on trip.
         loop {
-            let (slot, inst_args, owner_canonical) =
-                match self.graph().node_data(current).as_deref() {
-                    Some(SemanticNodeData::DeclRef { identity }) => (
-                        self.type_slot_for(
-                            identity.canonical_id.clone(),
-                            identity.owner,
-                            identity.decl_name.clone(),
-                        ),
-                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                        identity.canonical_id.clone(),
-                    ),
-                    Some(SemanticNodeData::InstantiationRef { base, args }) => (
-                        self.type_slot_for(
-                            base.canonical_id.clone(),
-                            base.owner,
-                            base.decl_name.clone(),
-                        ),
-                        self.evaluate_carrier_arguments(base, args, context)
-                            .into_active_query_build_arguments(self),
-                        base.canonical_id.clone(),
-                    ),
-                    // Settled (non-carrier) — the stable stop; checked BEFORE the
-                    // work budget so a chain that settles on exactly the last
-                    // permitted step is never falsely partial.
-                    _ => return current,
-                };
-            if !visited.insert(current) {
-                // Residual-carrier resolution cycle: the chain can never
-                // settle — typed partial, never a silent carrier return.
-                self.fold_local_partial_completeness(
-                    crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
-                );
-                return current;
-            }
-            if let Err(reasons) = self.charge_connected_work() {
-                // Fresh-node regrowth exhausted the shared connected envelope.
-                self.fold_local_partial_completeness(reasons);
-                return current;
-            }
-            let read = self.execute_read(SemanticQueryKey::Instantiate(
-                crate::semantic_query::InstantiateKey::new(
-                    slot,
-                    inst_args,
-                    self.instantiate_context_for(&owner_canonical, context),
-                ),
-            ));
-            // A2 signal-split: fold a genuinely-incomplete carrier resolve.
-            crate::request_context::observe_component_meta_read_suppress(&read);
-            let next = match read.value {
-                QueryResult::Value(id) => id,
-                _ => return current,
+            let key = match self.source_carrier_instantiation(current, context, &mut visited) {
+                Ok(key) => key,
+                Err(settled) => return settled,
             };
-            if next == current {
+            let read = self.execute_read(key);
+            let Some(next) = Self::source_carrier_instantiated(current, &read) else {
                 return current;
-            }
+            };
             current = self
                 .evaluate_deferred_semantic_node_with_context(next, context)
                 .into_active_query_build_node(self);
+        }
+    }
+
+    /// One step of a signature source's carrier chain
+    /// ([`Self::resolve_signature_source_carrier`]) standing at `current`:
+    /// the instantiation it reads next, or the node the chain settles on —
+    /// a non-carrier, or a carrier whose chain cycles or exhausts the
+    /// connected work envelope (each folding its typed partial).
+    fn source_carrier_instantiation(
+        &self,
+        current: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+        visited: &mut crate::semantic_query::small_node_set::SmallNodeSet,
+    ) -> Result<SemanticQueryKey, SemanticNodeId> {
+        let (slot, inst_args, owner_canonical) = match self.graph().node_data(current).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => (
+                self.type_slot_for(
+                    identity.canonical_id.clone(),
+                    identity.owner,
+                    identity.decl_name.clone(),
+                ),
+                Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                identity.canonical_id.clone(),
+            ),
+            Some(SemanticNodeData::InstantiationRef { base, args }) => (
+                self.type_slot_for(
+                    base.canonical_id.clone(),
+                    base.owner,
+                    base.decl_name.clone(),
+                ),
+                self.evaluate_carrier_arguments(base, args, context)
+                    .into_active_query_build_arguments(self),
+                base.canonical_id.clone(),
+            ),
+            // Settled (non-carrier) — the stable stop; checked BEFORE the
+            // work budget so a chain that settles on exactly the last
+            // permitted step is never falsely partial.
+            _ => return Err(current),
+        };
+        if !visited.insert(current) {
+            // Residual-carrier resolution cycle: the chain can never
+            // settle — typed partial, never a silent carrier return.
+            self.fold_local_partial_completeness(
+                crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
+            );
+            return Err(current);
+        }
+        if let Err(reasons) = self.charge_connected_work() {
+            // Fresh-node regrowth exhausted the shared connected envelope.
+            self.fold_local_partial_completeness(reasons);
+            return Err(current);
+        }
+        Ok(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                slot,
+                inst_args,
+                self.instantiate_context_for(&owner_canonical, context),
+            ),
+        ))
+    }
+
+    /// The node a carrier chain standing at `current` goes on from, given
+    /// its instantiation's `read`: `None` when the chain settles on
+    /// `current` (the read did not answer, or answered `current` itself).
+    fn source_carrier_instantiated(
+        current: SemanticNodeId,
+        read: &crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> Option<SemanticNodeId> {
+        // Fold a genuinely-incomplete carrier resolve.
+        crate::request_context::observe_component_meta_read_suppress(read);
+        match read.value {
+            QueryResult::Value(next) if next != current => Some(next),
+            _ => None,
+        }
+    }
+
+    /// The first stage of [`Self::resolve_signature_source_carrier`] as a
+    /// sub-continuation its consumer steps: `node`'s deferred evaluation
+    /// on the shared evaluator, then each carrier of the chain
+    /// instantiated and its answer evaluated again, every read a stage
+    /// names returned with the chain retained ([`SourceCarrierRead`]).
+    pub(super) fn begin_source_carrier_read(
+        &self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SourceCarrierStep {
+        let step = self.begin_deferred_read(
+            node,
+            context,
+            super::evaluate::DeferredEvaluationDemand::Shell,
+        );
+        self.source_carrier_evaluated(
+            SourceCarrierRead {
+                context,
+                visited: crate::semantic_query::small_node_set::SmallNodeSet::default(),
+                current: node,
+                evaluation: None,
+            },
+            step,
+        )
+    }
+
+    /// The next stage of a carrier chain standing at the read its last
+    /// stage named, given `deliver`, that read: an evaluation's read is
+    /// delivered inside the evaluation, an instantiation's to the chain.
+    pub(super) fn resume_source_carrier_read(
+        &self,
+        mut read: SourceCarrierRead,
+        deliver: &mut dyn FnMut() -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> SourceCarrierStep {
+        if let Some(evaluation) = read.evaluation.take() {
+            let step = self.resume_deferred_read(evaluation, deliver);
+            return self.source_carrier_evaluated(read, step);
+        }
+        let Some(next) = Self::source_carrier_instantiated(read.current, &deliver()) else {
+            return SourceCarrierStep::Done(read.current);
+        };
+        let step = self.begin_deferred_read(
+            next,
+            read.context,
+            super::evaluate::DeferredEvaluationDemand::Shell,
+        );
+        self.source_carrier_evaluated(read, step)
+    }
+
+    /// A carrier chain whose evaluation took `step`: the read the
+    /// evaluation names, or — evaluated — the chain's next instantiation
+    /// or the node it settles on.
+    fn source_carrier_evaluated(
+        &self,
+        mut read: SourceCarrierRead,
+        step: super::evaluate::DeferredStep,
+    ) -> SourceCarrierStep {
+        match step {
+            super::evaluate::DeferredStep::Read(key, evaluation) => {
+                read.evaluation = Some(evaluation);
+                SourceCarrierStep::Read(key, Box::new(read))
+            }
+            super::evaluate::DeferredStep::Done(outcome) => {
+                read.current = outcome.into_active_query_build_node(self);
+                match self.source_carrier_instantiation(
+                    read.current,
+                    read.context,
+                    &mut read.visited,
+                ) {
+                    Ok(key) => SourceCarrierStep::Read(key, Box::new(read)),
+                    Err(settled) => SourceCarrierStep::Done(settled),
+                }
+            }
+        }
+    }
+
+    /// Release a carrier chain standing between two of its stages: an
+    /// evaluation standing at its read abandons its recordings.
+    pub(super) fn abandon_source_carrier_read(&self, read: SourceCarrierRead) {
+        if let Some(evaluation) = read.evaluation {
+            self.abandon_deferred_read(*evaluation);
+        }
+    }
+
+    /// Whether a mapped type's non-enumerable primitive key space admits a
+    /// selected key of the segment's domain, as a sub-continuation its
+    /// consumer steps: `string` admits a string-domain segment, `number` a
+    /// number-domain one, `any` / `unknown` either; a union admits when an
+    /// arm does, its arms tried in order, a nested union's before its
+    /// siblings, until one admits. Each node the check reaches is evaluated
+    /// as published `Expanded` on the shared evaluator, every read that
+    /// evaluation names returned with the check retained
+    /// ([`KeySpaceAdmissionRead`]).
+    ///
+    /// `Record<string, V>['foo']` and `{ [K in string]: V }['foo']` have a
+    /// `string` key space: the key domain is the whole `string` universe,
+    /// which no enumeration lists, and substituting `K = "foo"` gives the
+    /// value the whole mapped surface would give that key. Any other key
+    /// space does not admit here — the tier failing to apply, never a proof
+    /// of absence.
+    pub(super) fn begin_keyspace_admission(
+        &self,
+        key_space: SemanticNodeId,
+        segment_is_string_domain: bool,
+    ) -> KeySpaceAdmissionStep {
+        self.advance_keyspace_admission(KeySpaceAdmissionRead {
+            pending: vec![key_space],
+            segment_is_string_domain,
+            evaluation: None,
+        })
+    }
+
+    /// The next stage of a key-space admission standing at the read its
+    /// evaluation named, given `deliver`, that read.
+    pub(super) fn resume_keyspace_admission(
+        &self,
+        mut read: KeySpaceAdmissionRead,
+        deliver: &mut dyn FnMut() -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> KeySpaceAdmissionStep {
+        let evaluation = read
+            .evaluation
+            .take()
+            .expect("a key-space admission resumed with a read stands in an evaluation");
+        let step = self.resume_deferred_read(evaluation, deliver);
+        match self.keyspace_evaluated(&mut read, step) {
+            KeySpaceEvaluated::Admits => KeySpaceAdmissionStep::Done(true),
+            KeySpaceEvaluated::Read(key) => KeySpaceAdmissionStep::Read(key, Box::new(read)),
+            KeySpaceEvaluated::Next => self.advance_keyspace_admission(read),
+        }
+    }
+
+    /// Release a key-space admission standing at its evaluation's read.
+    pub(super) fn abandon_keyspace_admission(&self, read: KeySpaceAdmissionRead) {
+        if let Some(evaluation) = read.evaluation {
+            self.abandon_deferred_read(*evaluation);
+        }
+    }
+
+    /// Evaluate the nodes the check has left, in order, until one admits
+    /// or an evaluation names a read; none admitting, the key space does
+    /// not admit.
+    fn advance_keyspace_admission(&self, mut read: KeySpaceAdmissionRead) -> KeySpaceAdmissionStep {
+        while let Some(node) = read.pending.pop() {
+            let step = self.begin_deferred_read(
+                node,
+                crate::semantic_query::ProjectionReductionContext::published(
+                    ProjectionMode::Expanded,
+                ),
+                super::evaluate::DeferredEvaluationDemand::Shell,
+            );
+            match self.keyspace_evaluated(&mut read, step) {
+                KeySpaceEvaluated::Admits => return KeySpaceAdmissionStep::Done(true),
+                KeySpaceEvaluated::Read(key) => {
+                    return KeySpaceAdmissionStep::Read(key, Box::new(read));
+                }
+                KeySpaceEvaluated::Next => {}
+            }
+        }
+        KeySpaceAdmissionStep::Done(false)
+    }
+
+    /// A key-space node whose evaluation took `step`: the evaluation
+    /// retained at the read it names, or — evaluated, its partiality folded
+    /// into the active build — an admitting primitive; a union's arms join
+    /// the nodes left, before its siblings, and any other node admits
+    /// nothing.
+    fn keyspace_evaluated(
+        &self,
+        read: &mut KeySpaceAdmissionRead,
+        step: super::evaluate::DeferredStep,
+    ) -> KeySpaceEvaluated {
+        let outcome = match step {
+            super::evaluate::DeferredStep::Read(key, evaluation) => {
+                read.evaluation = Some(evaluation);
+                return KeySpaceEvaluated::Read(key);
+            }
+            super::evaluate::DeferredStep::Done(outcome) => outcome,
+        };
+        let resolved = outcome.into_active_query_build_node(self);
+        let Some(data) = self.graph().node_data(resolved) else {
+            return KeySpaceEvaluated::Next;
+        };
+        let admits = match data.as_ref() {
+            SemanticNodeData::Primitive(PrimitiveKind::String) => read.segment_is_string_domain,
+            SemanticNodeData::Primitive(PrimitiveKind::Number) => !read.segment_is_string_domain,
+            SemanticNodeData::Primitive(PrimitiveKind::Any | PrimitiveKind::Unknown) => true,
+            SemanticNodeData::Union(members) => {
+                read.pending.extend(members.iter().rev().copied());
+                false
+            }
+            _ => false,
+        };
+        if admits {
+            KeySpaceEvaluated::Admits
+        } else {
+            KeySpaceEvaluated::Next
         }
     }
 
@@ -14871,15 +15096,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> super::family_continuation::FamilyStep {
         use super::family_continuation::{FamilyBuild, FamilyStep};
         match progress {
-            super::walk::WalkProgress::Read(key) => FamilyStep::Need(
-                key,
-                Box::new(FamilyBuild::ProjectPath(Box::new(
+            super::walk::WalkProgress::Read(need) => {
+                use super::walk::WalkNeed;
+                let build = Box::new(FamilyBuild::ProjectPath(Box::new(
                     super::walk::ProjectPathBuild {
                         walk: walker.into_state(),
                         plan,
                     },
-                ))),
-            ),
+                )));
+                match need {
+                    WalkNeed::Query(key) => FamilyStep::Need(key, build),
+                    WalkNeed::Port => FamilyStep::Port(build),
+                    WalkNeed::Load(file) => FamilyStep::Load(file, build),
+                    WalkNeed::Index(file) => FamilyStep::Index(file, build),
+                }
+            }
             super::walk::WalkProgress::Done(result) => {
                 let mut plan = plan;
                 let binders = std::mem::take(&mut plan.this_binders);
@@ -14896,11 +15127,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub(super) fn resume_project_path(
         &self,
         build: super::walk::ProjectPathBuild,
-        deliver: &mut dyn FnMut() -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+        deliver: &mut dyn FnMut() -> crate::semantic_query::CacheRead<
+            QueryResult<crate::semantic_query::SemanticQueryValue>,
+        >,
     ) -> super::family_continuation::FamilyStep {
         let super::walk::ProjectPathBuild { walk, plan } = build;
         let mut walker = PathWalker::from_state(self, walk);
         let progress = walker.resume_walk(deliver);
+        self.advance_project_path(plan, walker, progress)
+    }
+
+    /// The next stage of a path build whose walk stands at its wrapper
+    /// lookup's port or file, given that port's answer or that file's
+    /// indexed input.
+    #[inline(never)]
+    pub(super) fn resume_project_path_lookup(
+        &self,
+        build: super::walk::ProjectPathBuild,
+        answer: super::walk::LookupAnswer,
+    ) -> super::family_continuation::FamilyStep {
+        let super::walk::ProjectPathBuild { walk, plan } = build;
+        let mut walker = PathWalker::from_state(self, walk);
+        let progress = walker.resume_lookup(answer);
         self.advance_project_path(plan, walker, progress)
     }
 
@@ -17951,6 +18199,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> super::evaluate::EvaluateDeferredOutcome {
         let substituted = self.substitute_selected_mapped_value(mapper, key_arg, context);
         self.evaluate_mapped_index_value_outcome(substituted, context)
+    }
+
+    /// The first stage of [`Self::materialize_selected_key_mapped_value_outcome`]'s
+    /// evaluation, as a sub-continuation its consumer steps
+    /// ([`Self::begin_deferred_read`]): the binder substituted with
+    /// `key_arg`, then the substituted value evaluated as a mapped member's.
+    pub(super) fn begin_selected_key_mapped_value(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        key_arg: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> super::evaluate::DeferredStep {
+        let substituted = self.substitute_selected_mapped_value(mapper, key_arg, context);
+        self.begin_deferred_read(
+            substituted,
+            context,
+            super::evaluate::DeferredEvaluationDemand::MappedMemberValue,
+        )
     }
 
     fn substitute_selected_mapped_value(
@@ -23099,4 +23365,70 @@ fn finish_recorded_read<C: crate::resolver_core::ResolverCapabilities>(
 pub(super) fn is_certified_recovery(error: &QueryError) -> bool {
     super::query_error_disposition::query_error_disposition(error)
         == super::query_error_disposition::QueryErrorDisposition::CheckerRecovery
+}
+
+/// A signature source's carrier chain
+/// ([`ProjectSemanticDispatch::resolve_signature_source_carrier`]) between two
+/// of its stages: the context it resolves under, the carriers it already
+/// instantiated, the node it stands at and — while one stands at its read —
+/// the deferred evaluation of that node.
+pub(super) struct SourceCarrierRead {
+    context: crate::semantic_query::ProjectionReductionContext,
+    visited: crate::semantic_query::small_node_set::SmallNodeSet,
+    current: SemanticNodeId,
+    evaluation: Option<Box<super::evaluate::DeferredRead>>,
+}
+
+impl SourceCarrierRead {
+    /// Whether the read the chain stands at is its evaluation's carrier
+    /// resolution's, counted as its consumers count those reads.
+    pub(super) fn reads_for_carrier(&self) -> bool {
+        self.evaluation
+            .as_ref()
+            .is_some_and(|evaluation| evaluation.reads_for_carrier())
+    }
+}
+
+/// Where a signature source's carrier chain stands after its latest stage.
+pub(super) enum SourceCarrierStep {
+    /// The node the chain settled on.
+    Done(SemanticNodeId),
+    /// The chain reads this query next, holding everything it computed.
+    Read(SemanticQueryKey, Box<SourceCarrierRead>),
+}
+
+/// A mapped key space's admission check
+/// ([`ProjectSemanticDispatch::begin_keyspace_admission`]) between two of its
+/// evaluations: the nodes left to evaluate, the next one last, the selected
+/// segment's domain and — while one stands at its read — the evaluation of
+/// the node it took.
+pub(super) struct KeySpaceAdmissionRead {
+    pending: Vec<SemanticNodeId>,
+    segment_is_string_domain: bool,
+    evaluation: Option<Box<super::evaluate::DeferredRead>>,
+}
+
+impl KeySpaceAdmissionRead {
+    /// Whether the read the check stands at is its evaluation's carrier
+    /// resolution's, counted as its consumers count those reads.
+    pub(super) fn reads_for_carrier(&self) -> bool {
+        self.evaluation
+            .as_ref()
+            .is_some_and(|evaluation| evaluation.reads_for_carrier())
+    }
+}
+
+/// Where a key-space admission check stands after its latest stage.
+pub(super) enum KeySpaceAdmissionStep {
+    /// Whether the key space admits the selected key's domain.
+    Done(bool),
+    /// The check reads this query next, holding everything it computed.
+    Read(SemanticQueryKey, Box<KeySpaceAdmissionRead>),
+}
+
+/// What one key-space node's evaluation decided.
+enum KeySpaceEvaluated {
+    Admits,
+    Next,
+    Read(SemanticQueryKey),
 }

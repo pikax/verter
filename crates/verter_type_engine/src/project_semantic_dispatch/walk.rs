@@ -1332,18 +1332,39 @@ enum WalkFrame {
 
 /// Where a path walk stands after it ran: complete, or at a dependency
 /// read a hop named, which the walk resumes with
-/// ([`PathWalker::resume_walk`]).
+/// ([`PathWalker::resume_walk`], [`PathWalker::resume_lookup`]).
 pub(super) enum WalkProgress {
     /// The walk's terminal node.
     Done(SemanticNodeId),
-    /// The query the walk reads next, everything it computed retained.
-    Read(SemanticQueryKey),
+    /// The dependency the walk reads next, everything it computed retained.
+    Read(WalkNeed),
 }
 
-/// A dependency read a hop stands at: the query, and where the hop resumes
-/// with its answer.
+/// A dependency a hop names: a query, or — while a global wrapper's
+/// declaration lookup steps — the resolver port or the file the lookup
+/// reads next ([`WrapperStage::Lookup`]).
+pub(super) enum WalkNeed {
+    Query(SemanticQueryKey),
+    /// The resolver port the lookup stands at ([`WalkState::port_read`]).
+    Port,
+    /// The file whose indexed input the lookup reads next.
+    Load(Arc<str>),
+    /// The pending contributor the lookup makes IndexedReady next, unread.
+    Index(Arc<str>),
+}
+
+/// The answer a walk standing at its lookup's port or file resumes with
+/// ([`PathWalker::resume_lookup`]).
+pub(super) enum LookupAnswer {
+    Port(super::port_continuations::PortAnswer),
+    /// The file's indexed input (`None` when the live view serves none,
+    /// and for a contributor only indexed).
+    Source(Option<verter_session_query::inputs::indexed::IndexedInputServe>),
+}
+
+/// A dependency a hop stands at, and where the hop resumes with its answer.
 pub(super) struct HopRead {
-    key: SemanticQueryKey,
+    key: WalkNeed,
     resume: HopResume,
 }
 
@@ -1412,6 +1433,20 @@ enum HopSite {
     /// An identity mapper's selected key read off its source
     /// ([`PathWalker::finish_mapped_key`]).
     MappedKey(Box<MappedKeyHop>),
+    /// A computed mapper's selected key: its value's evaluation on
+    /// the shared deferred evaluator, standing at the read it named
+    /// ([`PathWalker::mapped_value_hop`]).
+    MappedValue {
+        evaluation: Box<super::evaluate::DeferredRead>,
+        key: Box<MappedKeyHop>,
+    },
+    /// A mapped type's source carrier chain, standing at the read it named
+    /// ([`PathWalker::mapped_source_hop`]).
+    MappedSource(Box<MappedSourceHop>),
+    /// A mapped type's primitive key space evaluated to admit a selected
+    /// key, standing at the read it named
+    /// ([`PathWalker::mapped_keyspace_hop`]).
+    MappedKeySpace(Box<MappedKeySpaceHop>),
     /// A mapped type resolved as a whole surface.
     MappedWhole,
     /// A `BareRef` / `ImportType` carrier's head resolution, standing at the
@@ -1426,6 +1461,20 @@ enum HopSite {
     Wrapper(Box<WrapperHop>),
     /// The terminal carrier a non-empty `Expanded` path resolves one level.
     Terminal(Box<TerminalHop>),
+    /// A spread program's member read: the projection of one of its
+    /// candidate keys.
+    Spread(Box<SpreadHop>),
+    /// An `Expanded` terminal's expansion, standing at a frame's
+    /// instantiation or mapped-type read.
+    Expand(Box<Expansion>),
+}
+
+/// A spread program's member read ([`PathWalker::spread_candidate_hop`]):
+/// the key and its element-access equivalent, and the one whose projection
+/// is read.
+struct SpreadHop {
+    candidates: Vec<PropertyKey>,
+    at: usize,
 }
 
 /// Where the walk uses a carrier subject it resolves
@@ -1440,6 +1489,49 @@ enum CarrierAt {
     NavigateTerminal,
 }
 
+/// A mapped hop's source carrier chain standing at its read: the chain,
+/// what the hop does with the subject it settles on, and the mapping.
+struct MappedSourceHop {
+    read: Box<super::build::SourceCarrierRead>,
+    using: MappedSourceUse,
+    source: SemanticNodeId,
+    mapper: crate::semantic_query::MapperKey,
+}
+
+/// A mapped hop's key-space admission check standing at its read: the
+/// check, the selected key it admits, and the mapping.
+struct MappedKeySpaceHop {
+    read: Box<super::build::KeySpaceAdmissionRead>,
+    key: LiteralKey,
+    source: SemanticNodeId,
+    mapper: crate::semantic_query::MapperKey,
+}
+
+/// What a mapped hop does with its source's resolved subject.
+enum MappedSourceUse {
+    /// Map a homomorphic array or tuple container as a whole.
+    Homomorphic,
+    /// Decide this selected key's admission.
+    Admission(LiteralKey),
+}
+
+/// Where a mapped hop ([`PathWalker::mapped_hop`]) resumes.
+enum MappedResume {
+    /// From the start: the homomorphic container check first.
+    Fresh,
+    /// Past the homomorphic container check.
+    PastHomomorphic,
+    /// At the admission of the selected `key`, which the structural
+    /// tiers left undecided, its source resolved to `subject`.
+    Admission {
+        subject: SemanticNodeId,
+        key: LiteralKey,
+    },
+    /// Past the key-domain tiers for the selected `key`, the primitive key
+    /// space's check having `admitted` it or not.
+    KeySpace { admitted: bool, key: LiteralKey },
+}
+
 /// An identity mapper's selected key the hop reads off its source.
 struct MappedKeyHop {
     source: SemanticNodeId,
@@ -1449,17 +1541,31 @@ struct MappedKeyHop {
 
 /// A global wrapper read ([`PathWalker::begin_wrapper_read`]): the
 /// interface and its arguments, whether it is scoped by the walk's origin
-/// file (a read left unsettled there is read again for the demand's
-/// project) and how the walk uses the surface.
+/// file, whether a read left unsettled there is read again for the
+/// demand's project, where the read stands and how the walk uses the
+/// surface.
 struct WrapperHop {
     name: &'static str,
     args: Vec<SemanticNodeId>,
     by_origin: bool,
+    demand_fallback: bool,
+    stage: WrapperStage,
     use_surface: WrapperUse,
 }
 
+/// Where a global wrapper read stands: its declaration lookup or its
+/// instantiation.
+enum WrapperStage {
+    /// The lookup of the interface's first declaration in a project
+    /// ([`super::port_continuations::GlobalLookup`]), standing at the port
+    /// or the file it reads next — what the in-place lookup
+    /// (`first_global_declaration`) answers where it stands.
+    Lookup(super::port_continuations::GlobalLookup),
+    /// The interface's instantiation, whose answer is the wrapper.
+    Instantiate,
+}
+
 /// How a walk uses a global wrapper's surface.
-#[derive(Clone, Copy)]
 enum WrapperUse {
     /// An array or tuple member read off its apparent wrapper.
     Member,
@@ -1468,6 +1574,36 @@ enum WrapperUse {
     /// A runtime nominal declaration's member, read off its global
     /// interface.
     RuntimeNominal,
+    /// The surface a tuple or array arm of a composite split reports its
+    /// key off ([`PathWalker::tuple_index_hop`],
+    /// [`PathWalker::array_index_hop`]).
+    ArmView,
+    /// The global `Object` an object reads a member its own surface does not
+    /// declare off ([`PathWalker::object_member_hop`]).
+    ObjectMember(Box<ObjectMemberRead>),
+    /// The global `Object` a composite join's arm reads the split's key
+    /// off ([`PathWalker::advance_composite_decision`]).
+    CompositeObject(Box<CompositeDecision>),
+}
+
+/// An object's member read past its own surface, standing at the global
+/// `Object` read: the surface and the key.
+struct ObjectMemberRead {
+    surface: crate::semantic_query::SurfaceView,
+    key: PropertyKey,
+}
+
+/// A composite join deciding its segment, standing at the global `Object`
+/// read of the arm `at`: its arms' probes, the key and the apparent
+/// surfaces the arms before `at` declared it on.
+struct CompositeDecision {
+    join: CompositeJoin,
+    arm_count: usize,
+    is_union: bool,
+    probes: Vec<ArmProbe>,
+    key: OwnedIndexAccessKey,
+    at: usize,
+    found: Vec<SemanticNodeId>,
 }
 
 /// The read resolving a non-empty `Expanded` path's terminal carrier one
@@ -1479,14 +1615,45 @@ struct TerminalHop {
 }
 
 /// How a terminal resolved one level finishes.
-#[derive(Clone, Copy)]
 enum TerminalThen {
-    /// As the resolved node: an in-place expansion step resolving it.
+    /// As the resolved node: an expansion step resolving it where it
+    /// stands ([`PathWalker::run_expansion`]).
     Resolved,
     /// Expanded and presented as the path's terminal, unless a `typeof`
     /// read already projected it.
     Expanded { typeof_owns: bool },
+    /// An expansion's carrier frame, resolved after a read: the expansion
+    /// goes on from the resolved node.
+    Expanding(Box<Expansion>),
 }
+
+/// An `Expanded` terminal's expansion ([`PathWalker::run_expansion`])
+/// between two of its reads: the node it expands, the frames left, the
+/// arms expanded so far, and the frame node whose read — an instantiation,
+/// a mapped type or a carrier's resolution — it stands at.
+struct Expansion {
+    root: SemanticNodeId,
+    work: Vec<ExpandFrame>,
+    results: Vec<SemanticNodeId>,
+    at: SemanticNodeId,
+}
+
+/// What an expansion frame reads before the expansion goes on.
+enum ExpandRead {
+    /// A declaration placeholder's instantiation or a mapped type's
+    /// materialization, whose answer is expanded next.
+    Query(SemanticQueryKey),
+    /// A non-empty path's carrier resolved one level.
+    Carrier,
+}
+
+/// Where a terminal stands in its path: the path, the walk's index in it
+/// and the arm it reads for — what a terminal's read resumes with.
+type TerminalAt<'p> = (
+    &'p verter_type_expr::OwnedSlice<PathSegment>,
+    usize,
+    Option<ArmRead>,
+);
 
 enum TerminalRead {
     /// A `typeof` carrier's value, its instantiation arguments applied.
@@ -1551,6 +1718,10 @@ pub(super) struct ProjectPathBuild {
 // resumes it, advanced by value one stage at a time.
 static_assertions::assert_impl_all!(ProjectPathBuild: Send);
 static_assertions::assert_not_impl_any!(ProjectPathBuild: Clone, Copy);
+// A mapped hop's suspended source carrier chain and key-space admission are
+// owned state the walk carries to whichever thread resumes it.
+static_assertions::assert_impl_all!(super::build::SourceCarrierRead: Send);
+static_assertions::assert_impl_all!(super::build::KeySpaceAdmissionRead: Send);
 
 /// What a path build decided before its walk began: the base and path it
 /// projects (past any class `this` binders it reads through, outermost
@@ -1579,13 +1750,24 @@ impl WalkState {
         if matches!(
             &self.awaiting,
             Some(HopResume {
-                site: HopSite::DeferredOperand { .. } | HopSite::Carrier { .. },
+                site: HopSite::DeferredOperand { .. }
+                    | HopSite::MappedValue { .. }
+                    | HopSite::MappedSource(_)
+                    | HopSite::MappedKeySpace(_)
+                    | HopSite::Carrier { .. },
                 ..
             })
         ) {
             match self.awaiting.take().map(|resume| resume.site) {
-                Some(HopSite::DeferredOperand { evaluation, .. }) => {
+                Some(
+                    HopSite::DeferredOperand { evaluation, .. }
+                    | HopSite::MappedValue { evaluation, .. },
+                ) => {
                     dispatch.abandon_deferred_read(*evaluation);
+                }
+                Some(HopSite::MappedSource(hop)) => dispatch.abandon_source_carrier_read(*hop.read),
+                Some(HopSite::MappedKeySpace(hop)) => {
+                    dispatch.abandon_keyspace_admission(*hop.read)
                 }
                 // A carrier standing between its stages leaves the
                 // normalization record; what it observed is dropped unread.
@@ -1602,6 +1784,23 @@ impl WalkState {
         }
     }
 
+    /// The resolver port the walk stands at ([`WalkNeed::Port`]): its
+    /// global wrapper read's lookup's.
+    pub(super) fn port_read(&self) -> super::port_continuations::PortRead<'_> {
+        match &self.awaiting {
+            Some(HopResume {
+                site: HopSite::Wrapper(hop),
+                ..
+            }) => match &hop.stage {
+                WrapperStage::Lookup(lookup) => lookup.port(),
+                WrapperStage::Instantiate => {
+                    unreachable!("a wrapper read at its instantiation stands at no port")
+                }
+            },
+            _ => unreachable!("only a wrapper's lookup reads a port"),
+        }
+    }
+
     /// Whether `key`, the read the walk stands at, is counted as the walk's
     /// own dispatch intent where a driver reads it in place: a carrier
     /// resolution's reads but its `typeof` value's, as the carrier's
@@ -1609,9 +1808,19 @@ impl WalkState {
     pub(super) fn counts_awaited_intent(&self, key: &SemanticQueryKey) -> bool {
         let carrier = match &self.awaiting {
             Some(HopResume {
-                site: HopSite::DeferredOperand { evaluation, .. },
+                site:
+                    HopSite::DeferredOperand { evaluation, .. }
+                    | HopSite::MappedValue { evaluation, .. },
                 ..
             }) => evaluation.reads_for_carrier(),
+            Some(HopResume {
+                site: HopSite::MappedSource(hop),
+                ..
+            }) => hop.read.reads_for_carrier(),
+            Some(HopResume {
+                site: HopSite::MappedKeySpace(hop),
+                ..
+            }) => hop.read.reads_for_carrier(),
             Some(HopResume {
                 site: HopSite::Carrier { .. },
                 ..
@@ -1663,6 +1872,7 @@ impl WalkState {
 /// the soundness gap where `{ [K in number]: K }[1.5]` would have
 /// fallen back to a deferred Mapped shell instead of substituting
 /// `K = 1.5`.
+#[derive(Clone)]
 enum LiteralKey {
     String(verter_type_expr::OwnedStr),
     Number(f64),
@@ -1808,13 +2018,13 @@ pub(crate) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabiliti
     /// under `Expanded` it resolves a carrier (`DeclRef` /
     /// `InstantiationRef`) UNDER the caller's mode. The empty whole-
     /// surface projection KEEPS the carrier-preserving behaviour of
-    /// [`Self::expand_empty_path_terminal`] (the slot-binding indexed-
+    /// [`Self::run_expansion`] (the slot-binding indexed-
     /// access preservation policy at the empty-path terminal expander).
     original_path_non_empty: bool,
     /// The file the walk's subject was declared in, when it was: an
     /// apparent-wrapper read on the way is scoped to that file's project, so
     /// the entry's key names the project it read
-    /// ([`Self::apparent_wrapper_read`]).
+    /// ([`Self::begin_wrapper_read`]).
     origin_file: Option<verter_type_expr::OwnedStr>,
     /// The shallow-surface slots filled since the synthesiser last read
     /// them: each completes the visits that were to fill it.
@@ -2406,7 +2616,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// into the walk first.
     pub(super) fn resume_walk(
         &mut self,
-        deliver: &mut dyn FnMut() -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+        deliver: &mut dyn FnMut() -> crate::semantic_query::CacheRead<
+            QueryResult<crate::semantic_query::SemanticQueryValue>,
+        >,
     ) -> WalkProgress {
         let resume = self
             .awaiting
@@ -2414,13 +2626,113 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .expect("a walk resumes at the hop that named its read");
         let mut frames = std::mem::take(&mut self.frames);
         let mut results = std::mem::take(&mut self.results);
+        // Every read but a spread program's projection answers a node.
+        let mut node_read = || super::narrow_value_cache_read(deliver());
         let next = match resume.site {
+            HopSite::Spread(spread) => {
+                let formula =
+                    ProjectSemanticDispatch::<'_, C>::object_projection_of(deliver().value);
+                let flow = self.spread_member_hop(
+                    resume.current,
+                    &resume.path,
+                    resume.index,
+                    resume.arm_read,
+                    *spread,
+                    formula,
+                    &mut results,
+                );
+                self.continue_flow(
+                    flow,
+                    &resume.path,
+                    resume.arm_read,
+                    &mut frames,
+                    &mut results,
+                )
+            }
+            HopSite::MappedSource(hop) => {
+                let MappedSourceHop {
+                    read,
+                    using,
+                    source,
+                    mapper,
+                } = *hop;
+                let step = self
+                    .dispatch
+                    .resume_source_carrier_read(*read, &mut node_read);
+                let flow = self.mapped_source_hop(
+                    step,
+                    resume.current,
+                    using,
+                    (source, &mapper),
+                    &resume.path,
+                    resume.index,
+                    resume.arm_read,
+                    &mut results,
+                );
+                self.continue_flow(
+                    flow,
+                    &resume.path,
+                    resume.arm_read,
+                    &mut frames,
+                    &mut results,
+                )
+            }
+            HopSite::MappedKeySpace(hop) => {
+                let MappedKeySpaceHop {
+                    read,
+                    key,
+                    source,
+                    mapper,
+                } = *hop;
+                let step = self
+                    .dispatch
+                    .resume_keyspace_admission(*read, &mut node_read);
+                let flow = self.mapped_keyspace_hop(
+                    step,
+                    resume.current,
+                    (source, &mapper),
+                    key,
+                    &resume.path,
+                    resume.index,
+                    resume.arm_read,
+                    &mut results,
+                );
+                self.continue_flow(
+                    flow,
+                    &resume.path,
+                    resume.arm_read,
+                    &mut frames,
+                    &mut results,
+                )
+            }
+            HopSite::MappedValue { evaluation, key } => {
+                let step = self
+                    .dispatch
+                    .resume_deferred_read(evaluation, &mut node_read);
+                let flow = self.mapped_value_hop(
+                    step,
+                    resume.current,
+                    *key,
+                    &resume.path,
+                    resume.index,
+                    resume.arm_read,
+                );
+                self.continue_flow(
+                    flow,
+                    &resume.path,
+                    resume.arm_read,
+                    &mut frames,
+                    &mut results,
+                )
+            }
             HopSite::DeferredOperand {
                 evaluation,
                 index,
                 origin,
             } => {
-                let step = self.dispatch.resume_deferred_read(evaluation, deliver);
+                let step = self
+                    .dispatch
+                    .resume_deferred_read(evaluation, &mut node_read);
                 self.deferred_operand_hop(
                     step,
                     resume.current,
@@ -2434,7 +2746,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             site => self.resume_site(
                 HopResume { site, ..resume },
-                deliver,
+                &mut node_read,
                 &mut frames,
                 &mut results,
             ),
@@ -2474,7 +2786,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 Err(pending) => {
                     let (key, read, observed) = *pending;
                     Some(HopRead {
-                        key,
+                        key: WalkNeed::Query(key),
                         resume: HopResume {
                             current,
                             path,
@@ -2495,7 +2807,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 }
                 Ok(resolved) => self.walk_hops(resolved, &path, index, arm_read, frames, results),
             },
-            site @ (HopSite::Carrier { .. } | HopSite::Terminal(_)) => {
+            site @ (HopSite::Carrier { .. } | HopSite::Terminal(_) | HopSite::Expand(_)) => {
                 let resume = HopResume {
                     current,
                     path,
@@ -2514,30 +2826,19 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             HopSite::Wrapper(hop) => {
                 let answer = super::apparent_type::GlobalWrapper::of_read(deliver().value);
                 match self.wrapper_settled(*hop, answer) {
-                    Err(pending) => {
-                        let (key, hop) = *pending;
-                        Some(HopRead {
-                            key,
-                            resume: HopResume {
-                                current,
-                                path,
-                                index,
-                                arm_read,
-                                site: HopSite::Wrapper(Box::new(hop)),
-                            },
-                        })
-                    }
-                    Ok((use_surface, wrapper)) => {
-                        match Self::use_wrapper(current, use_surface, wrapper) {
-                            Some(surface) => {
-                                self.walk_hops(surface, &path, index, arm_read, frames, results)
-                            }
-                            None => {
-                                results.push(self.opaque_miss());
-                                None
-                            }
-                        }
-                    }
+                    Err(pending) => Some(Self::wrapper_pending(
+                        current, path, index, arm_read, *pending,
+                    )),
+                    Ok((use_surface, wrapper)) => self.wrapper_resumed(
+                        current,
+                        path,
+                        index,
+                        arm_read,
+                        use_surface,
+                        wrapper,
+                        frames,
+                        results,
+                    ),
                 }
             }
             site => {
@@ -2626,50 +2927,125 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         self.adopt_carrier_resolution(resolved)
     }
 
-    /// Begin the read of the global wrapper `name` over `args`, as
-    /// [`Self::global_surface_read`] reads it: in the walk's origin file's
-    /// project first, then in the demand's.
+    /// Begin the read of the global wrapper `name` over `args`: in the walk's
+    /// origin file's project first, then — when `demand_fallback` and the
+    /// origin's read did not settle — in the demand's. Each project's read
+    /// looks the interface's first declaration up
+    /// ([`WrapperStage::Lookup`]), each port and file the lookup reads a
+    /// dependency of the walk, and then instantiates it.
+    #[allow(clippy::type_complexity)]
     fn begin_wrapper_read(
         &mut self,
         name: &'static str,
         args: Vec<SemanticNodeId>,
+        demand_fallback: bool,
         use_surface: WrapperUse,
-    ) -> Result<
-        (WrapperUse, super::apparent_type::GlobalWrapper),
-        Box<(SemanticQueryKey, WrapperHop)>,
-    > {
-        use super::apparent_type::{GlobalWrapper, WrapperRead};
+    ) -> Result<(WrapperUse, super::apparent_type::GlobalWrapper), Box<(WalkNeed, WrapperHop)>>
+    {
         let hop = WrapperHop {
             name,
             args,
             by_origin: true,
+            demand_fallback,
+            stage: WrapperStage::Instantiate,
             use_surface,
         };
-        if let Some(origin) = self.origin_file.as_deref() {
-            match self
-                .dispatch
-                .global_wrapper_read(hop.name, &hop.args, origin)
-            {
-                WrapperRead::Settled(GlobalWrapper::Unsettled) => {}
-                WrapperRead::Settled(settled) => return Ok((use_surface, settled)),
-                WrapperRead::Read(key) => return Err(Box::new((key, hop))),
-            }
+        match self.origin_file.clone() {
+            Some(origin) => self.wrapper_in(hop, origin.as_ref()),
+            None => self.wrapper_settled(hop, super::apparent_type::GlobalWrapper::Unsettled),
         }
-        self.wrapper_by_demand(hop)
+    }
+
+    /// The wrapper read in `canonical`'s project: its declaration lookup
+    /// begun and stepped as far as it goes without a port or a file.
+    #[allow(clippy::type_complexity)]
+    fn wrapper_in(
+        &mut self,
+        mut hop: WrapperHop,
+        canonical: &str,
+    ) -> Result<(WrapperUse, super::apparent_type::GlobalWrapper), Box<(WalkNeed, WrapperHop)>>
+    {
+        if self
+            .dispatch
+            .project_stable_key_for_canonical(canonical)
+            .is_none()
+        {
+            return self.wrapper_settled(hop, super::apparent_type::GlobalWrapper::Unsettled);
+        }
+        let (lookup, step) = super::port_continuations::GlobalLookup::begin(
+            Arc::from(canonical),
+            Arc::from(hop.name),
+        );
+        hop.stage = WrapperStage::Lookup(lookup);
+        self.advance_wrapper_lookup(hop, step)
+    }
+
+    /// Carry a wrapper read's lookup on from `step`: the port or file it
+    /// reads next, or — the declaration found — the interface's
+    /// instantiation; a project that declares no such interface settles
+    /// the read.
+    #[allow(clippy::type_complexity)]
+    fn advance_wrapper_lookup(
+        &mut self,
+        mut hop: WrapperHop,
+        step: super::port_continuations::GlobalStep,
+    ) -> Result<(WrapperUse, super::apparent_type::GlobalWrapper), Box<(WalkNeed, WrapperHop)>>
+    {
+        use super::port_continuations::GlobalStep;
+        let need = match step {
+            GlobalStep::Found(None) => {
+                return self.wrapper_settled(hop, super::apparent_type::GlobalWrapper::Absent);
+            }
+            GlobalStep::Found(Some(declaration)) => {
+                hop.stage = WrapperStage::Instantiate;
+                WalkNeed::Query(
+                    self.dispatch
+                        .global_wrapper_key(&declaration, hop.name, &hop.args),
+                )
+            }
+            GlobalStep::Port => WalkNeed::Port,
+            GlobalStep::Load(file) => WalkNeed::Load(file),
+            GlobalStep::Index(file) => WalkNeed::Index(file),
+        };
+        Err(Box::new((need, hop)))
+    }
+
+    /// A wrapper read whose lookup stood at a port or a file, resumed with
+    /// its answer.
+    #[allow(clippy::type_complexity)]
+    fn resume_wrapper_lookup(
+        &mut self,
+        mut hop: WrapperHop,
+        answer: LookupAnswer,
+    ) -> Result<(WrapperUse, super::apparent_type::GlobalWrapper), Box<(WalkNeed, WrapperHop)>>
+    {
+        let WrapperStage::Lookup(mut lookup) =
+            std::mem::replace(&mut hop.stage, WrapperStage::Instantiate)
+        else {
+            unreachable!("a wrapper read resumed with a port or a file stands in its lookup")
+        };
+        let step = match answer {
+            LookupAnswer::Port(answer) => lookup.resume_port(answer),
+            LookupAnswer::Source(serve) => lookup.resume_source(serve),
+        };
+        hop.stage = WrapperStage::Lookup(lookup);
+        self.advance_wrapper_lookup(hop, step)
     }
 
     /// A wrapper read answered `answer`: settled, or — unsettled in the
-    /// origin file's project — read again in the demand's.
+    /// origin file's project, when the read falls back — read again in the
+    /// demand's.
+    #[allow(clippy::type_complexity)]
     fn wrapper_settled(
         &mut self,
         hop: WrapperHop,
         answer: super::apparent_type::GlobalWrapper,
-    ) -> Result<
-        (WrapperUse, super::apparent_type::GlobalWrapper),
-        Box<(SemanticQueryKey, WrapperHop)>,
-    > {
+    ) -> Result<(WrapperUse, super::apparent_type::GlobalWrapper), Box<(WalkNeed, WrapperHop)>>
+    {
         match answer {
-            super::apparent_type::GlobalWrapper::Unsettled if hop.by_origin => {
+            super::apparent_type::GlobalWrapper::Unsettled
+                if hop.by_origin && hop.demand_fallback =>
+            {
                 self.wrapper_by_demand(hop)
             }
             settled => Ok((hop.use_surface, settled)),
@@ -2678,33 +3054,48 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
 
     /// The wrapper read in the demand's project, which a read the origin
     /// file's project left unsettled falls back to.
+    #[allow(clippy::type_complexity)]
     fn wrapper_by_demand(
         &mut self,
         mut hop: WrapperHop,
-    ) -> Result<
-        (WrapperUse, super::apparent_type::GlobalWrapper),
-        Box<(SemanticQueryKey, WrapperHop)>,
-    > {
-        use super::apparent_type::{GlobalWrapper, WrapperRead};
+    ) -> Result<(WrapperUse, super::apparent_type::GlobalWrapper), Box<(WalkNeed, WrapperHop)>>
+    {
         self.dispatch.fold_into_top_build_local_taint(false, true);
         let Some(demand) = self.dispatch.wrapper_demand_canonical() else {
-            return Ok((hop.use_surface, GlobalWrapper::Unsettled));
+            return Ok((
+                hop.use_surface,
+                super::apparent_type::GlobalWrapper::Unsettled,
+            ));
         };
         hop.by_origin = false;
-        match self
-            .dispatch
-            .global_wrapper_read(hop.name, &hop.args, demand.as_ref())
-        {
-            WrapperRead::Settled(settled) => Ok((hop.use_surface, settled)),
-            WrapperRead::Read(key) => Err(Box::new((key, hop))),
+        self.wrapper_in(hop, demand.as_ref())
+    }
+
+    /// The hop standing at a wrapper read's next dependency `need`.
+    fn wrapper_pending(
+        current: SemanticNodeId,
+        path: verter_type_expr::OwnedSlice<PathSegment>,
+        index: usize,
+        arm_read: Option<ArmRead>,
+        (need, hop): (WalkNeed, WrapperHop),
+    ) -> HopRead {
+        HopRead {
+            key: need,
+            resume: HopResume {
+                current,
+                path,
+                index,
+                arm_read,
+                site: HopSite::Wrapper(Box::new(hop)),
+            },
         }
     }
 
     /// The node a walk standing at `current` goes on from over the wrapper
-    /// it read, used as `use_surface` says: `None` when it has none.
-    fn use_wrapper(
+    /// it read, for the member uses: `None` when it has none.
+    fn wrapper_surface(
         current: SemanticNodeId,
-        use_surface: WrapperUse,
+        use_surface: &WrapperUse,
         wrapper: super::apparent_type::GlobalWrapper,
     ) -> Option<SemanticNodeId> {
         use super::apparent_type::GlobalWrapper;
@@ -2715,6 +3106,104 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 WrapperUse::DistinctMember | WrapperUse::RuntimeNominal,
             ) if surface != current => Some(surface),
             _ => None,
+        }
+    }
+
+    /// The wrapper's surface and its view, when it settled on an object:
+    /// what a tuple or array arm of a composite split reports its key off.
+    fn wrapper_view_of(
+        &self,
+        wrapper: super::apparent_type::GlobalWrapper,
+    ) -> Option<(crate::semantic_query::SurfaceView, SemanticNodeId)> {
+        let super::apparent_type::GlobalWrapper::Surface(surface) = wrapper else {
+            return None;
+        };
+        match self.graph().node_data(surface).as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some((view.clone(), surface)),
+            _ => None,
+        }
+    }
+
+    /// What a hop standing at `current` does with the wrapper it read, used
+    /// as `use_surface` says — the same whether the wrapper settled where
+    /// the hop stands or was delivered to it. A composite join's read is
+    /// resumed by its join ([`Self::resume_composite_decision`]).
+    #[allow(clippy::too_many_arguments)]
+    fn use_wrapper(
+        &mut self,
+        current: SemanticNodeId,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        index: usize,
+        arm_read: Option<ArmRead>,
+        use_surface: WrapperUse,
+        wrapper: super::apparent_type::GlobalWrapper,
+        results: &mut Vec<SemanticNodeId>,
+    ) -> HopFlow {
+        match use_surface {
+            WrapperUse::ArmView => {
+                let view = self.wrapper_view_of(wrapper);
+                let tuple = matches!(
+                    self.graph().node_data(current).as_deref(),
+                    Some(SemanticNodeData::Tuple { .. })
+                );
+                if tuple {
+                    self.tuple_index_hop(current, path, index, arm_read, Some(view), results)
+                } else {
+                    self.array_index_hop(current, path, index, arm_read, Some(view), results)
+                }
+            }
+            WrapperUse::ObjectMember(read) => {
+                let ObjectMemberRead { surface, key } = *read;
+                let apparent = self.object_member_of(current, &key, wrapper);
+                self.object_member_after(
+                    current, &surface, &key, path, index, arm_read, apparent, results,
+                )
+            }
+            WrapperUse::CompositeObject(_) => {
+                unreachable!("a composite join's wrapper read is resumed by its join")
+            }
+            use_surface => match Self::wrapper_surface(current, &use_surface, wrapper) {
+                Some(surface) => HopFlow::Next(surface, index),
+                None => {
+                    results.push(self.opaque_miss());
+                    HopFlow::Stop
+                }
+            },
+        }
+    }
+
+    /// A hop reading the global wrapper `name` over `args` as `use_surface`
+    /// says: the hop goes on, stops, or stands at the read's next
+    /// dependency.
+    #[allow(clippy::too_many_arguments)]
+    fn read_wrapper_hop(
+        &mut self,
+        current: SemanticNodeId,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        index: usize,
+        arm_read: Option<ArmRead>,
+        (name, args): (&'static str, Vec<SemanticNodeId>),
+        demand_fallback: bool,
+        use_surface: WrapperUse,
+        results: &mut Vec<SemanticNodeId>,
+    ) -> HopFlow {
+        match self.begin_wrapper_read(name, args, demand_fallback, use_surface) {
+            Ok((use_surface, wrapper)) => self.use_wrapper(
+                current,
+                path,
+                index,
+                arm_read,
+                use_surface,
+                wrapper,
+                results,
+            ),
+            Err(pending) => HopFlow::Read(Box::new(Self::wrapper_pending(
+                current,
+                path.clone(),
+                index,
+                arm_read,
+                *pending,
+            ))),
         }
     }
 
@@ -2729,31 +3218,110 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         use_surface: WrapperUse,
         results: &mut Vec<SemanticNodeId>,
     ) -> HopFlow {
-        let Some((name, args)) = self.dispatch.apparent_wrapper_of(current) else {
+        let Some(wrapper) = self.dispatch.apparent_wrapper_of(current) else {
             results.push(self.opaque_miss());
             return HopFlow::Stop;
         };
-        match self.begin_wrapper_read(name, args, use_surface) {
-            Ok((use_surface, wrapper)) => match Self::use_wrapper(current, use_surface, wrapper) {
-                Some(surface) => HopFlow::Next(surface, index),
-                None => {
-                    results.push(self.opaque_miss());
-                    HopFlow::Stop
-                }
-            },
-            Err(pending) => {
-                let (key, hop) = *pending;
-                HopFlow::Read(Box::new(HopRead {
-                    key,
-                    resume: HopResume {
-                        current,
-                        path: path.clone(),
-                        index,
-                        arm_read,
-                        site: HopSite::Wrapper(Box::new(hop)),
-                    },
-                }))
+        self.read_wrapper_hop(
+            current,
+            path,
+            index,
+            arm_read,
+            wrapper,
+            true,
+            use_surface,
+            results,
+        )
+    }
+
+    /// Carry a resumed hop on from `flow`: walk on, stop, or stand at the
+    /// next dependency.
+    fn continue_flow(
+        &mut self,
+        flow: HopFlow,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        arm_read: Option<ArmRead>,
+        frames: &mut Vec<WalkFrame>,
+        results: &mut Vec<SemanticNodeId>,
+    ) -> Option<HopRead> {
+        match flow {
+            HopFlow::Next(node, index) => {
+                self.walk_hops(node, path, index, arm_read, frames, results)
             }
+            HopFlow::Stop => None,
+            HopFlow::Read(read) => Some(*read),
+        }
+    }
+
+    /// A hop whose wrapper read settled after a delivery, resumed: a
+    /// composite join decides on, any other use goes on as
+    /// [`Self::use_wrapper`] says.
+    #[allow(clippy::too_many_arguments)]
+    fn wrapper_resumed(
+        &mut self,
+        current: SemanticNodeId,
+        path: verter_type_expr::OwnedSlice<PathSegment>,
+        index: usize,
+        arm_read: Option<ArmRead>,
+        use_surface: WrapperUse,
+        wrapper: super::apparent_type::GlobalWrapper,
+        frames: &mut Vec<WalkFrame>,
+        results: &mut Vec<SemanticNodeId>,
+    ) -> Option<HopRead> {
+        if let WrapperUse::CompositeObject(decision) = use_surface {
+            return self.resume_composite_decision(*decision, wrapper, frames, results);
+        }
+        let flow = self.use_wrapper(
+            current,
+            &path,
+            index,
+            arm_read,
+            use_surface,
+            wrapper,
+            results,
+        );
+        self.continue_flow(flow, &path, arm_read, frames, results)
+    }
+
+    /// Resume the walk standing at its wrapper lookup's port or file with
+    /// `answer`: the lookup goes on from where it stood, and nothing the
+    /// walk completed runs again.
+    pub(super) fn resume_lookup(&mut self, answer: LookupAnswer) -> WalkProgress {
+        let HopResume {
+            current,
+            path,
+            index,
+            arm_read,
+            site,
+        } = self
+            .awaiting
+            .take()
+            .expect("a walk resumes at the hop that named its read");
+        let HopSite::Wrapper(hop) = site else {
+            unreachable!("only a wrapper's lookup reads a port or a file")
+        };
+        let mut frames = std::mem::take(&mut self.frames);
+        let mut results = std::mem::take(&mut self.results);
+        let next = match self.resume_wrapper_lookup(*hop, answer) {
+            Err(pending) => Some(Self::wrapper_pending(
+                current, path, index, arm_read, *pending,
+            )),
+            Ok((use_surface, wrapper)) => self.wrapper_resumed(
+                current,
+                path,
+                index,
+                arm_read,
+                use_surface,
+                wrapper,
+                &mut frames,
+                &mut results,
+            ),
+        };
+        self.frames = frames;
+        self.results = results;
+        match next {
+            Some(read) => self.await_hop(read),
+            None => self.run_frames(),
         }
     }
 
@@ -2790,14 +3358,16 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     composite,
                 } => {
                     if let Some(join) = composite {
-                        if self.decide_composite_join(
+                        match self.decide_composite_join(
                             join,
                             arm_count,
                             true,
                             &mut frames,
                             &mut results,
                         ) {
-                            continue;
+                            Ok(true) => continue,
+                            Ok(false) => {}
+                            Err(read) => break Some(*read),
                         }
                     }
                     self.join_union(arm_count, &mut results);
@@ -2807,14 +3377,16 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     composite,
                 } => {
                     if let Some(join) = composite {
-                        if self.decide_composite_join(
+                        match self.decide_composite_join(
                             join,
                             arm_count,
                             false,
                             &mut frames,
                             &mut results,
                         ) {
-                            continue;
+                            Ok(true) => continue,
+                            Ok(false) => {}
+                            Err(read) => break Some(*read),
                         }
                     }
                     self.join_intersection(arm_count, &mut results);
@@ -3164,28 +3736,57 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// whose own surface is `view` — the members the checker's
     /// `getPropertyOfType` adds after an object's own: the apparent
     /// `Function` type of an object with call or construct signatures,
-    /// then the global `Object`.
+    /// then the global `Object` — both read where the caller stands.
     fn apparent_member_surface(
         &self,
         node: SemanticNodeId,
         view: &crate::semantic_query::SurfaceView,
         name: &PropertyKey,
     ) -> ApparentMember {
-        use super::apparent_type::GlobalWrapper;
-        if !view.call_signatures.is_empty() || !view.construct_signatures.is_empty() {
-            let Some(apparent) = self.dispatch.apparent_type_of(node) else {
-                return ApparentMember::Undecided;
-            };
-            if apparent != node && !self.surface_proves_absent(apparent, name) {
-                return ApparentMember::Found(apparent);
-            }
+        if let Some(apparent) = self.apparent_function_member(node, view, name) {
+            return apparent;
         }
         // Read in the subject's own project, so an answer that names no
         // project stays a shared one.
         let Some(origin) = self.origin_file.as_deref() else {
             return ApparentMember::Undecided;
         };
-        match self.dispatch.global_wrapper_surface("Object", &[], origin) {
+        let object = self.dispatch.global_wrapper_surface("Object", &[], origin);
+        self.object_member_of(node, name, object)
+    }
+
+    /// The member the apparent `Function` type of an object with call or
+    /// construct signatures declares for `name`: `None` when the object has
+    /// no signatures or the apparent type does not declare it, and the
+    /// global `Object` is read next ([`Self::object_member_of`]). The
+    /// apparent type is a declinable probe, read in place: a frame need could
+    /// not keep a failed probe's partiality inside its observation.
+    fn apparent_function_member(
+        &self,
+        node: SemanticNodeId,
+        view: &crate::semantic_query::SurfaceView,
+        name: &PropertyKey,
+    ) -> Option<ApparentMember> {
+        if view.call_signatures.is_empty() && view.construct_signatures.is_empty() {
+            return None;
+        }
+        let Some(apparent) = self.dispatch.apparent_type_of(node) else {
+            return Some(ApparentMember::Undecided);
+        };
+        (apparent != node && !self.surface_proves_absent(apparent, name))
+            .then_some(ApparentMember::Found(apparent))
+    }
+
+    /// Whether the global `Object` read in the subject's own project
+    /// (`object`) declares `name` for the object `node`.
+    fn object_member_of(
+        &self,
+        node: SemanticNodeId,
+        name: &PropertyKey,
+        object: super::apparent_type::GlobalWrapper,
+    ) -> ApparentMember {
+        use super::apparent_type::GlobalWrapper;
+        match object {
             GlobalWrapper::Absent => ApparentMember::Absent,
             GlobalWrapper::Surface(object) if object == node => ApparentMember::Absent,
             GlobalWrapper::Surface(object) => {
@@ -3196,6 +3797,94 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 }
             }
             GlobalWrapper::Unsettled => ApparentMember::Undecided,
+        }
+    }
+
+    /// An object's member its own surface `surface` does not declare, read
+    /// the checker's way past it: the apparent `Function` type's member of
+    /// an object with signatures, then the global `Object`'s — read in the
+    /// subject's project as the hop's own dependency
+    /// ([`WrapperUse::ObjectMember`]) — then the index signature that
+    /// applies to the key.
+    #[allow(clippy::too_many_arguments)]
+    fn object_member_hop(
+        &mut self,
+        current: SemanticNodeId,
+        surface: crate::semantic_query::SurfaceView,
+        key: PropertyKey,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        index: usize,
+        arm_read: Option<ArmRead>,
+        results: &mut Vec<SemanticNodeId>,
+    ) -> HopFlow {
+        if let Some(apparent) = self.apparent_function_member(current, &surface, &key) {
+            return self.object_member_after(
+                current, &surface, &key, path, index, arm_read, apparent, results,
+            );
+        }
+        self.read_wrapper_hop(
+            current,
+            path,
+            index,
+            arm_read,
+            ("Object", Vec::new()),
+            false,
+            WrapperUse::ObjectMember(Box::new(ObjectMemberRead { surface, key })),
+            results,
+        )
+    }
+
+    /// An object's member read past its own surface once its apparent
+    /// member is known: the apparent surface the walk goes on at, else the
+    /// index signature that applies to the key. An arm of a composite split
+    /// reports how it read the key.
+    #[allow(clippy::too_many_arguments)]
+    fn object_member_after(
+        &mut self,
+        current: SemanticNodeId,
+        surface: &crate::semantic_query::SurfaceView,
+        key: &PropertyKey,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        index: usize,
+        arm_read: Option<ArmRead>,
+        apparent: ApparentMember,
+        results: &mut Vec<SemanticNodeId>,
+    ) -> HopFlow {
+        let mode = arm_read.and_then(|read| (read.at == index).then_some(read.mode));
+        let read = match apparent {
+            ApparentMember::Found(apparent) => {
+                self.note_arm(arm_read, index, surface, current, ArmHow::Apparent);
+                return HopFlow::Next(apparent, index);
+            }
+            ApparentMember::Undecided => {
+                self.note_arm(arm_read, index, surface, current, ArmHow::Undecided);
+                None
+            }
+            ApparentMember::Absent => {
+                let read = self.index_signature_read(
+                    current,
+                    &surface.index_signatures,
+                    IndexAccessKey::Name(key),
+                    mode.is_none(),
+                );
+                let how = if read.is_some() {
+                    ArmHow::Index
+                } else {
+                    ArmHow::Nothing
+                };
+                self.note_arm(arm_read, index, surface, current, how);
+                read
+            }
+        };
+        match read {
+            Some(value) => {
+                let next = self.step_through_index_signature(current, value, &path[index]);
+                HopFlow::Next(next, index + 1)
+            }
+            None => {
+                results.push(self.opaque_miss());
+                HopFlow::Stop
+            }
         }
     }
 
@@ -3314,19 +4003,23 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     ///   for it and every arm of which has one or an applicable index
     ///   signature: the arms' reads (`createUnionOrIntersectionProperty`);
     /// - a named key over an intersection: the members the arms' apparent
-    ///   `Function` / `Object` types declare;
+    ///   `Function` / `Object` types declare
+    ///   ([`Self::advance_composite_decision`]);
     /// - otherwise the composite's own index signatures: an intersection
     ///   reads every arm's, a union the key types every arm declares, their
     ///   types unioned (`getUnionIndexInfos`).
-    fn composite_hop(
+    ///
+    /// `None` for a named key over an intersection: its arms' apparent
+    /// members are read next.
+    fn composite_hop_head(
         &self,
         composite: SemanticNodeId,
         probes: &[ArmProbe],
         is_union: bool,
         key: IndexAccessKey<'_>,
-    ) -> CompositeHop {
+    ) -> Option<CompositeHop> {
         if probes.iter().any(|probe| probe.how == ArmHow::Undecided) {
-            return CompositeHop::Miss;
+            return Some(CompositeHop::Miss);
         }
         if self.key_is_string_or_number_like(key)
             && probes
@@ -3335,45 +4028,120 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         {
             let signatures = self.composite_index_signatures(probes, is_union);
             let string = self.string_key();
-            return match self.index_signature_read(
-                composite,
-                &signatures,
-                IndexAccessKey::Type(string),
-                true,
-            ) {
-                Some(value) => CompositeHop::Value(value),
-                None => CompositeHop::Miss,
-            };
+            return Some(
+                match self.index_signature_read(
+                    composite,
+                    &signatures,
+                    IndexAccessKey::Type(string),
+                    true,
+                ) {
+                    Some(value) => CompositeHop::Value(value),
+                    None => CompositeHop::Miss,
+                },
+            );
         }
-        if let IndexAccessKey::Name(name) = key {
-            if is_union {
-                if probes.iter().any(|probe| probe.how == ArmHow::Apparent)
-                    && probes.iter().all(|probe| probe.how != ArmHow::Nothing)
-                {
-                    return CompositeHop::Arms;
-                }
-            } else {
-                let mut found: Vec<SemanticNodeId> = Vec::new();
-                for probe in probes {
-                    match self.apparent_member_surface(probe.node, &probe.view, name) {
-                        ApparentMember::Found(surface) => {
-                            if !found.contains(&surface) {
-                                found.push(surface);
-                            }
-                        }
-                        ApparentMember::Undecided => return CompositeHop::Miss,
-                        ApparentMember::Absent => {}
-                    }
-                }
-                if !found.is_empty() {
-                    return CompositeHop::Apparent(found);
-                }
+        if let IndexAccessKey::Name(_) = key {
+            if !is_union {
+                return None;
+            }
+            if probes.iter().any(|probe| probe.how == ArmHow::Apparent)
+                && probes.iter().all(|probe| probe.how != ArmHow::Nothing)
+            {
+                return Some(CompositeHop::Arms);
             }
         }
+        Some(self.composite_hop_tail(composite, probes, is_union, key))
+    }
+
+    /// The composite's own index signatures' read of the key: the last
+    /// rule of [`Self::composite_hop_head`].
+    fn composite_hop_tail(
+        &self,
+        composite: SemanticNodeId,
+        probes: &[ArmProbe],
+        is_union: bool,
+        key: IndexAccessKey<'_>,
+    ) -> CompositeHop {
         let signatures = self.composite_index_signatures(probes, is_union);
         match self.index_signature_read(composite, &signatures, key, true) {
             Some(value) => CompositeHop::Value(value),
             None => CompositeHop::Miss,
+        }
+    }
+
+    /// Carry an intersection join's apparent-member reads on from the arm
+    /// `decision.at`: each arm's apparent `Function` member, else the global
+    /// `Object`'s, read in the subject's project as the join's own
+    /// dependency ([`WrapperUse::CompositeObject`]). The decided read once
+    /// every arm answered, with the decision handed back; or the read's
+    /// next dependency, the decision retained in it.
+    #[allow(clippy::type_complexity)]
+    fn advance_composite_decision(
+        &mut self,
+        mut decision: CompositeDecision,
+    ) -> Result<(CompositeDecision, CompositeHop), Box<(WalkNeed, WrapperHop)>> {
+        let IndexAccessKey::Name(name) = decision.key.borrowed() else {
+            unreachable!("an intersection reads apparent members of a named key")
+        };
+        let name = name.clone();
+        while decision.at < decision.probes.len() {
+            let (node, apparent) = {
+                let probe = &decision.probes[decision.at];
+                (
+                    probe.node,
+                    self.apparent_function_member(probe.node, &probe.view, &name),
+                )
+            };
+            let apparent = match apparent {
+                Some(apparent) => apparent,
+                None => match self.begin_wrapper_read(
+                    "Object",
+                    Vec::new(),
+                    false,
+                    WrapperUse::CompositeObject(Box::new(decision)),
+                )? {
+                    (WrapperUse::CompositeObject(retained), object) => {
+                        decision = *retained;
+                        self.object_member_of(node, &name, object)
+                    }
+                    _ => unreachable!("the read hands its decision back"),
+                },
+            };
+            match self.note_composite_apparent(&mut decision, apparent) {
+                Some(hop) => return Ok((decision, hop)),
+                None => decision.at += 1,
+            }
+        }
+        let hop = if decision.found.is_empty() {
+            self.composite_hop_tail(
+                decision.join.node,
+                &decision.probes,
+                decision.is_union,
+                decision.key.borrowed(),
+            )
+        } else {
+            CompositeHop::Apparent(std::mem::take(&mut decision.found))
+        };
+        Ok((decision, hop))
+    }
+
+    /// Record the arm `decision.at`'s apparent member: the surface that
+    /// declares it, once. An arm whose apparent surface did not settle
+    /// decides the join a miss.
+    fn note_composite_apparent(
+        &self,
+        decision: &mut CompositeDecision,
+        apparent: ApparentMember,
+    ) -> Option<CompositeHop> {
+        match apparent {
+            ApparentMember::Found(surface) => {
+                if !decision.found.contains(&surface) {
+                    decision.found.push(surface);
+                }
+                None
+            }
+            ApparentMember::Undecided => Some(CompositeHop::Miss),
+            ApparentMember::Absent => None,
         }
     }
 
@@ -3416,10 +4184,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     }
 
     /// Decide a union's or an intersection's join from its arms' reports
-    /// ([`Self::composite_hop`]). `false` when the arms' results stand —
-    /// the arms read the segment as the checker does, or an arm reported
-    /// no surface (one that reads its own property, or settles on no single
-    /// surface); `true` when the composite's own read replaced them.
+    /// ([`Self::composite_hop_head`]). `Ok(false)` when the arms' results
+    /// stand — the arms read the segment as the checker does, or an arm
+    /// reported no surface (one that reads its own property, or settles on
+    /// no single surface); `Ok(true)` when the composite's own read
+    /// replaced them; or the dependency an intersection's apparent-member
+    /// read stands at, the decision retained in it.
     fn decide_composite_join(
         &mut self,
         join: CompositeJoin,
@@ -3427,9 +4197,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         is_union: bool,
         frames: &mut Vec<WalkFrame>,
         results: &mut Vec<SemanticNodeId>,
-    ) -> bool {
+    ) -> Result<bool, Box<HopRead>> {
         let Some(reports) = self.arm_probes.get_mut(join.slot).map(std::mem::take) else {
-            return false;
+            return Ok(false);
         };
         let replaced_from = results.len().saturating_sub(arm_count);
         // An arm that is itself a union or an intersection: read the
@@ -3460,7 +4230,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     })
             };
             if rebuilt == join.node {
-                return false;
+                return Ok(false);
             }
             results.truncate(replaced_from);
             // The rebuilt composite is read afresh, its arms with it: not a
@@ -3484,18 +4254,106 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 index: join.index,
                 arm_read: None,
             });
-            return true;
+            return Ok(true);
         }
         let mut probes: Vec<ArmProbe> = Vec::with_capacity(reports.len());
         for report in reports {
             match report {
                 Some(ArmReport::Settled(probe)) => probes.push(probe),
-                _ => return false,
+                _ => return Ok(false),
             }
         }
+        let key = self.owned_index_access_key(&join.path[join.index]);
+        let hop = match self.composite_hop_head(join.node, &probes, is_union, key.borrowed()) {
+            Some(hop) => hop,
+            None => {
+                let decision = CompositeDecision {
+                    join,
+                    arm_count,
+                    is_union,
+                    probes,
+                    key,
+                    at: 0,
+                    found: Vec::new(),
+                };
+                return match self.advance_composite_decision(decision) {
+                    Ok((decision, hop)) => Ok(self.apply_composite_hop(
+                        decision.join,
+                        arm_count,
+                        hop,
+                        frames,
+                        results,
+                    )),
+                    Err(pending) => Err(Box::new(Self::composite_pending(*pending))),
+                };
+            }
+        };
+        Ok(self.apply_composite_hop(join, arm_count, hop, frames, results))
+    }
+
+    /// The join standing at its apparent-member read's next dependency.
+    fn composite_pending((need, hop): (WalkNeed, WrapperHop)) -> HopRead {
+        let WrapperUse::CompositeObject(decision) = &hop.use_surface else {
+            unreachable!("a composite join's read retains its decision")
+        };
+        let (current, path, index) = (
+            decision.join.node,
+            decision.join.path.clone(),
+            decision.join.index,
+        );
+        Self::wrapper_pending(current, path, index, None, (need, hop))
+    }
+
+    /// A composite join standing at an arm's global `Object` read, resumed
+    /// with the read's answer: the decision goes on from that arm, and the
+    /// join completes as it would have where it stood.
+    fn resume_composite_decision(
+        &mut self,
+        mut decision: CompositeDecision,
+        object: super::apparent_type::GlobalWrapper,
+        frames: &mut Vec<WalkFrame>,
+        results: &mut Vec<SemanticNodeId>,
+    ) -> Option<HopRead> {
+        let IndexAccessKey::Name(name) = decision.key.borrowed() else {
+            unreachable!("an intersection reads apparent members of a named key")
+        };
+        let name = name.clone();
+        let apparent = self.object_member_of(decision.probes[decision.at].node, &name, object);
+        let decided = match self.note_composite_apparent(&mut decision, apparent) {
+            Some(hop) => Ok((decision, hop)),
+            None => {
+                decision.at += 1;
+                self.advance_composite_decision(decision)
+            }
+        };
+        let (decision, hop) = match decided {
+            Ok(decided) => decided,
+            Err(pending) => return Some(Self::composite_pending(*pending)),
+        };
+        let (arm_count, is_union) = (decision.arm_count, decision.is_union);
+        if !self.apply_composite_hop(decision.join, arm_count, hop, frames, results) {
+            if is_union {
+                self.join_union(arm_count, results);
+            } else {
+                self.join_intersection(arm_count, results);
+            }
+        }
+        None
+    }
+
+    /// Carry a composite join out as `hop` decided it: `false` when the
+    /// arms' results stand, `true` when the composite's own read replaced
+    /// them.
+    fn apply_composite_hop(
+        &mut self,
+        join: CompositeJoin,
+        arm_count: usize,
+        hop: CompositeHop,
+        frames: &mut Vec<WalkFrame>,
+        results: &mut Vec<SemanticNodeId>,
+    ) -> bool {
+        let replaced_from = results.len().saturating_sub(arm_count);
         let segment = &join.path[join.index];
-        let key = self.owned_index_access_key(segment);
-        let hop = self.composite_hop(join.node, &probes, is_union, key.borrowed());
         match hop {
             CompositeHop::Arms => return false,
             CompositeHop::Value(value) => {
@@ -3573,20 +4431,6 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// its composite at `index`.
     fn reports_at(arm_read: Option<ArmRead>, index: usize) -> Option<ArmRead> {
         arm_read.filter(|read| read.at == index && read.probe.is_some())
-    }
-
-    /// The global wrapper surface of an array or a tuple
-    /// ([`Self::apparent_wrapper_read`]) and its view — the object the
-    /// checker reads an array's properties and index signatures off.
-    fn wrapper_view(
-        &self,
-        node: SemanticNodeId,
-    ) -> Option<(crate::semantic_query::SurfaceView, SemanticNodeId)> {
-        let wrapper = self.apparent_wrapper_read(node)?;
-        match self.graph().node_data(wrapper).as_deref() {
-            Some(SemanticNodeData::Object(view)) => Some((view.clone(), wrapper)),
-            _ => None,
-        }
     }
 
     /// Open a probe slot for a composite split of `arm_count` arms.
@@ -3669,30 +4513,6 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         signatures
     }
 
-    /// A global interface of the project the walk reads in — the subject's
-    /// declaring file's, else the demand's (a read the key cannot name,
-    /// kept out of the shared memo) — through the one global lookup
-    /// ([`ProjectSemanticDispatch::global_wrapper_surface`]).
-    fn global_surface_read(
-        &self,
-        name: &str,
-        args: &[SemanticNodeId],
-    ) -> super::apparent_type::GlobalWrapper {
-        use super::apparent_type::GlobalWrapper;
-        if let Some(origin) = self.origin_file.as_deref() {
-            match self.dispatch.global_wrapper_surface(name, args, origin) {
-                GlobalWrapper::Unsettled => {}
-                settled => return settled,
-            }
-        }
-        self.dispatch.fold_into_top_build_local_taint(false, true);
-        let Some(demand) = self.dispatch.wrapper_demand_canonical() else {
-            return GlobalWrapper::Unsettled;
-        };
-        self.dispatch
-            .global_wrapper_surface(name, args, demand.as_ref())
-    }
-
     /// Dispatch a nested subquery and FOLD its A2 partiality flag into the
     /// walker's accumulated `result_is_partial` before returning the bare
     /// [`QueryResult`].
@@ -3765,7 +4585,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         let outcome = match step {
             super::evaluate::DeferredStep::Read(key, evaluation) => {
                 return Some(HopRead {
-                    key,
+                    key: WalkNeed::Query(key),
                     resume: HopResume {
                         current,
                         path: path.clone(),
@@ -3789,11 +4609,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
         };
         Some(HopRead {
-            key: SemanticQueryKey::IndexedAccess {
+            key: WalkNeed::Query(SemanticQueryKey::IndexedAccess {
                 base: object,
                 index: ix.clone(),
                 mode: ProjectionMode::Navigate,
-            },
+            }),
             resume: HopResume {
                 current,
                 path: path.clone(),
@@ -4463,7 +5283,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     fn runtime_nominal_wrapper_read(
         &mut self,
         node: SemanticNodeId,
-    ) -> Result<SemanticNodeId, Option<Box<(SemanticQueryKey, WrapperHop)>>> {
+    ) -> Result<SemanticNodeId, Option<Box<(WalkNeed, WrapperHop)>>> {
         let (nominal, args) = match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args }) => (
                 crate::intrinsic_registry::RuntimeNominal::of_builtin_identity(base),
@@ -4478,18 +5298,16 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         let Some(nominal) = nominal else {
             return Err(None);
         };
-        match self.begin_wrapper_read(nominal.global_name(), args, WrapperUse::RuntimeNominal) {
-            Ok((use_surface, wrapper)) => Self::use_wrapper(node, use_surface, wrapper).ok_or(None),
+        match self.begin_wrapper_read(
+            nominal.global_name(),
+            args,
+            true,
+            WrapperUse::RuntimeNominal,
+        ) {
+            Ok((use_surface, wrapper)) => {
+                Self::wrapper_surface(node, &use_surface, wrapper).ok_or(None)
+            }
             Err(read) => Err(Some(read)),
-        }
-    }
-
-    fn apparent_wrapper_read(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        use super::apparent_type::GlobalWrapper;
-        let (name, args) = self.dispatch.apparent_wrapper_of(node)?;
-        match self.global_surface_read(name, &args) {
-            GlobalWrapper::Surface(surface) => Some(surface),
-            GlobalWrapper::Absent | GlobalWrapper::Unsettled => None,
         }
     }
 
@@ -4621,6 +5439,400 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 std::sync::Arc::<str>::from(name.as_str()),
             )),
             _ => None,
+        }
+    }
+
+    /// A spread program's member read of `candidates[at]`: its projection
+    /// for the key, the hop's own read ([`HopSite::Spread`]). Element access
+    /// coerces a numeric key to its canonical string spelling and vice versa
+    /// (JS property identity): a key positively absent from every
+    /// alternative is read once more in its equivalent form, the next
+    /// candidate.
+    fn spread_candidate_hop(
+        &mut self,
+        current: SemanticNodeId,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        index: usize,
+        arm_read: Option<ArmRead>,
+        spread: SpreadHop,
+    ) -> HopFlow {
+        let key = self.dispatch.object_spread_projection_key(
+            current,
+            crate::semantic_query::ObjectProjectionSelector::Key(
+                spread.candidates[spread.at].clone(),
+            ),
+            self.context,
+        );
+        HopFlow::Read(Box::new(HopRead {
+            key: WalkNeed::Query(key),
+            resume: HopResume {
+                current,
+                path: path.clone(),
+                index,
+                arm_read,
+                site: HopSite::Spread(Box::new(spread)),
+            },
+        }))
+    }
+
+    /// A spread program's member read resumed with the projection of the
+    /// key `spread.candidates[spread.at]` (`formula`): the member's value
+    /// over every alternative, the walk going on from it; a stop on an open
+    /// or refused construction; or the next candidate's read when every
+    /// alternative proves the key absent.
+    #[allow(clippy::too_many_arguments)]
+    fn spread_member_hop(
+        &mut self,
+        current: SemanticNodeId,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        index: usize,
+        arm_read: Option<ArmRead>,
+        mut spread: SpreadHop,
+        formula: QueryResult<crate::semantic_query::ObjectProjectionFormula>,
+        results: &mut Vec<SemanticNodeId>,
+    ) -> HopFlow {
+        let formula = match formula {
+            QueryResult::Value(formula) => formula,
+            QueryResult::Recursive(node) => {
+                self.cache_suppress = true;
+                self.mark_partial_with(crate::semantic_query::PartialReasonSet::empty());
+                results.push(node);
+                return HopFlow::Stop;
+            }
+            QueryResult::Error(error) => {
+                self.cache_suppress = true;
+                self.mark_partial_with(crate::semantic_query::PartialReasonSet::empty());
+                // A refused construction reads as its checker recovery, as
+                // the checker reads a member of its error type.
+                let terminal = match error {
+                    QueryError::CheckerRecovery { .. } => error,
+                    _ => QueryError::OpenSurface,
+                };
+                results.push(self.dispatch.opaque(terminal));
+                return HopFlow::Stop;
+            }
+        };
+        let candidate = &spread.candidates[spread.at];
+        let mut projected = Vec::new();
+        let mut definitely_absent = 0usize;
+        let mut open_evidence = false;
+        for alternative in self.dispatch.object_spread_cursor(&formula) {
+            let alternative = match alternative {
+                Ok(alternative) => alternative,
+                Err(reasons) => {
+                    self.cache_suppress = true;
+                    self.mark_partial_with(reasons);
+                    results.push(self.dispatch.opaque(QueryError::OpenSurface));
+                    return HopFlow::Stop;
+                }
+            };
+            match alternative.selected_key(candidate) {
+                crate::semantic_query::OpenSafeKeyEvidence::Positive(fact) => match fact.value() {
+                    crate::semantic_query::ProjectionEvidence::Proven(node) => {
+                        if !projected.contains(node) {
+                            projected.push(*node);
+                        }
+                    }
+                    crate::semantic_query::ProjectionEvidence::Indeterminate => {
+                        open_evidence = true;
+                        break;
+                    }
+                },
+                crate::semantic_query::OpenSafeKeyEvidence::IndeterminatePossibleWrite => {
+                    open_evidence = true;
+                    break;
+                }
+                crate::semantic_query::OpenSafeKeyEvidence::UnknownOnOpenDomain { .. } => {
+                    match alternative
+                        .closed()
+                        .and_then(|closed| closed.lookup(candidate))
+                    {
+                        // A closed branch with a proven-absent key makes the
+                        // whole-union value optional (mirrors the typeinfo
+                        // multi-branch join).
+                        Some(crate::semantic_query::ClosedKeyLookup::AbsentProven) => {
+                            definitely_absent += 1;
+                        }
+                        _ => {
+                            open_evidence = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if open_evidence {
+            results.push(self.dispatch.opaque(QueryError::OpenSurface));
+            return HopFlow::Stop;
+        }
+        if projected.is_empty() {
+            spread.at += 1;
+            if spread.at < spread.candidates.len() {
+                return self.spread_candidate_hop(current, path, index, arm_read, spread);
+            }
+            results.push(self.opaque_miss());
+            return HopFlow::Stop;
+        }
+        if definitely_absent > 0 {
+            projected.push(
+                self.graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
+            );
+        }
+        // Canonical construction: the per-candidate projection join routes
+        // through the one union/intersection authority.
+        let member_value = self
+            .dispatch
+            .intern_normalized_union_or_intersection(&projected, true);
+        let segment = &path[index];
+        let edge_kind = match segment {
+            PathSegment::Member(_) => OriginEdgeKind::ProjectMember,
+            PathSegment::Index(_) => OriginEdgeKind::ProjectIndex,
+        };
+        crate::semantic_query_memo::record_origin_edge!(
+            self.graph(),
+            member_value,
+            edge_kind,
+            Arc::from([current]),
+            match segment {
+                PathSegment::Member(key) => OriginMeta::ProjectedMember {
+                    key: key.clone(),
+                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                },
+                PathSegment::Index(index) => OriginMeta::Index(index.clone()),
+            },
+            self.fence.clone(),
+        );
+        self.record_intermediate(Some(member_value));
+        HopFlow::Next(member_value, index + 1)
+    }
+
+    /// The view a tuple or array arm of a composite split reports its key
+    /// off: its apparent wrapper's surface. `view` is that surface when the
+    /// hop resumes with it; otherwise it is read here, as the hop's own
+    /// dependency ([`WrapperUse::ArmView`]) when it does not settle where
+    /// the hop stands.
+    #[allow(clippy::type_complexity)]
+    fn arm_wrapper_view(
+        &mut self,
+        current: SemanticNodeId,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        index: usize,
+        arm_read: Option<ArmRead>,
+        view: Option<Option<(crate::semantic_query::SurfaceView, SemanticNodeId)>>,
+    ) -> Result<Option<(crate::semantic_query::SurfaceView, SemanticNodeId)>, Box<HopRead>> {
+        if let Some(view) = view {
+            return Ok(view);
+        }
+        let Some((name, args)) = self.dispatch.apparent_wrapper_of(current) else {
+            return Ok(None);
+        };
+        match self.begin_wrapper_read(name, args, true, WrapperUse::ArmView) {
+            Ok((_, wrapper)) => Ok(self.wrapper_view_of(wrapper)),
+            Err(pending) => Err(Box::new(Self::wrapper_pending(
+                current,
+                path.clone(),
+                index,
+                arm_read,
+                *pending,
+            ))),
+        }
+    }
+
+    /// A tuple's index read past its `length` and its apparent members. An
+    /// arm of a composite split reporting a key that is not one of the
+    /// tuple's properties (a position of its fixed elements) reads its
+    /// wrapper's surface first ([`Self::arm_wrapper_view`]; `view` once
+    /// read): a union member reads its number index
+    /// (`getRestTypeOfTupleType`, else `undefined`), anything else leaves
+    /// the key to its composite. Otherwise the tuple's element projection.
+    fn tuple_index_hop(
+        &mut self,
+        current: SemanticNodeId,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        index: usize,
+        arm_read: Option<ArmRead>,
+        view: Option<Option<(crate::semantic_query::SurfaceView, SemanticNodeId)>>,
+        results: &mut Vec<SemanticNodeId>,
+    ) -> HopFlow {
+        let elements = match self.graph().node_data(current).as_deref() {
+            Some(SemanticNodeData::Tuple { elements, .. }) => elements.share(),
+            _ => unreachable!("a tuple's index hop stands at a tuple"),
+        };
+        let segment = &path[index];
+        if let Some(read) = Self::reports_at(arm_read, index) {
+            let demand = self.classify_numeric_index_segment(segment);
+            let fixed = elements
+                .iter()
+                .position(|element| element.rest)
+                .unwrap_or(elements.len());
+            let property = matches!(demand, Some(NumericIndexDemand::Position(at)) if at < fixed);
+            if !property {
+                let view = match self.arm_wrapper_view(current, path, index, arm_read, view) {
+                    Ok(view) => view,
+                    Err(read) => return HopFlow::Read(read),
+                };
+                if let Some((view, wrapper)) = view {
+                    let member_read = match (read.mode, demand) {
+                        (ArmMode::Member, Some(NumericIndexDemand::Position(_))) => {
+                            Some(if fixed < elements.len() {
+                                let declaring_file = self
+                                    .graph()
+                                    .node_scope(current)
+                                    .and_then(|scope| scope.canonical_file());
+                                match self.project_tuple_index(
+                                    &elements,
+                                    NumericIndexDemand::Position(fixed),
+                                    declaring_file.as_deref(),
+                                ) {
+                                    Some(rest) => rest,
+                                    None => {
+                                        results.push(self.opaque_miss());
+                                        return HopFlow::Stop;
+                                    }
+                                }
+                            } else {
+                                self.graph().intern_node(SemanticNodeData::Primitive(
+                                    PrimitiveKind::Undefined,
+                                ))
+                            })
+                        }
+                        _ => None,
+                    };
+                    let how = if member_read.is_some() {
+                        ArmHow::Index
+                    } else {
+                        ArmHow::Nothing
+                    };
+                    self.note_arm(arm_read, index, &view, wrapper, how);
+                    return match member_read {
+                        Some(value) => {
+                            let next = self.step_through_index_signature(current, value, segment);
+                            HopFlow::Next(next, index + 1)
+                        }
+                        None => {
+                            results.push(self.opaque_miss());
+                            HopFlow::Stop
+                        }
+                    };
+                }
+                // Past the end of a tuple without a rest element the
+                // composite reads its number index, which an unsettled
+                // wrapper leaves unknown: the lone tuple's `undefined` is
+                // not that read.
+                if matches!(demand, Some(NumericIndexDemand::Position(_)))
+                    && fixed == elements.len()
+                {
+                    results.push(self.opaque_miss());
+                    return HopFlow::Stop;
+                }
+            }
+        }
+        // A negative key over a composite this tuple is an arm of reads the
+        // composite's number index: the checker's TS2514 recovery needs the
+        // whole object to be one tuple.
+        let in_composite = arm_read.is_some_and(|read| read.at == index);
+        let projected = self
+            .classify_numeric_index_segment(segment)
+            .map(|demand| match demand {
+                NumericIndexDemand::Negative if in_composite => NumericIndexDemand::BroadNumber,
+                demand => demand,
+            })
+            .and_then(|demand| {
+                let declaring_file = self
+                    .graph()
+                    .node_scope(current)
+                    .and_then(|scope| scope.canonical_file());
+                self.project_tuple_index(&elements, demand, declaring_file.as_deref())
+            });
+        match projected {
+            Some(value) => {
+                crate::semantic_query_memo::record_origin_edge!(
+                    self.graph(),
+                    value,
+                    OriginEdgeKind::ProjectIndex,
+                    Arc::from(vec![current].into_boxed_slice()),
+                    match segment {
+                        PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
+                        PathSegment::Member(key) => OriginMeta::ProjectedMember {
+                            key: key.clone(),
+                            provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                        },
+                    },
+                    self.fence.clone(),
+                );
+                self.record_intermediate(Some(value));
+                HopFlow::Next(value, index + 1)
+            }
+            None => {
+                results.push(self.opaque_miss());
+                HopFlow::Stop
+            }
+        }
+    }
+
+    /// An array's index read past its apparent members. An arm of a
+    /// composite split reports its key off its wrapper's surface
+    /// ([`Self::arm_wrapper_view`]; `view` once read): an array declares no
+    /// numeric property, so a union member reads a position through its
+    /// number index and anything else leaves the key to its composite.
+    /// Otherwise any numeric demand projects the element type.
+    fn array_index_hop(
+        &mut self,
+        current: SemanticNodeId,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        index: usize,
+        arm_read: Option<ArmRead>,
+        view: Option<Option<(crate::semantic_query::SurfaceView, SemanticNodeId)>>,
+        results: &mut Vec<SemanticNodeId>,
+    ) -> HopFlow {
+        let element = match self.graph().node_data(current).as_deref() {
+            Some(SemanticNodeData::Array { element, .. }) => *element,
+            _ => unreachable!("an array's index hop stands at an array"),
+        };
+        let segment = &path[index];
+        if let Some(read) = Self::reports_at(arm_read, index) {
+            let view = match self.arm_wrapper_view(current, path, index, arm_read, view) {
+                Ok(view) => view,
+                Err(read) => return HopFlow::Read(read),
+            };
+            if let Some((view, wrapper)) = view {
+                let position = matches!(
+                    self.classify_numeric_index_segment(segment),
+                    Some(NumericIndexDemand::Position(_))
+                );
+                if read.mode == ArmMode::Member && position {
+                    self.note_arm(arm_read, index, &view, wrapper, ArmHow::Index);
+                } else {
+                    self.note_arm(arm_read, index, &view, wrapper, ArmHow::Nothing);
+                    results.push(self.opaque_miss());
+                    return HopFlow::Stop;
+                }
+            }
+        }
+        match self.classify_numeric_index_segment(segment) {
+            Some(_) => {
+                crate::semantic_query_memo::record_origin_edge!(
+                    self.graph(),
+                    element,
+                    OriginEdgeKind::ProjectIndex,
+                    Arc::from(vec![current].into_boxed_slice()),
+                    match segment {
+                        PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
+                        PathSegment::Member(key) => OriginMeta::ProjectedMember {
+                            key: key.clone(),
+                            provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                        },
+                    },
+                    self.fence.clone(),
+                );
+                self.record_intermediate(Some(element));
+                HopFlow::Next(element, index + 1)
+            }
+            None => {
+                results.push(self.opaque_miss());
+                HopFlow::Stop
+            }
         }
     }
 
@@ -4770,135 +5982,24 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // Element access coerces a numeric key to its canonical
                     // string spelling and vice versa (JS property identity):
                     // when the authored key is positively absent from every
-                    // alternative, retry once with the equivalent form.
-                    let mut candidate_keys = vec![known_key.clone()];
+                    // alternative, it is read once more in the equivalent
+                    // form. Each projection is the hop's own read.
+                    let mut candidates = vec![known_key.clone()];
                     if let Some(equivalent) = known_key.element_access_equivalent() {
-                        candidate_keys.push(equivalent);
+                        candidates.push(equivalent);
                     }
-                    let mut member_value = None;
-                    'candidates: for candidate in &candidate_keys {
-                        let formula = match self.dispatch.project_object_spread_for_consumer(
-                            current,
-                            crate::semantic_query::ObjectProjectionSelector::Key(candidate.clone()),
-                            self.context,
-                        ) {
-                            QueryResult::Value(formula) => formula,
-                            QueryResult::Recursive(node) => {
-                                self.cache_suppress = true;
-                                self.mark_partial_with(crate::semantic_query::PartialReasonSet::empty());
-                                results.push(node);
-                                return None;
-                            }
-                            QueryResult::Error(error) => {
-                                self.cache_suppress = true;
-                                self.mark_partial_with(crate::semantic_query::PartialReasonSet::empty());
-                                // A refused construction reads as its
-                                // checker recovery, as the checker reads a
-                                // member of its error type.
-                                let terminal = match error {
-                                    QueryError::CheckerRecovery { .. } => error,
-                                    _ => QueryError::OpenSurface,
-                                };
-                                results.push(self.dispatch.opaque(terminal));
-                                return None;
-                            }
-                        };
-                        let mut projected = Vec::new();
-                        let mut definitely_absent = 0usize;
-                        let mut open_evidence = false;
-                        for alternative in self.dispatch.object_spread_cursor(&formula) {
-                            let alternative = match alternative {
-                                Ok(alternative) => alternative,
-                                Err(reasons) => {
-                                    self.cache_suppress = true;
-                                    self.mark_partial_with(reasons);
-                                    results.push(self.dispatch.opaque(QueryError::OpenSurface));
-                                    return None;
-                                }
-                            };
-                            match alternative.selected_key(candidate) {
-                                crate::semantic_query::OpenSafeKeyEvidence::Positive(fact) => {
-                                    match fact.value() {
-                                        crate::semantic_query::ProjectionEvidence::Proven(node) => {
-                                            if !projected.contains(node) {
-                                                projected.push(*node);
-                                            }
-                                        }
-                                        crate::semantic_query::ProjectionEvidence::Indeterminate => {
-                                            open_evidence = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                                crate::semantic_query::OpenSafeKeyEvidence::IndeterminatePossibleWrite => {
-                                    open_evidence = true;
-                                    break;
-                                }
-                                crate::semantic_query::OpenSafeKeyEvidence::UnknownOnOpenDomain { .. } => {
-                                    match alternative
-                                        .closed()
-                                        .and_then(|closed| closed.lookup(candidate))
-                                    {
-                                        // A closed branch with a proven-absent
-                                        // key makes the whole-union value
-                                        // optional (mirrors the typeinfo
-                                        // multi-branch join).
-                                        Some(crate::semantic_query::ClosedKeyLookup::AbsentProven) => {
-                                            definitely_absent += 1;
-                                        }
-                                        _ => {
-                                            open_evidence = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
+                    return match self.spread_candidate_hop(
+                        current,
+                        path,
+                        index,
+                        arm_read,
+                        SpreadHop { candidates, at: 0 },
+                    ) {
+                        HopFlow::Read(read) => Some(*read),
+                        HopFlow::Next(..) | HopFlow::Stop => {
+                            unreachable!("a spread program's member is read")
                         }
-                        if open_evidence {
-                            results.push(self.dispatch.opaque(QueryError::OpenSurface));
-                            return None;
-                        }
-                        if !projected.is_empty() {
-                            if definitely_absent > 0 {
-                                projected.push(self.graph().intern_node(
-                                    SemanticNodeData::Primitive(PrimitiveKind::Undefined),
-                                ));
-                            }
-                            // Canonical construction: the per-candidate
-                            // projection join routes through the one
-                            // union/intersection authority.
-                            member_value = Some(
-                                self.dispatch
-                                    .intern_normalized_union_or_intersection(&projected, true),
-                            );
-                            break 'candidates;
-                        }
-                    }
-                    let Some(member_value) = member_value else {
-                        results.push(self.opaque_miss());
-                        return None;
                     };
-                    let edge_kind = match segment {
-                        PathSegment::Member(_) => OriginEdgeKind::ProjectMember,
-                        PathSegment::Index(_) => OriginEdgeKind::ProjectIndex,
-                    };
-                    crate::semantic_query_memo::record_origin_edge!(
-                        self.graph(),
-                        member_value,
-                        edge_kind,
-                        Arc::from([current]),
-                        match segment {
-                            PathSegment::Member(key) => OriginMeta::ProjectedMember {
-                                key: key.clone(),
-                                provenance: verter_audit::MemberEdgeProvenance::PathProjection,
-                            },
-                            PathSegment::Index(index) => OriginMeta::Index(index.clone()),
-                        },
-                        self.fence.clone(),
-                    );
-                    current = member_value;
-                    index += 1;
-                    self.record_intermediate(Some(current));
                 }
                 SemanticNodeData::Object(surface) => {
                     let known_key = match segment {
@@ -5081,69 +6182,41 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 results.push(self.opaque_miss());
                                 return None;
                             }
-                            let read = if mode.is_none()
+                            if mode.is_none()
                                 && self.is_string_index_only(&surface)
                                 && self.key_is_string_or_number_like(IndexAccessKey::Name(
                                     &known_key,
-                                )) {
+                                ))
+                            {
                                 let string = self.string_key();
-                                self.index_signature_read(
+                                match self.index_signature_read(
                                     current,
                                     &surface.index_signatures,
                                     IndexAccessKey::Type(string),
                                     true,
-                                )
-                            } else {
-                                match self.apparent_member_surface(current, &surface, &known_key) {
-                                    ApparentMember::Found(apparent) => {
-                                        self.note_arm(
-                                            arm_read,
-                                            index,
-                                            &surface,
-                                            current,
-                                            ArmHow::Apparent,
-                                        );
-                                        current = apparent;
+                                ) {
+                                    Some(value) => {
+                                        current = self
+                                            .step_through_index_signature(current, value, segment);
+                                        index += 1;
                                         continue;
                                     }
-                                    ApparentMember::Undecided => {
-                                        self.note_arm(
-                                            arm_read,
-                                            index,
-                                            &surface,
-                                            current,
-                                            ArmHow::Undecided,
-                                        );
-                                        None
-                                    }
-                                    ApparentMember::Absent => {
-                                        let read = self.index_signature_read(
-                                            current,
-                                            &surface.index_signatures,
-                                            IndexAccessKey::Name(&known_key),
-                                            mode.is_none(),
-                                        );
-                                        let how = if read.is_some() {
-                                            ArmHow::Index
-                                        } else {
-                                            ArmHow::Nothing
-                                        };
-                                        self.note_arm(arm_read, index, &surface, current, how);
-                                        read
+                                    None => {
+                                        results.push(self.opaque_miss());
+                                        return None;
                                     }
                                 }
-                            };
-                            match read {
-                                Some(value) => {
-                                    current =
-                                        self.step_through_index_signature(current, value, segment);
-                                    index += 1;
+                            }
+                            match self.object_member_hop(
+                                current, surface, known_key, path, index, arm_read, results,
+                            ) {
+                                HopFlow::Next(next, at) => {
+                                    current = next;
+                                    index = at;
                                     continue;
                                 }
-                                None => {
-                                    results.push(self.opaque_miss());
-                                    return None;
-                                }
+                                HopFlow::Stop => return None,
+                                HopFlow::Read(read) => return Some(*read),
                             }
                         }
                     }
@@ -5398,7 +6471,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         ),
                     };
                     return Some(HopRead {
-                        key: true_key,
+                        key: WalkNeed::Query(true_key),
                         resume: HopResume {
                             current,
                             path: path.clone(),
@@ -5425,7 +6498,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         ),
                     };
                     return Some(HopRead {
-                        key,
+                        key: WalkNeed::Query(key),
                         resume: HopResume {
                             current,
                             path: path.clone(),
@@ -5452,7 +6525,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // the caller demanded `Expanded`). Only the consumed
                     // TERMINAL segment runs in the caller's mode — that is
                     // handled after the loop by
-                    // `resolve_expanded_terminal_carrier`.
+                    // `begin_expanded_terminal_carrier`.
                     let object = *object;
                     let ix = ix.clone();
                     // Resolve nested operands on the shared evaluator's
@@ -5472,11 +6545,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         );
                     }
                     return Some(HopRead {
-                        key: SemanticQueryKey::IndexedAccess {
+                        key: WalkNeed::Query(SemanticQueryKey::IndexedAccess {
                             base: object,
                             index: ix.clone(),
                             mode: ProjectionMode::Navigate,
-                        },
+                        }),
                         resume: HopResume {
                             current,
                             path: path.clone(),
@@ -5495,7 +6568,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let mapper = mapper.clone();
                     drop(data);
                     match self.mapped_hop(
-                        current, &source, &mapper, path, index, arm_read, true, results,
+                        current,
+                        &source,
+                        &mapper,
+                        path,
+                        index,
+                        arm_read,
+                        MappedResume::Fresh,
+                        results,
                     ) {
                         HopFlow::Next(node, at) => {
                             current = node;
@@ -5548,7 +6628,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         typeof_context,
                     );
                     return Some(HopRead {
-                        key,
+                        key: WalkNeed::Query(key),
                         resume: HopResume {
                             current,
                             path: path.clone(),
@@ -5631,7 +6711,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // transit demand — `keyof` / `Mapped` operators along
                 // the decl body publish carriers (no reify) and never
                 // reach the publication-edge loops. The terminal
-                // expander (`expand_empty_path_terminal`,
+                // expander (`run_expansion`,
                 // walk.rs:1403) keeps `published(self.mode)` for
                 // empty-path terminal demand.
                 SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
@@ -5653,13 +6733,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     );
                     drop(data);
                     return Some(HopRead {
-                        key: SemanticQueryKey::Instantiate(
+                        key: WalkNeed::Query(SemanticQueryKey::Instantiate(
                             crate::semantic_query::InstantiateKey::new(
                                 base,
                                 Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                                 inst_ctx,
                             ),
-                        ),
+                        )),
                         resume: HopResume {
                             current,
                             path: path.clone(),
@@ -5699,7 +6779,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let name = identity.decl_name.clone();
                     drop(data);
                     return Some(HopRead {
-                        key: SemanticQueryKey::ResolveDecl(ResolveDeclKey { scope, name }),
+                        key: WalkNeed::Query(SemanticQueryKey::ResolveDecl(ResolveDeclKey { scope, name })),
                         resume: HopResume {
                             current,
                             path: path.clone(),
@@ -5838,13 +6918,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         .dispatch
                         .instantiate_context_for(&identity.defining_canonical, unwrap_context);
                     return Some(HopRead {
-                        key: SemanticQueryKey::Instantiate(
+                        key: WalkNeed::Query(SemanticQueryKey::Instantiate(
                             crate::semantic_query::InstantiateKey::new(
                                 identity,
                                 args_clone,
                                 inst_context,
                             ),
-                        ),
+                        )),
                         resume: HopResume {
                             current,
                             path: path.clone(),
@@ -5917,129 +6997,20 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             HopFlow::Read(read) => return Some(*read),
                         }
                     }
-                    // An arm of a composite split reports a key that is
-                    // not one of the tuple's properties (a position of its
-                    // fixed elements): a union member reads its number
-                    // index (`getRestTypeOfTupleType`, else `undefined`),
-                    // anything else leaves the key to its composite.
-                    if let Some(read) = Self::reports_at(arm_read, index) {
-                        let demand = self.classify_numeric_index_segment(segment);
-                        let fixed = elements
-                            .iter()
-                            .position(|element| element.rest)
-                            .unwrap_or(elements.len());
-                        let property =
-                            matches!(demand, Some(NumericIndexDemand::Position(at)) if at < fixed);
-                        if !property {
-                            if let Some((view, wrapper)) = self.wrapper_view(current) {
-                                let member_read = match (read.mode, demand) {
-                                    (ArmMode::Member, Some(NumericIndexDemand::Position(_))) => {
-                                        Some(if fixed < elements.len() {
-                                            let declaring_file = self
-                                                .graph()
-                                                .node_scope(current)
-                                                .and_then(|scope| scope.canonical_file());
-                                            match self.project_tuple_index(
-                                                &elements,
-                                                NumericIndexDemand::Position(fixed),
-                                                declaring_file.as_deref(),
-                                            ) {
-                                                Some(rest) => rest,
-                                                None => {
-                                                    results.push(self.opaque_miss());
-                                                    return None;
-                                                }
-                                            }
-                                        } else {
-                                            self.graph().intern_node(SemanticNodeData::Primitive(
-                                                PrimitiveKind::Undefined,
-                                            ))
-                                        })
-                                    }
-                                    _ => None,
-                                };
-                                let how = if member_read.is_some() {
-                                    ArmHow::Index
-                                } else {
-                                    ArmHow::Nothing
-                                };
-                                self.note_arm(arm_read, index, &view, wrapper, how);
-                                match member_read {
-                                    Some(value) => {
-                                        current = self
-                                            .step_through_index_signature(current, value, segment);
-                                        index += 1;
-                                        continue;
-                                    }
-                                    None => {
-                                        results.push(self.opaque_miss());
-                                        return None;
-                                    }
-                                }
-                            }
-                            // Past the end of a tuple without a rest
-                            // element the composite reads its number index,
-                            // which an unsettled wrapper leaves unknown: the
-                            // lone tuple's `undefined` is not that read.
-                            if matches!(demand, Some(NumericIndexDemand::Position(_)))
-                                && fixed == elements.len()
-                            {
-                                results.push(self.opaque_miss());
-                                return None;
-                            }
+                    match self.tuple_index_hop(current, path, index, arm_read, None, results) {
+                        HopFlow::Next(next, at) => {
+                            current = next;
+                            index = at;
                         }
-                    }
-                    // A negative key over a composite this tuple is an arm
-                    // of reads the composite's number index: the checker's
-                    // TS2514 recovery needs the whole object to be one tuple.
-                    let in_composite = arm_read.is_some_and(|read| read.at == index);
-                    let projected = self
-                        .classify_numeric_index_segment(segment)
-                        .map(|demand| match demand {
-                            NumericIndexDemand::Negative if in_composite => {
-                                NumericIndexDemand::BroadNumber
-                            }
-                            demand => demand,
-                        })
-                        .and_then(|demand| {
-                            let declaring_file = self
-                                .graph()
-                                .node_scope(current)
-                                .and_then(|scope| scope.canonical_file());
-                            self.project_tuple_index(&elements, demand, declaring_file.as_deref())
-                        });
-                    match projected {
-                        Some(value) => {
-                            crate::semantic_query_memo::record_origin_edge!(
-                                self.graph(),
-                                value,
-                                OriginEdgeKind::ProjectIndex,
-                                Arc::from(vec![current].into_boxed_slice()),
-                                match segment {
-                                    PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
-                                    PathSegment::Member(key) => OriginMeta::ProjectedMember {
-                                        key: key.clone(),
-                                        provenance: verter_audit::MemberEdgeProvenance::PathProjection,
-                                    },
-                                },
-                                self.fence.clone(),
-                            );
-                            current = value;
-                            index += 1;
-                            self.record_intermediate(Some(current));
-                        }
-                        None => {
-                            results.push(self.opaque_miss());
-                            return None;
-                        }
+                        HopFlow::Stop => return None,
+                        HopFlow::Read(read) => return Some(*read),
                     }
                 }
-                SemanticNodeData::Array { element, .. } => {
+                SemanticNodeData::Array { .. } => {
                     // Array indexed access: any numeric demand — a
                     // literal position or the broad `number` key —
                     // projects the element type; any other key is a
                     // member of the apparent `Array` (`length`, `map`).
-                    let element = *element;
                     drop(data);
                     if self.dispatch.apparent_member_name(segment).is_some() {
                         match self.wrapper_hop(
@@ -6058,49 +7029,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             HopFlow::Read(read) => return Some(*read),
                         }
                     }
-                    // An arm of a composite split reports its key: an
-                    // array declares no numeric property, so a union member
-                    // reads a position through its number index and
-                    // anything else leaves the key to its composite.
-                    if let Some(read) = Self::reports_at(arm_read, index) {
-                        if let Some((view, wrapper)) = self.wrapper_view(current) {
-                            let position = matches!(
-                                self.classify_numeric_index_segment(segment),
-                                Some(NumericIndexDemand::Position(_))
-                            );
-                            if read.mode == ArmMode::Member && position {
-                                self.note_arm(arm_read, index, &view, wrapper, ArmHow::Index);
-                            } else {
-                                self.note_arm(arm_read, index, &view, wrapper, ArmHow::Nothing);
-                                results.push(self.opaque_miss());
-                                return None;
-                            }
+                    match self.array_index_hop(current, path, index, arm_read, None, results) {
+                        HopFlow::Next(next, at) => {
+                            current = next;
+                            index = at;
                         }
-                    }
-                    match self.classify_numeric_index_segment(segment) {
-                        Some(_) => {
-                            crate::semantic_query_memo::record_origin_edge!(
-                                self.graph(),
-                                element,
-                                OriginEdgeKind::ProjectIndex,
-                                Arc::from(vec![current].into_boxed_slice()),
-                                match segment {
-                                    PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
-                                    PathSegment::Member(key) => OriginMeta::ProjectedMember {
-                                        key: key.clone(),
-                                        provenance: verter_audit::MemberEdgeProvenance::PathProjection,
-                                    },
-                                },
-                                self.fence.clone(),
-                            );
-                            current = element;
-                            index += 1;
-                            self.record_intermediate(Some(current));
-                        }
-                        None => {
-                            results.push(self.opaque_miss());
-                            return None;
-                        }
+                        HopFlow::Stop => return None,
+                        HopFlow::Read(read) => return Some(*read),
                     }
                 }
                 // Unresolved-reference carriers reached MID-WALK (behind an
@@ -6126,7 +7061,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         Err(pending) => {
                             let (key, read, observed) = *pending;
                             return Some(HopRead {
-                                key,
+                                key: WalkNeed::Query(key),
                                 resume: HopResume {
                                     current,
                                     path: path.clone(),
@@ -6237,11 +7172,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     }
 
     /// A hop standing at a mapped type: its homomorphic container's
-    /// mapping (read first, unless `read_homomorphic` is false because the
-    /// hop resumes past it), then the selected key's narrowing or the whole
-    /// mapped surface. Each read it names stops the hop there
-    /// ([`HopSite::MappedHomomorphic`], [`HopSite::MappedKey`],
-    /// [`HopSite::MappedWhole`]).
+    /// mapping (read first, unless `resumed` says the hop resumes past it),
+    /// then the selected key's narrowing or the whole mapped surface. Each
+    /// read it names stops the hop there ([`HopSite::MappedSource`],
+    /// [`HopSite::MappedHomomorphic`], [`HopSite::MappedKey`],
+    /// [`HopSite::MappedValue`], [`HopSite::MappedWhole`]).
     #[allow(clippy::too_many_arguments)]
     fn mapped_hop(
         &mut self,
@@ -6251,42 +7186,35 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         path: &verter_type_expr::OwnedSlice<PathSegment>,
         index: usize,
         arm_read: Option<ArmRead>,
-        read_homomorphic: bool,
+        resumed: MappedResume,
         results: &mut Vec<SemanticNodeId>,
     ) -> HopFlow {
         // Homomorphic arrays and tuples carry element layout and
         // optionality; their owner maps the container before a
         // selected element is read as an ordinary tuple/array hop. The
-        // mapping is the hop's read; resumed with it, the hop goes on at
+        // source's carrier chain is resolved first, as the hop's own
+        // sub-continuation ([`Self::mapped_source_hop`]); the mapping
+        // is then the hop's read, and resumed with it, the hop goes on at
         // the mapping, or past this check when it maps to itself.
-        if read_homomorphic && mapper.over_type_variable && mapper.name_remap.is_none() {
-            let subject = self.dispatch.resolve_signature_source_carrier(
+        if matches!(resumed, MappedResume::Fresh)
+            && mapper.over_type_variable
+            && mapper.name_remap.is_none()
+        {
+            let step = self.dispatch.begin_source_carrier_read(
                 *source,
                 self.context
                     .into_structural_transit_with_mode(ProjectionMode::Navigate),
             );
-            if matches!(
-                self.graph().node_data(subject).as_deref(),
-                Some(SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. })
-            ) {
-                return HopFlow::Read(Box::new(HopRead {
-                    key: SemanticQueryKey::MappedType {
-                        source: *source,
-                        mapper: mapper.clone(),
-                        context: self.context,
-                    },
-                    resume: HopResume {
-                        current,
-                        path: path.clone(),
-                        index,
-                        arm_read,
-                        site: HopSite::MappedHomomorphic {
-                            source: *source,
-                            mapper: Box::new(mapper.clone()),
-                        },
-                    },
-                }));
-            }
+            return self.mapped_source_hop(
+                step,
+                current,
+                MappedSourceUse::Homomorphic,
+                (*source, mapper),
+                path,
+                index,
+                arm_read,
+                results,
+            );
         }
         // Operator-level Mapped narrowing: when the walker
         // has a literal key segment and the mapper has no
@@ -6326,6 +7254,26 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         //    through to the whole-surface fallback, which
         //    produces the correct Object miss via the
         //    bounded enumerated surface.
+        // A hop resumed past its key-domain tiers carries the literal key
+        // it normalized and what the tiers decided; neither is read again,
+        // nor the remapped-key narrowing that precedes them.
+        let (resumed_subject, resumed_key, resumed_tiers) = match resumed {
+            MappedResume::Admission { subject, key } => (
+                Some(subject),
+                Some(key),
+                Some(MappedKeyAdmission::Undecided),
+            ),
+            MappedResume::KeySpace { admitted, key } => (
+                None,
+                Some(key),
+                Some(if admitted {
+                    MappedKeyAdmission::Admitted
+                } else {
+                    MappedKeyAdmission::Undecided
+                }),
+            ),
+            MappedResume::Fresh | MappedResume::PastHomomorphic => (None, None, None),
+        };
         let next_index = index;
         let next_segment = path.get(next_index);
         // Carry both the literal *value* (string text or
@@ -6343,112 +7291,119 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // check) reads the same kind discriminator so a
         // numeric segment is admitted only by a number-
         // domain key_space and vice versa.
-        let (literal_key, segment_is_string_domain): (Option<LiteralKey>, bool) = match next_segment
+        // The string-domain flag is read only by the structural tiers,
+        // which a resumed admission does not run.
+        let (literal_key, segment_is_string_domain): (Option<LiteralKey>, bool) = if let Some(key) =
+            resumed_key
         {
-            Some(PathSegment::Member(crate::semantic_query::PropertyKey::String(name))) => {
-                (Some(LiteralKey::String(name.clone())), true)
-            }
-            Some(PathSegment::Member(crate::semantic_query::PropertyKey::Number(number))) => {
-                (Some(LiteralKey::Number(number.get() as f64)), false)
-            }
-            Some(PathSegment::Member(crate::semantic_query::PropertyKey::UniqueSymbol(_))) => {
-                (None, false)
-            }
-            Some(PathSegment::Index(IndexKey::String(s))) => {
-                (Some(LiteralKey::String(s.clone())), true)
-            }
-            Some(PathSegment::Index(IndexKey::Number(n))) => {
-                // G4.4: integer-convention recovery.
-                //
-                // Every `IndexKey::Number` producer
-                // (`lower::shallow_lower_type_expr`,
-                // `evaluate::normalized_index_key_node`,
-                // `substitute::substitute_index_key_with_change_tracking`)
-                // folds through the bounded
-                // `build::integer_convention_index_key`
-                // predicate, which admits an integer
-                // only when it equals its source f64
-                // exactly. The integer→float cast here
-                // is therefore VALUE- and
-                // CANONICAL-NAME-exact: the recovered
-                // f64 compares equal to the original
-                // literal and spells the same canonical
-                // `js_number_to_string` name (the one
-                // admitted two-bit-pattern value, -0.0,
-                // recovers as +0.0 — same value, same
-                // name "0") — symmetric with
-                // `raise::raise_index_key_to_type_expr`'s
-                // `*number as f64` raise.
-                //
-                // Numeric indices outside the bound
-                // (`Foo[1.5]`, `Foo[1e21]`, big integers
-                // with divergent shortest-round-trip
-                // spellings) never reach this arm — the
-                // producer predicate routes them through
-                // `IndexKey::Computed` instead,
-                // preserving full f64 precision via the
-                // SemanticNodeId reference.
-                (Some(LiteralKey::Number(n.get() as f64)), false)
-            }
-            Some(PathSegment::Index(IndexKey::UniqueSymbol(_))) => (None, false),
-            Some(PathSegment::Index(IndexKey::Computed(node))) => {
-                match self.dispatch.normalized_index_key_node(*node) {
-                    IndexKey::String(text) => (Some(LiteralKey::String(text.clone())), true),
-                    IndexKey::Number(number) => {
-                        // `normalized_index_key_node`
-                        // folds through the bounded
-                        // `integer_convention_index_key`
-                        // predicate (integer == source
-                        // f64 exactly), not the
-                        // bit-pattern. Recover the f64
-                        // by direct integer→float cast.
-                        (Some(LiteralKey::Number(number.get() as f64)), false)
-                    }
-                    IndexKey::UniqueSymbol(_) => (None, false),
-                    IndexKey::Computed(resolved) => {
-                        // G4.5: `normalized_index_key_node`
-                        // returns `IndexKey::Number(i64)`
-                        // ONLY when the integer's `Display`
-                        // IS the literal's canonical
-                        // `js_number_to_string` spelling.
-                        // Non-integer literals (`Foo[1.5]`),
-                        // exponent-regime literals, and
-                        // integral literals with divergent
-                        // shortest-round-trip spellings
-                        // (`Foo[4611686018427387904]`)
-                        // fall through to this
-                        // `TypeNode(_)` arm, even though
-                        // they ARE concrete numeric
-                        // literals at the graph level.
-                        //
-                        // Recover the f64 literal directly
-                        // from the resolved node's data so
-                        // the Mapped narrowing can perform
-                        // the `K = Literal(Number(f))`
-                        // substitution for primitive
-                        // `number`-domain key spaces
-                        // (`{ [K in number]: K }[1.5]`).
-                        // Mirrors the `LiteralValue::String`
-                        // recovery path implicit in the
-                        // `IndexKey::String` arm above.
-                        match self.graph().node_data(resolved).as_deref() {
-                            Some(SemanticNodeData::Literal(
-                                crate::semantic_query::LiteralValue::Number(n),
-                            )) => (Some(LiteralKey::Number(*n)), false),
-                            Some(SemanticNodeData::Literal(
-                                crate::semantic_query::LiteralValue::String(s),
-                            )) => (
-                                Some(LiteralKey::String(verter_type_expr::OwnedStr::from(
-                                    s.as_str(),
-                                ))),
-                                true,
-                            ),
-                            _ => (None, false),
+            (Some(key), false)
+        } else {
+            match next_segment {
+                Some(PathSegment::Member(crate::semantic_query::PropertyKey::String(name))) => {
+                    (Some(LiteralKey::String(name.clone())), true)
+                }
+                Some(PathSegment::Member(crate::semantic_query::PropertyKey::Number(number))) => {
+                    (Some(LiteralKey::Number(number.get() as f64)), false)
+                }
+                Some(PathSegment::Member(crate::semantic_query::PropertyKey::UniqueSymbol(_))) => {
+                    (None, false)
+                }
+                Some(PathSegment::Index(IndexKey::String(s))) => {
+                    (Some(LiteralKey::String(s.clone())), true)
+                }
+                Some(PathSegment::Index(IndexKey::Number(n))) => {
+                    // Integer-convention recovery.
+                    //
+                    // Every `IndexKey::Number` producer
+                    // (`lower::shallow_lower_type_expr`,
+                    // `evaluate::normalized_index_key_node`,
+                    // `substitute::substitute_index_key_with_change_tracking`)
+                    // folds through the bounded
+                    // `build::integer_convention_index_key`
+                    // predicate, which admits an integer
+                    // only when it equals its source f64
+                    // exactly. The integer→float cast here
+                    // is therefore VALUE- and
+                    // CANONICAL-NAME-exact: the recovered
+                    // f64 compares equal to the original
+                    // literal and spells the same canonical
+                    // `js_number_to_string` name (the one
+                    // admitted two-bit-pattern value, -0.0,
+                    // recovers as +0.0 — same value, same
+                    // name "0") — symmetric with
+                    // `raise::raise_index_key_to_type_expr`'s
+                    // `*number as f64` raise.
+                    //
+                    // Numeric indices outside the bound
+                    // (`Foo[1.5]`, `Foo[1e21]`, big integers
+                    // with divergent shortest-round-trip
+                    // spellings) never reach this arm — the
+                    // producer predicate routes them through
+                    // `IndexKey::Computed` instead,
+                    // preserving full f64 precision via the
+                    // SemanticNodeId reference.
+                    (Some(LiteralKey::Number(n.get() as f64)), false)
+                }
+                Some(PathSegment::Index(IndexKey::UniqueSymbol(_))) => (None, false),
+                Some(PathSegment::Index(IndexKey::Computed(node))) => {
+                    match self.dispatch.normalized_index_key_node(*node) {
+                        IndexKey::String(text) => (Some(LiteralKey::String(text.clone())), true),
+                        IndexKey::Number(number) => {
+                            // `normalized_index_key_node`
+                            // folds through the bounded
+                            // `integer_convention_index_key`
+                            // predicate (integer == source
+                            // f64 exactly), not the
+                            // bit-pattern. Recover the f64
+                            // by direct integer→float cast.
+                            (Some(LiteralKey::Number(number.get() as f64)), false)
+                        }
+                        IndexKey::UniqueSymbol(_) => (None, false),
+                        IndexKey::Computed(resolved) => {
+                            // `normalized_index_key_node`
+                            // returns `IndexKey::Number(i64)`
+                            // ONLY when the integer's `Display`
+                            // IS the literal's canonical
+                            // `js_number_to_string` spelling.
+                            // Non-integer literals (`Foo[1.5]`),
+                            // exponent-regime literals, and
+                            // integral literals with divergent
+                            // shortest-round-trip spellings
+                            // (`Foo[4611686018427387904]`)
+                            // fall through to this
+                            // `TypeNode(_)` arm, even though
+                            // they ARE concrete numeric
+                            // literals at the graph level.
+                            //
+                            // Recover the f64 literal directly
+                            // from the resolved node's data so
+                            // the Mapped narrowing can perform
+                            // the `K = Literal(Number(f))`
+                            // substitution for primitive
+                            // `number`-domain key spaces
+                            // (`{ [K in number]: K }[1.5]`).
+                            // Mirrors the `LiteralValue::String`
+                            // recovery path implicit in the
+                            // `IndexKey::String` arm above.
+                            match self.graph().node_data(resolved).as_deref() {
+                                Some(SemanticNodeData::Literal(
+                                    crate::semantic_query::LiteralValue::Number(n),
+                                )) => (Some(LiteralKey::Number(*n)), false),
+                                Some(SemanticNodeData::Literal(
+                                    crate::semantic_query::LiteralValue::String(s),
+                                )) => (
+                                    Some(LiteralKey::String(verter_type_expr::OwnedStr::from(
+                                        s.as_str(),
+                                    ))),
+                                    true,
+                                ),
+                                _ => (None, false),
+                            }
                         }
                     }
                 }
+                None => (None, false),
             }
-            None => (None, false),
         };
         // Remapping mapper ⇒ key-domain PREIMAGE narrowing.
         //
@@ -6487,7 +7442,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // key-absent sentinel directly below — the same
         // answer the coarse path reaches, without forcing
         // any surviving key's value operand to get there.
-        if mapper.name_remap.is_some() {
+        if mapper.name_remap.is_some() && resumed_tiers.is_none() {
             let narrowing = self.narrow_remapped_mapped_key(*source, mapper, literal_key.as_ref());
             if matches!(narrowing, Some(RemappedKeyNarrowing::ProvenAbsent)) {
                 // The closed key domain proved the demanded
@@ -6548,178 +7503,186 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // bound) — fall back to the coarse path which
         // produces a deferred shell re-dispatched once the
         // domain becomes enumerable.
-        let mut key_admission: MappedKeyAdmission =
-            literal_key
-                .as_ref()
-                .map_or(MappedKeyAdmission::Undecided, |key| {
-                    // For Tier 1/2 enumerable lookups, both string
-                    // and numeric segments compare against textual
-                    // member names — TypeScript Object members are
-                    // string-keyed at the type level (numeric
-                    // indices coerce to their string form, so
-                    // `{ '1': X }[1]` matches member `"1"`).
-                    //
-                    // The numeric needle is the canonical
-                    // `js_number_to_string` spelling — the SAME
-                    // single canonicalizer the key-domain
-                    // enumeration and the non-emitting membership
-                    // predicate publish/compare with. The f64
-                    // `Display` form diverges in both exponent
-                    // regimes (`1e21` vs `"1e+21"`, `0.0000001` vs
-                    // `"1e-7"`) and would miss members published
-                    // under their canonical names.
-                    let needle_key = match key {
-                        LiteralKey::String(s) => crate::semantic_query::PropertyKey::String(
-                            verter_type_expr::OwnedStr::from(s),
-                        ),
-                        LiteralKey::Number(n) => {
-                            crate::semantic_query::PropertyKey::from_js_number(*n)
+        let structural_tiers = |key: &LiteralKey| -> Option<MappedKeyAdmission> {
+            // For Tier 1/2 enumerable lookups, both string
+            // and numeric segments compare against textual
+            // member names — TypeScript Object members are
+            // string-keyed at the type level (numeric
+            // indices coerce to their string form, so
+            // `{ '1': X }[1]` matches member `"1"`).
+            //
+            // The numeric needle is the canonical
+            // `js_number_to_string` spelling — the SAME
+            // single canonicalizer the key-domain
+            // enumeration and the non-emitting membership
+            // predicate publish/compare with. The f64
+            // `Display` form diverges in both exponent
+            // regimes (`1e21` vs `"1e+21"`, `0.0000001` vs
+            // `"1e-7"`) and would miss members published
+            // under their canonical names.
+            let needle_key = match key {
+                LiteralKey::String(s) => {
+                    crate::semantic_query::PropertyKey::String(verter_type_expr::OwnedStr::from(s))
+                }
+                LiteralKey::Number(n) => crate::semantic_query::PropertyKey::from_js_number(*n),
+            };
+            // Tier 1: source surface is an enumerable Object.
+            //
+            // This tier reads the SOURCE's member list, so it is
+            // sound only where the source's member names really
+            // ARE the mapper's iteration keys — the homomorphic
+            // `[K in keyof Src]` shape. A mapper whose key space
+            // is INDEPENDENT of the source iterates its own key
+            // set and produces a surface that is neither a subset
+            // nor a superset of the source's members, so source
+            // membership is evidence about the mapped surface in
+            // NEITHER direction. Both verdicts below are therefore
+            // gated on it; a non-homomorphic mapper falls through
+            // to the key-space tiers, which consult the key space
+            // itself.
+            //
+            // Public-keyspace admission: `M[K]` mapped narrowing over
+            // a class admits only PUBLIC member names (a mapped type
+            // iterates `keyof`, which excludes protected/private).
+            // A non-public member name is not an admissible key, so
+            // it must not narrow to that member's value.
+            if let Some(SemanticNodeData::Object(view)) = self.graph().node_data(*source).as_deref()
+            {
+                let homomorphic_over_source = matches!(
+                    self.graph().node_data(mapper.key_space).as_deref(),
+                    Some(SemanticNodeData::KeyOf { base }) if *base == *source
+                );
+                match view.project_known_key(&needle_key) {
+                    crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
+                        // Admit only a PUBLIC member of a source the
+                        // key space actually iterates. A non-public
+                        // member is refused, but its refusal is not a
+                        // structural proof that the mapped surface
+                        // lacks the name — the member exists, it is
+                        // only excluded from `keyof`. Likewise a
+                        // member of a source the key space does not
+                        // iterate says nothing either way. Both stay
+                        // `Undecided`, so the coarse path keeps
+                        // owning those answers exactly as it does
+                        // today — admitting one would narrow to a
+                        // member value the mapped type may not have.
+                        if homomorphic_over_source && member.visibility.is_public() {
+                            return Some(MappedKeyAdmission::Admitted);
                         }
-                    };
-                    // Tier 1: source surface is an enumerable Object.
-                    //
-                    // This tier reads the SOURCE's member list, so it is
-                    // sound only where the source's member names really
-                    // ARE the mapper's iteration keys — the homomorphic
-                    // `[K in keyof Src]` shape. A mapper whose key space
-                    // is INDEPENDENT of the source iterates its own key
-                    // set and produces a surface that is neither a subset
-                    // nor a superset of the source's members, so source
-                    // membership is evidence about the mapped surface in
-                    // NEITHER direction. Both verdicts below are therefore
-                    // gated on it; a non-homomorphic mapper falls through
-                    // to the key-space tiers, which consult the key space
-                    // itself.
-                    //
-                    // Public-keyspace admission: `M[K]` mapped narrowing over
-                    // a class admits only PUBLIC member names (a mapped type
-                    // iterates `keyof`, which excludes protected/private).
-                    // A non-public member name is not an admissible key, so
-                    // it must not narrow to that member's value.
-                    if let Some(SemanticNodeData::Object(view)) =
-                        self.graph().node_data(*source).as_deref()
-                    {
-                        let homomorphic_over_source = matches!(
-                            self.graph().node_data(mapper.key_space).as_deref(),
-                            Some(SemanticNodeData::KeyOf { base }) if *base == *source
-                        );
-                        match view.project_known_key(&needle_key) {
-                            crate::semantic_query::SurfaceKeyProjection::Exact(member) => {
-                                // Admit only a PUBLIC member of a source the
-                                // key space actually iterates. A non-public
-                                // member is refused, but its refusal is not a
-                                // structural proof that the mapped surface
-                                // lacks the name — the member exists, it is
-                                // only excluded from `keyof`. Likewise a
-                                // member of a source the key space does not
-                                // iterate says nothing either way. Both stay
-                                // `Undecided`, so the coarse path keeps
-                                // owning those answers exactly as it does
-                                // today — admitting one would narrow to a
-                                // member value the mapped type may not have.
-                                if homomorphic_over_source && member.visibility.is_public() {
-                                    return MappedKeyAdmission::Admitted;
-                                }
-                                return MappedKeyAdmission::Undecided;
-                            }
-                            crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
-                                // Absent from the SOURCE surface. That
-                                // proves absence from the MAPPED surface
-                                // only when TWO things hold.
-                                //
-                                // First, the key domain must be derived
-                                // from the source — the homomorphic
-                                // `[K in keyof Src]` shape checked above.
-                                // An independent key space (`[K in 1e21]`
-                                // over an unrelated source) produces keys
-                                // the source never had, so a source miss
-                                // says nothing about it.
-                                //
-                                // Second, the source's own key domain
-                                // must be CLOSED
-                                // (`SurfaceView::key_domain_is_closed`,
-                                // which owns the full definition).
-                                // `project_known_key` decides membership
-                                // against the explicit `members` list and
-                                // only against keys it can NAME, so its
-                                // negative verdict is one-sided twice
-                                // over: an INDEX SIGNATURE supplies keys
-                                // that are on no member list at all (on
-                                // `{ a: string; [k: string]: string }` the
-                                // name `b` is neither a member nor
-                                // absent), and an unfolded COMPUTED member
-                                // key is a key the surface HAS but cannot
-                                // name (`{ [E.A]: number }` answers
-                                // `AbsentProven` for `"alpha"`, the very
-                                // name it produces). Either leaves the
-                                // domain open, and an open domain never
-                                // refutes a key — the same one-sidedness
-                                // the primitive tier below documents.
-                                // Missing members are positive evidence
-                                // only.
-                                //
-                                // Either way it stays `Undecided` and the
-                                // coarse path owns the answer.
-                                return if homomorphic_over_source && view.key_domain_is_closed() {
-                                    MappedKeyAdmission::AbsentProven
-                                } else {
-                                    MappedKeyAdmission::Undecided
-                                };
-                            }
-                        }
+                        return Some(MappedKeyAdmission::Undecided);
                     }
-                    // Tier 2: **non-emitting** key-domain
-                    // membership predicate.
-                    //
-                    // The enumeration-based admission would call
-                    // `key_names_from_keyspace_node` here — which
-                    // routes through `evaluate_deferred_semantic_node`
-                    // and `key_names_from_base_node`, both
-                    // emitting one `ProjectMember` edge per
-                    // enumerated key (via the `build_key_of` /
-                    // `build_mapped_type` publication loop). That
-                    // would emit the entire keyspace just to test
-                    // membership of ONE segment.
-                    //
-                    // The non-emitting predicate decides admission
-                    // structurally without `evaluate_deferred_*`
-                    // and without `Instantiate` round-trips. When
-                    // it cannot decide (`None`), the walker falls
-                    // through to Tier 3 (primitive keyspace) or
-                    // accepts the unresolved carrier — NEVER
-                    // enumerating to prove membership.
-                    if let Some(admits) = self
-                        .dispatch
-                        .keyspace_admits_literal_non_emitting(mapper.key_space, &needle_key)
-                    {
-                        // Both verdicts are structural PROOFS (see the
-                        // predicate's soundness contract): `true` admits,
-                        // `false` refutes.
-                        return if admits {
-                            MappedKeyAdmission::Admitted
-                        } else {
+                    crate::semantic_query::SurfaceKeyProjection::AbsentProven => {
+                        // Absent from the SOURCE surface. That
+                        // proves absence from the MAPPED surface
+                        // only when TWO things hold.
+                        //
+                        // First, the key domain must be derived
+                        // from the source — the homomorphic
+                        // `[K in keyof Src]` shape checked above.
+                        // An independent key space (`[K in 1e21]`
+                        // over an unrelated source) produces keys
+                        // the source never had, so a source miss
+                        // says nothing about it.
+                        //
+                        // Second, the source's own key domain
+                        // must be CLOSED
+                        // (`SurfaceView::key_domain_is_closed`,
+                        // which owns the full definition).
+                        // `project_known_key` decides membership
+                        // against the explicit `members` list and
+                        // only against keys it can NAME, so its
+                        // negative verdict is one-sided twice
+                        // over: an INDEX SIGNATURE supplies keys
+                        // that are on no member list at all (on
+                        // `{ a: string; [k: string]: string }` the
+                        // name `b` is neither a member nor
+                        // absent), and an unfolded COMPUTED member
+                        // key is a key the surface HAS but cannot
+                        // name (`{ [E.A]: number }` answers
+                        // `AbsentProven` for `"alpha"`, the very
+                        // name it produces). Either leaves the
+                        // domain open, and an open domain never
+                        // refutes a key — the same one-sidedness
+                        // the primitive tier below documents.
+                        // Missing members are positive evidence
+                        // only.
+                        //
+                        // Either way it stays `Undecided` and the
+                        // coarse path owns the answer.
+                        return Some(if homomorphic_over_source && view.key_domain_is_closed() {
                             MappedKeyAdmission::AbsentProven
-                        };
+                        } else {
+                            MappedKeyAdmission::Undecided
+                        });
                     }
-                    // Tier 3: key_space is a non-enumerable
-                    // primitive whose domain admits the segment.
-                    //
-                    // This tier is one-sided. `true` proves the
-                    // primitive domain accepts the segment; `false`
-                    // is the catch-all for "the keyspace is not a
-                    // primitive at all", which is the tier failing to
-                    // APPLY, not a proof of absence. Only `true`
-                    // decides here — everything else stays
-                    // `Undecided` and keeps the coarse path's answer.
-                    if self.dispatch.primitive_keyspace_admits_segment(
-                        mapper.key_space,
-                        segment_is_string_domain,
-                    ) {
-                        MappedKeyAdmission::Admitted
-                    } else {
-                        MappedKeyAdmission::Undecided
-                    }
+                }
+            }
+            // Tier 2: **non-emitting** key-domain
+            // membership predicate.
+            //
+            // The enumeration-based admission would call
+            // `key_names_from_keyspace_node` here — which
+            // routes through `evaluate_deferred_semantic_node`
+            // and `key_names_from_base_node`, both
+            // emitting one `ProjectMember` edge per
+            // enumerated key (via the `build_key_of` /
+            // `build_mapped_type` publication loop). That
+            // would emit the entire keyspace just to test
+            // membership of ONE segment.
+            //
+            // The non-emitting predicate decides admission
+            // structurally without `evaluate_deferred_*`
+            // and without `Instantiate` round-trips. When
+            // it cannot decide (`None`), the walker falls
+            // through to Tier 3 (primitive keyspace) or
+            // accepts the unresolved carrier — NEVER
+            // enumerating to prove membership.
+            if let Some(admits) = self
+                .dispatch
+                .keyspace_admits_literal_non_emitting(mapper.key_space, &needle_key)
+            {
+                // Both verdicts are structural PROOFS (see the
+                // predicate's soundness contract): `true` admits,
+                // `false` refutes.
+                return Some(if admits {
+                    MappedKeyAdmission::Admitted
+                } else {
+                    MappedKeyAdmission::AbsentProven
                 });
+            }
+            None
+        };
+        // Tier 3: key_space is a non-enumerable primitive whose domain
+        // admits the segment, its evaluation the hop's own
+        // sub-continuation ([`Self::mapped_keyspace_hop`]).
+        //
+        // This tier is one-sided. `true` proves the primitive domain
+        // accepts the segment; `false` is the catch-all for "the keyspace
+        // is not a primitive at all", which is the tier failing to APPLY,
+        // not a proof of absence. Only `true` decides here — everything
+        // else stays `Undecided` and keeps the coarse path's answer.
+        let mut key_admission: MappedKeyAdmission = match (resumed_tiers, literal_key.as_ref()) {
+            (Some(resumed), _) => resumed,
+            (None, None) => MappedKeyAdmission::Undecided,
+            (None, Some(key)) => match structural_tiers(key) {
+                Some(decided) => decided,
+                None => {
+                    let step = self
+                        .dispatch
+                        .begin_keyspace_admission(mapper.key_space, segment_is_string_domain);
+                    return self.mapped_keyspace_hop(
+                        step,
+                        current,
+                        (*source, mapper),
+                        key.clone(),
+                        path,
+                        index,
+                        arm_read,
+                        results,
+                    );
+                }
+            },
+        };
         // A named member of a homomorphic dictionary still belongs
         // to its constraint. Resolve only the source's shallow
         // surface when non-emitting admission cannot decide it.
@@ -6729,11 +7692,29 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 Some(SemanticNodeData::KeyOf { base }) if *base == *source)
         {
             if let Some(literal_key) = literal_key.as_ref() {
-                let subject = self.dispatch.resolve_signature_source_carrier(
-                    *source,
-                    self.context
-                        .into_structural_transit_with_mode(ProjectionMode::Shallow),
-                );
+                // The source's carrier chain is the hop's own
+                // sub-continuation; resumed with the subject it settles
+                // on, the hop decides the admission from it.
+                let subject = match resumed_subject {
+                    Some(subject) => subject,
+                    None => {
+                        let step = self.dispatch.begin_source_carrier_read(
+                            *source,
+                            self.context
+                                .into_structural_transit_with_mode(ProjectionMode::Shallow),
+                        );
+                        return self.mapped_source_hop(
+                            step,
+                            current,
+                            MappedSourceUse::Admission(literal_key.clone()),
+                            (*source, mapper),
+                            path,
+                            index,
+                            arm_read,
+                            results,
+                        );
+                    }
+                };
                 let needle = match literal_key {
                     LiteralKey::String(name) => PropertyKey::string_literal(name.as_ref()),
                     LiteralKey::Number(number) => PropertyKey::from_js_number(*number),
@@ -6853,11 +7834,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // it, the hop finishes the key
                     // ([`Self::finish_mapped_key`]).
                     return HopFlow::Read(Box::new(HopRead {
-                        key: SemanticQueryKey::IndexedAccess {
+                        key: WalkNeed::Query(SemanticQueryKey::IndexedAccess {
                             base: source,
                             index: IndexKey::Computed(key_arg),
                             mode: self.mode(),
-                        },
+                        }),
                         resume: HopResume {
                             current,
                             path: path.clone(),
@@ -6872,34 +7853,41 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     }));
                 }
             } else {
-                // Route through the shared
-                // `materialize_selected_key_mapped_value_with_node`
-                // substrate. The node-keyed entry preserves
-                // String / Number literal kind through
-                // substitution (G4 soundness — `M[1]` keeps
-                // `K = Literal::Number(1)`). The helper does
-                // substitute → evaluate → Instantiate →
-                // **trailing Conditional reduction**: the
-                // last step drives the body's `Conditional`
-                // dispatch through the nested-infer arm so
-                // per-key narrowing closes generic-helper
+                // The shared selected-key substrate
+                // (`materialize_selected_key_mapped_value_with_node`)
+                // as the hop's own sub-continuation: the binder
+                // substituted with the key, preserving String /
+                // Number literal kind (`M[1]` keeps
+                // `K = Literal::Number(1)`), then the value
+                // evaluated as a mapped member's — substitute →
+                // evaluate → Instantiate → **trailing Conditional
+                // reduction**, which closes generic-helper
                 // conditionals (`ExtendSlotWithPlan<TPlan, K>`-style)
-                // to the realized `Function` instead of
-                // leaving a Conditional carrier shell. The
-                // Opaque-fallback contract (substituted
-                // carrier on stall) is preserved inside the
-                // helper so the free mapper binder is never
-                // leaked.
-                self.dispatch
-                    .materialize_selected_key_mapped_value_with_node(
-                        mapper,
+                // to the realized `Function` instead of leaving a
+                // Conditional carrier shell, the substituted
+                // carrier kept on a stall so the free mapper binder
+                // never leaks. A read the evaluation names stops
+                // the hop with the evaluation retained
+                // ([`HopSite::MappedValue`]).
+                let step = self.dispatch.begin_selected_key_mapped_value(
+                    mapper,
+                    key_arg,
+                    self.context_from_template(
+                        crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+                    ),
+                );
+                return self.mapped_value_hop(
+                    step,
+                    current,
+                    MappedKeyHop {
+                        source: *source,
+                        mapper: mapper.clone(),
                         key_arg,
-                        self.context_from_template(
-                            crate::semantic_query::ProjectionReductionContext::published(
-                                self.mode(),
-                            ),
-                        ),
-                    )
+                    },
+                    path,
+                    index,
+                    arm_read,
+                );
             };
             let value =
                 self.finish_mapped_key(current, *source, mapper, key_arg, path, index, value);
@@ -6922,13 +7910,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         //   the key-absent sentinel above.
         let mapped_mode = self.mode();
         HopFlow::Read(Box::new(HopRead {
-            key: SemanticQueryKey::MappedType {
+            key: WalkNeed::Query(SemanticQueryKey::MappedType {
                 source: *source,
                 mapper: mapper.clone(),
                 context: self.context_from_template(
                     crate::semantic_query::ProjectionReductionContext::published(mapped_mode),
                 ),
-            },
+            }),
             resume: HopResume {
                 current,
                 path: path.clone(),
@@ -6937,6 +7925,167 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 site: HopSite::MappedWhole,
             },
         }))
+    }
+
+    /// A mapped hop whose source's carrier chain took `step`: the read
+    /// the chain names, the chain retained ([`HopSite::MappedSource`]), or
+    /// — the chain settled on its subject — the hop going on as `using`
+    /// says: a homomorphic container mapped as a whole, any other source
+    /// past that check; or the selected key's admission decided from the
+    /// subject.
+    #[allow(clippy::too_many_arguments)]
+    fn mapped_source_hop(
+        &mut self,
+        step: super::build::SourceCarrierStep,
+        current: SemanticNodeId,
+        using: MappedSourceUse,
+        (source, mapper): (SemanticNodeId, &crate::semantic_query::MapperKey),
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        index: usize,
+        arm_read: Option<ArmRead>,
+        results: &mut Vec<SemanticNodeId>,
+    ) -> HopFlow {
+        let subject = match step {
+            super::build::SourceCarrierStep::Read(key, read) => {
+                return HopFlow::Read(Box::new(HopRead {
+                    key: WalkNeed::Query(key),
+                    resume: HopResume {
+                        current,
+                        path: path.clone(),
+                        index,
+                        arm_read,
+                        site: HopSite::MappedSource(Box::new(MappedSourceHop {
+                            read,
+                            using,
+                            source,
+                            mapper: mapper.clone(),
+                        })),
+                    },
+                }));
+            }
+            super::build::SourceCarrierStep::Done(subject) => subject,
+        };
+        let resumed = match using {
+            MappedSourceUse::Homomorphic => {
+                if matches!(
+                    self.graph().node_data(subject).as_deref(),
+                    Some(SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. })
+                ) {
+                    return HopFlow::Read(Box::new(HopRead {
+                        key: WalkNeed::Query(SemanticQueryKey::MappedType {
+                            source,
+                            mapper: mapper.clone(),
+                            context: self.context,
+                        }),
+                        resume: HopResume {
+                            current,
+                            path: path.clone(),
+                            index,
+                            arm_read,
+                            site: HopSite::MappedHomomorphic {
+                                source,
+                                mapper: Box::new(mapper.clone()),
+                            },
+                        },
+                    }));
+                }
+                MappedResume::PastHomomorphic
+            }
+            MappedSourceUse::Admission(key) => MappedResume::Admission { subject, key },
+        };
+        self.mapped_hop(
+            current, &source, mapper, path, index, arm_read, resumed, results,
+        )
+    }
+
+    /// A mapped hop whose key space's admission check took `step`: the read
+    /// its evaluation names, the check retained
+    /// ([`HopSite::MappedKeySpace`]), or — decided — the hop going on from
+    /// its key-domain tiers with that verdict.
+    #[allow(clippy::too_many_arguments)]
+    fn mapped_keyspace_hop(
+        &mut self,
+        step: super::build::KeySpaceAdmissionStep,
+        current: SemanticNodeId,
+        (source, mapper): (SemanticNodeId, &crate::semantic_query::MapperKey),
+        key: LiteralKey,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        index: usize,
+        arm_read: Option<ArmRead>,
+        results: &mut Vec<SemanticNodeId>,
+    ) -> HopFlow {
+        let admitted = match step {
+            super::build::KeySpaceAdmissionStep::Read(read_key, read) => {
+                return HopFlow::Read(Box::new(HopRead {
+                    key: WalkNeed::Query(read_key),
+                    resume: HopResume {
+                        current,
+                        path: path.clone(),
+                        index,
+                        arm_read,
+                        site: HopSite::MappedKeySpace(Box::new(MappedKeySpaceHop {
+                            read,
+                            key,
+                            source,
+                            mapper: mapper.clone(),
+                        })),
+                    },
+                }));
+            }
+            super::build::KeySpaceAdmissionStep::Done(admitted) => admitted,
+        };
+        self.mapped_hop(
+            current,
+            &source,
+            mapper,
+            path,
+            index,
+            arm_read,
+            MappedResume::KeySpace { admitted, key },
+            results,
+        )
+    }
+
+    /// A mapped hop's selected key whose value's evaluation took `step`:
+    /// the key finished over the evaluated value and the walk going on
+    /// past it, or the read the evaluation names, the evaluation retained.
+    fn mapped_value_hop(
+        &mut self,
+        step: super::evaluate::DeferredStep,
+        current: SemanticNodeId,
+        key: MappedKeyHop,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
+        index: usize,
+        arm_read: Option<ArmRead>,
+    ) -> HopFlow {
+        match step {
+            super::evaluate::DeferredStep::Done(outcome) => {
+                let value = outcome.into_active_query_build_node(self.dispatch);
+                let MappedKeyHop {
+                    source,
+                    mapper,
+                    key_arg,
+                } = key;
+                let value =
+                    self.finish_mapped_key(current, source, &mapper, key_arg, path, index, value);
+                HopFlow::Next(value, index + 1)
+            }
+            super::evaluate::DeferredStep::Read(read, evaluation) => {
+                HopFlow::Read(Box::new(HopRead {
+                    key: WalkNeed::Query(read),
+                    resume: HopResume {
+                        current,
+                        path: path.clone(),
+                        index,
+                        arm_read,
+                        site: HopSite::MappedValue {
+                            evaluation,
+                            key: Box::new(key),
+                        },
+                    },
+                }))
+            }
+        }
     }
 
     /// Finish a mapped hop's selected key over its `value`: the key's
@@ -7045,17 +8194,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         match self.runtime_nominal_wrapper_read(current) {
                             Ok(surface) => current = surface,
                             Err(Some(pending)) => {
-                                let (key, hop) = *pending;
-                                return Some(HopRead {
-                                    key,
-                                    resume: HopResume {
-                                        current,
-                                        path,
-                                        index,
-                                        arm_read,
-                                        site: HopSite::Wrapper(Box::new(hop)),
-                                    },
-                                });
+                                return Some(Self::wrapper_pending(
+                                    current, path, index, arm_read, *pending,
+                                ));
                             }
                             Err(None) => {
                                 results.push(self.opaque_miss());
@@ -7101,8 +8242,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 }
                 current = resolved;
             }
-            HopSite::DeferredOperand { .. } => {
-                unreachable!("a deferred operand's read is delivered to its evaluation")
+            HopSite::DeferredOperand { .. }
+            | HopSite::MappedValue { .. }
+            | HopSite::MappedSource(_)
+            | HopSite::MappedKeySpace(_) => {
+                unreachable!("a deferred evaluation's read is delivered to it")
             }
             HopSite::ConditionalTrue {
                 check,
@@ -7111,7 +8255,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 false_key,
             } => {
                 return Some(HopRead {
-                    key: *false_key,
+                    key: WalkNeed::Query(*false_key),
                     resume: HopResume {
                         current,
                         path,
@@ -7210,7 +8354,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         context,
                     );
                     return Some(HopRead {
-                        key: member_key,
+                        key: WalkNeed::Query(member_key),
                         resume: HopResume {
                             current,
                             path,
@@ -7242,7 +8386,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // The container maps to itself: the hop goes on to the
                     // selected key, past the mapping it read.
                     match self.mapped_hop(
-                        current, &source, &mapper, &path, index, arm_read, false, results,
+                        current,
+                        &source,
+                        &mapper,
+                        &path,
+                        index,
+                        arm_read,
+                        MappedResume::PastHomomorphic,
+                        results,
                     ) {
                         HopFlow::Next(node, at) => {
                             current = node;
@@ -7281,7 +8432,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 }
                 current = resolved;
             }
-            HopSite::Carrier { .. } | HopSite::Wrapper(_) | HopSite::Terminal(_) => {
+            HopSite::Carrier { .. }
+            | HopSite::Wrapper(_)
+            | HopSite::Terminal(_)
+            | HopSite::Spread(_)
+            | HopSite::Expand(_) => {
                 unreachable!("the hop consumes this read where it is delivered")
             }
         }
@@ -7310,6 +8465,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 Ok(terminal) => return terminal,
                 Err(read) => {
                     let HopRead { key, resume } = *read;
+                    let WalkNeed::Query(key) = key else {
+                        unreachable!("a terminal reads queries only")
+                    };
                     let counts = matches!(resume.site, HopSite::Carrier { .. })
                         && !matches!(key, SemanticQueryKey::TypeOf { .. });
                     let dispatch = self.dispatch;
@@ -7379,13 +8537,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             // UNDER the caller's `Expanded` mode so the demanded
             // terminal projection expands. The EMPTY whole-surface
             // projection keeps the carrier-preserving behaviour of
-            // `expand_empty_path_terminal` below (the slot-binding
+            // `run_expansion` below (the slot-binding
             // indexed-access preservation policy) and is NOT pre-
             // resolved here.
             if self.original_path_non_empty {
                 return self.begin_expanded_terminal_carrier(current, then, path, index, arm_read);
             }
-            return Ok(self.terminal_then(current, then));
+            return self.terminal_then(current, then, (path, index, arm_read));
         }
         if matches!(self.mode(), ProjectionMode::Shallow) {
             if !self.original_path_non_empty {
@@ -7418,14 +8576,36 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         Ok(current)
     }
 
-    /// Finish a terminal resolved one level as `then` says.
-    fn terminal_then(&mut self, mut current: SemanticNodeId, then: TerminalThen) -> SemanticNodeId {
-        let TerminalThen::Expanded { typeof_owns } = then else {
-            return current;
-        };
-        if !typeof_owns {
-            current = self.expand_empty_path_terminal(current);
+    /// Finish a terminal resolved one level as `then` says: the finished
+    /// node, or the read its expansion stands at.
+    fn terminal_then(
+        &mut self,
+        current: SemanticNodeId,
+        then: TerminalThen,
+        at: TerminalAt<'_>,
+    ) -> Result<SemanticNodeId, Box<HopRead>> {
+        match then {
+            TerminalThen::Resolved => Ok(current),
+            TerminalThen::Expanded { typeof_owns: true } => Ok(self.present_terminal(current)),
+            TerminalThen::Expanded { typeof_owns: false } => self.run_expansion(
+                Expansion {
+                    root: current,
+                    work: vec![ExpandFrame::Expand(current)],
+                    results: Vec::new(),
+                    at: current,
+                },
+                at,
+            ),
+            TerminalThen::Expanding(expansion) => {
+                let mut expansion = *expansion;
+                Self::expansion_carrier_settled(&mut expansion, current);
+                self.run_expansion(expansion, at)
+            }
         }
+    }
+
+    /// An expanded terminal presented as the path's terminal.
+    fn present_terminal(&mut self, mut current: SemanticNodeId) -> SemanticNodeId {
         if self.original_path_non_empty {
             // Terminal-surface carrier PRESENTATION: the demanded
             // terminal projection materialises its own surface one
@@ -7478,14 +8658,30 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     (_, QueryResult::Value(value)) => value,
                     (_, QueryResult::Recursive(_) | QueryResult::Error(_)) => node,
                 };
-                Ok(self.terminal_then(resolved, then))
+                self.terminal_then(resolved, then, (&path, index, arm_read))
+            }
+            HopSite::Expand(expansion) => {
+                // The frame's read folds into the walk, as its in-place
+                // read did; a recursive answer is the frame's result, an
+                // errored one or one that is the frame itself keeps the
+                // frame, and any other answer is expanded next.
+                let mut expansion = *expansion;
+                let at = expansion.at;
+                match self.fold_read(deliver()) {
+                    QueryResult::Value(expanded) if expanded != at => {
+                        expansion.work.push(ExpandFrame::Expand(expanded));
+                    }
+                    QueryResult::Value(_) | QueryResult::Error(_) => expansion.results.push(at),
+                    QueryResult::Recursive(recursive) => expansion.results.push(recursive),
+                }
+                self.run_expansion(expansion, (&path, index, arm_read))
             }
             HopSite::Carrier { read, observed, at } => {
                 match self.resume_carrier(*read, observed, deliver) {
                     Err(pending) => {
                         let (key, read, observed) = *pending;
                         Err(Box::new(HopRead {
-                            key,
+                            key: WalkNeed::Query(key),
                             resume: HopResume {
                                 current: node,
                                 path,
@@ -7495,28 +8691,125 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             },
                         }))
                     }
-                    Ok(resolved) => Ok(match at {
+                    Ok(resolved) => match at {
                         CarrierAt::ExpandedTerminal(then) => {
                             let resolved = self.expanded_carrier_settled(node, resolved);
-                            self.terminal_then(resolved, then)
+                            self.terminal_then(resolved, then, (&path, index, arm_read))
                         }
-                        CarrierAt::NavigateTerminal => {
-                            Self::navigate_identity_settled(self.graph(), node, resolved)
-                        }
+                        CarrierAt::NavigateTerminal => Ok(Self::navigate_identity_settled(
+                            self.graph(),
+                            node,
+                            resolved,
+                        )),
                         CarrierAt::Hop => unreachable!("a mid-walk carrier resumes its hop"),
-                    }),
+                    },
                 }
             }
             _ => unreachable!("a terminal resumes at the read it named"),
         }
     }
 
-    /// Resolve a NON-EMPTY-path terminal carrier under `Expanded`, in place.
-    fn resolve_expanded_terminal_carrier(&mut self, node: SemanticNodeId) -> SemanticNodeId {
-        let unwalked = verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice());
-        let step =
-            self.begin_expanded_terminal_carrier(node, TerminalThen::Resolved, &unwalked, 0, None);
-        self.drive_terminal_in_place(step)
+    /// Run an `Expanded` terminal's expansion worklist from where it
+    /// stands. Union / Intersection arm descent grows the heap-backed
+    /// worklist rather than the Rust call stack, and `DeclAnchor`
+    /// expansion tail-iterates through it. A frame's dependency read — a
+    /// declaration placeholder's instantiation, a `Mapped` shell's
+    /// materialization through [`SemanticQueryKey::MappedType`] (so the
+    /// deferred shell becomes its concrete surface), or a non-empty path's
+    /// carrier resolved one level — stops the expansion there with every
+    /// frame and arm result retained ([`HopSite::Expand`],
+    /// [`TerminalThen::Expanding`]); it resumes at that frame. The
+    /// expanded terminal, presented as the path's terminal, once the
+    /// worklist is done.
+    fn run_expansion(
+        &mut self,
+        mut expansion: Expansion,
+        (path, index, arm_read): TerminalAt<'_>,
+    ) -> Result<SemanticNodeId, Box<HopRead>> {
+        while let Some(frame) = expansion.work.pop() {
+            match frame {
+                ExpandFrame::Expand(id) => {
+                    let Some(read) =
+                        self.expand_terminal_step(id, &mut expansion.work, &mut expansion.results)
+                    else {
+                        continue;
+                    };
+                    expansion.at = id;
+                    match read {
+                        ExpandRead::Query(key) => {
+                            return Err(Box::new(HopRead {
+                                key: WalkNeed::Query(key),
+                                resume: HopResume {
+                                    current: id,
+                                    path: path.clone(),
+                                    index,
+                                    arm_read,
+                                    site: HopSite::Expand(Box::new(expansion)),
+                                },
+                            }));
+                        }
+                        ExpandRead::Carrier => match self.begin_expanded_terminal_carrier(
+                            id,
+                            TerminalThen::Resolved,
+                            path,
+                            index,
+                            arm_read,
+                        ) {
+                            Ok(resolved) => {
+                                Self::expansion_carrier_settled(&mut expansion, resolved)
+                            }
+                            Err(mut read) => {
+                                Self::expansion_awaits(&mut read, expansion);
+                                return Err(read);
+                            }
+                        },
+                    }
+                }
+                ExpandFrame::CombineIntersection { parent, originals } => {
+                    self.combine_expanded_arms(
+                        parent,
+                        &originals,
+                        &mut expansion.results,
+                        ExpansionCombineKind::Intersection,
+                    );
+                }
+                ExpandFrame::CombineUnion { parent, originals } => {
+                    self.combine_expanded_arms(
+                        parent,
+                        &originals,
+                        &mut expansion.results,
+                        ExpansionCombineKind::Union,
+                    );
+                }
+            }
+        }
+        let expanded = expansion.results.pop().unwrap_or(expansion.root);
+        Ok(self.present_terminal(expanded))
+    }
+
+    /// An expansion's carrier frame `expansion.at` resolved to `resolved`:
+    /// a carrier that resolved to itself is the frame's result, any other
+    /// resolution is expanded next.
+    fn expansion_carrier_settled(expansion: &mut Expansion, resolved: SemanticNodeId) {
+        if resolved == expansion.at {
+            expansion.results.push(resolved);
+        } else {
+            expansion.work.push(ExpandFrame::Expand(resolved));
+        }
+    }
+
+    /// The read an expansion's carrier frame's resolution stands at, made
+    /// to resume the expansion once the carrier resolves.
+    fn expansion_awaits(read: &mut HopRead, expansion: Expansion) {
+        let then = match &mut read.resume.site {
+            HopSite::Terminal(hop) => &mut hop.then,
+            HopSite::Carrier {
+                at: CarrierAt::ExpandedTerminal(then),
+                ..
+            } => then,
+            _ => unreachable!("a carrier resolved one level reads at its terminal"),
+        };
+        *then = TerminalThen::Expanding(Box::new(expansion));
     }
 
     /// Resolve a NON-EMPTY-path terminal carrier under `Expanded`, then
@@ -7528,7 +8821,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// `DeclRef` / `InstantiationRef` carrier and the caller demanded
     /// `Expanded`, resolve the carrier ONE level (declaration resolution
     /// / instantiation under `published(Expanded)`) so the subsequent
-    /// `expand_empty_path_terminal` can materialise the Object surface.
+    /// `run_expansion` can materialise the Object surface.
     ///
     /// This mirrors the in-loop `DeclRef` / `InstantiationRef` arms
     /// (`advance_step`), which only fire while a segment is still pending
@@ -7536,7 +8829,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// last segment is consumed, so the loop has already exited; this
     /// applies the SAME resolution to the terminal under the caller's
     /// mode. Non-carrier terminals (Object, Union, Intersection, …) are
-    /// returned unchanged and flow into `expand_empty_path_terminal`.
+    /// returned unchanged and flow into `run_expansion`.
     ///
     /// An INTERFACE application is the exception: it stays its named
     /// carrier. The checker prints a selected interface member by its
@@ -7560,14 +8853,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     ) -> Result<SemanticNodeId, Box<HopRead>> {
         let data = match self.graph().node_data(node) {
             Some(data) => data,
-            None => return Ok(self.terminal_then(node, then)),
+            None => return self.terminal_then(node, then, (path, index, arm_read)),
         };
         if let SemanticNodeData::InstantiationRef { base, .. } = &*data {
             if self.dispatch.prepared_decl_kind(base)
                 == Some(verter_session_query::declarations::TypeDeclKind::Interface)
             {
                 drop(data);
-                return Ok(self.terminal_then(node, then));
+                return self.terminal_then(node, then, (path, index, arm_read));
             }
         }
         let resume = |site| HopResume {
@@ -7588,7 +8881,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     .dispatch
                     .typeof_key_with_path(root, typeof_path, self.context);
                 Err(Box::new(HopRead {
-                    key,
+                    key: WalkNeed::Query(key),
                     resume: resume(HopSite::Terminal(Box::new(TerminalHop {
                         then,
                         read: TerminalRead::TypeOf { type_args },
@@ -7607,7 +8900,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 let name = identity.decl_name.clone();
                 drop(data);
                 Err(Box::new(HopRead {
-                    key: SemanticQueryKey::ResolveDecl(ResolveDeclKey { scope, name }),
+                    key: WalkNeed::Query(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                        scope,
+                        name,
+                    })),
                     resume: resume(HopSite::Terminal(Box::new(TerminalHop {
                         then,
                         read: TerminalRead::Declaration,
@@ -7631,10 +8927,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     ),
                 );
                 Err(Box::new(HopRead {
-                    key: SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-                        inst_base,
-                        args_clone,
-                        inst_context,
+                    key: WalkNeed::Query(SemanticQueryKey::Instantiate(
+                        crate::semantic_query::InstantiateKey::new(
+                            inst_base,
+                            args_clone,
+                            inst_context,
+                        ),
                     )),
                     resume: resume(HopSite::Terminal(Box::new(TerminalHop {
                         then,
@@ -7648,7 +8946,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             // mode — so a closed utility terminal (e.g. a `Pick<...>`
             // projected value surfacing as a `BareRef` carrier)
             // resolves through the one shared dispatch and the
-            // subsequent `expand_empty_path_terminal` can materialise
+            // subsequent `run_expansion` can materialise
             // it. Open-domain safety stays owned by
             // `resolve_bare_ref_head` / `build_instantiate`'s
             // `Pick`/`Omit` carrier-stop.
@@ -7660,12 +8958,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 match self.begin_carrier(node, context) {
                     Ok(resolved) => {
                         let resolved = self.expanded_carrier_settled(node, resolved);
-                        Ok(self.terminal_then(resolved, then))
+                        self.terminal_then(resolved, then, (path, index, arm_read))
                     }
                     Err(pending) => {
                         let (key, read, observed) = *pending;
                         Err(Box::new(HopRead {
-                            key,
+                            key: WalkNeed::Query(key),
                             resume: resume(HopSite::Carrier {
                                 read,
                                 observed,
@@ -7677,7 +8975,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             _ => {
                 drop(data);
-                Ok(self.terminal_then(node, then))
+                self.terminal_then(node, then, (path, index, arm_read))
             }
         }
     }
@@ -7689,7 +8987,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// terminal stays the bare `Ref` per the shallow-by-default rule. A
     /// resolved `DeclPlaceholder` is PROGRESS, not failure: the head
     /// resolved to a declaration identity whose body the subsequent
-    /// `expand_empty_path_terminal` materialises via `Instantiate` (its
+    /// `run_expansion` materialises via `Instantiate` (its
     /// `DeclPlaceholder` arm). Every OTHER opaque (a genuine `Miss`, a
     /// recursive back-edge, …) keeps the shallow carrier.
     fn expanded_carrier_settled(
@@ -7745,7 +9043,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             Err(pending) => {
                 let (key, read, observed) = *pending;
                 Err(Box::new(HopRead {
-                    key,
+                    key: WalkNeed::Query(key),
                     resume: HopResume {
                         current: node,
                         path: path.clone(),
@@ -8355,62 +9653,21 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .map(|distributed| distributed.node)
     }
 
-    /// Iterative empty-path-terminal expander. Union / Intersection
-    /// arm descent grows the heap-backed worklist rather than the
-    /// Rust call stack, and `DeclAnchor` expansion tail-iterates
-    /// through the worklist rather than via a recursive call.
-    ///
-    /// **Mapped arm.** When the walker runs in
-    /// [`ProjectionMode::Expanded`] and a `SemanticNodeData::Mapped`
-    /// shell appears at an empty-path terminal, re-enter dispatch via
-    /// [`SemanticQueryKey::MappedType`] so the deferred shell is
-    /// materialised into its concrete surface rather than being
-    /// returned unchanged.
-    fn expand_empty_path_terminal(&mut self, node: SemanticNodeId) -> SemanticNodeId {
-        let mut work: Vec<ExpandFrame> = Vec::new();
-        let mut results: Vec<SemanticNodeId> = Vec::new();
-        work.push(ExpandFrame::Expand(node));
-
-        while let Some(frame) = work.pop() {
-            match frame {
-                ExpandFrame::Expand(id) => {
-                    self.expand_terminal_step(id, &mut work, &mut results);
-                }
-                ExpandFrame::CombineIntersection { parent, originals } => {
-                    self.combine_expanded_arms(
-                        parent,
-                        &originals,
-                        &mut results,
-                        ExpansionCombineKind::Intersection,
-                    );
-                }
-                ExpandFrame::CombineUnion { parent, originals } => {
-                    self.combine_expanded_arms(
-                        parent,
-                        &originals,
-                        &mut results,
-                        ExpansionCombineKind::Union,
-                    );
-                }
-            }
-        }
-
-        results.pop().unwrap_or(node)
-    }
-
     /// Expand one node worth of work, pushing either a direct result
-    /// onto `results` or sub-expansions + a combine frame onto `work`.
+    /// onto `results` or sub-expansions + a combine frame onto `work` —
+    /// or the read the node's expansion takes first, which
+    /// [`Self::run_expansion`] stands at.
     fn expand_terminal_step(
         &mut self,
         node: SemanticNodeId,
         work: &mut Vec<ExpandFrame>,
         results: &mut Vec<SemanticNodeId>,
-    ) {
+    ) -> Option<ExpandRead> {
         let data = match self.graph().node_data(node) {
             Some(data) => data,
             None => {
                 results.push(node);
-                return;
+                return None;
             }
         };
         match &*data {
@@ -8428,14 +9685,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     if self.visited_aliases.iter().any(|a| a == &alias_id) {
                         drop(data);
                         results.push(node);
-                        return;
+                        return None;
                     }
                     self.visited_aliases.push(alias_id);
                 }
                 if self.dispatch.ctx.workspace_is_package_backed(canonical_id) {
                     drop(data);
                     results.push(node);
-                    return;
+                    return None;
                 }
                 drop(data);
                 // Preserve the walker's surface provenance onto the
@@ -8454,28 +9711,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             .with_provenance(self.provenance()),
                     ),
                 );
-                let expanded = match self.execute_read_folding_partial(
-                    SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                return Some(ExpandRead::Query(SemanticQueryKey::Instantiate(
+                    crate::semantic_query::InstantiateKey::new(
                         identity,
                         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                         inst_context,
-                    )),
-                ) {
-                    QueryResult::Value(id) => id,
-                    QueryResult::Recursive(id) => {
-                        results.push(id);
-                        return;
-                    }
-                    QueryResult::Error(_) => {
-                        results.push(node);
-                        return;
-                    }
-                };
-                if expanded == node {
-                    results.push(node);
-                    return;
-                }
-                work.push(ExpandFrame::Expand(expanded));
+                    ),
+                )));
             }
             // A non-empty path has selected this terminal. Empty-path
             // carriers remain addressable until a member demand reads them.
@@ -8483,12 +9725,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 if self.original_path_non_empty =>
             {
                 drop(data);
-                let resolved = self.resolve_expanded_terminal_carrier(node);
-                if resolved == node {
-                    results.push(node);
-                } else {
-                    work.push(ExpandFrame::Expand(resolved));
-                }
+                return Some(ExpandRead::Carrier);
             }
             SemanticNodeData::Mapped { source, mapper }
                 if matches!(self.mode(), ProjectionMode::Expanded) =>
@@ -8497,31 +9734,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 let mapper = mapper.clone();
                 let mapped_mode = self.mode();
                 drop(data);
-                let materialised =
-                    match self.execute_read_folding_partial(SemanticQueryKey::MappedType {
-                        source,
-                        mapper,
-                        context: self.context_from_template(
-                            crate::semantic_query::ProjectionReductionContext::published(
-                                mapped_mode,
-                            ),
-                        ),
-                    }) {
-                        QueryResult::Value(id) => id,
-                        QueryResult::Recursive(id) => {
-                            results.push(id);
-                            return;
-                        }
-                        QueryResult::Error(_) => {
-                            results.push(node);
-                            return;
-                        }
-                    };
-                if materialised == node {
-                    results.push(node);
-                    return;
-                }
-                work.push(ExpandFrame::Expand(materialised));
+                return Some(ExpandRead::Query(SemanticQueryKey::MappedType {
+                    source,
+                    mapper,
+                    context: self.context_from_template(
+                        crate::semantic_query::ProjectionReductionContext::published(mapped_mode),
+                    ),
+                }));
             }
             // Open Conditional at empty-path terminal in
             // Expanded mode. Per CLAUDE.md "Macro Type Traversal Rule"
@@ -8612,7 +9831,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 drop(data);
                 if arms.is_empty() {
                     results.push(node);
-                    return;
+                    return None;
                 }
                 work.push(ExpandFrame::CombineIntersection {
                     parent: node,
@@ -8627,7 +9846,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 drop(data);
                 if arms.is_empty() {
                     results.push(node);
-                    return;
+                    return None;
                 }
                 work.push(ExpandFrame::CombineUnion {
                     parent: node,
@@ -8649,6 +9868,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 results.push(node);
             }
         }
+        None
     }
 
     /// Rebuild an Intersection / Union arm list from the top `originals.len()`
@@ -12928,7 +14148,7 @@ fn collect_literal_keys(
     }
 }
 
-/// Worklist frame for the iterative `expand_empty_path_terminal`
+/// Worklist frame for the iterative `run_expansion`
 /// driver. `Expand` advances one node; `Combine*` rebuilds a
 /// compound from its previously-expanded arms.
 enum ExpandFrame {

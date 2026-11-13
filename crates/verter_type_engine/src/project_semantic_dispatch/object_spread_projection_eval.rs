@@ -215,37 +215,70 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             selector: ObjectProjectionSelector,
             projection_reduction: crate::semantic_query::ProjectionReductionContext,
         ) -> QueryResult<ObjectProjectionFormula> {
-            let canonical = self
-                .graph()
-                .node_scope(program)
-                .and_then(|scope| scope.canonical_file())
-                .unwrap_or_else(|| verter_type_expr::OwnedStr::from(""));
-            let policy = if self.relation_strict_config().exact_optional_property_types {
-                ExactOptionalPropertyPolicy::Enabled
-            } else {
-                ExactOptionalPropertyPolicy::Disabled
-            };
-            let context = self.object_spread_projection_context_for(
-                &canonical,
-                projection_reduction,
-                crate::semantic_query::SubstitutionCanonicalHash::empty(),
-                policy,
-            );
-            match self
-                .execute_via_cold_build_helper(SemanticQueryKey::ProjectObjectSpread {
-                    program,
-                    selector,
-                    context,
-                })
-                .value
-            {
-                QueryResult::Value(SemanticQueryValue::ObjectProjection(formula)) => {
-                    QueryResult::Value(formula)
-                }
-                QueryResult::Value(_) => QueryResult::Error(QueryError::Miss),
-                QueryResult::Error(error) => QueryResult::Error(error),
-                QueryResult::Recursive(node) => QueryResult::Recursive(node),
+            let key = self.object_spread_projection_key(program, selector, projection_reduction);
+            Self::object_projection_of(self.execute_via_cold_build_helper(key).value)
+        }
+    }
+
+    /// The projection of `program` for `selector` a consumer reading under
+    /// `projection_reduction` reads ([`Self::project_object_spread_for_consumer`]):
+    /// under the program's own file's exact-optional policy.
+    pub(super) fn object_spread_projection_key(
+        &self,
+        program: SemanticNodeId,
+        selector: ObjectProjectionSelector,
+        projection_reduction: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticQueryKey {
+        let canonical = self
+            .graph()
+            .node_scope(program)
+            .and_then(|scope| scope.canonical_file())
+            .unwrap_or_else(|| verter_type_expr::OwnedStr::from(""));
+        let policy = if self.relation_strict_config().exact_optional_property_types {
+            ExactOptionalPropertyPolicy::Enabled
+        } else {
+            ExactOptionalPropertyPolicy::Disabled
+        };
+        let context = self.object_spread_projection_context_for(
+            &canonical,
+            projection_reduction,
+            crate::semantic_query::SubstitutionCanonicalHash::empty(),
+            policy,
+        );
+        SemanticQueryKey::ProjectObjectSpread {
+            program,
+            selector,
+            context,
+        }
+    }
+
+    /// The projection of `program` for its member `key` that a consumer
+    /// reading under `projection_reduction` reads.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn object_spread_member_key_for_tests(
+        &self,
+        program: SemanticNodeId,
+        key: crate::semantic_query::PropertyKey,
+        projection_reduction: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticQueryKey {
+        self.object_spread_projection_key(
+            program,
+            ObjectProjectionSelector::Key(key),
+            projection_reduction,
+        )
+    }
+
+    /// The formula a projection read answered.
+    pub(super) fn object_projection_of(
+        value: QueryResult<SemanticQueryValue>,
+    ) -> QueryResult<ObjectProjectionFormula> {
+        match value {
+            QueryResult::Value(SemanticQueryValue::ObjectProjection(formula)) => {
+                QueryResult::Value(formula)
             }
+            QueryResult::Value(_) => QueryResult::Error(QueryError::Miss),
+            QueryResult::Error(error) => QueryResult::Error(error),
+            QueryResult::Recursive(node) => QueryResult::Recursive(node),
         }
     }
 
