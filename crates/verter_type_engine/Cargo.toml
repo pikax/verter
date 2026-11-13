@@ -55,7 +55,7 @@ arc-swap = "1.9"
 boxcar = "=0.2.14"
 dashmap = "6.2"
 hashbrown = { version = "0.17.1", default-features = false, features = ["inline-more"] }
-hotpath = { version = "0.31", optional = true }
+hotpath = { version = "0.23", optional = true }
 imbl = "7.0.2"
 indexmap = "2.14"
 parking_lot = "0.13.0"
@@ -79,7 +79,7 @@ uuid = { version = "1.29", features = ["js"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The profiler itself is native-only: on wasm32 `hotpath` stays in its
 # no-op mode, so `semantic-observe` builds for every target.
-hotpath = { version = "0.31", optional = true, features = ["hotpath"] }
+hotpath = { version = "0.23", optional = true, features = ["hotpath"] }
 uuid = { version = "1.29", features = ["rng-getrandom"] }
 
 # Generator for the SemanticQueryKeySpec table artifact (sole writer of

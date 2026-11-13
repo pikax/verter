@@ -26,10 +26,6 @@ semantic-observe = [
 # Allocation profiling through hotpath's own allocator, on top of the
 # coordinated opt-in.
 hotpath-alloc = ["semantic-observe", "verter_compiler/hotpath-alloc", "hotpath/hotpath-alloc"]
-# hotpath-cloud report metadata (commit, pull request, benchmark, policy) and
-# Callgrind instruction counts, for the hotpath-cloud CI benchmark.
-hotpath-cloud = ["semantic-observe", "hotpath/hotpath-cloud"]
-hotpath-callgrind = ["semantic-observe", "hotpath/hotpath-callgrind"]
 # The long-churn soak runner (`src/soak/`, `verter-soak`). Default-off
 # tooling opt-in that forwards only the session's narrow soak seams: the
 # engine's flight rendezvous, the retention account's ACTIVE-occupancy window,
@@ -79,7 +75,7 @@ glob = "0.3.4"
 rayon = "1.12"
 tempfile = "3.27"
 sha2 = { workspace = true }
-hotpath = { version = "0.31", optional = true }
+hotpath = { version = "0.23", optional = true }
 
 # Process statistics for the semantic benchmark probe (`src/semantic_perf/process_stats.rs`).
 [target.'cfg(windows)'.dependencies]
@@ -104,9 +100,6 @@ verter_supervise = { path = "../verter_supervise" }
 # `verter_compiler` dev-dependency edges in `verter_session`'s Cargo.toml.
 verter_compiler = { path = "../verter_compiler", features = ["test-support"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
-# hotpath's Criterion adapter, for bench targets only: fixed-iteration
-# hotpath reports under `HOTPATH_CRITERION_ITERATIONS`, a pass-through otherwise.
-hotpath = { version = "0.31", features = ["criterion-0-8"] }
 smallvec = "1.16"
 
 [[bin]]
@@ -293,4 +286,4 @@ required-features = ["semantic-observe"]
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The profiler itself is native-only: on wasm32 `hotpath` stays in its
 # no-op mode, so `semantic-observe` builds for every target.
-hotpath = { version = "0.31", optional = true, features = ["hotpath"] }
+hotpath = { version = "0.23", optional = true, features = ["hotpath"] }

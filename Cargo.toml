@@ -96,14 +96,6 @@ codegen-units = 1
 # helpers when the bench needs to be inspected with a debugger
 # attaching to a running process. Keeps the regular `release` profile
 # small and frame-pointer-omitted for production benchmarks.
-# hotpath-cloud CI benchmark profile: release optimisation without fat LTO
-# (too slow to rebuild per pull request) and with symbols kept, which
-# Callgrind needs to attribute instruction counts.
-[profile.hotpath]
-inherits = "release"
-lto = false
-strip = "none"
-
 [profile.release-dbg]
 inherits = "release"
 debug = "line-tables-only"
