@@ -155,9 +155,10 @@ mod query_frames;
 pub(crate) mod request_completions;
 #[cfg(any(test, feature = "test-support"))]
 pub use query_frames::{
+    call_callbacks_typed_here_for_tests, drive_contextual_call_here_for_tests,
     hold_call_needs_here_for_tests, seam_need_probes_for_tests, seam_need_questions_for_tests,
-    take_call_suspensions_for_tests, CallSuspensionForTests, ContextualRouteEventForTests,
-    OpenRequestStateForTests, TaskOutcomeForTests,
+    take_call_suspensions_for_tests, CallSuspensionForTests, ContextualCallProbe,
+    ContextualRouteEventForTests, OpenRequestStateForTests, TaskOutcomeForTests,
 };
 pub use query_frames::{SemanticQueryPoll, SemanticTask};
 pub mod signature_discovery;

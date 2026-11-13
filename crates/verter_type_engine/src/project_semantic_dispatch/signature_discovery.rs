@@ -1658,12 +1658,25 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         subject: SemanticNodeId,
         kind: GraphSignatureKind,
     ) -> Result<crate::signature_kernel::SignatureSetValue, IncompleteReason> {
-        use crate::semantic_query::{QueryResult, SemanticQueryKey, SemanticQueryValue};
+        use crate::semantic_query::SemanticQueryKey;
         let read = self.execute_via_cold_build_helper(SemanticQueryKey::SignaturesOfType {
             subject,
             kind,
             context: SemanticContextId::production(),
         });
+        self.signature_set_of_read(read)
+    }
+
+    /// The signature set a subject's `SignaturesOfType` read answered,
+    /// wherever the read was made: anything but a signature set is the
+    /// reason the subject did not settle.
+    pub(super) fn signature_set_of_read(
+        &self,
+        read: crate::semantic_query::CacheRead<
+            crate::semantic_query::QueryResult<crate::semantic_query::SemanticQueryValue>,
+        >,
+    ) -> Result<crate::signature_kernel::SignatureSetValue, IncompleteReason> {
+        use crate::semantic_query::{QueryResult, SemanticQueryValue};
         if !read.fact_status.is_complete() {
             return Err(if self.connected_demand_tripped() {
                 IncompleteReason::Budget

@@ -263,9 +263,15 @@ pub(super) struct CallPlan {
 /// candidates with the one it stopped inside retained.
 ///
 /// On a frame of the continuation runtime ([`HelperDrive::Frame`]) the
-/// walk reads its candidate list and each argument relation's operand
-/// instantiations as requests; a delivery enters the walk where it stood.
+/// walk reads its candidate list, each argument relation's operand
+/// instantiations and the signature lists a contextual candidate's
+/// preparation maps as requests; a delivery enters the walk where it stood.
 /// Driven in place, it makes every read where it stands and never stops.
+///
+/// A walk whose candidate names a callback ends its round between
+/// candidates with its plan retained: the round the callback's typed
+/// argument begins continues over that plan ([`CallWalk::deliver_callback`])
+/// instead of walking the call again.
 pub(super) struct CallWalk {
     key: ResolveCallKey,
     stage: WalkStage,
@@ -314,6 +320,15 @@ struct CandidateWalk {
     /// The candidate that stopped inside its argument relations, and the
     /// position of its raw form.
     suspended: Option<(Box<SuspendedCandidate>, usize)>,
+    /// The position of the raw form of the candidate whose contextual
+    /// preparation stopped at a read: its collector and its mapping wait in
+    /// the call's contextual continuation, and its next advance re-enters
+    /// the preparation with the delivery.
+    preparing: Option<usize>,
+    /// The argument a callback exchange named, typed by the consumer in the
+    /// call's key: the next advance acquires it into the plan before the
+    /// walk goes on.
+    delivered: Option<usize>,
 }
 
 static SUBTYPE_THEN_ASSIGNABLE: [crate::semantic_query::RelationKind; 2] = [
@@ -383,6 +398,50 @@ struct PendingArgument {
     demand: Box<super::query_frames::OperandDemand>,
 }
 
+/// How a contextual candidate's mapping reads the signature lists it
+/// stops at ([`ProjectSemanticDispatch::contextual_signature_nodes`]): the
+/// list it waits on, the delivery of that read when it resumes, and the
+/// drive.
+struct ListRead<'r> {
+    awaiting: &'r mut Option<SemanticQueryKey>,
+    delivery: Option<(SemanticQueryKey, super::query_frames::QueryDelivery)>,
+    drive: HelperDrive,
+}
+
+/// The contextual type of a context-sensitive argument as an owned walk
+/// over its parameter type's wrapper templates
+/// ([`ProjectSemanticDispatch::advance_contextual_argument_type`]): the
+/// templates still to visit, the nodes mapped so far, and the callable
+/// leaf it stopped inside at a signature list read.
+#[derive(Debug)]
+struct ContextualTypeWalk {
+    pending: Vec<(SemanticNodeId, bool)>,
+    mapped: FxHashMap<SemanticNodeId, SemanticNodeId>,
+    callable: Option<CallableLeaf>,
+}
+
+impl ContextualTypeWalk {
+    /// The walk of `target`, nothing visited yet.
+    fn new(target: SemanticNodeId) -> Self {
+        Self {
+            pending: vec![(target, false)],
+            mapped: FxHashMap::default(),
+            callable: None,
+        }
+    }
+}
+
+/// A callable leaf of a contextual type walk: the leaf, its two
+/// substituted targets, and — once its list is read — the fixed target's
+/// one call signature.
+#[derive(Debug)]
+struct CallableLeaf {
+    node: SemanticNodeId,
+    fixed_target: SemanticNodeId,
+    partial_target: SemanticNodeId,
+    fixed_signature: Option<Option<SemanticNodeId>>,
+}
+
 /// What acquiring a call's plan did in one advance.
 #[allow(clippy::large_enum_variant)] // a request is the common outcome; boxing it costs an allocation per read
 enum PlanProgress {
@@ -419,6 +478,31 @@ impl CallWalk {
         Self {
             key,
             stage: WalkStage::Begin,
+        }
+    }
+
+    /// Whether the walk stands between candidates holding nothing but its
+    /// plan: a callback round ended there, and the round its delivery
+    /// begins continues over that plan.
+    pub(super) fn awaits_callback(&self) -> bool {
+        matches!(
+            &self.stage,
+            WalkStage::Candidates(walk) if walk.suspended.is_none() && walk.preparing.is_none()
+        )
+    }
+
+    /// Continue the walk for the round a callback's delivery begins: `key`
+    /// is the call with the argument at `position` typed by its consumer,
+    /// which the next advance acquires into the retained plan before the
+    /// walk goes on from its first candidate.
+    pub(super) fn deliver_callback(&mut self, key: ResolveCallKey, position: usize) {
+        verter_debug_assert!(
+            self.awaits_callback(),
+            "a callback round ends between candidates"
+        );
+        self.key = key;
+        if let WalkStage::Candidates(walk) = &mut self.stage {
+            walk.delivered = Some(position);
         }
     }
 
@@ -1725,7 +1809,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             walk.stage = WalkStage::Candidates(candidates);
                             HelperStep::Request(request)
                         }
-                        HelperStep::Done(verdict) => HelperStep::Done(verdict),
+                        HelperStep::Done(verdict) => {
+                            // A callback ends the round between candidates:
+                            // the plan stays with the walk for the round the
+                            // callback's delivery continues.
+                            if matches!(
+                                &verdict,
+                                CandidateVerdict::Degraded(
+                                    ResolveCallFailure::ContextSensitiveInference {
+                                        contextual: Some(_)
+                                    }
+                                )
+                            ) {
+                                walk.stage = WalkStage::Candidates(candidates);
+                            }
+                            HelperStep::Done(verdict)
+                        }
                     };
                 }
                 WalkStage::Finished => unreachable!("a walk delivers its verdict once"),
@@ -1743,6 +1842,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &ResolveCallKey,
     ) -> Result<Box<PlanStage>, Box<CandidateVerdict>> {
+        self.graph().record_call_walk_begun();
         let session_watermark = self.dispatch_txn.borrow().relation.sessions.len();
         let callee = self.substitute_canonical(key.callee, &key.context.substitution);
         let explicit_type_args: Arc<[SemanticNodeId]> = Arc::from(
@@ -1923,6 +2023,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             only_candidate: None,
             recovered_candidate: None,
             suspended: None,
+            preparing: None,
+            delivered: None,
         }))
     }
 
@@ -1980,6 +2082,59 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Ok(self.acquire_call_candidates(key, callee, bucket, type_args, answer))
     }
 
+    /// The call signatures of `subject` a contextual candidate's mapping
+    /// reads: the shared signature list. On a frame, a list the memo does
+    /// not serve warm is the request (`Err`), and its delivery is read where
+    /// it was asked; a list whose entry admits its subject, or one the
+    /// runtime would read outside the walk's call-site scope, reads in
+    /// place, as call candidate lists do ([`Self::call_candidate_list`]).
+    fn contextual_signature_nodes(
+        &self,
+        subject: SemanticNodeId,
+        read: &mut ListRead<'_>,
+    ) -> Result<super::signature_discovery::SharedSignatureNodes, Box<HelperRequest>> {
+        let key = SemanticQueryKey::SignaturesOfType {
+            subject,
+            kind: SignatureKind::Call,
+            context: crate::semantic_query::SemanticContextId::production(),
+        };
+        let delivered = match (read.delivery.take(), read.drive) {
+            (Some((delivered, delivery)), HelperDrive::Frame { depth }) => {
+                let awaited = read
+                    .awaiting
+                    .take()
+                    .expect("a delivery answers the signature list the mapping waited on");
+                verter_debug_assert!(
+                    awaited == delivered && delivered == key,
+                    "a delivery answers the list it was asked"
+                );
+                Some((delivery, depth))
+            }
+            (Some(_), HelperDrive::InPlace) => {
+                unreachable!("a mapping driven in place is delivered nothing")
+            }
+            (None, HelperDrive::Frame { depth })
+                if !self.admits_through_entry(&key) && self.walk_scope_is_ambient() =>
+            {
+                match self.enter_helper_read(&key, depth) {
+                    Ok(request) => {
+                        *read.awaiting = Some(key);
+                        return Err(Box::new(request));
+                    }
+                    Err(delivery) => Some((*delivery, depth)),
+                }
+            }
+            (None, _) => None,
+        };
+        Ok(match delivered {
+            Some((delivery, depth)) => {
+                let first = self.signature_set_of_read(self.read_helper_delivery(delivery, depth));
+                self.shared_signature_nodes_from(subject, SignatureKind::Call, first)
+            }
+            None => self.shared_signature_nodes(subject, SignatureKind::Call),
+        })
+    }
+
     /// Whether a read the walk requests of its frame is scoped as the walk
     /// would read it in place. The walk pushes its call site as the
     /// innermost demand scope; a requested read is produced on the runtime
@@ -2000,6 +2155,74 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Enter the argument at `position` a callback's consumer typed in
+    /// `key` into the walk's retained plan, for the round its delivery
+    /// begins: the argument is acquired alone, in place of the run of plan
+    /// arguments it was authored as, and handed to the suspended
+    /// candidate's collector when the call's continuation holds one. The
+    /// walk then goes on from its first candidate as a walk over the plan
+    /// would begin, passing over every candidate before the one the last
+    /// round stopped at.
+    fn enter_delivered_argument(
+        &self,
+        key: &ResolveCallKey,
+        walk: &mut CandidateWalk,
+        position: usize,
+    ) -> Result<(), ResolveCallFailure> {
+        verter_debug_assert!(
+            walk.suspended.is_none() && walk.preparing.is_none(),
+            "a callback round ends between candidates"
+        );
+        let Some(argument) = key.args.get(position) else {
+            return Err(ResolveCallFailure::Undecidable);
+        };
+        let mut acquired = Vec::new();
+        self.acquire_call_argument(key, position, argument, &mut acquired)?;
+        let collects = self
+            .dispatch_txn
+            .borrow()
+            .call
+            .contextual
+            .as_ref()
+            .is_some_and(ContextualCallState::holds_collector);
+        // The candidate's collector relates exactly the argument its
+        // callback named.
+        if collects && acquired.len() != 1 {
+            return Err(ResolveCallFailure::Undecidable);
+        }
+        // Every argument is acquired on its own, so the others' acquisitions
+        // stand as they are.
+        let authored = u32::try_from(position).map_err(|_| ResolveCallFailure::Undecidable)?;
+        let plan =
+            Arc::get_mut(&mut walk.plan).expect("a walk between its advances holds its plan alone");
+        let start = plan
+            .arguments
+            .partition_point(|argument| argument.authored < authored);
+        let end = plan
+            .arguments
+            .partition_point(|argument| argument.authored <= authored);
+        plan.arguments.splice(start..end, acquired.iter().cloned());
+        let mut txn = self.dispatch_txn.borrow_mut();
+        if collects {
+            if let Some(state) = txn.call.contextual.as_mut() {
+                state.deliver_argument(acquired.pop().expect("one acquired argument"));
+            }
+        }
+        walk.session_watermark = txn.relation.sessions.len();
+        walk.outer_applicability = txn.call.applicability;
+        walk.resume_at = txn
+            .call
+            .contextual
+            .as_ref()
+            .and_then(|state| state.resume_at);
+        drop(txn);
+        walk.pass = 0;
+        walk.position = 0;
+        walk.only_candidate = None;
+        walk.recovered_candidate = None;
+        Ok(())
+    }
+
     /// Carry a call's candidate walk on: resume the candidate it stopped
     /// inside with the delivery, or check the next candidate, until one is
     /// selected, the walk fails, a candidate stops on a read, or every
@@ -2011,6 +2234,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         mut delivery: Option<(SemanticQueryKey, super::query_frames::QueryDelivery)>,
         drive: HelperDrive,
     ) -> HelperStep<CandidateVerdict> {
+        if let Some(position) = walk.delivered.take() {
+            if let Err(failure) = self.enter_delivered_argument(key, walk, position) {
+                return HelperStep::Done(CandidateVerdict::Degraded(failure));
+            }
+        }
         let graph = self.graph();
         let bucket = signature_bucket(key.kind);
         let plan = Arc::clone(&walk.plan);
@@ -2064,49 +2292,57 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     (verdict, raw_position)
                 }
                 None => {
-                    if walk.resume_at.is_some() {
-                        if walk.resume_at != Some((applicability, candidate.node)) {
-                            walk.position += 1;
-                            continue;
+                    let raw_position = if let Some(raw_position) = walk.preparing.take() {
+                        // The candidate whose contextual preparation stopped
+                        // at a read re-enters it with the delivery: it was
+                        // passed to and paired with its raw form before.
+                        raw_position
+                    } else {
+                        if walk.resume_at.is_some() {
+                            if walk.resume_at != Some((applicability, candidate.node)) {
+                                walk.position += 1;
+                                continue;
+                            }
+                            walk.resume_at = None;
                         }
-                        walk.resume_at = None;
-                    }
-                    let Some(kind) = bucket_kind(candidate.node) else {
-                        return HelperStep::Done(CandidateVerdict::Degraded(
-                            ResolveCallFailure::Undecidable,
-                        ));
-                    };
-                    // The set was demanded for exactly this bucket; a
-                    // candidate of the other bucket is a producer contract
-                    // violation, and the call fails closed rather than
-                    // deciding on it.
-                    if kind != bucket {
-                        return HelperStep::Done(CandidateVerdict::Degraded(
-                            ResolveCallFailure::Undecidable,
-                        ));
-                    }
-                    // Pair the (possibly instantiated) candidate with its RAW
-                    // form through the content-free authored origin —
-                    // instantiation preserves the occurrence but mints a new
-                    // graph node, so a node-id pairing would lose the raw
-                    // type parameters. A ROOTLESS candidate has no occurrence
-                    // to compare: both lists are the same callee's ordered
-                    // bucket, so its raw form is the candidate at the same
-                    // flat position.
-                    let raw_position = match candidate.occurrence.authored() {
-                        Some(occurrence) => raw_pairing.authored(occurrence, kind, bucket_kind),
-                        None => raw
-                            .get(position)
-                            .filter(|raw| {
-                                raw.occurrence.authored().is_none()
-                                    && bucket_kind(raw.node) == Some(kind)
-                            })
-                            .map(|_| position),
-                    };
-                    let Some(raw_position) = raw_position else {
-                        return HelperStep::Done(CandidateVerdict::Degraded(
-                            ResolveCallFailure::Undecidable,
-                        ));
+                        let Some(kind) = bucket_kind(candidate.node) else {
+                            return HelperStep::Done(CandidateVerdict::Degraded(
+                                ResolveCallFailure::Undecidable,
+                            ));
+                        };
+                        // The set was demanded for exactly this bucket; a
+                        // candidate of the other bucket is a producer contract
+                        // violation, and the call fails closed rather than
+                        // deciding on it.
+                        if kind != bucket {
+                            return HelperStep::Done(CandidateVerdict::Degraded(
+                                ResolveCallFailure::Undecidable,
+                            ));
+                        }
+                        // Pair the (possibly instantiated) candidate with its RAW
+                        // form through the content-free authored origin —
+                        // instantiation preserves the occurrence but mints a new
+                        // graph node, so a node-id pairing would lose the raw
+                        // type parameters. A ROOTLESS candidate has no occurrence
+                        // to compare: both lists are the same callee's ordered
+                        // bucket, so its raw form is the candidate at the same
+                        // flat position.
+                        let raw_position = match candidate.occurrence.authored() {
+                            Some(occurrence) => raw_pairing.authored(occurrence, kind, bucket_kind),
+                            None => raw
+                                .get(position)
+                                .filter(|raw| {
+                                    raw.occurrence.authored().is_none()
+                                        && bucket_kind(raw.node) == Some(kind)
+                                })
+                                .map(|_| position),
+                        };
+                        let Some(raw_position) = raw_position else {
+                            return HelperStep::Done(CandidateVerdict::Degraded(
+                                ResolveCallFailure::Undecidable,
+                            ));
+                        };
+                        raw_position
                     };
                     self.dispatch_txn.borrow_mut().call.applicability = applicability;
                     let prepared = if self.dispatch_txn.borrow().call.contextual.is_some() {
@@ -2116,6 +2352,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             arguments,
                             &mut budget,
                             position + 1 == visible.len(),
+                            delivery.take(),
+                            drive,
                         )
                     } else {
                         Ok(arguments.clone())
@@ -2132,7 +2370,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             None,
                             drive,
                         ),
-                        Err(verdict) => verdict.into(),
+                        Err(contextual::PreparationStop::Failed(failure)) => failure.into(),
+                        // A signature list its mapping reads stops the
+                        // candidate's preparation, its collector held in the
+                        // call's continuation; the walk waits at it.
+                        Err(contextual::PreparationStop::Waiting(request)) => {
+                            self.dispatch_txn.borrow_mut().call.applicability =
+                                walk.outer_applicability;
+                            walk.preparing = Some(raw_position);
+                            return HelperStep::Request(*request);
+                        }
                     };
                     (verdict, raw_position)
                 }
@@ -2305,10 +2552,50 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         fixed: &CanonicalTypeSubstitution,
         inferred: &CanonicalTypeSubstitution,
     ) -> SemanticNodeId {
+        let mut awaiting = None;
+        let mut read = ListRead {
+            awaiting: &mut awaiting,
+            delivery: None,
+            drive: HelperDrive::InPlace,
+        };
+        match self.advance_contextual_argument_type(
+            &mut ContextualTypeWalk::new(target),
+            target,
+            fixed,
+            inferred,
+            &mut read,
+        ) {
+            Ok(contextual) => contextual,
+            Err(_) => unreachable!("a contextual type walk driven in place makes no request"),
+        }
+    }
+
+    /// Carry the contextual type walk of `target` on
+    /// ([`Self::contextual_argument_type`]): the callable leaf it stopped
+    /// inside resumes at the list it waited on, then the templates left
+    /// are visited. A signature list `read` requests stops the walk with
+    /// that leaf retained.
+    fn advance_contextual_argument_type(
+        &self,
+        walk: &mut ContextualTypeWalk,
+        target: SemanticNodeId,
+        fixed: &CanonicalTypeSubstitution,
+        inferred: &CanonicalTypeSubstitution,
+        read: &mut ListRead<'_>,
+    ) -> Result<SemanticNodeId, Box<HelperRequest>> {
+        if let Some(leaf) = walk.callable.as_mut() {
+            let contextual = self.contextual_callable_type(leaf, read)?;
+            let node = leaf.node;
+            walk.callable = None;
+            walk.mapped.insert(node, contextual);
+        }
         // Traverse wrapper templates, never the images of substituted binders.
         // Each callback keeps fixed parameter types and an unfixed return.
-        let mut pending = vec![(target, false)];
-        let mut mapped = FxHashMap::default();
+        let ContextualTypeWalk {
+            pending,
+            mapped,
+            callable,
+        } = walk;
         while let Some((node, finishing)) = pending.pop() {
             if mapped.contains_key(&node) {
                 continue;
@@ -2334,7 +2621,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 Some(SemanticNodeData::Array { element, .. }) => vec![*element],
                 _ => {
-                    mapped.insert(node, self.contextual_callable_type(node, fixed, inferred));
+                    let leaf = callable.insert(self.callable_leaf(node, fixed, inferred));
+                    let contextual = self.contextual_callable_type(leaf, read)?;
+                    *callable = None;
+                    mapped.insert(node, contextual);
                     continue;
                 }
             };
@@ -2399,31 +2689,56 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             mapped.insert(node, self.graph().intern_preserving_scope(node, rebuilt));
         }
-        mapped[&target]
+        Ok(mapped[&target])
     }
 
-    fn contextual_callable_type(
+    /// A callable leaf of a contextual type walk with its two targets
+    /// substituted: every type parameter fixed, and the inferences alone.
+    fn callable_leaf(
         &self,
         target: SemanticNodeId,
         fixed: &CanonicalTypeSubstitution,
         inferred: &CanonicalTypeSubstitution,
-    ) -> SemanticNodeId {
+    ) -> CallableLeaf {
         let fixed_target = self.substitute_canonical(target, fixed);
         let partial_target = self.substitute_canonical(target, inferred);
-        let single = |node: SemanticNodeId| match self
-            .shared_signature_nodes(node, SignatureKind::Call)
-        {
+        CallableLeaf {
+            node: target,
+            fixed_target,
+            partial_target,
+            fixed_signature: None,
+        }
+    }
+
+    /// The contextual type of a callable leaf: its fixed target's one call
+    /// signature with the return its inferences alone give. The fixed
+    /// target's list is read, then the partial target's; a list `read`
+    /// requests leaves the leaf where it stands, the lists read before it
+    /// retained.
+    fn contextual_callable_type(
+        &self,
+        leaf: &mut CallableLeaf,
+        read: &mut ListRead<'_>,
+    ) -> Result<SemanticNodeId, Box<HelperRequest>> {
+        let single = |nodes: super::signature_discovery::SharedSignatureNodes| match nodes {
             super::signature_discovery::SharedSignatureNodes::Nodes(nodes) if nodes.len() == 1 => {
                 Some(nodes[0])
             }
             _ => None,
         };
-        let (Some(fixed_signature), Some(partial_signature)) =
-            (single(fixed_target), single(partial_target))
+        let fixed_signature = match leaf.fixed_signature {
+            Some(signature) => signature,
+            None => *leaf.fixed_signature.insert(single(
+                self.contextual_signature_nodes(leaf.fixed_target, read)?,
+            )),
+        };
+        let partial_signature = single(self.contextual_signature_nodes(leaf.partial_target, read)?);
+        let fixed_target = leaf.fixed_target;
+        let (Some(fixed_signature), Some(partial_signature)) = (fixed_signature, partial_signature)
         else {
             // Non-callable contexts keep their uninferred binders, including
             // the literal's own part of a contextual receiver.
-            return partial_target;
+            return Ok(leaf.partial_target);
         };
         let graph = self.graph();
         let Some(SemanticNodeData::Signature { return_type, .. }) = graph
@@ -2431,14 +2746,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .as_deref()
             .map(crate::semantic_query::SemanticNodeData::clone)
         else {
-            return fixed_target;
+            return Ok(fixed_target);
         };
         let Some(mut data) = graph
             .node_data(fixed_signature)
             .as_deref()
             .map(crate::semantic_query::SemanticNodeData::clone)
         else {
-            return fixed_target;
+            return Ok(fixed_target);
         };
         let SemanticNodeData::Signature {
             return_type: ref mut fixed_return,
@@ -2446,11 +2761,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ..
         } = data
         else {
-            return fixed_target;
+            return Ok(fixed_target);
         };
         *fixed_return = return_type;
         *return_carrier = crate::semantic_query::SignatureReturnCarrier::Declared(return_type);
-        graph.intern_node(data)
+        Ok(graph.intern_node(data))
     }
 
     /// Demand the ordered candidates of the callee's `bucket`, instantiated
@@ -2622,122 +2937,135 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Result<Vec<CallArgument>, ResolveCallFailure> {
         let mut result = Vec::new();
         for (authored, argument) in key.args.iter().enumerate() {
-            record_argument_work(1);
-            let authored = u32::try_from(authored).map_err(|_| ResolveCallFailure::Undecidable)?;
-            let context_sensitive = argument.is_context_sensitive();
-            let (node, spread, literal_mode, (const_view, first_pass), literal_provenance) =
-                match argument {
-                    CallArgKey::Eager {
-                        ty,
-                        spread,
-                        literal_mode,
-                        const_view,
-                        first_pass,
-                        literal_provenance,
-                        ..
-                    } => (
-                        *ty,
-                        *spread,
-                        *literal_mode,
-                        (*const_view, *first_pass),
-                        literal_provenance.clone(),
-                    ),
-                    CallArgKey::ProgramExpression {
-                        point,
-                        spread,
-                        literal_mode,
-                        ..
-                    } => {
-                        let (_serve, source_demand) = self
-                            .ctx
-                            .indexed_expression_source(point.canonical_id.as_ref())
-                            .ok_or(ResolveCallFailure::Undecidable)?;
-                        let indexed_point = verter_type_expr::facts::ProgramExpressionIdentity {
-                            canonical_id: std::sync::Arc::<str>::from(point.canonical_id.as_str()),
-                            offset: point.offset,
-                        };
-                        let program_index = source_demand.function_program_index();
-                        let record = program_index
-                            .expression(&indexed_point)
-                            .ok_or(ResolveCallFailure::Undecidable)?;
-                        let expression = source_demand
-                            .indexed_program_expression_ir(record)
-                            .ok_or(ResolveCallFailure::Undecidable)?;
-                        let node = self
-                            .evaluate_indexed_value_expression_node(
-                                point.canonical_id.as_ref(),
-                                record.locator.contributor.owner,
-                                expression.as_ref(),
-                            )
-                            .ok_or(ResolveCallFailure::Undecidable)?;
-                        (node, *spread, *literal_mode, (None, None), None)
-                    }
-                };
-            let freshness_origin = node;
-            let node = self.substitute_canonical(node, &key.context.substitution);
-            if !spread {
-                result.push(CallArgument {
-                    node,
-                    freshness_origin,
+            self.acquire_call_argument(key, authored, argument, &mut result)?;
+        }
+        Ok(result)
+    }
+
+    /// Acquire the call's argument authored at `authored` onto `result`:
+    /// the argument, or each argument a tuple spread expands to.
+    fn acquire_call_argument(
+        &self,
+        key: &ResolveCallKey,
+        authored: usize,
+        argument: &CallArgKey,
+        result: &mut Vec<CallArgument>,
+    ) -> Result<(), ResolveCallFailure> {
+        record_argument_work(1);
+        let authored = u32::try_from(authored).map_err(|_| ResolveCallFailure::Undecidable)?;
+        let context_sensitive = argument.is_context_sensitive();
+        let (node, spread, literal_mode, (const_view, first_pass), literal_provenance) =
+            match argument {
+                CallArgKey::Eager {
+                    ty,
+                    spread,
                     literal_mode,
+                    const_view,
+                    first_pass,
                     literal_provenance,
-                    indefinite_spread: false,
-                    context_sensitive,
-                    const_view: const_view
-                        .map(|view| self.substitute_canonical(view, &key.context.substitution)),
-                    first_pass: first_pass
-                        .map(|view| self.substitute_canonical(view, &key.context.substitution)),
-                    authored,
-                });
-                continue;
-            }
-            match self.graph().node_data(node).as_deref() {
-                // A REST-free tuple spread expands positionally. An
-                // OPTIONAL element supplies its `T | undefined` argument
-                // and still counts toward the target's maximum — the
-                // TypeScript spread-argument rule: the position's value may
-                // be absent, so `undefined` reaches the parameter, and a
-                // non-nullish parameter rejects it. Only a tuple carrying
-                // a rest element (unknown length) stays indefinite.
-                Some(SemanticNodeData::Tuple { elements, .. })
-                    if elements.iter().all(|element| !element.rest) =>
-                {
-                    let undefined = self
-                        .graph()
-                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
-                    result.extend(elements.iter().map(|element| CallArgument {
-                        node: if element.optional && element.value != undefined {
-                            self.intern_normalized_union_or_intersection(
-                                &[element.value, undefined],
-                                true,
-                            )
-                        } else {
-                            element.value
-                        },
-                        freshness_origin,
-                        literal_mode,
-                        literal_provenance: None,
-                        indefinite_spread: false,
-                        context_sensitive,
-                        const_view: None,
-                        first_pass: None,
-                        authored,
-                    }));
+                    ..
+                } => (
+                    *ty,
+                    *spread,
+                    *literal_mode,
+                    (*const_view, *first_pass),
+                    literal_provenance.clone(),
+                ),
+                CallArgKey::ProgramExpression {
+                    point,
+                    spread,
+                    literal_mode,
+                    ..
+                } => {
+                    let (_serve, source_demand) = self
+                        .ctx
+                        .indexed_expression_source(point.canonical_id.as_ref())
+                        .ok_or(ResolveCallFailure::Undecidable)?;
+                    let indexed_point = verter_type_expr::facts::ProgramExpressionIdentity {
+                        canonical_id: std::sync::Arc::<str>::from(point.canonical_id.as_str()),
+                        offset: point.offset,
+                    };
+                    let program_index = source_demand.function_program_index();
+                    let record = program_index
+                        .expression(&indexed_point)
+                        .ok_or(ResolveCallFailure::Undecidable)?;
+                    let expression = source_demand
+                        .indexed_program_expression_ir(record)
+                        .ok_or(ResolveCallFailure::Undecidable)?;
+                    let node = self
+                        .evaluate_indexed_value_expression_node(
+                            point.canonical_id.as_ref(),
+                            record.locator.contributor.owner,
+                            expression.as_ref(),
+                        )
+                        .ok_or(ResolveCallFailure::Undecidable)?;
+                    (node, *spread, *literal_mode, (None, None), None)
                 }
-                _ => result.push(CallArgument {
-                    node,
+            };
+        let freshness_origin = node;
+        let node = self.substitute_canonical(node, &key.context.substitution);
+        if !spread {
+            result.push(CallArgument {
+                node,
+                freshness_origin,
+                literal_mode,
+                literal_provenance,
+                indefinite_spread: false,
+                context_sensitive,
+                const_view: const_view
+                    .map(|view| self.substitute_canonical(view, &key.context.substitution)),
+                first_pass: first_pass
+                    .map(|view| self.substitute_canonical(view, &key.context.substitution)),
+                authored,
+            });
+            return Ok(());
+        }
+        match self.graph().node_data(node).as_deref() {
+            // A REST-free tuple spread expands positionally. An
+            // OPTIONAL element supplies its `T | undefined` argument
+            // and still counts toward the target's maximum — the
+            // TypeScript spread-argument rule: the position's value may
+            // be absent, so `undefined` reaches the parameter, and a
+            // non-nullish parameter rejects it. Only a tuple carrying
+            // a rest element (unknown length) stays indefinite.
+            Some(SemanticNodeData::Tuple { elements, .. })
+                if elements.iter().all(|element| !element.rest) =>
+            {
+                let undefined = self
+                    .graph()
+                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+                result.extend(elements.iter().map(|element| CallArgument {
+                    node: if element.optional && element.value != undefined {
+                        self.intern_normalized_union_or_intersection(
+                            &[element.value, undefined],
+                            true,
+                        )
+                    } else {
+                        element.value
+                    },
                     freshness_origin,
                     literal_mode,
                     literal_provenance: None,
-                    indefinite_spread: true,
+                    indefinite_spread: false,
                     context_sensitive,
                     const_view: None,
                     first_pass: None,
                     authored,
-                }),
+                }));
             }
+            _ => result.push(CallArgument {
+                node,
+                freshness_origin,
+                literal_mode,
+                literal_provenance: None,
+                indefinite_spread: true,
+                context_sensitive,
+                const_view: None,
+                first_pass: None,
+                authored,
+            }),
         }
-        Ok(result)
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]

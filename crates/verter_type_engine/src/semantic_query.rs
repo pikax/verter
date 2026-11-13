@@ -6635,6 +6635,13 @@ pub struct SemanticGraphStats {
     /// Counted where the relation runs, outside every charge and its
     /// rollback, so an argument related again counts again.
     pub call_arguments_related: u64,
+    /// Executor walks call resolutions began, wherever they ran: one per
+    /// walk whose callee is substituted and whose candidate plan is
+    /// acquired. Counted where the walk's first stage runs, outside every
+    /// charge and its rollback, so a call executed again — a contextual
+    /// round begun from its entry instead of continued over its plan —
+    /// counts again.
+    pub call_walks_begun: u64,
     /// Property pairs object comparisons related, wherever they ran: one
     /// per target property whose pair the comparison relates. Counted where
     /// the pair is related, outside every charge and its rollback, so a
@@ -13078,6 +13085,7 @@ mod tests {
             "relation_reductions",
             "call_candidates_begun",
             "call_arguments_related",
+            "call_walks_begun",
             "relation_members_related",
             "admission_stages_walked",
             "deferred_steps_evaluated",
