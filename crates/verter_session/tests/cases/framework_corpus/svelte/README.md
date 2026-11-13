@@ -1,7 +1,7 @@
 # Svelte framework-surface corpus (hermetic)
 
 Vendored, locally-authored `.svelte` fixtures exercising the Svelte typeinfo
-surface adapter end-to-end through `resolve_framework_surface_with_audit`. Every
+surface adapter end-to-end through `type_info_with_audit`. Every
 fixture is self-contained — these tests compile and run with NO third-party
 repository checked out alongside this one (the Testing-Hermeticity rule).
 

@@ -4282,36 +4282,33 @@ impl NapiVerterHost {
         }))?
     }
 
-    /// Resolve a component's framework surfaces and return the wire
+    /// Answer a typeinfo graph operation and return the wire
     /// `TypeInfoGraphResponse` plus the per-request audit record.
     ///
     /// `request` is a protobuf-encoded
     /// `verter_protocol::typeinfo::graph::TypeInfoGraphRequest` envelope
-    /// carrying the `GRAPH_OPERATION_FRAMEWORK_SURFACES` operation (the
-    /// framework-surface operation rides the existing graph envelope — no
-    /// dedicated request type). The host runs the envelope validator FIRST,
+    /// carrying any served operation (resolve-symbol, expand-around or
+    /// framework surfaces). The host runs the envelope validator FIRST,
     /// so a malformed envelope returns the typed wire `error` arm in
     /// `response` BEFORE any registry lookup or semantic dispatch.
     ///
     /// `response` is the protobuf-encoded `TypeInfoGraphResponse` — the
-    /// `framework_surface` arm on success, the `error` arm on a typed
+    /// operation's answer arm on success, the `error` arm on a typed
     /// rejection — and is ALWAYS present (the validation-first executor
     /// always produces a typed response). `auditRecord` is `null` when
     /// audit is disabled / filtered; the audit envelope rides BOTH the
     /// success AND the rejection outcome.
-    #[napi(js_name = "resolveFrameworkSurfaceWithAudit")]
-    pub fn resolve_framework_surface_with_audit(
+    #[napi(js_name = "typeInfoWithAudit")]
+    pub fn type_info_with_audit(
         &self,
         request: Buffer,
     ) -> Result<typeinfo::NapiFrameworkSurfaceResult> {
         let envelope = typeinfo::decode_type_info_graph_request(request)?;
         let host = std::sync::Arc::clone(&self.inner);
         catch_panic(std::panic::AssertUnwindSafe(move || {
-            let (outcome, record) = host
-                .resolve_framework_surface_with_audit(envelope)
-                .into_parts();
+            let (outcome, record) = host.type_info_with_audit(envelope).into_parts();
             // The validation-first executor always yields a typed wire
-            // response: the `framework_surface` arm on success, the
+            // response: the operation's answer arm on success, the
             // `error` arm on a typed rejection. The `AuditedResult` Err
             // arm drops the (error-arm) response, so re-form it here so
             // the JS side always decodes a `TypeInfoGraphResponse`.
@@ -5386,14 +5383,14 @@ defineProps<{ value: Unsafe }>()
     /// Route-level proof: a runtime-object macro's real member presence
     /// must publish through the SOLE audited wire entry for
     /// `GRAPH_OPERATION_FRAMEWORK_SURFACES`
-    /// (`resolve_framework_surface_with_audit`, `CLAUDE.md` → "Framework
+    /// (`type_info_with_audit`, `CLAUDE.md` → "Framework
     /// Adapter Substrate"), exercised through the FULL encode → NAPI call →
     /// decode round-trip a real JS caller drives — not just the internal
     /// `resolve_vue_macro_surface`/direct-host-call route.
     ///
     /// `verter_lsp` has no framework-surface / typeinfo-graph request
     /// handler at all today (confirmed by inspection — no reference to
-    /// `resolve_framework_surface_with_audit`, `FrameworkSurfacePayload`, or
+    /// `type_info_with_audit`, `FrameworkSurfacePayload`, or
     /// `GRAPH_OPERATION_FRAMEWORK_SURFACES` anywhere under
     /// `crates/verter_lsp/src/`), so there is no SEPARATE LSP route to prove
     /// this through without inventing a new LSP wire surface. This crate
@@ -5488,7 +5485,7 @@ defineProps<{ value: Unsafe }>()
         let request_buf = Buffer::from(envelope.encode_to_vec());
 
         let result = napi_host
-            .resolve_framework_surface_with_audit(request_buf)
+            .type_info_with_audit(request_buf)
             .expect("the NAPI wire adapter must decode/dispatch/encode successfully");
 
         let response = wire::TypeInfoGraphResponse::decode(result.response.as_ref())
@@ -5529,7 +5526,7 @@ defineProps<{ value: Unsafe }>()
     }
 
     #[test]
-    fn resolve_framework_surface_with_audit_publishes_real_runtime_object_expose_members() {
+    fn type_info_with_audit_publishes_real_runtime_object_expose_members() {
         let names = runtime_object_members_via_napi_wire_round_trip(
             "/w/RuntimeExposeNapi.vue",
             "<script setup lang=\"ts\">\n\
@@ -5549,7 +5546,7 @@ defineProps<{ value: Unsafe }>()
     }
 
     #[test]
-    fn resolve_framework_surface_with_audit_publishes_real_runtime_object_props_members() {
+    fn type_info_with_audit_publishes_real_runtime_object_props_members() {
         let names = runtime_object_members_via_napi_wire_round_trip(
             "/w/RuntimePropsNapi.vue",
             "<script setup lang=\"ts\">\n\

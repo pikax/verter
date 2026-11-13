@@ -120,7 +120,7 @@ Top-level record (`crates/verter_audit/src/record.rs`):
 | `Mcp { tool: String }` | `McpToolPayload` | `VerterHost::audit_mcp_tool_call` |
 | `BundlerBatch { kind: BundlerKindTag }` | `BundlerBatchPayload` | `BatchAuditAggregator::summarize` |
 | `Custom { name: String }` | `RequestKindPayload::None` | Open-ended escape hatch |
-| `TypeInfoGraph` | `TypeInfoGraphPayload` | `VerterHost::resolve_framework_surface_with_audit` (the typeinfo graph wire envelope) |
+| `TypeInfoGraph` | `TypeInfoGraphPayload` | `VerterHost::type_info_with_audit` (the typeinfo graph wire envelope) |
 | `FlowReturnInference` | `FlowReturnInferencePayload` | `VerterHost::get_flow_return_type_with_audit` |
 
 ### Typed Payload Accessors
@@ -372,7 +372,7 @@ The guard's `MISSING_TLS_TEST` allow-list is empty: every Wave-3 entry-point is 
 
 NAPI bindings: `crates/verter_napi/src/audit.rs` (helper types + decoders) and inline `#[napi] impl NapiVerterHost` in `crates/verter_napi/src/lib.rs`. WASM bindings: `crates/verter_wasm/src/audit.rs` + `crates/verter_wasm/src/lib.rs`. All exports return `Buffer` (JSON UTF-8 payload) for parity with the original `getComponentMetaWithAudit` contract; consumers decode against `@verter/types/audit.generated.ts`.
 
-TypeScript consumers branch on `captureAvailability()` (exported by `@verter/native` and `@verter/wasm`), never on a missing record. Without capture `compileWithAudit` / `analyzeWithAudit` / `resolveTypeWithAudit` return `null`, the `auditRecord` of `resolveSymbolWithAudit` / `evaluateTypeExpressionWithAudit` / `resolveFrameworkSurfaceWithAudit` is absent, `auditWorkspaceOp` returns a record with `capture_state: "Unavailable"`, and the store readers, `getComponentMetaWithAudit` and the `why*FromAuditJson` walkers throw "audit capture is unavailable". Capture-aware TS specs keep both branches: the default binding (`native-test`) asserts the unavailable outcome, and CI `native-observe-test` builds the binding with `pnpm --filter @verter/native build:observe:debug` and runs `@verter/native` and `@verter/typeinfo` with capture available.
+TypeScript consumers branch on `captureAvailability()` (exported by `@verter/native` and `@verter/wasm`), never on a missing record. Without capture `compileWithAudit` / `analyzeWithAudit` / `resolveTypeWithAudit` return `null`, the `auditRecord` of `resolveSymbolWithAudit` / `evaluateTypeExpressionWithAudit` / `typeInfoWithAudit` is absent, `auditWorkspaceOp` returns a record with `capture_state: "Unavailable"`, and the store readers, `getComponentMetaWithAudit` and the `why*FromAuditJson` walkers throw "audit capture is unavailable". Capture-aware TS specs keep both branches: the default binding (`native-test`) asserts the unavailable outcome, and CI `native-observe-test` builds the binding with `pnpm --filter @verter/native build:observe:debug` and runs `@verter/native` and `@verter/typeinfo` with capture available.
 
 ## `BatchAuditAggregator`
 

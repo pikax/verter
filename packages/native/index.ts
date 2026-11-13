@@ -1104,26 +1104,23 @@ export declare class VerterHost {
   };
 
   /**
-   * Resolve a component's framework surfaces (props, emits, slots,
-   * options, expose, model) and return the wire `TypeInfoGraphResponse`
-   * plus the per-request audit record.
+   * Answer a typeinfo graph operation (resolve-symbol, expand-around or
+   * framework surfaces) and return the wire `TypeInfoGraphResponse` plus
+   * the per-request audit record.
    *
-   * `request` is a protobuf-encoded
-   * `verter.v1.TypeInfoGraphRequest` envelope carrying the
-   * `GRAPH_OPERATION_FRAMEWORK_SURFACES` operation (the framework-surface
-   * operation rides the existing graph envelope — no dedicated request
-   * type). The host runs the envelope validator FIRST, so a malformed
+   * `request` is a protobuf-encoded `verter.v1.TypeInfoGraphRequest`
+   * envelope. The host runs the envelope validator FIRST, so a malformed
    * envelope returns the typed wire `error` arm in `response` BEFORE any
    * registry lookup or semantic dispatch.
    *
    * `response` is the protobuf-encoded `TypeInfoGraphResponse` — the
-   * `framework_surface` arm on success, the `error` arm on a typed
+   * operation's answer arm on success, the `error` arm on a typed
    * rejection — and is ALWAYS present (the validation-first executor
    * always produces a typed response). `auditRecord` is `null` when
    * audit is disabled / filtered; the audit envelope rides BOTH the
    * success AND the rejection outcome.
    */
-  resolveFrameworkSurfaceWithAudit(request: Buffer): {
+  typeInfoWithAudit(request: Buffer): {
     response: Buffer;
     auditRecord: Buffer | null;
   };

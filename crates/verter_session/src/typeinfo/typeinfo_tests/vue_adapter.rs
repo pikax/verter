@@ -1449,7 +1449,7 @@ defineExpose()
 // ---------------------------------------------------------------------------
 // Route-level proof: a runtime-object macro's member presence must also
 // publish through the AUDITED public wire entry
-// (`resolve_framework_surface_with_audit`), not just the internal
+// (`type_info_with_audit`), not just the internal
 // `resolve_vue_macro_surface` the tests above exercise directly. This is the
 // SOLE audited wire entry for `GRAPH_OPERATION_FRAMEWORK_SURFACES`
 // (`CLAUDE.md` → "Framework Adapter Substrate"); today `verter_napi` /
@@ -1515,7 +1515,7 @@ fn vue_surface_members_via_audited_entry(
         )),
     };
 
-    let result = host.resolve_framework_surface_with_audit(envelope);
+    let result = host.type_info_with_audit(envelope);
     let response = result
         .as_result()
         .unwrap_or_else(|err| panic!("audited framework-surface request must succeed: {err:?}"));

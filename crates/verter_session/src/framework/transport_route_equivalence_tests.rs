@@ -936,10 +936,6 @@ const NAPI_OUT_OF_SCOPE: &[(&str, &str)] = &[
     ("remove", "lifecycle"),
     ("resolve", "id resolution"),
     ("resolveExports", "type-resolution product"),
-    (
-        "resolveFrameworkSurfaceWithAudit",
-        "framework-surface wire operation",
-    ),
     ("resolveImport", "import resolution"),
     (
         "resolveKnownModuleReferenceDependencies",
@@ -952,6 +948,7 @@ const NAPI_OUT_OF_SCOPE: &[(&str, &str)] = &[
         "typeInfoCapabilities",
         "TypeInfo capability handshake (versions and admitted framework profiles)",
     ),
+    ("typeInfoWithAudit", "TypeInfo graph wire operations"),
 ];
 
 /// The `VerterHost` methods the NAPI probe actually executes.
@@ -1460,10 +1457,6 @@ const WASM_OUT_OF_SCOPE: &[(&str, &str)] = &[
     ("remove", "lifecycle"),
     ("resolve", "id resolution"),
     (
-        "resolveFrameworkSurfaceWithAudit",
-        "framework-surface wire operation",
-    ),
-    (
         "resolveKnownModuleReferenceDependencies",
         "dependency resolution",
     ),
@@ -1474,6 +1467,7 @@ const WASM_OUT_OF_SCOPE: &[(&str, &str)] = &[
         "typeInfoCapabilities",
         "TypeInfo capability handshake (versions and admitted framework profiles)",
     ),
+    ("typeInfoWithAudit", "TypeInfo graph wire operations"),
 ];
 
 /// wasm-bindgen's own memory-management members on every generated class.

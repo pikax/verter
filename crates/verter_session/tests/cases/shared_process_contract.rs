@@ -604,7 +604,7 @@ fn resolved_props(response: &wire::TypeInfoGraphResponse) -> Vec<String> {
     names
 }
 
-/// A typeinfo-graph wire request (`resolve_framework_surface_with_audit` —
+/// A typeinfo-graph wire request (`type_info_with_audit` —
 /// the SOLE audited entry point for `TypeInfoGraphRequest` framework
 /// surfaces; see CLAUDE.md's Framework Adapter Substrate) across TWO hosts
 /// with the SAME canonical id and different content, in one process. None
@@ -630,21 +630,13 @@ fn typeinfo_graph_request_across_hosts_stays_isolated() {
         FileLanguage::vue(),
     );
 
-    let result_a = host_a.resolve_framework_surface_with_audit(framework_envelope(
-        &host_a,
-        "/src/Comp.vue",
-        "vue",
-    ));
+    let result_a = host_a.type_info_with_audit(framework_envelope(&host_a, "/src/Comp.vue", "vue"));
     let response_a = result_a
         .as_result()
         .expect("host A's framework-surface request must resolve structurally");
     assert_eq!(resolved_props(response_a), vec!["onA"]);
 
-    let result_b = host_b.resolve_framework_surface_with_audit(framework_envelope(
-        &host_b,
-        "/src/Comp.vue",
-        "vue",
-    ));
+    let result_b = host_b.type_info_with_audit(framework_envelope(&host_b, "/src/Comp.vue", "vue"));
     let response_b = result_b
         .as_result()
         .expect("host B's framework-surface request must resolve structurally");
@@ -656,11 +648,8 @@ fn typeinfo_graph_request_across_hosts_stays_isolated() {
     // Re-read A again AFTER touching B (same canonical id, same process), to
     // catch a shared slot that only manifests once a second host has
     // resolved a typeinfo-graph request for the same canonical id.
-    let result_a_again = host_a.resolve_framework_surface_with_audit(framework_envelope(
-        &host_a,
-        "/src/Comp.vue",
-        "vue",
-    ));
+    let result_a_again =
+        host_a.type_info_with_audit(framework_envelope(&host_a, "/src/Comp.vue", "vue"));
     let response_a_again = result_a_again
         .as_result()
         .expect("host A's re-resolve must resolve structurally");

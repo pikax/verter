@@ -1,6 +1,6 @@
 //! Framework-surface executor wire-entry coverage.
 //!
-//! Discriminating coverage for `VerterHost::resolve_framework_surface_with_audit`:
+//! Discriminating coverage for `VerterHost::type_info_with_audit`:
 //! - VALIDATION FIRST: a malformed envelope (op/payload mismatch, framework
 //!   schema-version mismatch) returns the typed wire `error` arm BEFORE any
 //!   registry lookup or semantic dispatch — no `framework_surface` arm, no
@@ -272,8 +272,7 @@ fn a_degraded_framework_surface_never_encodes_exact_resolved() {
             })
             .unwrap_or_else(|e| panic!("{canonical}: upsert {e:?}"));
 
-        let result = host
-            .resolve_framework_surface_with_audit(framework_envelope(&host, canonical, adapter));
+        let result = host.type_info_with_audit(framework_envelope(&host, canonical, adapter));
         let response = result.as_result().expect("structural response");
         let payload = expect_payload(response);
         let entries = entries_by_kind(payload);
@@ -328,7 +327,7 @@ fn malformed_envelope_op_payload_mismatch_returns_error_before_dispatch() {
     // Corrupt the operation discriminator to a non-framework operation.
     envelope.operation = wire::Operation::ResolveSymbol as i32;
 
-    let result = host.resolve_framework_surface_with_audit(envelope);
+    let result = host.type_info_with_audit(envelope);
     // A malformed envelope is the audited Err outcome carrying the typed wire
     // error — no framework_surface payload, no registered adapter selection.
     result
@@ -347,7 +346,7 @@ fn framework_schema_version_mismatch_rejected_before_dispatch() {
     for version in [2, 3, 9, 10] {
         let envelope =
             framework_envelope_versioned("/Parity.vue", Some(profile.clone()), version, version);
-        let result = host.resolve_framework_surface_with_audit(envelope);
+        let result = host.type_info_with_audit(envelope);
         let error = result
             .as_result()
             .expect_err("a sub-minimum schema version must be the Err outcome");
@@ -366,7 +365,7 @@ fn framework_schema_version_mismatch_rejected_before_dispatch() {
 fn empty_framework_selector_canonical_is_not_applicable_in_rejected_audit() {
     let host = build_host();
     let envelope = framework_envelope(&host, "", "vue");
-    let result = host.resolve_framework_surface_with_audit(envelope);
+    let result = host.type_info_with_audit(envelope);
 
     result
         .as_result()
@@ -416,7 +415,7 @@ fn an_unminted_profile_reference_is_unknown_framework_profile() {
         wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
         wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
     );
-    let result = host.resolve_framework_surface_with_audit(envelope);
+    let result = host.type_info_with_audit(envelope);
     assert_eq!(expect_unknown_profile(&result), forged);
 }
 
@@ -449,7 +448,7 @@ fn a_disabled_framework_profile_is_neither_advertised_nor_admitted() {
         wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
         wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
     );
-    let result = vue_only.resolve_framework_surface_with_audit(envelope);
+    let result = vue_only.type_info_with_audit(envelope);
     assert_eq!(expect_unknown_profile(&result), svelte_profile);
 }
 
@@ -471,8 +470,7 @@ fn the_response_echoes_the_admitted_profile_and_the_discovered_profiles_are_dist
     sorted.sort();
     assert_eq!(digests, sorted, "advertisements are in digest order");
 
-    let result =
-        host.resolve_framework_surface_with_audit(framework_envelope(&host, "/Parity.vue", "vue"));
+    let result = host.type_info_with_audit(framework_envelope(&host, "/Parity.vue", "vue"));
     let response = result.into_result().expect("a Vue request resolves");
     let payload = expect_payload(&response);
     let selector = payload.selector.as_ref().expect("the selector is echoed");
@@ -506,7 +504,7 @@ fn a_retired_field_4_adapter_string_does_not_select_a_profile() {
     }
     let bytes = envelope.encode_to_vec();
     let envelope = wire::TypeInfoGraphRequest::decode(bytes.as_slice()).expect("decodes");
-    let result = host.resolve_framework_surface_with_audit(envelope);
+    let result = host.type_info_with_audit(envelope);
     let error = result
         .as_result()
         .expect_err("a field-4-only selector must be the Err outcome");
@@ -524,7 +522,7 @@ fn a_retired_field_4_adapter_string_does_not_select_a_profile() {
 fn response_carries_exactly_one_entry_per_known_kind() {
     let host = build_host();
     let envelope = framework_envelope(&host, "/Parity.vue", "vue");
-    let result = host.resolve_framework_surface_with_audit(envelope);
+    let result = host.type_info_with_audit(envelope);
     let response = result
         .into_result()
         .expect("a well-formed Vue request resolves");
@@ -562,7 +560,7 @@ fn a_facet_demand_answers_exactly_the_requested_kinds_in_canonical_order() {
         "vue",
         &[FrameworkSurfaceKind::Slots, FrameworkSurfaceKind::Props],
     );
-    let result = host.resolve_framework_surface_with_audit(envelope);
+    let result = host.type_info_with_audit(envelope);
     let response = result
         .into_result()
         .expect("a well-formed demanding request resolves");
@@ -600,7 +598,7 @@ fn vue_props_emits_slots_match_live_macro_dtos() {
     // members the live `vue_macro_dtos` path produces for the same SFC.
     let host = build_host();
     let envelope = framework_envelope(&host, "/Parity.vue", "vue");
-    let result = host.resolve_framework_surface_with_audit(envelope);
+    let result = host.type_info_with_audit(envelope);
     let response = result.into_result().expect("Vue request resolves");
     let payload = expect_payload(&response);
     let by_kind = entries_by_kind(payload);
@@ -723,7 +721,7 @@ fn supported_empty_kind_is_distinct_from_unsupported() {
     // supported-empty vs unsupported distinction on the wire.
     let host = build_host();
     let envelope = framework_envelope(&host, "/Parity.vue", "vue");
-    let result = host.resolve_framework_surface_with_audit(envelope);
+    let result = host.type_info_with_audit(envelope);
     let response = result.into_result().expect("Vue request resolves");
     let payload = expect_payload(&response);
     let by_kind = entries_by_kind(payload);
@@ -771,7 +769,7 @@ fn define_model_surface_carries_the_model_binding() {
     );
     let envelope = framework_envelope(&host, "/Model.vue", "vue");
     let response = host
-        .resolve_framework_surface_with_audit(envelope)
+        .type_info_with_audit(envelope)
         .into_result()
         .expect("Model.vue resolves");
     let payload = expect_payload(&response);
@@ -807,7 +805,7 @@ fn define_model_only_component_surfaces_modelvalue_in_props() {
     );
     let envelope = framework_envelope(&host, "/Model.vue", "vue");
     let response = host
-        .resolve_framework_surface_with_audit(envelope)
+        .type_info_with_audit(envelope)
         .into_result()
         .expect("Model.vue resolves");
     let payload = expect_payload(&response);
@@ -839,7 +837,7 @@ fn multiple_define_model_calls_surface_every_binding() {
     );
     let envelope = framework_envelope(&host, "/MultiModel.vue", "vue");
     let response = host
-        .resolve_framework_surface_with_audit(envelope)
+        .type_info_with_audit(envelope)
         .into_result()
         .expect("MultiModel.vue resolves");
     let payload = expect_payload(&response);
@@ -889,7 +887,7 @@ fn define_options_present_resolves_supported_with_members() {
     );
     let envelope = framework_envelope(&host, "/Options.vue", "vue");
     let response = host
-        .resolve_framework_surface_with_audit(envelope)
+        .type_info_with_audit(envelope)
         .into_result()
         .expect("Options.vue resolves");
     let payload = expect_payload(&response);
@@ -950,7 +948,7 @@ fn define_expose_present_resolves_supported_with_members() {
     );
     let envelope = framework_envelope(&host, "/Expose.vue", "vue");
     let response = host
-        .resolve_framework_surface_with_audit(envelope)
+        .type_info_with_audit(envelope)
         .into_result()
         .expect("Expose.vue resolves");
     let payload = expect_payload(&response);
@@ -996,7 +994,7 @@ defineModel<string>('title');
     let descriptor = verter_session::framework::descriptor::vue_descriptor();
     let envelope = framework_envelope(&host, "/AllMacros.vue", "vue");
     let response = host
-        .resolve_framework_surface_with_audit(envelope)
+        .type_info_with_audit(envelope)
         .into_result()
         .expect("AllMacros.vue resolves");
     let payload = expect_payload(&response);
@@ -1028,7 +1026,7 @@ fn nonexistent_named_export_is_a_malformed_payload() {
             selector.export_name = "NoSuchExport".to_string();
         }
     }
-    let result = host.resolve_framework_surface_with_audit(envelope);
+    let result = host.type_info_with_audit(envelope);
     let error = result
         .as_result()
         .expect_err("a nonexistent named export must be the Err outcome");
@@ -1124,8 +1122,7 @@ fn an_entry_form_over_a_call_spread_reaches_the_framework_surface_intact() {
             })
             .unwrap_or_else(|e| panic!("{canonical}: upsert {e:?}"));
 
-        let result = host
-            .resolve_framework_surface_with_audit(framework_envelope(&host, &canonical, "svelte"));
+        let result = host.type_info_with_audit(framework_envelope(&host, &canonical, "svelte"));
         let response = result.as_result().expect("structural response");
         let payload = expect_payload(response);
         let entries = entries_by_kind(payload);

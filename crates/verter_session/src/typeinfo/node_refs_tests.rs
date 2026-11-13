@@ -137,9 +137,7 @@ fn root_node_ref(graph: &SemanticTypeGraph) -> Option<wire::NodeRef> {
 
 /// The graph the production executor answers for `name`.
 fn answered_graph(host: &VerterHost, name: &str) -> SemanticTypeGraph {
-    let (response, _) = host
-        .resolve_symbol_graph_with_audit(envelope(name))
-        .into_parts();
+    let (response, _) = host.type_info_with_audit(envelope(name)).into_parts();
     match response.expect("the graph arm").kind {
         Some(type_info_graph_response::Kind::Graph(graph)) => graph,
         other => panic!("expected a graph answer, got {other:?}"),
@@ -570,10 +568,7 @@ fn framework_props_issue_replayable_member_references() {
     use verter_session_query::analysis::types::AnalyzedMacroKind;
     let host = vue_host();
     let (response, _) = host
-        .resolve_framework_surface_with_audit(framework_envelope(
-            &host,
-            &[FrameworkSurfaceKind::Props],
-        ))
+        .type_info_with_audit(framework_envelope(&host, &[FrameworkSurfaceKind::Props]))
         .into_parts();
     assert!(matches!(
         response.expect("the framework arm").kind,
@@ -662,11 +657,8 @@ fn framework_props_issue_replayable_member_references() {
 fn framework_member_role_is_independent_of_sibling_facets() {
     use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
     let host = vue_host();
-    let _ = host.resolve_framework_surface_with_audit(framework_envelope(
-        &host,
-        &[FrameworkSurfaceKind::Props],
-    ));
-    let _ = host.resolve_framework_surface_with_audit(framework_envelope(
+    let _ = host.type_info_with_audit(framework_envelope(&host, &[FrameworkSurfaceKind::Props]));
+    let _ = host.type_info_with_audit(framework_envelope(
         &host,
         &[FrameworkSurfaceKind::Props, FrameworkSurfaceKind::Emits],
     ));
@@ -774,7 +766,7 @@ fn framework_options_and_slots_issue_replayable_member_references() {
     use verter_session_query::analysis::types::AnalyzedMacroKind;
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_standalone(&host, SLOTS_SFC, SLOTS_SFC_SOURCE);
-    let _ = host.resolve_framework_surface_with_audit(framework_envelope_for(
+    let _ = host.type_info_with_audit(framework_envelope_for(
         &host,
         SLOTS_SFC,
         "vue",
@@ -819,7 +811,7 @@ fn ambiguous_member_names_are_not_addressed() {
     use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_standalone(&host, MODEL_SFC, MODEL_SFC_SOURCE);
-    let _ = host.resolve_framework_surface_with_audit(framework_envelope_for(
+    let _ = host.type_info_with_audit(framework_envelope_for(
         &host,
         MODEL_SFC,
         "vue",
@@ -847,7 +839,7 @@ fn framework_model_bindings_issue_replayable_member_references() {
     use verter_session_query::analysis::types::AnalyzedMacroKind;
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_standalone(&host, MODEL_ONLY_SFC, MODEL_ONLY_SFC_SOURCE);
-    let _ = host.resolve_framework_surface_with_audit(framework_envelope_for(
+    let _ = host.type_info_with_audit(framework_envelope_for(
         &host,
         MODEL_ONLY_SFC,
         "vue",
@@ -898,7 +890,7 @@ fn svelte_props_issue_replayable_member_references() {
     use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     upsert_standalone(&host, SVELTE, SVELTE_SOURCE);
-    let _ = host.resolve_framework_surface_with_audit(framework_envelope_for(
+    let _ = host.type_info_with_audit(framework_envelope_for(
         &host,
         SVELTE,
         "svelte",
@@ -986,7 +978,7 @@ fn expand_in(
     mode: wire::ProjectionMode,
 ) -> Result<SemanticTypeGraph, verter_protocol::verter::v1::type_info_request_error::Kind> {
     let (response, _) = host
-        .resolve_symbol_graph_with_audit(expand_envelope(node_ref, mode))
+        .type_info_with_audit(expand_envelope(node_ref, mode))
         .into_parts();
     let refused = |error: wire::TypeInfoRequestError| Err(error.kind.expect("a typed error"));
     match response {
@@ -1066,7 +1058,7 @@ fn expand_around_refuses_another_projection_context() {
             context.demand = wire::ReductionDemand::StructuralTransit as i32;
         }
     }
-    let (response, _) = host.resolve_symbol_graph_with_audit(transit).into_parts();
+    let (response, _) = host.type_info_with_audit(transit).into_parts();
     assert!(
         matches!(
             response.map(|response| response.kind),
@@ -1143,10 +1135,7 @@ fn expand_around_replays_a_framework_member() {
     use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
     let host = vue_host();
     let (response, _) = host
-        .resolve_framework_surface_with_audit(framework_envelope(
-            &host,
-            &[FrameworkSurfaceKind::Props],
-        ))
+        .type_info_with_audit(framework_envelope(&host, &[FrameworkSurfaceKind::Props]))
         .into_parts();
     let payload = match response.expect("the framework arm").kind {
         Some(type_info_graph_response::Kind::FrameworkSurface(payload)) => payload,
@@ -1215,9 +1204,7 @@ fn framework_payload(
     kinds: &[verter_protocol::typeinfo::graph::FrameworkSurfaceKind],
 ) -> verter_protocol::verter::v1::FrameworkSurfacePayload {
     let (response, _) = host
-        .resolve_framework_surface_with_audit(framework_envelope_for(
-            host, canonical, family, kinds,
-        ))
+        .type_info_with_audit(framework_envelope_for(host, canonical, family, kinds))
         .into_parts();
     match response.expect("the framework arm").kind {
         Some(type_info_graph_response::Kind::FrameworkSurface(payload)) => payload,
@@ -1503,7 +1490,7 @@ fn a_graph_answer_names_the_fact_its_node_refs_name() {
 fn fact_query_of(host: &VerterHost, request: wire::ResolveSymbolGraphRequest) -> Vec<u8> {
     let mut wrapped = envelope(&request.name);
     wrapped.payload = Some(type_info_graph_request::Payload::ResolveSymbol(request));
-    let (response, _) = host.resolve_symbol_graph_with_audit(wrapped).into_parts();
+    let (response, _) = host.type_info_with_audit(wrapped).into_parts();
     match response.expect("the graph arm").kind {
         Some(type_info_graph_response::Kind::Graph(graph)) => {
             fact_of(&graph).query_identity_digest.clone()

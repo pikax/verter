@@ -185,10 +185,10 @@ pub(crate) fn parse_resolve_mode(mode: Option<String>) -> Result<Option<Projecti
     Ok(Some(parsed))
 }
 
-/// Combined response shape for `resolveFrameworkSurfaceWithAudit`.
+/// Combined response shape for `typeInfoWithAudit`.
 ///
 /// `response` is the protobuf-encoded `TypeInfoGraphResponse` — the
-/// `framework_surface` arm on success, the `error` arm on a typed
+/// operation's answer arm on success, the `error` arm on a typed
 /// rejection. It is ALWAYS present (the validation-first executor always
 /// produces a typed response). `auditRecord` carries the per-request
 /// `RequestAuditRecord` as a JSON Buffer; `null` when audit is disabled

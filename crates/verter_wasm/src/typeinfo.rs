@@ -134,7 +134,7 @@ pub(crate) fn parse_resolve_mode(mode: Option<String>) -> Result<Option<Projecti
     Ok(Some(parsed))
 }
 
-/// Combined response shape for `resolveFrameworkSurfaceWithAudit` (WASM).
+/// Combined response shape for `typeInfoWithAudit` (WASM).
 ///
 /// `response` is the protobuf-encoded `TypeInfoGraphResponse` (always
 /// present — the validation-first executor always yields a typed

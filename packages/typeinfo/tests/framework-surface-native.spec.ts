@@ -3,7 +3,7 @@
  *
  * A real `.vue` SFC is upserted into a live `VerterHost`; the request
  * envelope is encoded with `@verter/proto`, passed to the native
- * `resolveFrameworkSurfaceWithAudit` binding, and the returned wire
+ * `typeInfoWithAudit` binding, and the returned wire
  * `TypeInfoGraphResponse` bytes are decoded by `decodeFrameworkSurfaceResponse`.
  *
  * The decoded props/emits/slots surfaces must carry the macro members the
@@ -122,7 +122,7 @@ function encodeRequest(canonicalId: string, digest: Uint8Array): Buffer {
   return Buffer.from(toBinary(TypeInfoGraphRequestSchema, request));
 }
 
-describe("resolveFrameworkSurfaceWithAudit (native binding)", () => {
+describe("typeInfoWithAudit (native binding)", () => {
   it("round-trips a Vue SFC's props/emits/slots through the wire", () => {
     const host = new VerterHost({ auditEnabled: true });
     const canonicalId = "/fixtures/Parity.vue";
@@ -133,7 +133,7 @@ describe("resolveFrameworkSurfaceWithAudit (native binding)", () => {
     });
 
     const vueProfile = discoverProfile(host, "vue");
-    const { response, auditRecord } = host.resolveFrameworkSurfaceWithAudit(
+    const { response, auditRecord } = host.typeInfoWithAudit(
       encodeRequest(canonicalId, vueProfile),
     );
     expect(response).toBeInstanceOf(Buffer);
@@ -196,7 +196,7 @@ describe("resolveFrameworkSurfaceWithAudit (native binding)", () => {
 
     // A well-shaped 32-byte reference the host never minted.
     const forged = new Uint8Array(32).fill(0xab);
-    const { response } = host.resolveFrameworkSurfaceWithAudit(encodeRequest(canonicalId, forged));
+    const { response } = host.typeInfoWithAudit(encodeRequest(canonicalId, forged));
 
     const decoded = decodeFrameworkSurfaceResponse(new Uint8Array(response));
     expect("error" in decoded).toBe(true);
@@ -239,7 +239,7 @@ let { onMove, onToggle, onSelect, onlabel, label = "untitled" }: Props = $props(
 <div>{label}</div>
 `;
 
-describe("resolveFrameworkSurfaceWithAudit (Svelte callback props)", () => {
+describe("typeInfoWithAudit (Svelte callback props)", () => {
   it("answers names / requiredness / defaults and type-bearing callback members", () => {
     const host = new VerterHost({ auditEnabled: false });
     const canonicalId = "/fixtures/Callbacks.svelte";
@@ -249,7 +249,7 @@ describe("resolveFrameworkSurfaceWithAudit (Svelte callback props)", () => {
       source: Buffer.from(SVELTE_CALLBACKS, "utf-8"),
     });
 
-    const { response } = host.resolveFrameworkSurfaceWithAudit(
+    const { response } = host.typeInfoWithAudit(
       encodeRequest(canonicalId, discoverProfile(host, "svelte")),
     );
     const decoded = decodeFrameworkSurfaceResponse(new Uint8Array(response));

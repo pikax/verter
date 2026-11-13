@@ -24,7 +24,7 @@
 //! * `runtime` — bracket-matched emitted option value.
 //! * `tsx` — `ensure_ide_compiled` + `get_ide`.
 //! * `svelte` — `FrameworkSurfaceKind::Props` via
-//!   `resolve_framework_surface_with_audit`, not
+//!   `type_info_with_audit`, not
 //!   `ComponentMetaAnalysis.props` (that path reports every Svelte row
 //!   empty).
 //!
@@ -1029,7 +1029,7 @@ fn drive_svelte(row: &Row) -> Result<Vec<String>, String> {
             },
         )),
     };
-    let result = host.resolve_framework_surface_with_audit(envelope);
+    let result = host.type_info_with_audit(envelope);
     let response = match result.as_result() {
         Ok(response) => response,
         Err(err) => return Err(format!("{err:?}")),
@@ -4573,7 +4573,7 @@ mod corpus_suite {
                             &format!("{want:?}"),
                             &format!("{got_refs:?}"),
                             "the `.svelte` twin's prop member set changed. NOTE: Svelte props \
-                             are served by `resolve_framework_surface_with_audit`, NOT by \
+                             are served by `type_info_with_audit`, NOT by \
                              `ComponentMetaAnalysis.props` — a harness driving the latter \
                              reports every Svelte row empty and proves nothing.",
                         ));

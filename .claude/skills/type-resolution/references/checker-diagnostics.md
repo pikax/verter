@@ -242,7 +242,7 @@ and `ProjectPath` queries, which keep answering the typed miss to every path a c
 - `ProjectSemanticDispatch::checker_recovery_message(node)`: the `TS<code>: <message>` a
   `QueryError::CheckerRecovery` node carries; TS2456 names the alias its origin `DeclRef` refers to.
   `checker_recovery_location(node)` is where the checker reports it: the alias's name span from its
-  header. The resolve-symbol typeinfo graph (`resolve_symbol_graph_with_audit`, `include_diagnostics`)
+  header. The resolve-symbol typeinfo graph (`type_info_with_audit`, `include_diagnostics`)
   carries both as a `GraphDiagnostic`.
 - `ProjectSemanticDispatch::checker_message(&ShallowDiagnostic)`: TS2859 naming both types; the
   component-meta expansion diagnostic's context carries it.

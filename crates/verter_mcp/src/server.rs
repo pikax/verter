@@ -710,9 +710,7 @@ impl VerterMcpServer {
                         })?;
                     let request =
                         crate::tools::framework_surface::build_request(&canonical, profile);
-                    let (outcome, _record) = host
-                        .resolve_framework_surface_with_audit(request)
-                        .into_parts();
+                    let (outcome, _record) = host.type_info_with_audit(request).into_parts();
                     let response = match outcome {
                         Ok(response) => response,
                         Err(error) => verter_protocol::typeinfo::graph::TypeInfoGraphResponse {
