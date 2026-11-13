@@ -226,28 +226,18 @@ describe("decodeTypeInfoResult", () => {
 
   it("preserves the complete wire graph — identity, provenance, completeness", () => {
     // REGRESSION — the view must carry EVERY wire field the graph
-    // declares: query identity (operation, context, provenance flags,
-    // env hashes, resolver version), origin edges, per-node exactness,
+    // declares: the fact identity (query and basis digests), origin
+    // edges, per-node exactness,
     // diagnostics, both provenance id maps (with their stable decl-slot
     // identities and whole-hash bytes), and the relation-proof table.
     // A decode that drops any of them would silently strip identity or
     // provenance from the consumer surface.
     const wholeHash = new Uint8Array([9, 9, 9]);
-    const solverOptionsHash = new Uint8Array([1, 2, 3]);
+    const queryIdentityDigest = new Uint8Array(32).fill(1);
+    const inputBasisDigest = new Uint8Array(32).fill(2);
     const response = encodeGraphResponse({
       schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
-      query: {
-        operation: GraphOperation.RESOLVE_SYMBOL,
-        path: [],
-        context: { mode: GraphProjectionMode.EXPANDED, demand: GraphReductionDemand.PUBLISHED },
-        substitutions: [],
-        solverOptionsHash,
-        resolverVersion: 7,
-        includeProvenance: true,
-        includeDiagnostics: true,
-        includeProjection: [],
-        resolvedRoots: [],
-      },
+      factIdentity: { queryIdentityDigest, inputBasisDigest },
       strings: { entries: ["", "Foo", "/types.ts", "elided context"] },
       nodes: [
         {},
@@ -309,14 +299,13 @@ describe("decodeTypeInfoResult", () => {
     if (result.kind !== "graph") throw new Error("graph arm expected");
     const { graph } = result;
 
-    // Query identity — echoed whole.
-    expect(graph.query?.operation).toBe(GraphOperation.RESOLVE_SYMBOL);
-    expect(graph.query?.context?.mode).toBe(GraphProjectionMode.EXPANDED);
-    expect(graph.query?.context?.demand).toBe(GraphReductionDemand.PUBLISHED);
-    expect(graph.query?.includeProvenance).toBe(true);
-    expect(graph.query?.includeDiagnostics).toBe(true);
-    expect(graph.query?.resolverVersion).toBe(7);
-    expect(Array.from(graph.query?.solverOptionsHash ?? [])).toEqual([1, 2, 3]);
+    // Fact identity — both digests, each in its own field.
+    expect(Array.from(graph.factIdentity?.queryIdentityDigest ?? [])).toEqual(
+      Array.from(queryIdentityDigest),
+    );
+    expect(Array.from(graph.factIdentity?.inputBasisDigest ?? [])).toEqual(
+      Array.from(inputBasisDigest),
+    );
 
     // Completeness — edges, exactness, diagnostics survive with order.
     expect(graph.edges).toHaveLength(1);

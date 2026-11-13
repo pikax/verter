@@ -173,10 +173,9 @@ pub use wire::GraphClosureProjectionRequired as ClosureProjectionRequired;
 pub use wire::GraphClosureRootOnly as ClosureRootOnly;
 pub use wire::GraphDisplayBudgets as DisplayBudgets;
 pub use wire::GraphDisplayPolicy as DisplayPolicy;
+pub use wire::GraphFactIdentity as FactIdentity;
 pub use wire::GraphProjectionReductionContext as ProjectionReductionContext;
 pub use wire::GraphProjectionRequest as ProjectionRequest;
-pub use wire::GraphQueryIdentity as QueryIdentity;
-pub use wire::GraphSubstitutionBinding as SubstitutionBinding;
 pub use wire::GraphTypePathSegment as TypePathSegment;
 
 pub use wire::GraphSpanRef as SpanRef;
@@ -280,9 +279,9 @@ pub use wire::UniqueSymbolKeyExpr;
 /// ClosurePolicy, …) or when introducing an additive arm.
 ///
 /// v2 retired the env-LESS decl-slot query-identity roots carrier in
-/// favour of the env-BEARING `GraphResolvedDeclSlotIdentity`
-/// (`GraphQueryIdentity.resolved_roots`); the retired `roots` tag/name
-/// are reserved at message scope.
+/// favour of the env-BEARING `GraphResolvedDeclSlotIdentity`; the
+/// request echo that carried both has since been retired, and
+/// `SemanticTypeGraph` reserves its tag 2 / name `query`.
 ///
 /// v3 added the `framework_surface` response arm on
 /// `TypeInfoGraphResponse` plus the per-kind
@@ -368,7 +367,10 @@ pub use wire::UniqueSymbolKeyExpr;
 /// position by `node_ref` (field 8); `GraphHandle` and `GraphTypeNodeRef`
 /// are deleted. The expand-around operation's floor is 12, and its two new
 /// rejections are the `StaleBasis` (tag 14) and `UnknownNodeRef` (tag 15)
-/// error arms. v11 stays accepted for every other operation. v12 also adds
+/// error arms. v11 stays accepted for every other operation. v12 also
+/// replaces the graph's request echo (`SemanticTypeGraph.query`, tag 2,
+/// reserved) with `fact_identity` (tag 14): the query identity and committed
+/// input basis digests the graph's `NodeRef`s name. v12 also adds
 /// the `UnsupportedOperation` (tag 16) error arm, which answers an operation
 /// the host does not serve at every accepted version: no earlier arm states
 /// that refusal truthfully, and those operations never had an executor.

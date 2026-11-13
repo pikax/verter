@@ -670,7 +670,7 @@ pub(crate) fn encode_framework_surfaces_with_unsupported_message(
     let strings = arena.strings.into_table();
     let graph = WireGraph {
         schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
-        query: None,
+        fact_identity: None,
         nodes: arena.nodes,
         symbols: arena.symbols,
         signatures: arena.signatures,

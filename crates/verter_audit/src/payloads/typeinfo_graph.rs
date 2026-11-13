@@ -200,8 +200,7 @@ pub struct TypeInfoGraphPayload {
     pub mode: ProjectionModeTag,
     /// Reduction demand axis (published vs structural-transit).
     pub demand: ReductionDemandTag,
-    /// Number of declared roots in the request's
-    /// `GraphQueryIdentity`.
+    /// Number of root nodes in the answered graph.
     pub roots_count: u32,
     /// Closure policy class.
     pub closure: GraphClosurePolicyTag,

@@ -799,7 +799,7 @@ pub(crate) fn resolve_named_symbol_located<M: verter_audit::observe::ObserveExec
         requested_name: Arc::from(name),
         resolved_slot: base.clone(),
         effective_mode,
-        demand: verter_type_engine::semantic_query::ReductionDemand::Published,
+        demand: crate::typeinfo::node_refs::RESOLVE_SYMBOL_DEMAND,
     });
 
     let instantiate_key =
