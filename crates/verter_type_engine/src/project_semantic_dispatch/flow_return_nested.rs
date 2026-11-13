@@ -7,7 +7,7 @@
 //! nested function, about 53 KiB unoptimized. [`FlowEvaluator::eval_region`]
 //! instead drives a stack of evaluators: a return statement whose argument
 //! reaches a nested function value suspends its region
-//! ([`RegionProgress::Nested`]); the function is prepared on the evaluator
+//! ([`RegionProgress::Wait`]); the function is prepared on the evaluator
 //! that suspended ([`FlowEvaluator::prepare_nested`]), its own evaluator is
 //! pushed and its body run; when the body completes, the evaluator is popped,
 //! the signature composed on the parent ([`FlowEvaluator::finish_nested`]),
@@ -23,6 +23,11 @@
 //! outside a region's statements is prepared, driven and finished in place
 //! ([`FlowEvaluator::eval_nested_demand`]); a body inside it is driven
 //! from the stack again.
+//!
+//! A read an evaluator requests stops its step the same way
+//! ([`DriveStep::Request`]), the stack left as it is: the drive's owner
+//! answers it, and the evaluator that requested it resumes with the answer.
+//! A drive that cannot suspend answers it at once.
 
 use std::sync::Arc;
 use verter_session_query::source::demand::ExpressionSourceDemand as _;
@@ -467,6 +472,17 @@ pub(super) enum DriveEnd {
     Nested(SemanticNodeId),
 }
 
+/// Where a drive stands after one step.
+pub(super) enum DriveStep {
+    /// The drive goes on.
+    Continue,
+    /// The evaluator on top requests this read: the drive's next step is
+    /// delivered its answer.
+    Request(ReadWait),
+    /// The drive has ended.
+    End(DriveEnd),
+}
+
 impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// Evaluate a region, driving the nested functions its return
     /// statements reach from the stack (see the module docs).
@@ -531,23 +547,36 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     ) -> DriveEnd {
         let mut delivered: Option<RegionDelivery> = None;
         loop {
-            if let Some(end) = self.drive_step(root.as_mut(), &mut stack, &mut delivered) {
-                return end;
+            match self.drive_step(root.as_mut(), &mut stack, &mut delivered) {
+                DriveStep::Continue => {}
+                // A drive that cannot suspend answers its body's read at once.
+                DriveStep::Request(wait) => {
+                    let delivery = self.dispatch.read_in_place(wait);
+                    delivered = Some(RegionDelivery::Wait(BodyDelivery::Read(delivery)));
+                }
+                DriveStep::End(end) => return end,
             }
         }
     }
 
     /// One step of a drive (see [`Self::drive`]): the evaluator on top of
     /// `stack`, or this evaluator's `root` region when the stack is empty,
-    /// runs with `delivered` until it suspends at a nested function or
-    /// completes. The drive's state lives in its caller between steps;
-    /// `Some` when the drive has ended.
+    /// runs with `delivered` until it suspends at a nested function or a
+    /// read, or completes. The drive's state lives in its caller between
+    /// steps: a requested read leaves the stack as it is, for the next step
+    /// to be delivered its answer.
     pub(super) fn drive_step<'r>(
         &mut self,
         root: Option<&mut RegionRun<'r>>,
         stack: &mut Vec<NestedActivation>,
         delivered: &mut Option<RegionDelivery>,
-    ) -> Option<DriveEnd> {
+    ) -> DriveStep {
+        /// Where the evaluator on top of the stack stands after it ran.
+        enum TopStep {
+            Prepared(NestedPrepared),
+            Request(ReadWait),
+            Done((Result<Vec<FlowContribution>, FlowReturnFailure>, bool)),
+        }
         let dispatch = self.dispatch;
         // The evaluator on top runs; a nested function it suspends at is
         // prepared on it.
@@ -558,23 +587,26 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     match FlowEvaluator::over(dispatch, &mut active.evaluator, &mut *self.tables)
                         .run_region(&mut active.run, delivery)
                     {
-                        RegionProgress::Nested(demand) => {
+                        RegionProgress::Wait(BodyWait::Nested(demand)) => {
                             let own_env = demand.outer_env.clone();
                             let frame_env: &FlowBinderEnv = active.evaluator.binder_env;
                             let outer_env = own_env.as_deref().unwrap_or(frame_env);
-                            Ok(FlowEvaluator::over(
+                            let prepared = FlowEvaluator::over(
                                 dispatch,
                                 &mut active.evaluator,
                                 &mut *self.tables,
                             )
-                            .prepare_nested(demand, outer_env))
+                            .prepare_nested(demand, outer_env);
+                            TopStep::Prepared(prepared)
                         }
-                        RegionProgress::Done(outcome) => Err(outcome),
+                        RegionProgress::Wait(BodyWait::Read(wait)) => TopStep::Request(wait),
+                        RegionProgress::Done(outcome) => TopStep::Done(outcome),
                     }
                 });
                 match step {
-                    Ok(prepared) => Some(prepared),
-                    Err(outcome) => {
+                    TopStep::Prepared(prepared) => Some(prepared),
+                    TopStep::Request(wait) => return DriveStep::Request(wait),
+                    TopStep::Done(outcome) => {
                         let finished = stack.pop().expect("the evaluator on top");
                         let node = match stack.last_mut() {
                             Some(parent) => parent.cell.with_dependent_mut(|_, active| {
@@ -588,12 +620,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                             None => {
                                 let node = self.finish_nested(finished, outcome);
                                 if root.is_none() {
-                                    return Some(DriveEnd::Nested(node));
+                                    return DriveStep::End(DriveEnd::Nested(node));
                                 }
                                 node
                             }
                         };
-                        *delivered = Some(RegionDelivery::Nested(node));
+                        *delivered = Some(RegionDelivery::Wait(BodyDelivery::Nested(node)));
                         None
                     }
                 }
@@ -601,22 +633,27 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             None => {
                 let run = root.expect("a drive with no nested evaluator runs its root");
                 match self.run_region(run, delivered.take()) {
-                    RegionProgress::Nested(demand) => {
+                    RegionProgress::Wait(BodyWait::Nested(demand)) => {
                         let own_env = demand.outer_env.clone();
                         let frame_env: &FlowBinderEnv = self.st.binder_env;
                         let outer_env = own_env.as_deref().unwrap_or(frame_env);
                         Some(self.prepare_nested(demand, outer_env))
                     }
-                    RegionProgress::Done(outcome) => return Some(DriveEnd::Region(outcome)),
+                    RegionProgress::Wait(BodyWait::Read(wait)) => return DriveStep::Request(wait),
+                    RegionProgress::Done(outcome) => {
+                        return DriveStep::End(DriveEnd::Region(outcome))
+                    }
                 }
             }
         };
         match prepared {
-            Some(NestedPrepared::Value(node)) => *delivered = Some(RegionDelivery::Nested(node)),
+            Some(NestedPrepared::Value(node)) => {
+                *delivered = Some(RegionDelivery::Wait(BodyDelivery::Nested(node)));
+            }
             Some(NestedPrepared::Child(child)) => stack.push(*child),
             None => {}
         }
-        None
+        DriveStep::Continue
     }
 
     /// Prepare a nested function value on this evaluator: its slice content

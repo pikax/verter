@@ -4830,7 +4830,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // that made it until every such site makes it as a request.
             #[cfg(any(test, feature = "test-support"))]
             if let Ok(txn) = self.dispatch_txn.try_borrow() {
-                flow_return::census::count_read(txn.reentry().depth(), key.tag());
+                flow_return::body_reads::count_read(txn.reentry().depth(), key.tag());
             }
             if let Some(read) = self
                 .read_at_decision_seam(&key)
