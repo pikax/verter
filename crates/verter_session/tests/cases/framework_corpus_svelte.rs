@@ -3,7 +3,7 @@
 //!
 //! Each fixture under `tests/framework_corpus/svelte/` is loaded into a fresh
 //! host, its framework surfaces resolved via
-//! `resolve_framework_surface_with_audit`, and the per-kind support + member
+//! `type_info_with_audit`, and the per-kind support + member
 //! names asserted against the `CORPUS` expectation table. Hermetic: the fixtures
 //! are locally-authored `.svelte` files, so the suite runs with no third-party
 //! repo present (Testing-Hermeticity).
@@ -309,7 +309,7 @@ fn svelte_callback_prop_events_structural_not_nominal() {
         })
         .unwrap_or_else(|e| panic!("upsert: {e:?}"));
 
-    let result = host.resolve_framework_surface_with_audit(envelope(&host, &canonical));
+    let result = host.type_info_with_audit(envelope(&host, &canonical));
     let response = result.as_result().expect("structural response");
     let payload = match &response.kind {
         Some(type_info_graph_response::Kind::FrameworkSurface(p)) => p,
@@ -366,7 +366,7 @@ fn svelte_surface_corpus_resolves_every_fixture() {
             })
             .unwrap_or_else(|e| panic!("upsert {canonical}: {e:?}"));
 
-        let result = host.resolve_framework_surface_with_audit(envelope(&host, &canonical));
+        let result = host.type_info_with_audit(envelope(&host, &canonical));
         let response = result
             .as_result()
             .unwrap_or_else(|e| panic!("{}: structural response, got {e:?}", case.fixture));
@@ -479,7 +479,7 @@ fn svelte_prop_defaults_make_props_optional_on_the_surface() {
         })
         .unwrap_or_else(|e| panic!("upsert: {e:?}"));
 
-    let result = host.resolve_framework_surface_with_audit(envelope(&host, &canonical));
+    let result = host.type_info_with_audit(envelope(&host, &canonical));
     let response = result.as_result().expect("structural response");
     let payload = match &response.kind {
         Some(type_info_graph_response::Kind::FrameworkSurface(p)) => p,
@@ -537,7 +537,7 @@ fn svelte_prop_default_and_origin_are_on_the_public_framework_surface_wire() {
         })
         .unwrap_or_else(|e| panic!("upsert: {e:?}"));
 
-    let result = host.resolve_framework_surface_with_audit(envelope(&host, &canonical));
+    let result = host.type_info_with_audit(envelope(&host, &canonical));
     let response = result.as_result().expect("structural response");
     let payload = match &response.kind {
         Some(type_info_graph_response::Kind::FrameworkSurface(p)) => p,
@@ -648,7 +648,7 @@ fn svelte_imported_props_origin_import_hop_on_the_public_wire() {
             .unwrap_or_else(|e| panic!("upsert {canonical}: {e:?}"));
     }
 
-    let result = host.resolve_framework_surface_with_audit(envelope(&host, &component));
+    let result = host.type_info_with_audit(envelope(&host, &component));
     let response = result.as_result().expect("structural response");
     let payload = match &response.kind {
         Some(type_info_graph_response::Kind::FrameworkSurface(p)) => p,

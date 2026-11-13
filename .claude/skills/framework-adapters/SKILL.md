@@ -1,6 +1,6 @@
 ---
 name: framework-adapters
-description: "Verter framework-adapter substrate — FrameworkAdapterRegistry, FrameworkAdapterDescriptor + virtual-file naming column, facts/carrier-only FrameworkAdapterCtx, the framework-surface executor (resolve_framework_surface_with_audit), the two-pass script-fact seam, ComponentDefaultSynth, and Vue as the reference adapter"
+description: "Verter framework-adapter substrate — FrameworkAdapterRegistry, FrameworkAdapterDescriptor + virtual-file naming column, facts/carrier-only FrameworkAdapterCtx, the framework-surface executor (served through type_info_with_audit), the two-pass script-fact seam, ComponentDefaultSynth, and Vue as the reference adapter"
 ---
 
 # Framework Adapter Substrate
@@ -140,9 +140,9 @@ third-party Svelte extension is needed for syntax colors.
 
 ## The framework-surface executor
 
-`VerterHost::resolve_framework_surface_with_audit(TypeInfoGraphRequest)` is
-the SOLE audited entry for the `GRAPH_OPERATION_FRAMEWORK_SURFACES`
-operation. It rides the EXISTING typeinfo graph envelope. The current
+`VerterHost::type_info_with_audit(TypeInfoGraphRequest)` is the SOLE
+audited entry for every served typeinfo graph operation; the
+`GRAPH_OPERATION_FRAMEWORK_SURFACES` arm dispatches to this executor. It rides the EXISTING typeinfo graph envelope. The current
 `FrameworkSurfacePayload`/embedded-`SemanticTypeGraph` shape is PROVISIONAL,
 NOT final: the `S5.B11/B12 → U8` gate landed ahead of order, so U8 still
 OWES the retag of `FrameworkSurfacePayload.graph` to a `TypeInfoGraphPayload`
@@ -687,9 +687,9 @@ extensions); the shared content builder is
 
 ## Bindings (NAPI / WASM / MCP / TS)
 
-- NAPI `resolveFrameworkSurfaceWithAudit(Buffer) -> { response, auditRecord }`
+- NAPI `typeInfoWithAudit(Buffer) -> { response, auditRecord }`
   (protobuf `TypeInfoGraphRequest` in, `TypeInfoGraphResponse` + audit out).
-- WASM mirror `resolveFrameworkSurfaceWithAudit(&[u8]) -> { response, auditRecord }`.
+- WASM mirror `typeInfoWithAudit(&[u8]) -> { response, auditRecord }`.
 - MCP `get_framework_surface` tool — projects the typed payload to JSON.
 - TS `packages/typeinfo/src/framework-surface.ts` —
   `decodeFrameworkSurfaceResponse` decodes the wire payload into a per-kind

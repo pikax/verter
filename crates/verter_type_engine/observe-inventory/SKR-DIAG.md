@@ -27,6 +27,6 @@ Classification follows [the observation policy](../../../docs/arch/semantic-obse
 
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
-| `SemanticTypeGraph.diagnostics` on a resolve-symbol answer (an existing wire field: the root's checker diagnostic as a `GraphDiagnostic` with its message and span interned in the graph's strings) | `VerterHost::resolve_symbol_graph_with_audit` with `include_diagnostics` | REQUIRED | The response | `src/typeinfo/graph_query.rs` | the request's `include_diagnostics` |
+| `SemanticTypeGraph.diagnostics` on a resolve-symbol answer (an existing wire field: the root's checker diagnostic as a `GraphDiagnostic` with its message and span interned in the graph's strings) | `VerterHost::type_info_with_audit` (resolve-symbol) with `include_diagnostics` | REQUIRED | The response | `src/typeinfo/graph_query.rs` | the request's `include_diagnostics` |
 
 No production counter, trace or charge history is added, and no failed relation records a history: a message chain is computed only when a recipe is bound to its occurrence, from the two types the failure names, by asking the shared relation which child of each pair fails, so nothing is gated behind `semantic-observe`.

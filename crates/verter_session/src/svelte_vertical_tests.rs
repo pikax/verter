@@ -652,7 +652,7 @@ fn svelte_framework_surface_resolves_runes_props_and_options_unsupported() {
         "<script lang=\"ts\">interface Props { name: string; count?: number }\nlet { name, count }: Props = $props();</script>\n",
     );
     let envelope = framework_envelope(&host, "/Widget.svelte", "svelte");
-    let result = host.resolve_framework_surface_with_audit(envelope);
+    let result = host.type_info_with_audit(envelope);
     let response = result
         .as_result()
         .expect("a registered Svelte adapter is a structural response, not an error");
@@ -719,7 +719,7 @@ fn svelte_runes_callback_prop_stays_props_absent_from_emits() {
         "<script lang=\"ts\">interface Props { title: string; onClose?: () => void }\nlet { title, onClose }: Props = $props();</script>\n",
     );
     let envelope = framework_envelope(&host, "/Closeable.svelte", "svelte");
-    let result = host.resolve_framework_surface_with_audit(envelope);
+    let result = host.type_info_with_audit(envelope);
     let response = result.as_result().expect("structural response");
     let payload = match &response.kind {
         Some(type_info_graph_response::Kind::FrameworkSurface(p)) => p,
@@ -751,12 +751,12 @@ fn svelte_framework_surface_warm_hit_is_value_stable() {
         "<script lang=\"ts\">let { a, b }: { a: string; b: number } = $props();</script>\n",
     );
     let first = host
-        .resolve_framework_surface_with_audit(framework_envelope(&host, "/Warm.svelte", "svelte"))
+        .type_info_with_audit(framework_envelope(&host, "/Warm.svelte", "svelte"))
         .as_result()
         .expect("first")
         .clone();
     let second = host
-        .resolve_framework_surface_with_audit(framework_envelope(&host, "/Warm.svelte", "svelte"))
+        .type_info_with_audit(framework_envelope(&host, "/Warm.svelte", "svelte"))
         .as_result()
         .expect("second")
         .clone();

@@ -1,6 +1,6 @@
 //! Framework-surface tool projection.
 //!
-//! Thin adapter over the host's `resolve_framework_surface_with_audit`
+//! Thin adapter over the host's `type_info_with_audit`
 //! entry — the single validation-first framework-surface executor. The
 //! tool builds the wire `TypeInfoGraphRequest` envelope for a component
 //! file, calls the host method, and projects the typed

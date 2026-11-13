@@ -1,13 +1,13 @@
 #![deny(missing_docs)]
-//! The framework-surface executor — the single audited entry-point for the
+//! The framework-surface executor for the
 //! `GRAPH_OPERATION_FRAMEWORK_SURFACES` wire operation.
 //!
-//! [`VerterHost::resolve_framework_surface_with_audit`] is the one public entry.
-//! It runs the existing [`validate_type_info_graph_request`] FIRST (the envelope
-//! validator — operation/payload-arm match, schema echo, and the nested
-//! framework-surface validator), so a malformed envelope is rejected with a
-//! typed wire error BEFORE any registry lookup or semantic dispatch. Only the
-//! validated inner request reaches the module-private executor body.
+//! [`VerterHost::type_info_with_audit`] is the one public entry for every
+//! served operation. It runs [`validate_type_info_graph_request`] FIRST (the
+//! envelope validator — operation/payload-arm match, schema echo, and the
+//! nested framework-surface validator), so a malformed envelope is rejected
+//! with a typed wire error BEFORE any registry lookup or semantic dispatch.
+//! Only the validated inner request reaches this executor body.
 //!
 //! Executor flow (post-validation):
 //! 1. Resolve `selector.framework_profile` (schema 11, a 32-byte digest the
@@ -39,19 +39,12 @@
 //! / `project_shallow_surface_from_base`). It is NOT a second resolver — it
 //! plans, dispatches to the shared engine, and encodes.
 
-#[cfg(feature = "semantic-observe")]
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use verter_audit::payloads::typeinfo_graph::{
     FrameworkSurfaceKindSupportTag, GraphOperationTag, TypeInfoGraphPayload,
 };
-#[cfg(feature = "semantic-observe")]
-use verter_audit::WaitAudit;
-use verter_audit::{
-    AuditedResult, ProjectionModeTag, RequestAuditRecord, RequestKind, RequestKindPayload,
-    RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit,
-};
+use verter_audit::ProjectionModeTag;
 use verter_protocol::typeinfo::graph::{
     self as wire, ComponentSelector, FrameworkSurfaceKind, FrameworkSurfaceKindSupport,
     FrameworkSurfacePayload, FrameworkTag, TypeInfoGraphRequest, TypeInfoGraphResponse,
@@ -62,8 +55,6 @@ use verter_protocol::verter::v1::{type_info_graph_response, type_info_request_er
 use crate::framework::ctx::FrameworkAdapterCtx;
 use crate::framework::descriptor::ALL_FRAMEWORK_SURFACE_KINDS;
 use crate::framework::registry::{RegisteredFrameworkProfile, SurfaceRegistration};
-#[cfg(feature = "semantic-observe")]
-use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::typeinfo::framework_surface::graph_export::{
     encode_framework_surfaces, encode_framework_surfaces_with_unsupported_message,
 };
@@ -76,7 +67,6 @@ use crate::typeinfo::framework_surface::results::{
 };
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use crate::VerterHost;
-use verter_type_engine::request_context::RequestContextGuard;
 use verter_type_engine::semantic_query::ProjectionMode;
 
 /// The audit operation tag the framework-surface executor registers under.
@@ -87,156 +77,13 @@ pub const FRAMEWORK_SURFACE_AUDIT_OPERATION: GraphOperationTag =
     GraphOperationTag::FrameworkSurfaces;
 
 impl VerterHost {
-    /// Resolve a component's framework surfaces, returning the wire
-    /// [`TypeInfoGraphResponse`] (the `framework_surface` arm on success, the
-    /// `error` arm on a typed rejection) plus the request's audit record.
-    ///
-    /// The audited entry takes the FULL wire envelope and runs
-    /// [`validate_type_info_graph_request`](crate::typeinfo::request_validation::validate_type_info_graph_request)
-    /// FIRST — a bare-inner-request entry is forbidden, since it would reopen the
-    /// op/payload-mismatch and schema-echo invalid states the envelope validator
-    /// closes. A validation failure returns the typed wire error in the response
-    /// `error` arm; no registry lookup or semantic dispatch runs.
-    #[must_use]
-    pub fn resolve_framework_surface_with_audit(
+    /// The framework-surface executor body, after the one typeinfo entry
+    /// (`type_info_with_audit`) validated the envelope and matched its served
+    /// operation. Returns the wire response plus the audit payload.
+    pub(crate) fn execute_framework_surface(
         &self,
-        envelope: TypeInfoGraphRequest,
-    ) -> AuditedResult<TypeInfoGraphResponse, TypeInfoRequestError> {
-        let request_id = self.next_request_id();
-        #[cfg(feature = "semantic-observe")]
-        verter_type_engine::request_context::increment_requests_created();
-
-        let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
-        let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
-        // Best-effort target for the audit record. A malformed envelope with
-        // no selector or an empty selector canonical has no applicable
-        // document target.
-        let (canonical_for_audit, target_identity) = framework_selector_target(&envelope);
-        let ctx = crate::capture::root_entry_context(
-            self,
-            request_id,
-            Arc::<str>::from(canonical_for_audit.as_str()),
-            || RequestKind::TypeInfoGraph,
-            footprint_capture,
-            timing_capture,
-            None,
-            verter_execution::cancellation::CancellationToken::new(),
-        );
-        #[cfg(feature = "semantic-observe")]
-        let registration = {
-            let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
-            let _ = ctx.install_audit_registration(registration.clone());
-            registration
-        };
-
-        let request_clock = verter_audit::observe::Stopwatch::start_for(ctx.observe_mode());
-        let (response, payload) = {
-            // The request runs under its context whether or not it captures:
-            // the context carries its budget and cancellation.
-            let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
-            self.execute_framework_surface(envelope)
-        };
-
-        // VALIDATION-FIRST CONTRACT: the response is the `error` arm exactly when
-        // validation (or selector resolution) rejected the request. Both arms
-        // are audited identically.
-        let outcome = framework_response_outcome(&response);
-
-        #[cfg(feature = "semantic-observe")]
-        if matches!(registration.as_ref(), AuditRequestRegistration::Active(_)) {
-            let total_ms = request_clock.elapsed_ms();
-            let timings = RequestTimingAudit {
-                total_ms,
-                ..RequestTimingAudit::default()
-            };
-            let store = RequestStoreAudit {
-                cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
-                bypass_diagnostics:
-                    crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
-                ..RequestStoreAudit::default()
-            };
-            let memory = RequestMemoryAudit {
-                process_rss_peak_bytes: ctx.process_rss_peak_bytes.load(Ordering::Relaxed),
-                ..RequestMemoryAudit::default()
-            };
-            let waits = if ctx.timing_capture {
-                Some(WaitAudit {
-                    lock_wait_ns: ctx.lock_wait_ns.load(Ordering::Relaxed),
-                    queue_wait_ns: ctx.queue_wait_ns.load(Ordering::Relaxed),
-                    lock_acquisitions: ctx.lock_acquisitions.load(Ordering::Relaxed),
-                })
-            } else {
-                None
-            };
-
-            let record = RequestAuditRecord {
-                request_id,
-                target_identity: Some(target_identity),
-                canonical_id: canonical_for_audit,
-                kind: RequestKind::TypeInfoGraph,
-                parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
-                from_cache: false,
-                timings,
-                memory,
-                store,
-                footprint: None,
-                scheduler: ctx.scheduler_audit.lock().clone(),
-                files: Vec::new(),
-                waits,
-                kind_payload: RequestKindPayload::TypeInfoGraph(payload),
-                capture_state: verter_audit::AuditCaptureState::ActiveStored,
-                trace_id: ctx.trace_id.clone(),
-            };
-
-            let cloned = record.clone();
-            registration.finalize(record);
-            return audited_from_outcome(response, outcome, cloned);
-        }
-
-        // Uncaptured: filtered or disabled by the host, or capture compiled
-        // out. The answer is the same; the record carries no observation.
-        #[cfg(feature = "semantic-observe")]
-        let (parent_request_id, trace_id) = (ctx.parent_request_id, ctx.trace_id.clone());
-        #[cfg(not(feature = "semantic-observe"))]
-        let (parent_request_id, trace_id) = {
-            let _ = (request_clock, footprint_capture, timing_capture);
-            (None::<u64>, String::new())
-        };
-        let state = crate::capture::uncaptured_state(self.config.audit_enabled);
-        let record = noop_framework_record(
-            request_id,
-            &canonical_for_audit,
-            target_identity.clone(),
-            parent_request_id,
-            trace_id,
-            state,
-            payload,
-        );
-        audited_from_outcome(response, outcome, record)
-    }
-
-    /// The validation-first executor body. Returns the wire response plus the
-    /// audit payload. NEVER reaches registry/semantic work before
-    /// `validate_type_info_graph_request` returns `Ok`.
-    fn execute_framework_surface(
-        &self,
-        envelope: TypeInfoGraphRequest,
+        request: TypeInfoGraphRequest,
     ) -> (TypeInfoGraphResponse, TypeInfoGraphPayload) {
-        // VALIDATION FIRST — a malformed envelope (op/payload mismatch, schema
-        // echo divergence, missing selector) is rejected here before any
-        // registry lookup or semantic dispatch.
-        let validated = match crate::typeinfo::request_validation::validate_type_info_graph_request(
-            &envelope,
-        ) {
-            Ok(v) => v,
-            Err(error) => {
-                let payload = TypeInfoGraphPayload::from_validation_error(
-                    GraphOperationTag::FrameworkSurfaces,
-                );
-                return (error_response(error), payload);
-            }
-        };
-        let request = validated.into_inner();
         let framework_request = match request.payload {
             Some(
                 verter_protocol::verter::v1::type_info_graph_request::Payload::FrameworkSurface(r),
@@ -1183,7 +1030,7 @@ fn fold_requested_slot(
 ///
 /// A missing selector or empty selector canonical is a malformed request with
 /// no document target, so it uses `NotApplicable` explicitly.
-fn framework_selector_target(
+pub(crate) fn framework_selector_target(
     envelope: &TypeInfoGraphRequest,
 ) -> (String, verter_audit::RequestTargetIdentity) {
     match &envelope.payload {
@@ -1299,66 +1146,11 @@ fn framework_surface_response(
     }
 }
 
-/// Classify the executor's response into the audited `Ok`/`Err` outcome.
-///
-/// The `error` arm is the typed wire error (validation / unknown profile); the
-/// `framework_surface` arm is success.
-fn framework_response_outcome(
-    response: &TypeInfoGraphResponse,
-) -> Result<(), TypeInfoRequestError> {
-    match &response.kind {
-        Some(type_info_graph_response::Kind::Error(error)) => Err(error.clone()),
-        _ => Ok(()),
-    }
-}
-
 /// Build a typed `MalformedPayload` wire error with detail.
 fn malformed(detail: &str) -> TypeInfoRequestError {
     TypeInfoRequestError {
         kind: Some(type_info_request_error::Kind::MalformedPayload(
             verter_protocol::typeinfo::graph::wire_error_malformed_payload(detail),
         )),
-    }
-}
-
-/// Assemble the audited carrier from the response + outcome + record.
-fn audited_from_outcome(
-    response: TypeInfoGraphResponse,
-    outcome: Result<(), TypeInfoRequestError>,
-    record: RequestAuditRecord,
-) -> AuditedResult<TypeInfoGraphResponse, TypeInfoRequestError> {
-    match outcome {
-        Ok(()) => AuditedResult::ok(response, record),
-        Err(error) => AuditedResult::err(error, record),
-    }
-}
-
-/// Build the noop audit record for a filtered / disabled request.
-fn noop_framework_record(
-    request_id: u64,
-    canonical_id: &str,
-    target_identity: verter_audit::RequestTargetIdentity,
-    parent_request_id: Option<u64>,
-    trace_id: String,
-    state: verter_audit::AuditCaptureState,
-    payload: TypeInfoGraphPayload,
-) -> RequestAuditRecord {
-    RequestAuditRecord {
-        request_id,
-        canonical_id: canonical_id.to_string(),
-        target_identity: Some(target_identity),
-        kind: RequestKind::TypeInfoGraph,
-        parent_request_id: parent_request_id.map(|id| id.to_string()),
-        from_cache: false,
-        timings: RequestTimingAudit::default(),
-        memory: RequestMemoryAudit::default(),
-        store: RequestStoreAudit::default(),
-        footprint: None,
-        scheduler: None,
-        files: Vec::new(),
-        waits: None,
-        kind_payload: RequestKindPayload::TypeInfoGraph(payload),
-        capture_state: state,
-        trace_id,
     }
 }

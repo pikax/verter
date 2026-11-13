@@ -8,7 +8,7 @@
 //! typed [`plan::PlannedDemand`]s and NORMALIZES the executor-resolved
 //! [`plan::ResolvedSurfaces`] into per-kind [`results::MacroSurfaceDtos`].
 
-mod executor;
+pub(crate) mod executor;
 mod graph_export;
 pub mod plan;
 pub(crate) mod resolved_surface_access;

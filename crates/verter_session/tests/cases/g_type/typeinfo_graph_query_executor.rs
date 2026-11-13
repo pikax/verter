@@ -1,5 +1,5 @@
 //! Discriminating coverage for the resolve-symbol typeinfo graph
-//! operation executor (`VerterHost::resolve_symbol_graph_with_audit`).
+//! operation executor (`VerterHost::type_info_with_audit`).
 //!
 //! The executor is the graph-protocol answer route for the
 //! resolve-symbol operation: it runs the envelope validator FIRST (a
@@ -95,7 +95,7 @@ fn resolve_envelope(canonical: &str, name: &str, mode: ProjectionMode) -> TypeIn
 fn resolve_symbol_graph_answers_the_bounded_graph_arm() {
     let host = host_with_fixture();
     let (response, record) = host
-        .resolve_symbol_graph_with_audit(resolve_envelope(
+        .type_info_with_audit(resolve_envelope(
             "/types.ts",
             "Foo",
             ProjectionMode::Expanded,
@@ -160,7 +160,7 @@ fn validation_first_rejects_a_malformed_envelope_before_resolution() {
     {
         request.closure = None;
     }
-    let (response, _record) = host.resolve_symbol_graph_with_audit(envelope).into_parts();
+    let (response, _record) = host.type_info_with_audit(envelope).into_parts();
     let error = response.expect_err("a malformed envelope is a typed error arm");
     assert!(matches!(
         error.kind,
@@ -190,7 +190,7 @@ fn unbounded_expansion_is_structurally_rejected() {
             )),
         });
     }
-    let (response, _record) = host.resolve_symbol_graph_with_audit(envelope).into_parts();
+    let (response, _record) = host.type_info_with_audit(envelope).into_parts();
     let error = response.expect_err("unbounded budgets are rejected");
     assert!(matches!(
         error.kind,
@@ -247,41 +247,24 @@ fn relate_envelope() -> TypeInfoRequest {
     envelope
 }
 
-/// Sends `envelope` to both production entries that take the graph
-/// envelope and returns each entry's error with its audit payload.
-fn refusals_at_both_entries(
+/// Sends `envelope` to the one typeinfo entry and returns its refusal
+/// with its audit payload.
+fn refusal_of(
     host: &VerterHost,
     envelope: &TypeInfoRequest,
-) -> [(
-    &'static str,
-    wire::TypeInfoRequestError,
-    verter_audit::RequestKindPayload,
-); 2] {
-    let (graph, graph_record) = host
-        .resolve_symbol_graph_with_audit(envelope.clone())
-        .into_parts();
-    let (framework, framework_record) = host
-        .resolve_framework_surface_with_audit(envelope.clone())
-        .into_parts();
-    [
-        (
-            "graph entry",
-            graph.expect_err("the graph entry refuses"),
-            graph_record.kind_payload,
-        ),
-        (
-            "framework-surface entry",
-            framework.expect_err("the framework-surface entry refuses"),
-            framework_record.kind_payload,
-        ),
-    ]
+) -> (wire::TypeInfoRequestError, verter_audit::RequestKindPayload) {
+    let (response, record) = host.type_info_with_audit(envelope.clone()).into_parts();
+    (
+        response.expect_err("the entry refuses"),
+        record.kind_payload,
+    )
 }
 
-/// The validator, which both entries run first, refuses an operation the
-/// host does not serve. Neither entry answers it as a malformed payload or
-/// reaches execution: each audits a request-validation refusal.
+/// The validator, which the entry runs first, refuses an operation the
+/// host does not serve. It is never answered as a malformed payload and
+/// never reaches execution: it is audited as a request-validation refusal.
 #[test]
-fn both_entries_refuse_an_unserved_operation_before_execution() {
+fn the_entry_refuses_an_unserved_operation_before_execution() {
     let host = host_with_fixture();
     for (requested, envelope) in [
         (
@@ -290,31 +273,28 @@ fn both_entries_refuse_an_unserved_operation_before_execution() {
         ),
         (Operation::Relate, relate_envelope()),
     ] {
-        for (entry, error, audit) in refusals_at_both_entries(&host, &envelope) {
-            match error.kind {
-                Some(type_info_request_error::Kind::UnsupportedOperation(unsupported)) => {
-                    assert_eq!(
-                        unsupported.operation, requested as i32,
-                        "the {entry} echoes the requested operation"
-                    );
-                }
-                other => {
-                    panic!("the {entry} answers {requested:?} UnsupportedOperation, got {other:?}")
-                }
+        let (error, audit) = refusal_of(&host, &envelope);
+        match error.kind {
+            Some(type_info_request_error::Kind::UnsupportedOperation(unsupported)) => {
+                assert_eq!(
+                    unsupported.operation, requested as i32,
+                    "the refusal echoes the requested operation"
+                );
             }
-            let verter_audit::RequestKindPayload::TypeInfoGraph(payload) = &audit else {
-                panic!("the {entry} audits a TypeInfoGraph payload, got {audit:?}");
-            };
-            assert_eq!(
-                payload.degradation_reasons,
-                vec![TypeInfoDegradationReasonTag::RequestValidation],
-                "the {entry} records the refusal as request validation"
-            );
+            other => panic!("{requested:?} is UnsupportedOperation, got {other:?}"),
         }
+        let verter_audit::RequestKindPayload::TypeInfoGraph(payload) = &audit else {
+            panic!("the entry audits a TypeInfoGraph payload, got {audit:?}");
+        };
+        assert_eq!(
+            payload.degradation_reasons,
+            vec![TypeInfoDegradationReasonTag::RequestValidation],
+            "the entry records the refusal as request validation"
+        );
     }
 }
 
-/// Refusing an unserved operation reads no store view at either entry.
+/// Refusing an unserved operation reads no store view.
 // Reads optional audit capture: runs in the instrumentation lane.
 #[cfg(feature = "semantic-observe")]
 #[test]
@@ -323,7 +303,7 @@ fn an_unserved_operation_reads_no_store_view() {
     let host = host_with_fixture();
     let before = host.provenance().store_view_from_host_reads.load(Relaxed);
     for envelope in [evaluate_expression_envelope(), relate_envelope()] {
-        let _ = refusals_at_both_entries(&host, &envelope);
+        let _ = refusal_of(&host, &envelope);
     }
     assert_eq!(
         host.provenance().store_view_from_host_reads.load(Relaxed),
@@ -333,7 +313,7 @@ fn an_unserved_operation_reads_no_store_view() {
     // Control: a served request through the same entry does read one, so
     // the counter observes this route.
     let _ = host
-        .resolve_symbol_graph_with_audit(resolve_envelope(
+        .type_info_with_audit(resolve_envelope(
             "/types.ts",
             "Foo",
             ProjectionMode::Expanded,
@@ -351,7 +331,7 @@ fn an_op_payload_mismatch_is_rejected_by_the_envelope_validator() {
     let mut envelope = resolve_envelope("/types.ts", "Foo", ProjectionMode::Expanded);
     // A served operation whose payload arm is resolve-symbol.
     envelope.operation = Operation::ExpandAround as i32;
-    let (response, _record) = host.resolve_symbol_graph_with_audit(envelope).into_parts();
+    let (response, _record) = host.type_info_with_audit(envelope).into_parts();
     let error = response.expect_err("op/payload mismatch is a typed error");
     assert!(matches!(
         error.kind,
@@ -363,7 +343,7 @@ fn an_op_payload_mismatch_is_rejected_by_the_envelope_validator() {
 fn an_unresolved_symbol_is_a_typed_graph_fault_answer() {
     let host = host_with_fixture();
     let (response, _record) = host
-        .resolve_symbol_graph_with_audit(resolve_envelope(
+        .type_info_with_audit(resolve_envelope(
             "/types.ts",
             "DoesNotExist",
             ProjectionMode::Expanded,
@@ -419,7 +399,7 @@ fn an_unresolved_symbol_is_a_typed_graph_fault_answer() {
 #[test]
 fn the_audit_payload_carries_the_resolve_symbol_operation_tag() {
     let host = host_with_fixture();
-    let carrier = host.resolve_symbol_graph_with_audit(resolve_envelope(
+    let carrier = host.type_info_with_audit(resolve_envelope(
         "/types.ts",
         "Foo",
         ProjectionMode::Expanded,
@@ -448,7 +428,7 @@ fn include_degraded_is_rejected_as_unsupported() {
     {
         request.include_degraded = true;
     }
-    let (response, _record) = host.resolve_symbol_graph_with_audit(envelope).into_parts();
+    let (response, _record) = host.type_info_with_audit(envelope).into_parts();
     let error = response.expect_err("includeDegraded is a typed validation rejection");
     match error.kind {
         Some(type_info_request_error::Kind::MalformedPayload(payload)) => {
@@ -471,7 +451,7 @@ fn include_provenance_is_rejected_before_graph_construction() {
     {
         request.include_provenance = true;
     }
-    let (response, _record) = host.resolve_symbol_graph_with_audit(envelope).into_parts();
+    let (response, _record) = host.type_info_with_audit(envelope).into_parts();
     let error = response.expect_err("unsupported provenance is rejected before graph export");
     assert!(matches!(
         error.kind,
@@ -502,7 +482,7 @@ fn unserved_closure_kinds_are_refused_fail_closed() {
         {
             request.closure = Some(kind.clone());
         }
-        let (response, _record) = host.resolve_symbol_graph_with_audit(envelope).into_parts();
+        let (response, _record) = host.type_info_with_audit(envelope).into_parts();
         let error = response.expect_err("an unserved closure kind is a typed refusal, not a dump");
         match error.kind {
             Some(type_info_request_error::Kind::MalformedPayload(payload)) => {
@@ -526,7 +506,7 @@ fn a_one_level_closure_bounds_the_exported_walk_depth() {
     // depth-budget marker — the closure bounds the WALK, never a silent
     // full dump and never a truncated-looking object.
     let (response, _record) = host
-        .resolve_symbol_graph_with_audit(resolve_envelope(
+        .type_info_with_audit(resolve_envelope(
             "/types.ts",
             "Deep",
             ProjectionMode::Expanded,
@@ -599,7 +579,7 @@ fn resolve_symbol_graph_reports_the_checkers_ts2456_at_the_alias_name() {
         {
             resolve.include_diagnostics = include;
         }
-        let (response, _) = host.resolve_symbol_graph_with_audit(envelope).into_parts();
+        let (response, _) = host.type_info_with_audit(envelope).into_parts();
         let Some(type_info_graph_response::Kind::Graph(graph)) =
             response.expect("the graph arm").kind
         else {

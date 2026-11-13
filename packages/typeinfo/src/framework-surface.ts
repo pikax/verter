@@ -1,8 +1,9 @@
 /**
  * Typed decode of the framework-surface wire payload.
  *
- * The native binding `VerterHost.resolveFrameworkSurfaceWithAudit`
- * returns a protobuf-encoded `TypeInfoGraphResponse` (the
+ * Given a framework-surface request, the native binding
+ * `VerterHost.typeInfoWithAudit` returns a protobuf-encoded
+ * `TypeInfoGraphResponse` (the
  * `framework_surface` arm on success, the `error` arm on a typed
  * rejection). This module decodes those bytes into an ergonomic
  * TypeScript surface:
@@ -220,7 +221,7 @@ export interface FrameworkSurfaceError {
 
 /**
  * Decode the protobuf-encoded `TypeInfoGraphResponse` bytes returned by
- * `VerterHost.resolveFrameworkSurfaceWithAudit` into a
+ * `VerterHost.typeInfoWithAudit` for a framework-surface request into a
  * {@link FrameworkSurface} (the `framework_surface` arm) or a
  * {@link FrameworkSurfaceError} (the `error` arm).
  *

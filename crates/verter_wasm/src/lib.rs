@@ -1472,13 +1472,13 @@ impl WasmVerterHost {
         }))?
     }
 
-    /// Resolve a component's framework surfaces, returning the wire
+    /// Answer a typeinfo graph operation, returning the wire
     /// `TypeInfoGraphResponse` (as protobuf bytes) plus the per-request
-    /// audit record. Mirrors the NAPI `resolveFrameworkSurfaceWithAudit`.
+    /// audit record. Mirrors the NAPI `typeInfoWithAudit`.
     ///
     /// `request` is the protobuf-encoded
     /// `verter_protocol::typeinfo::graph::TypeInfoGraphRequest` envelope
-    /// carrying the `GRAPH_OPERATION_FRAMEWORK_SURFACES` operation. The
+    /// carrying any served operation. The
     /// host runs the envelope validator FIRST, so a malformed envelope
     /// returns the typed wire `error` arm BEFORE any registry lookup or
     /// semantic dispatch.
@@ -1486,14 +1486,12 @@ impl WasmVerterHost {
     /// Returns `{ response, auditRecord }` — `response` is the
     /// protobuf-encoded `TypeInfoGraphResponse` byte array (always
     /// present); `auditRecord` is the JSON `RequestAuditRecord` or `null`.
-    #[wasm_bindgen(js_name = "resolveFrameworkSurfaceWithAudit")]
-    pub fn resolve_framework_surface_with_audit(&self, request: &[u8]) -> Result<JsValue, JsValue> {
+    #[wasm_bindgen(js_name = "typeInfoWithAudit")]
+    pub fn type_info_with_audit(&self, request: &[u8]) -> Result<JsValue, JsValue> {
         let envelope = crate::typeinfo::decode_type_info_graph_request(request)?;
         let host = std::sync::Arc::clone(&self.inner);
         catch_panic(AssertUnwindSafe(move || {
-            let (outcome, record) = host
-                .resolve_framework_surface_with_audit(envelope)
-                .into_parts();
+            let (outcome, record) = host.type_info_with_audit(envelope).into_parts();
             let response = match outcome {
                 Ok(response) => response,
                 Err(error) => crate::typeinfo::framework_error_response(error),

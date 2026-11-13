@@ -183,13 +183,13 @@ not copy an owner or a receiving acceptance.
 | `OP01` | `ResolveSymbol` | FileName, ProjectName, WorkspaceName | whole operation | Native | `ProjectSemanticDispatch` | yes |
 | `OP02` | `ProjectPath` | FileName, ProjectName, NodeRef | whole operation | Native | `ProjectSemanticDispatch` | refused, `UnsupportedOperation` |
 | `OP03` | `EvaluateTypeExpression` | FileName | whole operation | Native | `ProjectSemanticDispatch` | serde entry only; the envelope refuses it, `UnsupportedOperation` |
-| `OP04` | `ExpandAround` | NodeRef | whole operation | Native | `ProjectSemanticDispatch` | yes, schema 12 (`resolve_symbol_graph_with_audit`) |
+| `OP04` | `ExpandAround` | NodeRef | whole operation | Native | `ProjectSemanticDispatch` | yes, schema 12 (`type_info_with_audit`) |
 | `OP05` | `FlowNarrowingAt` | Position | whole operation | Native | `ProjectSemanticDispatch` (flow substrate) | refused, `UnsupportedOperation` |
 | `OP06` | `ContextualTypeAt` | Position | whole operation | Native | `ProjectSemanticDispatch` | refused, `UnsupportedOperation` |
 | `OP07` | `Relate` | NodeRef, FileName | whole operation | Native | `ProjectSemanticDispatch` (relation oracle) | refused, `UnsupportedOperation` |
 | `OP08` | `ListSymbols` | FileName | shallow symbol inventory | Native | `IndexedReady` shallow inventory | `list_file_symbols` |
 | `OP09` | `ShallowSurface` | FileName, NodeRef | whole operation | Native | `ProjectSemanticDispatch` | `resolve_shallow_surface` |
-| `OP10` | `ComponentFacets` | Component | no requested facet needs a TypeScript fact | Native | `ProjectSemanticDispatch` | `resolve_framework_surface_with_audit` |
+| `OP10` | `ComponentFacets` | Component | no requested facet needs a TypeScript fact | Native | `ProjectSemanticDispatch` | `type_info_with_audit` |
 | `OP10` | `ComponentFacets` | Component | at least one requested facet needs a TypeScript fact | Composed | TIF1; executes no child | native child served; TypeScript child unserved |
 | `OP10` child | framework facet | Component | Native child of that composed claim | Native | `ProjectSemanticDispatch` | served with the facet |
 | `OP10` child | path-mapped member type | Component | TypeScript child of that composed claim | TypeScriptAuthoritative | `EngineBackend` over `CertifiedTypeEngineBinding` | unserved |

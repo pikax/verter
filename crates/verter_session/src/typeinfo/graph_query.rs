@@ -1,12 +1,14 @@
 #![deny(missing_docs)]
-//! The resolve-symbol and expand-around typeinfo graph operation executor.
+//! The one audited typeinfo entry, and the resolve-symbol and
+//! expand-around operation executors.
 //!
-//! [`VerterHost::resolve_symbol_graph_with_audit`] is the graph-protocol
-//! resolve entry: the operation-DTO envelope in, the typed
+//! [`VerterHost::type_info_with_audit`] is the graph-protocol entry for
+//! every served operation: the operation-DTO envelope in, the typed
 //! [`TypeInfoResult`] out — the answer route graph-protocol consumers
-//! bind instead of the internal `TypeExpr` JSON transit. The same audited
-//! entry serves the expand-around operation (OP04), which names its
-//! position by a host-issued `NodeRef`.
+//! bind instead of the internal `TypeExpr` JSON transit. It validates
+//! once and dispatches on the served operation: resolve-symbol and
+//! expand-around (which names its position by a host-issued `NodeRef`)
+//! here, framework surfaces in `framework_surface::executor`.
 //!
 //! Executor flow:
 //! 1. **Validation first** — the full envelope validator
@@ -18,12 +20,11 @@
 //!    with the typed wire `error` arm and never reaches resolution.
 //!    Unbounded export is therefore structurally rejected: an expanded
 //!    closure without explicit in-range budgets cannot pass validation.
-//! 2. **Operation gate** — this entry serves the resolve-symbol and
-//!    expand-around operations ONLY. The validator has already answered
-//!    an operation the host does not serve with `UnsupportedOperation`;
-//!    a served framework-surface envelope sent to this entry is refused
-//!    with a typed `MalformedPayload` (fail-closed: no silent re-route,
-//!    no dual-running authority).
+//! 2. **Operation dispatch** — the validated request carries its served
+//!    operation, and the entry matches it exhaustively: every served
+//!    operation has exactly one executor. The validator has already
+//!    answered an operation the host does not serve with
+//!    `UnsupportedOperation`.
 //! 3. **Closure gate** — the resolve-symbol bounded walk serves the
 //!    root-only / one-level / expanded closure kinds. A path policy or
 //!    a projection-required policy names behavior this operation does
@@ -98,16 +99,17 @@ use verter_type_engine::request_context::RequestContextGuard;
 use verter_type_engine::semantic_query::ProjectionMode;
 
 impl VerterHost {
-    /// Resolve a named declaration through the typeinfo graph operation
-    /// envelope, answering with the bounded wire [`TypeInfoGraphResponse`]
-    /// (the `graph` arm on a resolved / missed / faulted answer, the
-    /// `error` arm on a typed rejection) plus the request's audit record.
+    /// Answer a typeinfo graph operation envelope with the wire
+    /// [`TypeInfoGraphResponse`] plus the request's audit record: the
+    /// `graph` arm for resolve-symbol and expand-around, the
+    /// `framework_surface` arm for framework surfaces, and the `error` arm
+    /// on a typed rejection.
     ///
     /// Validation-first: [`validate_type_info_graph_request`] runs before
     /// any semantic work, so a malformed envelope is rejected with the
     /// typed wire `error` arm. See the module docs for the full contract.
     #[must_use]
-    pub fn resolve_symbol_graph_with_audit(
+    pub fn type_info_with_audit(
         &self,
         envelope: TypeInfoGraphRequest,
     ) -> AuditedResult<TypeInfoGraphResponse, TypeInfoRequestError> {
@@ -117,13 +119,8 @@ impl VerterHost {
 
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
         let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
-        // Best-effort audit target: the resolve payload's canonical.
-        let canonical_for_audit = resolve_target_canonical(&envelope);
-        let target_identity = if canonical_for_audit.is_empty() {
-            verter_audit::RequestTargetIdentity::NotApplicable
-        } else {
-            verter_audit::RequestTargetIdentity::registered(canonical_for_audit.clone())
-        };
+        // Best-effort audit target: the payload's subject canonical.
+        let (canonical_for_audit, target_identity) = request_target(&envelope);
         let ctx = crate::capture::root_entry_context(
             self,
             request_id,
@@ -146,7 +143,7 @@ impl VerterHost {
         let request_clock = verter_audit::observe::Stopwatch::start_for(ctx.observe_mode());
         let (response, payload) = {
             let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
-            self.execute_resolve_symbol_graph(envelope)
+            self.execute_type_info(envelope)
         };
 
         // VALIDATION-FIRST CONTRACT: the `error` arm is exactly the typed
@@ -241,8 +238,9 @@ impl VerterHost {
     }
 
     /// The validation-first executor body. NEVER reaches semantic work
-    /// before the envelope validator returns `Ok`.
-    fn execute_resolve_symbol_graph(
+    /// before the envelope validator returns `Ok`; then dispatches on the
+    /// served operation, exhaustively.
+    fn execute_type_info(
         &self,
         envelope: TypeInfoGraphRequest,
     ) -> (TypeInfoGraphResponse, TypeInfoGraphPayload) {
@@ -252,20 +250,16 @@ impl VerterHost {
             Ok(v) => v,
             Err(error) => {
                 let payload =
-                    TypeInfoGraphPayload::from_validation_error(GraphOperationTag::ResolveSymbol);
+                    TypeInfoGraphPayload::from_validation_error(requested_operation_tag(&envelope));
                 return (error_response(error), payload);
             }
         };
         let operation = validated.operation();
         let request = validated.into_inner();
 
-        // OPERATION GATE — this entry serves resolve-symbol and
-        // expand-around. The validator proved the operation is served and
-        // its payload arm coherent; a served framework-surface envelope
-        // belongs to the framework entry and is refused here, fail-closed,
-        // before any resolution.
         match operation {
-            ServedOperation::ResolveSymbol => {}
+            ServedOperation::ResolveSymbol => self.execute_resolve_symbol(request),
+            ServedOperation::FrameworkSurfaces => self.execute_framework_surface(request),
             ServedOperation::ExpandAround => {
                 let Some(type_info_graph_request::Payload::ExpandAround(expand)) = request.payload
                 else {
@@ -279,19 +273,16 @@ impl VerterHost {
                         payload,
                     );
                 };
-                return self.execute_expand_around(&expand);
-            }
-            ServedOperation::FrameworkSurfaces => {
-                let payload =
-                    TypeInfoGraphPayload::from_validation_error(GraphOperationTag::ResolveSymbol);
-                return (
-                    error_response(malformed(
-                        "this entry serves the resolve-symbol and expand-around operations only",
-                    )),
-                    payload,
-                );
+                self.execute_expand_around(&expand)
             }
         }
+    }
+
+    /// The resolve-symbol executor body, after validation.
+    fn execute_resolve_symbol(
+        &self,
+        request: TypeInfoGraphRequest,
+    ) -> (TypeInfoGraphResponse, TypeInfoGraphPayload) {
         let Some(type_info_graph_request::Payload::ResolveSymbol(resolve)) = request.payload else {
             // Unreachable after validation; refused rather than assumed.
             let payload =
@@ -670,10 +661,37 @@ fn push_checker_diagnostic(
 }
 
 /// The payload's canonical, best-effort for the audit target.
-fn resolve_target_canonical(envelope: &TypeInfoGraphRequest) -> String {
+fn request_target(
+    envelope: &TypeInfoGraphRequest,
+) -> (String, verter_audit::RequestTargetIdentity) {
     match &envelope.payload {
-        Some(type_info_graph_request::Payload::ResolveSymbol(r)) => r.canonical_id.clone(),
-        _ => String::new(),
+        Some(type_info_graph_request::Payload::FrameworkSurface(_)) => {
+            crate::typeinfo::framework_surface::executor::framework_selector_target(envelope)
+        }
+        Some(type_info_graph_request::Payload::ResolveSymbol(r)) if !r.canonical_id.is_empty() => (
+            r.canonical_id.clone(),
+            verter_audit::RequestTargetIdentity::registered(r.canonical_id.clone()),
+        ),
+        _ => (
+            String::new(),
+            verter_audit::RequestTargetIdentity::NotApplicable,
+        ),
+    }
+}
+
+/// The audit operation tag of the operation a request names, for a
+/// request refused before validation proved it served. A number outside
+/// the enum is recorded under resolve-symbol, the default tag.
+fn requested_operation_tag(envelope: &TypeInfoGraphRequest) -> GraphOperationTag {
+    match wire::Operation::try_from(envelope.operation) {
+        Ok(wire::Operation::ResolveSymbol) | Err(_) => GraphOperationTag::ResolveSymbol,
+        Ok(wire::Operation::EvaluateExpression) => GraphOperationTag::EvaluateExpression,
+        Ok(wire::Operation::ProjectPath) => GraphOperationTag::ProjectPath,
+        Ok(wire::Operation::Relate) => GraphOperationTag::Relate,
+        Ok(wire::Operation::FrameworkSurfaces) => GraphOperationTag::FrameworkSurfaces,
+        Ok(wire::Operation::ExpandAround) => GraphOperationTag::ExpandAround,
+        Ok(wire::Operation::FlowNarrowingAt) => GraphOperationTag::FlowNarrowingAt,
+        Ok(wire::Operation::ContextualTypeAt) => GraphOperationTag::ContextualTypeAt,
     }
 }
 

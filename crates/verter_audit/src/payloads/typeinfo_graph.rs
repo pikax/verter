@@ -27,7 +27,7 @@ use crate::payloads::tags::ProjectionModeTag;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export_to = "audit.generated.ts")]
 pub enum GraphOperationTag {
-    /// `resolve_symbol_graph_with_audit`.
+    /// The resolve-symbol operation of `type_info_with_audit`.
     #[default]
     ResolveSymbol,
     /// `evaluate_type_expression_graph_with_audit`.

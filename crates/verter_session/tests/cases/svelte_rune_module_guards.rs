@@ -255,7 +255,7 @@ fn svelte_feature_rows_supported_no_diagnostic() {
     // UNSUPPORTED / not-supported — NOT supported-empty (the typed distinction
     // the executor preserves). It must NOT be SUPPORTED for any component kind.
     let envelope = framework_envelope(&host, "/store.svelte.ts", "svelte");
-    let result = host.resolve_framework_surface_with_audit(envelope);
+    let result = host.type_info_with_audit(envelope);
     let response = result
         .as_result()
         .expect("a rune-module framework-surface request resolves structurally, not a wire error");
@@ -308,11 +308,8 @@ fn svelte_feature_rows_supported_no_diagnostic() {
         "<script lang=\"ts\">let { label }: { label: string } = $props();</script>\n<div>{label}</div>\n",
         FileLanguage::svelte(),
     );
-    let component_result = host.resolve_framework_surface_with_audit(framework_envelope(
-        &host,
-        "/Box.svelte",
-        "svelte",
-    ));
+    let component_result =
+        host.type_info_with_audit(framework_envelope(&host, "/Box.svelte", "svelte"));
     let component_response = component_result
         .as_result()
         .expect("a `.svelte` component framework-surface request resolves structurally");

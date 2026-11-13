@@ -1299,7 +1299,7 @@ mod unsettled_view_refusal {
         let host = project_host();
         let control = graph_of(
             answer_or_error(
-                host.resolve_symbol_graph_with_audit(resolve_envelope("A"))
+                host.type_info_with_audit(resolve_envelope("A"))
                     .into_parts(),
             )
             .expect("control: a quiescent request answers"),
@@ -1310,7 +1310,7 @@ mod unsettled_view_refusal {
         );
         let missing = graph_of(
             answer_or_error(
-                host.resolve_symbol_graph_with_audit(resolve_envelope("Nope"))
+                host.type_info_with_audit(resolve_envelope("Nope"))
                     .into_parts(),
             )
             .expect("an unresolved name is a graph answer"),
@@ -1325,7 +1325,7 @@ mod unsettled_view_refusal {
         let (outcome, reads) = churned(&host, |host| {
             let before = host_reads();
             let outcome = answer_or_error(
-                host.resolve_symbol_graph_with_audit(resolve_envelope("A"))
+                host.type_info_with_audit(resolve_envelope("A"))
                     .into_parts(),
             );
             (outcome, host_reads() - before)
@@ -1358,7 +1358,7 @@ mod unsettled_view_refusal {
 
         let recovered = graph_of(
             answer_or_error(
-                host.resolve_symbol_graph_with_audit(resolve_envelope("A"))
+                host.type_info_with_audit(resolve_envelope("A"))
                     .into_parts(),
             )
             .expect("a settled request answers"),
@@ -1381,7 +1381,7 @@ mod unsettled_view_refusal {
         let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
         upsert(&host, SFC, SFC_SOURCE);
         let control = answer_or_error(
-            host.resolve_framework_surface_with_audit(framework_envelope(&host))
+            host.type_info_with_audit(framework_envelope(&host))
                 .into_parts(),
         )
         .expect("control: a quiescent request answers");
@@ -1429,10 +1429,7 @@ mod unsettled_view_refusal {
         let envelope = framework_envelope(&host);
         let (outcome, dtos) = churned(&host, move |host| {
             (
-                answer_or_error(
-                    host.resolve_framework_surface_with_audit(envelope)
-                        .into_parts(),
-                ),
+                answer_or_error(host.type_info_with_audit(envelope).into_parts()),
                 host.vue_macro_dtos(&dtos_request),
             )
         });
@@ -1464,7 +1461,7 @@ mod unsettled_view_refusal {
         );
 
         let recovered = answer_or_error(
-            host.resolve_framework_surface_with_audit(framework_envelope(&host))
+            host.type_info_with_audit(framework_envelope(&host))
                 .into_parts(),
         )
         .expect("a settled request answers");
@@ -1486,7 +1483,7 @@ mod unsettled_view_refusal {
         let host = project_host();
         let answered = graph_of(
             answer_or_error(
-                host.resolve_symbol_graph_with_audit(resolve_envelope("A"))
+                host.type_info_with_audit(resolve_envelope("A"))
                     .into_parts(),
             )
             .expect("a quiescent request answers"),
@@ -1503,7 +1500,7 @@ mod unsettled_view_refusal {
             (
                 admit_issued_in_fresh_view(host, &issued),
                 answer_or_error(
-                    host.resolve_symbol_graph_with_audit(expand_envelope(node_ref))
+                    host.type_info_with_audit(expand_envelope(node_ref))
                         .into_parts(),
                 ),
             )

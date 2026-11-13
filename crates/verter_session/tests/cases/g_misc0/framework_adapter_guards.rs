@@ -345,23 +345,36 @@ fn extract_fn_body(src: &str, name: &str) -> String {
 
 #[test]
 fn framework_surface_wire_executor_validates_first() {
-    let src = read_src("crates/verter_session/src/typeinfo/framework_surface/executor.rs");
+    // The one typeinfo entry validates the envelope, then dispatches the
+    // served framework-surface operation to the executor body. Scope to the
+    // EXECUTABLE bodies, with comments stripped — a doc comment naming
+    // `validate_type_info_graph_request` must NOT satisfy the ordering, only
+    // the real call does.
+    let entry_src = read_src("crates/verter_session/src/typeinfo/graph_query.rs");
+    let entry = strip_comments(&extract_fn_body(&entry_src, "execute_type_info"));
+    let entry_validate_at = entry
+        .find("validate_type_info_graph_request")
+        .expect("the entry must call validate_type_info_graph_request");
+    let dispatch_at = entry
+        .find("self.execute_framework_surface(")
+        .expect("the entry must dispatch the framework-surface operation");
+    assert!(
+        entry_validate_at < dispatch_at,
+        "validation-first violated: the entry's `validate_type_info_graph_request` \
+         call (offset {entry_validate_at}) must precede the framework-surface \
+         dispatch (offset {dispatch_at})."
+    );
 
-    // Scope to the EXECUTABLE body of `fn execute_framework_surface` (the
-    // executor body that runs validation), with comments stripped — a doc
-    // comment naming `validate_type_info_graph_request` before the registry
-    // lookup must NOT satisfy the ordering, only the real call does.
+    let src = read_src("crates/verter_session/src/typeinfo/framework_surface/executor.rs");
     let body = strip_comments(&extract_fn_body(&src, "execute_framework_surface"));
 
-    // In the executor body, the real `validate_type_info_graph_request` call
-    // MUST appear before the registry's profile admission
-    // (`.resolve_profile(`) and before any selector resolution — a malformed
-    // envelope is rejected before any registry / semantic work, and an
-    // unadmitted profile before any selector resolution. The executor never
-    // looks a registration up by adapter id.
-    let validate_at = body
-        .find("validate_type_info_graph_request")
-        .expect("executor body must call validate_type_info_graph_request");
+    // Every executor-body offset below follows the entry's validation, so the
+    // validation point is the start of the executor body. The registry's
+    // profile admission (`.resolve_profile(`) MUST precede any selector
+    // resolution — a malformed envelope is rejected before any registry /
+    // semantic work, and an unadmitted profile before any selector
+    // resolution. The executor never looks a registration up by adapter id.
+    let validate_at = 0;
     let registry_lookup_at = body
         .find(".resolve_profile(")
         .expect("executor body must admit the selector's profile through the registry");
