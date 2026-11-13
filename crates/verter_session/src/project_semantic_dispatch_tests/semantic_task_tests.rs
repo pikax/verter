@@ -2522,20 +2522,20 @@ fn a_contextual_call_released_while_suspended_leaves_nothing_open() {
     }
 }
 
-/// The body census counts the reads a root flow read's own body makes at
-/// its own depth, each under the site that made it: the contextual body's
-/// read of its callee's signatures (the read its frame joins another
-/// task's producer through) is counted, under a driver method.
+/// The reads a root flow read's own body makes at its own depth are
+/// counted, each under the site that made it: the contextual body's read
+/// of its callee's signatures (the read its frame joins another task's
+/// producer through) is counted, under a driver method.
 #[test]
-fn the_flow_body_census_counts_each_body_read_under_its_site() {
-    use verter_type_engine::project_semantic_dispatch::flow_return::census;
+fn each_body_read_of_a_root_flow_read_is_counted_under_its_site() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::body_reads;
     use verter_type_engine::semantic_query::SemanticQueryKeyTag;
     const PHASES: [&str; 5] = ["prepare", "prelude", "body", "finish", "close"];
     let host = contextual_host();
     let dispatch = ProjectSemanticDispatch::new(&*host);
-    let _ = census::take();
+    let _ = body_reads::take();
     let _ = dispatch.execute_via_cold_build_helper(contextual_return_key(&dispatch));
-    let cold = census::take();
+    let cold = body_reads::take();
     let signatures: Vec<_> = cold
         .iter()
         .filter(|((_, _, family), _)| *family == SemanticQueryKeyTag::SignaturesOfType)
@@ -2550,6 +2550,207 @@ fn the_flow_body_census_counts_each_body_read_under_its_site() {
             .all(|((_, site, _), _)| !PHASES.contains(site) && *site != "<unattributed>"),
         "it is counted under the driver method that made it: {signatures:?}"
     );
+}
+
+const UTILITY_FILE: &str = "/semantic-task/utility.ts";
+
+/// Bodies whose return argument reads a module constant a closed
+/// signature utility types (`ReturnType<() => { v: number }>`, which the
+/// checker resolves where it is built): at the root, and in a nested
+/// function's return; and a local declared with the same utility, whose
+/// annotation is read where no statement suspends.
+const UTILITY: &str = "declare const k: ReturnType<() => { v: number }>;\n\
+                       export function root() {\n\
+                       return k;\n\
+                       }\n\
+                       export function outer() {\n\
+                       return () => {\n\
+                       return k;\n\
+                       };\n\
+                       }\n\
+                       export function declared() {\n\
+                       let r!: ReturnType<() => { v: number }>;\n\
+                       return r;\n\
+                       }\n";
+
+fn utility_host() -> Arc<crate::VerterHost> {
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        UTILITY_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(UTILITY),
+        crate::FileLanguage::script_ts(),
+    );
+    host
+}
+
+/// The return of `name` in the utility file, evaluated as a machinery root.
+fn utility_return_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    name: &str,
+) -> SemanticQueryKey {
+    SemanticQueryKey::FlowReturn(Box::new(
+        verter_type_engine::semantic_query::FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                verter_type_expr::OwnedStr::from(UTILITY_FILE),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                verter_type_expr::OwnedStr::from(name),
+                verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
+            context: dispatch.flow_return_context_for(UTILITY_FILE),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+            result_contract:
+                verter_type_engine::project_semantic_dispatch::flow_solve::flow_return_result_contract_id(),
+        },
+    ))
+}
+
+/// The counted body reads a request answered below the root would leave:
+/// a request answered in place, or the request's own driver methods.
+fn rows_answered_below_the_root(
+    counted: &[(
+        verter_type_engine::project_semantic_dispatch::flow_return::body_reads::BodyReadSite,
+        u64,
+    )],
+) -> Vec<String> {
+    counted
+        .iter()
+        .filter(|((_, site, _), _)| {
+            matches!(
+                *site,
+                "read_in_place" | "closed_signature_utility" | "answer_read"
+            )
+        })
+        .map(|row| format!("{row:?}"))
+        .collect()
+}
+
+/// A root body's return argument a closed signature utility types is read
+/// by request: the evaluator requests the utility's instantiation where it
+/// stands, and the root read answers it, once. That read is counted under
+/// no site: no driver method reads it, and no run answers it in place.
+#[test]
+fn the_closed_signature_utility_is_read_by_request() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::{
+        body_reads, flow_read_requests_for_tests,
+    };
+    let host = utility_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let _ = body_reads::take();
+    let requests = flow_read_requests_for_tests();
+    let read = dispatch.execute_via_cold_build_helper(utility_return_key(&dispatch, "root"));
+    let requested = flow_read_requests_for_tests() - requests;
+    let cold = body_reads::take();
+    assert_eq!(
+        requested, 1,
+        "the body requests the utility's read of its root read once: {cold:?}"
+    );
+    let below = rows_answered_below_the_root(&cold);
+    assert!(
+        below.is_empty(),
+        "no read of the utility is counted: {below:?}"
+    );
+    let value = display_return(&host, read.value());
+    assert!(value.contains("v: number"), "the utility's answer: {value}");
+}
+
+/// A nested function's return argument a closed signature utility types
+/// is read by request while the nested function's activation is on the
+/// root read's stack: the root read answers it, and the nested body
+/// resumes with the answer.
+#[test]
+fn a_nested_functions_closed_signature_utility_is_read_by_request() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::{
+        body_reads, flow_read_requests_for_tests, nested_body_evaluations_for_tests,
+    };
+    let host = utility_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let _ = body_reads::take();
+    let requests = flow_read_requests_for_tests();
+    let bodies = nested_body_evaluations_for_tests();
+    let read = dispatch.execute_via_cold_build_helper(utility_return_key(&dispatch, "outer"));
+    let requested = flow_read_requests_for_tests() - requests;
+    let cold = body_reads::take();
+    assert!(
+        nested_body_evaluations_for_tests() > bodies,
+        "the nested body is evaluated from the stack"
+    );
+    assert!(
+        requested >= 1,
+        "the nested body requests the utility's read of the root read: {cold:?}"
+    );
+    let below = rows_answered_below_the_root(&cold);
+    assert!(
+        below.is_empty(),
+        "no run answers the nested body's request in place: {below:?}"
+    );
+    let value = display_return(&host, read.value());
+    assert!(value.contains("v: number"), "the utility's answer: {value}");
+}
+
+/// A declared local's annotation a closed signature utility types is read
+/// where no statement suspends: its utility read is answered in place, and
+/// it is counted under the in-place answer, by family, so the reads answered
+/// in place stay visible.
+#[test]
+fn a_declared_annotations_closed_signature_utility_is_counted_as_read_in_place() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::body_reads;
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    let host = utility_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let _ = body_reads::take();
+    let _ = dispatch.execute_via_cold_build_helper(utility_return_key(&dispatch, "declared"));
+    let cold = body_reads::take();
+    assert!(
+        cold.iter().any(|((_, site, family), _)| {
+            *site == "read_in_place" && *family == SemanticQueryKeyTag::Instantiate
+        }),
+        "the annotation's utility read is counted as answered in place: {cold:?}"
+    );
+}
+
+/// A type leaf's read a flow body requests and its root read answers is
+/// the read the body would make in place: a root's and a nested function's
+/// return, read synchronously and polled, answer the same value with the
+/// same receipt, logical work and dependencies either way.
+#[test]
+fn a_requested_type_leaf_read_answers_and_charges_what_the_in_place_read_does() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::{
+        flow_read_requests_for_tests, with_type_leaves_read_in_place_for_tests,
+    };
+    let summary = |name: &str, polled: bool| {
+        let host = utility_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let key = utility_return_key(&dispatch, name);
+        let requests = flow_read_requests_for_tests();
+        let read = if polled {
+            let mut entry = dispatch.poll_query(key);
+            let read = semantic_poll_contract::poll_until_ready(|waker| entry.poll(waker));
+            drop(entry);
+            read
+        } else {
+            dispatch.execute_via_cold_build_helper(key)
+        };
+        (
+            flow_read_requests_for_tests() - requests,
+            read_summary(&dispatch, &read),
+        )
+    };
+    for name in ["root", "outer"] {
+        for polled in [false, true] {
+            let (requested, by_request) = summary(name, polled);
+            let (in_place_requests, in_place) =
+                with_type_leaves_read_in_place_for_tests(|| summary(name, polled));
+            assert!(
+                requested >= 1 && in_place_requests == 0,
+                "{name} (polled: {polled}) is read by request, then in place: {requested}, {in_place_requests}"
+            );
+            assert_eq!(by_request, in_place, "{name} (polled: {polled})");
+        }
+    }
 }
 
 /// A receipt's whole structure below its identity, which is an allocation
