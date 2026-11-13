@@ -26,6 +26,7 @@
 //! [`FactKey::ProgramFileOrder`](verter_session_query::facts::FactKey::ProgramFileOrder),
 //! so a reference edit in a non-contributor can invalidate a changed winner.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -40,6 +41,137 @@ use verter_session_query::resolution::{
 use verter_workspace::{
     AmbientLibsByProject, CanonicalPath, ProjectPayload, WorkspaceAccess, WorkspaceSnapshot,
 };
+
+/// A file a program walk is reading on this thread: the host, the program
+/// reading it, and the file.
+struct WalkRead {
+    host: u64,
+    owner: verter_session_query::resolution::ProjectOwnership,
+    file: Arc<str>,
+}
+
+thread_local! {
+    /// The reads program walks have in flight on this thread, innermost
+    /// last. Reading a file can resolve imports from it (a JavaScript file
+    /// probing for its declaration companion); those resolutions belong to
+    /// the program reading it, which is still building the membership that
+    /// would otherwise name the importer's owner.
+    static WALK_READS: RefCell<Vec<WalkRead>> = const { RefCell::new(Vec::new()) };
+}
+
+/// One [`WalkRead`] for as long as the read runs.
+struct WalkReadScope;
+
+impl WalkReadScope {
+    fn enter(
+        host: u64,
+        owner: &verter_session_query::resolution::ProjectOwnership,
+        file: &str,
+    ) -> Self {
+        WALK_READS.with(|reads| {
+            reads.borrow_mut().push(WalkRead {
+                host,
+                owner: owner.clone(),
+                file: Arc::from(file),
+            });
+        });
+        Self
+    }
+}
+
+impl Drop for WalkReadScope {
+    fn drop(&mut self) {
+        WALK_READS.with(|reads| {
+            reads.borrow_mut().pop();
+        });
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct OrderBuilds {
+    /// How many builds of one program may be in flight at once before the
+    /// next one panics; unset, any number may.
+    limit: Option<usize>,
+    /// The most builds of one program seen in flight at once.
+    peak: usize,
+    /// The programs whose order is being built, outermost first.
+    programs: Vec<Arc<str>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The order builds in flight on this thread (test-only).
+    static ORDER_BUILDS: RefCell<OrderBuilds> = RefCell::new(OrderBuilds::default());
+}
+
+/// Bounds how many builds of one program's order may be in flight on this
+/// thread at once while it lives, and records the most seen (test-only). A
+/// limit of 1 makes a build started inside its own construction panic
+/// instead of recursing until the stack overflows.
+#[cfg(test)]
+pub(crate) struct OrderBuildLimitForTests;
+
+#[cfg(test)]
+impl OrderBuildLimitForTests {
+    pub(crate) fn set(limit: usize) -> Self {
+        ORDER_BUILDS.with(|builds| {
+            let mut builds = builds.borrow_mut();
+            builds.limit = Some(limit);
+            builds.peak = 0;
+        });
+        Self
+    }
+
+    /// The most builds of one program seen in flight at once.
+    pub(crate) fn peak(&self) -> usize {
+        ORDER_BUILDS.with(|builds| builds.borrow().peak)
+    }
+}
+
+#[cfg(test)]
+impl Drop for OrderBuildLimitForTests {
+    fn drop(&mut self) {
+        ORDER_BUILDS.with(|builds| builds.borrow_mut().limit = None);
+    }
+}
+
+/// One order build of a program in flight on this thread (test-only).
+#[cfg(test)]
+struct OrderBuildForTests;
+
+#[cfg(test)]
+impl OrderBuildForTests {
+    fn enter(program: &str) -> Self {
+        let exceeded = ORDER_BUILDS.with(|builds| {
+            let mut builds = builds.borrow_mut();
+            let in_flight = 1 + builds
+                .programs
+                .iter()
+                .filter(|built| &***built == program)
+                .count();
+            builds.peak = builds.peak.max(in_flight);
+            if builds.limit.is_some_and(|limit| in_flight > limit) {
+                return Some(in_flight);
+            }
+            builds.programs.push(Arc::from(program));
+            None
+        });
+        if let Some(in_flight) = exceeded {
+            panic!("{in_flight} builds of the order of {program} in flight at once");
+        }
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for OrderBuildForTests {
+    fn drop(&mut self) {
+        ORDER_BUILDS.with(|builds| {
+            builds.borrow_mut().programs.pop();
+        });
+    }
+}
 
 /// The workspace state a published order was built from. A state with
 /// another stamp may still describe the same program: see
@@ -507,7 +639,13 @@ impl crate::VerterHost {
             };
             incomplete.clear();
             for project in &root.snapshot.projects {
-                if !matches!(project.payload, ProjectPayload::Configured { .. }) {
+                let ProjectPayload::Configured { tsconfig_path, .. } = &project.payload else {
+                    continue;
+                };
+                // A program whose walk is reading a file below this call is
+                // being built there; building it here would restart that walk
+                // inside itself. The walk publishes the order when it ends.
+                if self.walk_reading_in(tsconfig_path.as_str()) {
                     continue;
                 }
                 let order = self.project_program_order(&root.snapshot, project.id);
@@ -532,6 +670,33 @@ impl crate::VerterHost {
         for order in incomplete {
             verter_type_engine::resolver_core::resolver_context::observe_program_file_order(&order);
         }
+    }
+
+    /// The program whose walk is reading `file` on this thread, innermost
+    /// first: the owner resolutions from `file` take while that walk builds
+    /// the membership that would name it.
+    pub(crate) fn walk_reading_owner(
+        &self,
+        file: &str,
+    ) -> Option<verter_session_query::resolution::ProjectOwnership> {
+        WALK_READS.with(|reads| {
+            reads
+                .borrow()
+                .iter()
+                .rev()
+                .find(|read| read.host == self.instance_id && &*read.file == file)
+                .map(|read| read.owner.clone())
+        })
+    }
+
+    /// Whether a walk of `program` is reading a file on this thread.
+    fn walk_reading_in(&self, program: &str) -> bool {
+        WALK_READS.with(|reads| {
+            reads.borrow().iter().any(|read| {
+                read.host == self.instance_id
+                    && read.owner.tsconfig_path.as_deref() == Some(program)
+            })
+        })
     }
 
     /// Extend contributor discovery from changed roots/members at ingestion.
@@ -930,6 +1095,8 @@ impl crate::VerterHost {
         {
             return order;
         }
+        #[cfg(test)]
+        let _build = OrderBuildForTests::enter(tsconfig_path.as_str());
 
         // What the published order read that the live workspace still
         // holds: its roots while they are the same ones, and every file
@@ -1111,16 +1278,19 @@ impl crate::VerterHost {
         let mut local_probes = Vec::new();
         let mut local_provisional = false;
         let mut reference_free = false;
-        let files = self.read_pulled_files(
-            workspace,
-            libraries,
-            owner,
-            javascript,
-            file,
-            &mut local_provisional,
-            &mut local_probes,
-            &mut reference_free,
-        );
+        let files = {
+            let _reading = WalkReadScope::enter(self.instance_id, owner, file);
+            self.read_pulled_files(
+                workspace,
+                libraries,
+                owner,
+                javascript,
+                file,
+                &mut local_provisional,
+                &mut local_probes,
+                &mut reference_free,
+            )
+        };
         *provisional |= local_provisional;
         if !local_provisional
             && Some(before) == ProgramOrderStamp::live(workspace)
