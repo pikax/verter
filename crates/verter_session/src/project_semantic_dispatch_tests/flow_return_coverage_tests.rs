@@ -2105,9 +2105,8 @@ fn a_reused_callee_still_invalidates_its_consumers_on_edit() {
 /// name it `T`: a nested function value's or class expression's clause is
 /// its own declaration, so its binder is a node distinct from the outer
 /// `T` and the instantiated return read off the uninstantiated one leaves
-/// it alone. A function TYPE written in the body with a same-name clause
-/// shares the outer binder's node; that return is evaluated under the
-/// instantiation instead, and keeps its parameter too.
+/// it alone. So is a function TYPE written in the body with a same-name
+/// clause: its binders are named by the clause's content.
 ///
 /// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
 /// `noImplicitAny` settings alike): `w` is
@@ -2187,6 +2186,550 @@ fn an_instantiated_return_keeps_a_nested_clause_of_the_same_name() {
             && projected_member(instance, "outer") == &boolean(),
         "`wk` is `{{ new <T>(): {{ own: T; outer: boolean; }}; }}`: {value:?}"
     );
+}
+
+/// `<T>(<param>: T) => T` as the parser builds it, its signature written at
+/// `at`.
+fn identity_clause(param: &str, at: u32) -> TypeExpr {
+    identity_clause_returning(param, written_t(), at)
+}
+
+/// A reference to a type parameter `T`.
+fn written_t() -> TypeExpr {
+    TypeExpr::TypeParameter(verter_type_expr::TypeParam {
+        name: "T".to_string(),
+        constraint: None,
+        default: None,
+        is_const: false,
+    })
+}
+
+/// `<T>(<param>: T) => <ret>`, its signature written at `at`.
+fn identity_clause_returning(param: &str, ret: TypeExpr, at: u32) -> TypeExpr {
+    let mut function = verter_type_expr::FunctionExpr::synthetic(
+        vec![verter_type_expr::FunctionParam::synthetic(
+            Some(param.to_string()),
+            written_t(),
+            false,
+            false,
+        )],
+        Some(Arc::new(ret)),
+        vec![verter_type_expr::TypeParam {
+            name: "T".to_string(),
+            constraint: None,
+            default: None,
+            is_const: false,
+        }],
+    );
+    function.spans.signature = Some(verter_span::Span::new(at, at + 20));
+    TypeExpr::Function(Arc::new(function))
+}
+
+/// Lower `expr` in `canonical`'s file scope.
+fn lower_in(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    canonical: &str,
+    expr: &TypeExpr,
+) -> SemanticNodeId {
+    dispatch
+        .lower_type_expr_in_scope_with_context(
+            canonical,
+            expr,
+            verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                verter_type_engine::semantic_query::ProjectionMode::Expanded,
+            ),
+        )
+        .expect("a written type lowers")
+}
+
+/// The binders a lowered signature declares, and its return.
+fn clause_of(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    signature: SemanticNodeId,
+) -> (Vec<SemanticNodeId>, SemanticNodeId) {
+    match dispatch.graph().node_data(signature).as_deref() {
+        Some(SemanticNodeData::Signature {
+            type_parameters,
+            return_type,
+            ..
+        }) => (
+            type_parameters.iter().map(|param| param.param).collect(),
+            *return_type,
+        ),
+        other => panic!("expected a signature, got {other:?}"),
+    }
+}
+
+/// Every live binder displayed as `T` that `canonical` declares: its
+/// declaration name and stable key.
+fn t_binders(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    canonical: &str,
+) -> Vec<(
+    String,
+    verter_type_engine::semantic_query::stable_key::StableKey,
+)> {
+    let graph = dispatch.graph();
+    let mut binders = Vec::new();
+    for id in 0u64..(graph.node_slot_count() as u64) {
+        let node = SemanticNodeId(id);
+        if !graph.node_is_live(node) {
+            continue;
+        }
+        if let Some(SemanticNodeData::TypeParam {
+            decl, display_name, ..
+        }) = graph.node_data(node).as_deref()
+        {
+            if decl.canonical_id.as_ref() == canonical && display_name.as_ref() == "T" {
+                binders.push((
+                    decl.decl_name.to_string(),
+                    verter_type_engine::semantic_query::stable_key::stable_key_for_node(
+                        &graph, node,
+                    ),
+                ));
+            }
+        }
+    }
+    binders.sort();
+    binders.dedup();
+    binders
+}
+
+/// Whether `decl_name` names a written clause's binder.
+fn is_clause_binder(decl_name: &str) -> bool {
+    verter_type_engine::mapper_binder_registry::is_clause_binder_decl_name(decl_name)
+}
+
+/// Evaluate `warm`, then `name` in the same host: `name`'s answer and how
+/// many bodies it evaluated under an instantiation.
+fn after_warm(
+    host: &Arc<VerterHost>,
+    canonical: &str,
+    warm: &str,
+    name: &str,
+) -> (TypeExpr, usize) {
+    use verter_type_engine::project_semantic_dispatch::flow_return::instantiated_flow_evaluations_for_tests;
+    let _ = value_of(host, canonical, warm);
+    let before = instantiated_flow_evaluations_for_tests();
+    let value = value_of(host, canonical, name);
+    (value, instantiated_flow_evaluations_for_tests() - before)
+}
+
+/// A function type written with a generic clause nested in another's
+/// return (`<T>(a: T) => <T>(b: T) => T`) declares two binders, distinct
+/// from each other and from the file-scoped `T` an enclosing generic
+/// declaration's root clause binds: a clause is its binders' declaration,
+/// and no clause equals a clause nested in it. Written in the body of
+/// `l0<T>`, a new instantiation of `l0` is read off its uninstantiated
+/// return.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike): `w` is
+/// `{ v: boolean; f: <T>(a: T) => <T>(b: T) => T; }`.
+#[test]
+fn a_nested_same_name_clause_declares_its_own_binders() {
+    const PATH: &str = "/ws/cov/clause/nested.ts";
+    let host = host_with(&[(
+        PATH,
+        "function l0<T>(x: T) { const f: <T>(a: T) => <T>(b: T) => T = (a) => (b) => b; \
+         return { v: x, f }; }\n\
+         export function w1(v: number) { return l0(v); }\n\
+         export function w(v: boolean) { return l0(v); }\n",
+    )]);
+    let (value, instantiated) = after_warm(&host, PATH, "w1", "w");
+    assert_eq!(projected_member(&value, "v"), &boolean(), "{value:?}");
+    fn t(ty: &TypeExpr) -> bool {
+        matches!(ty, TypeExpr::TypeParameter(param) if param.name == "T")
+    }
+    /// The return of `<T>(<param>: T) => …`.
+    fn clause<'a>(ty: &'a TypeExpr, param: &str) -> Option<&'a TypeExpr> {
+        match ty {
+            TypeExpr::Function(function)
+                if function.type_parameters.len() == 1
+                    && function.type_parameters[0].name == "T"
+                    && function.parameters.len() == 1
+                    && function.parameters[0].name.as_deref() == Some(param)
+                    && t(&function.parameters[0].ty) =>
+            {
+                function.return_type.as_deref()
+            }
+            _ => None,
+        }
+    }
+    assert!(
+        clause(projected_member(&value, "f"), "a")
+            .and_then(|inner| clause(inner, "b"))
+            .is_some_and(t),
+        "`f` is `<T>(a: T) => <T>(b: T) => T`: {value:?}"
+    );
+    assert_eq!(
+        instantiated, 0,
+        "`w` is read off `l0`'s uninstantiated return"
+    );
+
+    with_dispatch(&host, |dispatch| {
+        let inner = identity_clause_returning("b", written_t(), 40);
+        let (outer, inner_signature) = clause_of(
+            dispatch,
+            lower_in(dispatch, PATH, &identity_clause_returning("a", inner, 20)),
+        );
+        let (inner, _) = clause_of(dispatch, inner_signature);
+        let file_scoped = lower_in(dispatch, PATH, &written_t());
+        assert_eq!((outer.len(), inner.len()), (1, 1));
+        assert!(
+            outer[0] != inner[0] && outer[0] != file_scoped && inner[0] != file_scoped,
+            "three distinct binders: outer {outer:?}, inner {inner:?}, file-scoped {file_scoped:?}"
+        );
+    });
+}
+
+/// A later parameter's bound in a written clause names the clause's own
+/// earlier binder (`U extends T` and `D = T` in `<T, U extends T, D = T>`),
+/// never a free `T` that merely shares its name, so a call infers through
+/// the bound.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike): `r` is `number`.
+#[test]
+fn a_later_clause_bound_reads_the_clauses_own_earlier_binder() {
+    const PATH: &str = "/ws/cov/clause/bound.ts";
+    let host = host_with(&[(
+        PATH,
+        "declare const get: <T, K extends keyof T>(o: T, k: K) => T[K];\n\
+         export function r() { return get({ a: 1 }, \"a\"); }\n",
+    )]);
+    assert_eq!(value_of(&host, PATH, "r"), number());
+    with_dispatch(&host, |dispatch| {
+        let param = |name: &str, constraint: Option<TypeExpr>, default: Option<TypeExpr>| {
+            verter_type_expr::TypeParam {
+                name: name.to_string(),
+                constraint: constraint.map(Arc::new),
+                default: default.map(Arc::new),
+                is_const: false,
+            }
+        };
+        let clause = TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::synthetic(
+            vec![verter_type_expr::FunctionParam::synthetic(
+                Some("o".to_string()),
+                written_t(),
+                false,
+                false,
+            )],
+            Some(Arc::new(written_t())),
+            vec![
+                param("T", None, None),
+                param("U", Some(written_t()), None),
+                param("D", None, Some(written_t())),
+            ],
+        )));
+        let signature = lower_in(dispatch, PATH, &clause);
+        let graph = dispatch.graph();
+        let (own_t, own_u, own_d, bounds) = match graph.node_data(signature).as_deref() {
+            Some(SemanticNodeData::Signature {
+                type_parameters, ..
+            }) => (
+                type_parameters[0].param,
+                type_parameters[1].param,
+                type_parameters[2].param,
+                (type_parameters[1].constraint, type_parameters[2].default),
+            ),
+            other => panic!("expected a signature, got {other:?}"),
+        };
+        let bound = |binder: SemanticNodeId| match graph.node_data(binder).as_deref() {
+            Some(SemanticNodeData::TypeParam {
+                constraint,
+                default,
+                ..
+            }) => (*constraint, *default),
+            other => panic!("expected a binder, got {other:?}"),
+        };
+        assert_eq!(
+            (bounds, bound(own_u).0, bound(own_d).1),
+            ((Some(own_t), Some(own_t)), Some(own_t), Some(own_t)),
+            "`U extends T` and `D = T` name the clause's own `T` binder, on the              signature and on the binders themselves"
+        );
+    });
+}
+
+/// A constraint in a written clause names the clause's own later
+/// parameter (`T extends U` in `<T extends U, U>`), never a free `U` that
+/// merely shares its name: the constraint is the later parameter's
+/// bound-free binder, of the clause's identity at its ordinal.
+#[test]
+fn a_clause_constraint_reads_its_own_later_binder() {
+    const PATH: &str = "/ws/cov/clause/forward.ts";
+    let host = host_with(&[(PATH, "export const x = 1;\n")]);
+    with_dispatch(&host, |dispatch| {
+        let written_u = TypeExpr::TypeParameter(verter_type_expr::TypeParam {
+            name: "U".to_string(),
+            constraint: None,
+            default: None,
+            is_const: false,
+        });
+        let clause = TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::synthetic(
+            vec![verter_type_expr::FunctionParam::synthetic(
+                Some("x".to_string()),
+                written_t(),
+                false,
+                false,
+            )],
+            Some(Arc::new(written_u.clone())),
+            vec![
+                verter_type_expr::TypeParam {
+                    name: "T".to_string(),
+                    constraint: Some(Arc::new(written_u)),
+                    default: None,
+                    is_const: false,
+                },
+                verter_type_expr::TypeParam {
+                    name: "U".to_string(),
+                    constraint: None,
+                    default: None,
+                    is_const: false,
+                },
+            ],
+        )));
+        let graph = dispatch.graph();
+        let signature = lower_in(dispatch, PATH, &clause);
+        let (own_t, own_u) = match graph.node_data(signature).as_deref() {
+            Some(SemanticNodeData::Signature {
+                type_parameters, ..
+            }) => (type_parameters[0].param, type_parameters[1].param),
+            other => panic!("expected a signature, got {other:?}"),
+        };
+        let identity = |binder: SemanticNodeId| match graph.node_data(binder).as_deref() {
+            Some(SemanticNodeData::TypeParam {
+                decl,
+                param_index,
+                constraint,
+                ..
+            }) => (decl.decl_name.to_string(), *param_index, *constraint),
+            other => panic!("expected a binder, got {other:?}"),
+        };
+        let (u_decl, u_index, _) = identity(own_u);
+        let t_constraint = identity(own_t).2.expect("`T` carries `extends U`");
+        let (constraint_decl, constraint_index, _) = identity(t_constraint);
+        assert_eq!(
+            (constraint_decl, constraint_index),
+            (u_decl, u_index),
+            "`T extends U` names the clause's own `U`"
+        );
+    });
+}
+
+/// A function value an instantiated return holds, whose clause bounds an
+/// earlier parameter by an outer generic and a later one by the earlier
+/// (`<T extends A, U = T>` in `outer<A, T>`), keeps that chain under a new
+/// instantiation read off the uninstantiated return: the earlier binder,
+/// re-interned with its substituted bound, is the one the later default
+/// names, so a call that fixes the earlier one fixes the later.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike): `w1` is `"s"`; `w` is `1`.
+#[test]
+fn an_instantiated_clause_keeps_later_bounds_on_its_rebound_binders() {
+    const PATH: &str = "/ws/cov/clause/rebound.ts";
+    let host = host_with(&[(
+        PATH,
+        "function outer<A, T>(a: A, x: T) { \
+         const f: <T extends A, U = T>() => U = () => { throw 0; }; return f; }\n\
+         export function w1() { return outer(\"s\", 1)<\"s\">(); }\n\
+         export function w() { return outer(1, true)<1>(); }\n",
+    )]);
+    assert_eq!(value_of(&host, PATH, "w1"), string_lit("s"));
+    let (value, _) = after_warm(&host, PATH, "w1", "w");
+    assert_eq!(
+        value,
+        TypeExpr::Literal(LiteralValue::Number(1.0)),
+        "{value:?}"
+    );
+}
+
+/// A written clause's binder is named by the clause's content, never its
+/// position or how the tree reached the lowering: the same declaration
+/// with unrelated text above it keeps byte-equal binder names and stable
+/// keys, and within one file generation the clause lowered fresh, from a
+/// span-cleared copy and from a wire round-trip is one binder.
+#[test]
+fn a_written_clause_binder_is_independent_of_position_and_path() {
+    const PATH: &str = "/ws/cov/clause/position.ts";
+    const SOURCE: &str = "function l0<T>(x: T) { const id: <T>(z: T) => T = (z) => z; \
+                          return { v: x, id }; }\n\
+                          export function w(v: boolean) { return l0(v); }\n";
+    let binders = |source: &str| {
+        let host = host_with(&[(PATH, source)]);
+        with_dispatch(&host, |dispatch| {
+            let key = key_of(dispatch, PATH, "w");
+            let _ = eval_key_on(&host, dispatch, key);
+            t_binders(dispatch, PATH)
+                .into_iter()
+                .filter(|(decl_name, _)| is_clause_binder(decl_name))
+                .collect::<Vec<_>>()
+        })
+    };
+    let plain = binders(SOURCE);
+    assert!(
+        !plain.is_empty(),
+        "the written clause interns its own binder"
+    );
+    assert_eq!(
+        binders(&format!(
+            "const unrelated = 1;\n// moves every offset below\n{SOURCE}"
+        )),
+        plain,
+        "text above the declaration moves neither the binder's name nor its stable key"
+    );
+
+    let host = host_with(&[(PATH, SOURCE)]);
+    with_dispatch(&host, |dispatch| {
+        let fresh = identity_clause("z", 33);
+        let mut cleared = fresh.clone();
+        cleared.clear_spans();
+        let wire =
+            verter_type_expr::type_expr_from_json(&fresh.to_json_value()).expect("a wire TypeExpr");
+        let binder = |expr: &TypeExpr| clause_of(dispatch, lower_in(dispatch, PATH, expr)).0;
+        let fresh = binder(&fresh);
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(
+            binder(&cleared),
+            fresh,
+            "a span-cleared copy names the same binder"
+        );
+        assert_eq!(
+            binder(&wire),
+            fresh,
+            "a wire round-trip names the same binder"
+        );
+    });
+}
+
+/// A generic declaration whose return comes from its body keeps the
+/// file-scoped name-keyed binders the flow lane builds that return under,
+/// so the declared signature's own `T` is the node in its body-derived
+/// return and a call instantiates it, directly or through the function
+/// value whose type carries that return.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike): `w` and `u` are `{ v: number; }`.
+#[test]
+fn a_body_derived_clause_keeps_the_name_keyed_binder_its_return_reads() {
+    const PATH: &str = "/ws/cov/clause/root.ts";
+    let host = host_with(&[(
+        PATH,
+        "function g<T>(x: T) { return { v: x }; }\n\
+         export function w() { return g(1); }\n\
+         export function u() { const f = g; return f(1); }\n",
+    )]);
+    for name in ["w", "u"] {
+        let value = value_of(&host, PATH, name);
+        assert_eq!(
+            projected_member(&value, "v"),
+            &number(),
+            "{name}: {value:?}"
+        );
+    }
+    with_dispatch(&host, |dispatch| {
+        for name in ["w", "u"] {
+            let key = key_of(dispatch, PATH, name);
+            let _ = eval_key_on(&host, dispatch, key);
+        }
+        let binders = t_binders(dispatch, PATH);
+        assert!(
+            binders.iter().any(|(decl_name, _)| decl_name == "T")
+                && !binders
+                    .iter()
+                    .any(|(decl_name, _)| is_clause_binder(decl_name)),
+            "`g`'s clause is bound by name alone: {binders:?}"
+        );
+    });
+}
+
+/// A generic function value an instantiated return holds keeps its own
+/// clause even when both root clauses are bound by the same file-scoped
+/// name: `h`'s `T` and `l0`'s `T` are one node, so `l0<number>` is not
+/// read off with `T` replaced everywhere, and `h` keeps its clause and its
+/// parameter.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike): `w` is
+/// `{ x: number; h: <T>(y: T) => T; }`. Known gap, on main before the
+/// written-clause identity too: `h`'s body-derived return reads `number`,
+/// because the instantiated evaluation of `l0` substitutes the shared
+/// file-scoped `T` in it; this test holds what is right today.
+#[test]
+fn a_root_function_returned_under_a_same_name_instantiation_keeps_its_clause() {
+    const PATH: &str = "/ws/cov/clause/guard.ts";
+    let host = host_with(&[(
+        PATH,
+        "function h<T>(y: T) { return y; }\n\
+         function l0<T>(x: T) { return { x, h }; }\n\
+         export function w(v: number) { return l0(v); }\n",
+    )]);
+    let value = value_of(&host, PATH, "w");
+    assert_eq!(projected_member(&value, "x"), &number(), "{value:?}");
+    let t = |ty: &TypeExpr| matches!(ty, TypeExpr::TypeParameter(param) if param.name == "T");
+    assert!(
+        matches!(projected_member(&value, "h"), TypeExpr::Function(h)
+            if h.type_parameters.len() == 1
+                && h.type_parameters[0].name == "T"
+                && h.parameters.len() == 1
+                && t(&h.parameters[0].ty)),
+        "`h` stays `<T>(y: T) => …`: {value:?}"
+    );
+}
+
+/// A clause written through an alias (`type F = <T>(z: T) => T`) in the
+/// body of `l0<T>` is its own declaration too, so a new instantiation of
+/// `l0` is read off its uninstantiated return. Alpha-equivalent clauses
+/// with different parameter names (`<T>(a: T) => T`, `<T>(b: T) => T`)
+/// declare distinct binders and are assignable both ways; two clauses of
+/// identical text share theirs.
+///
+/// Oracle (the pinned TypeScript 7.0.2, all four `strictNullChecks` x
+/// `noImplicitAny` settings alike): `w` is `{ v: boolean; id: F; }`, and
+/// each of `<T>(a: T) => T` and `<T>(b: T) => T` is assignable to the other.
+#[test]
+fn an_aliased_or_alpha_equivalent_clause_relates_by_structure() {
+    const PATH: &str = "/ws/cov/clause/alias.ts";
+    let host = host_with(&[(
+        PATH,
+        "type F = <T>(z: T) => T;\n\
+         function l0<T>(x: T) { const id: F = (z) => z; return { v: x, id }; }\n\
+         export function w1(v: number) { return l0(v); }\n\
+         export function w(v: boolean) { return l0(v); }\n",
+    )]);
+    let (value, instantiated) = after_warm(&host, PATH, "w1", "w");
+    assert_eq!(projected_member(&value, "v"), &boolean(), "{value:?}");
+    assert_eq!(
+        instantiated, 0,
+        "`w` is read off `l0`'s uninstantiated return"
+    );
+
+    with_dispatch(&host, |dispatch| {
+        let a = lower_in(dispatch, PATH, &identity_clause("a", 10));
+        let b = lower_in(dispatch, PATH, &identity_clause("b", 60));
+        let again = lower_in(dispatch, PATH, &identity_clause("a", 110));
+        let (a_binders, _) = clause_of(dispatch, a);
+        let (b_binders, _) = clause_of(dispatch, b);
+        assert_ne!(
+            a_binders, b_binders,
+            "different clauses declare different binders"
+        );
+        assert_eq!(
+            clause_of(dispatch, again).0,
+            a_binders,
+            "two clauses of identical text share their binder"
+        );
+        for (source, target) in [(a, b), (b, a)] {
+            assert!(
+                matches!(
+                    dispatch.execute_relate_pair_as_result_for_tests(source, target),
+                    verter_type_engine::semantic_query::RelationResult::Assignable { .. }
+                ),
+                "alpha-equivalent clauses are assignable both ways"
+            );
+        }
+    });
 }
 
 /// A same-file call that swaps the caller's binders into the callee's
