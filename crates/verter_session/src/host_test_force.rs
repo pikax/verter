@@ -114,6 +114,10 @@ pub(crate) struct TestForceKnobs {
     pub(crate) wrapper_source_clone_count: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(crate) wrapper_cache_mode_classification_count: std::sync::atomic::AtomicUsize,
+    /// How many times a compile captured its input through
+    /// `VerterHost::capture_compile_input`.
+    #[cfg(test)]
+    pub(crate) compile_input_capture_count: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(crate) wrapper_sync_transitive_count: std::sync::atomic::AtomicUsize,
     #[cfg(test)]

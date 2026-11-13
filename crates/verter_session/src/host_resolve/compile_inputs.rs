@@ -1,6 +1,11 @@
 //! The input side of a host compile: one coherent capture of the compiled
 //! file, and the framework execution inputs prepared from it.
 //!
+//! Every compile lane (the caller-supplied request route, the
+//! profile-derived virtual-file lane and the runtime render lane) takes its
+//! owner/content capture through [`VerterHost::capture_compile_input`]; no
+//! lane assembles a [`CompileInput`] of its own.
+//!
 //! Everything a compile waits on happens here, before the framework
 //! backend is called: blocker hydration has ended before the capture
 //! ([`VerterHost::capture_compile_input`] takes its outcome by value), and
@@ -31,8 +36,27 @@ pub(crate) struct CapturedCompileInput {
     pub(crate) input: CompileInput,
     /// The source snapshot the capture read, which the attempt binds to.
     pub(crate) source: Arc<verter_scheduler::node::SourceSnapshot>,
+    /// The scheduler node incarnation `source` was read from, present when
+    /// the capture was asked to mint it ([`SourceWitnessDemand::Mint`]). A
+    /// lane that publishes fences its publication on it.
+    pub(crate) witness: Option<verter_scheduler::node::SourceWitness>,
+    /// The projection of the block content the capture read, taken under
+    /// the same admission fence as `input`. A lane that publishes
+    /// revalidates it after its compute.
+    pub(crate) block_content_stamp: BlockContentHashToken,
     /// How far the blocker hydration before the capture got.
     pub(crate) hydration: BlockerHydration,
+}
+
+/// Whether a capture mints the source witness a publishing lane fences on.
+/// Minting copies the canonical path, so a lane that publishes nothing
+/// declines it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceWitnessDemand {
+    /// Mint the witness: the lane publishes cache slots and artifacts.
+    Mint,
+    /// Read the plain snapshot only.
+    Skip,
 }
 
 /// A compile's prepared framework execution inputs. Always complete.
@@ -111,6 +135,11 @@ impl VerterHost {
     /// before this capture; the capture carries it so the dependency
     /// verdict can name what hydration could not establish.
     ///
+    /// `witness_demand` says whether the capture mints the source witness.
+    ///
+    /// The admission fence is re-entrant, so a lane that already holds it
+    /// across its own cache consult may capture under it.
+    ///
     /// # Errors
     ///
     /// [`HostError::MissingSource`] when no source is registered under
@@ -120,8 +149,14 @@ impl VerterHost {
         canonical: &str,
         scope: SuppliedBlockScope<'_>,
         hydration: BlockerHydration,
+        witness_demand: SourceWitnessDemand,
     ) -> Result<CapturedCompileInput, HostError> {
         use crate::host_executor::HostSourceData;
+
+        #[cfg(test)]
+        self.test_force
+            .compile_input_capture_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let missing = || HostError::MissingSource {
             canonical_id: canonical.to_owned(),
@@ -130,11 +165,23 @@ impl VerterHost {
 
         // ── ONE coherent source snapshot ──
         // Every content-determined input derives from this single read, so
-        // the bytes and the analysis beside them cohere.
-        let source = self
-            .scheduler
-            .try_get_source(canonical)
-            .ok_or_else(missing)?;
+        // the bytes and the analysis beside them cohere. A minted witness
+        // names the node incarnation the read came from.
+        let (source, witness) = match witness_demand {
+            SourceWitnessDemand::Mint => {
+                let verter_scheduler::node::WitnessedSource { snapshot, witness } = self
+                    .scheduler
+                    .try_get_witnessed_source(canonical)
+                    .ok_or_else(missing)?;
+                (snapshot, Some(witness))
+            }
+            SourceWitnessDemand::Skip => (
+                self.scheduler
+                    .try_get_source(canonical)
+                    .ok_or_else(missing)?,
+                None,
+            ),
+        };
         let efs = self
             .effective_file_state_from_snapshot(&source, canonical, None)
             .ok_or_else(missing)?;
@@ -169,6 +216,8 @@ impl VerterHost {
         Ok(CapturedCompileInput {
             input,
             source,
+            witness,
+            block_content_stamp: block_content.stamp,
             hydration,
         })
     }
@@ -209,8 +258,9 @@ pub(crate) async fn prepare_execution_inputs_pollable<'h>(
 }
 
 /// Prepare `captured_input`'s execution inputs on this thread: the profile
-/// lanes' synchronous entry. These lanes carry no hydration outcome, so
-/// the verdict names only the gaps its own walk finds.
+/// lanes' synchronous entry. These lanes hydrate before their capture, but
+/// their compile entry takes the captured input alone, so the verdict names
+/// only the gaps its own walk finds.
 pub(crate) fn prepare_execution_inputs(
     host: &VerterHost,
     captured_input: &CompileInput,

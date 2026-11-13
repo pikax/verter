@@ -585,3 +585,80 @@ fn a_source_block_loaded_during_hydration_is_in_the_captured_input() {
         runtime_code(&response)
     );
 }
+
+/// Every compile lane takes its owner/content capture through the one
+/// capture function: the caller-supplied request route, the
+/// profile-derived virtual-file lane and the runtime render lane each run
+/// it exactly once per compile. A lane that kept an inline capture of its
+/// own would leave the count short by one.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn every_compile_lane_captures_through_one_function() {
+    let host = strict_host();
+    upsert(&host, TYPES, TYPES_SOURCE);
+    upsert(&host, APP, TYPES_APP_SOURCE);
+    let captures = || {
+        host.test_force
+            .compile_input_capture_count
+            .load(Ordering::Relaxed)
+    };
+    assert_eq!(captures(), 0, "registering a source captures no input");
+
+    let _ = host
+        .compile_request(APP, request())
+        .expect("the request route compiles");
+    assert_eq!(captures(), 1, "the request route captures once");
+
+    let _ = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(APP.to_owned()),
+            node_kind: Some(VirtualNodeKind::Main),
+            compile_profile: CompileProfile::default(),
+        })
+        .expect("the profile lane compiles");
+    assert_eq!(captures(), 2, "the profile-derived lane captures once");
+
+    let render_profile = CompileProfile {
+        target: crate::CompileTarget::BUNDLER,
+        is_production: true,
+        ..CompileProfile::default()
+    };
+    host.render_only_main(
+        APP,
+        &render_profile,
+        verter_compiler::compile_request::RuntimeStyleProcessing::Complete,
+    )
+    .expect("the render lane compiles");
+    assert_eq!(captures(), 3, "the runtime render lane captures once");
+}
+
+/// A source that is not registered answers `MissingSource` even when the
+/// profile also names a grammar the registered parse cannot honour; a
+/// registered source answers the grammar refusal.
+#[test]
+fn an_unregistered_source_answers_missing_source_before_a_grammar_refusal() {
+    let profile = CompileProfile {
+        delimiters: Some(("[[".to_owned(), "]]".to_owned())),
+        ..CompileProfile::default()
+    };
+    let query = || VirtualQuery {
+        raw_id: None,
+        canonical_id: Some(APP.to_owned()),
+        node_kind: Some(VirtualNodeKind::Main),
+        compile_profile: profile.clone(),
+    };
+
+    let host = strict_host();
+    assert!(matches!(
+        host.get_virtual_file(query()),
+        Err(HostError::MissingSource { .. })
+    ));
+
+    upsert(&host, TYPES, TYPES_SOURCE);
+    upsert(&host, APP, TYPES_APP_SOURCE);
+    assert!(matches!(
+        host.get_virtual_file(query()),
+        Err(HostError::GrammarMismatch(_))
+    ));
+}
