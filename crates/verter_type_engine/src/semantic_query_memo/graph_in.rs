@@ -231,6 +231,13 @@ impl<M: ObserveExec> GraphIn<'_, M> {
     }
     /// Record optional telemetry for this execution.
     #[inline(always)]
+    pub fn record_call_walk_begun(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_call_walk_begun();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
     pub fn record_relation_member_related(self) {
         if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
             self.store.record_relation_member_related();

@@ -1835,6 +1835,555 @@ fn suspend_the_contextual_call<R>(
         .expect("the cold root runs as a task")
 }
 
+const CALLBACK_ROUNDS_FILE: &str = "/semantic-task/callback-rounds.ts";
+
+/// Two generic calls whose callbacks a consumer types. `both` names `f` and
+/// then `g`, whose parameter type reads the `U` that typing `f` infers;
+/// `echo` names its callback beside a spread argument.
+const CALLBACK_ROUNDS: &str = "type Box<T> = { v: T };\n\
+     declare function both<T, U, V>(seed: T, f: (x: T) => U, g: (y: U) => V): [T, U, V];\n\
+     declare function typedF(x: number): Box<3>;\n\
+     declare function typedG(y: Box<3>): string;\n\
+     declare function echo<T>(seed: T, f: (x: T) => T): T;\n\
+     declare function typedEcho(x: number): number;\n";
+
+fn callback_rounds_host() -> Arc<crate::VerterHost> {
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        CALLBACK_ROUNDS_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(CALLBACK_ROUNDS),
+        crate::FileLanguage::script_ts(),
+    );
+    host.ensure_indexed_ready(CALLBACK_ROUNDS_FILE)
+        .expect("the calls have indexed input");
+    host
+}
+
+/// The type of the declared function `name`.
+fn callback_round_value(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    name: &str,
+) -> verter_type_engine::semantic_query::SemanticNodeId {
+    let key = dispatch.typeof_key_for(
+        ValueRootKey {
+            scope: ScopeId::file(
+                CALLBACK_ROUNDS_FILE,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
+            name: verter_type_expr::OwnedStr::from(name),
+        },
+        ProjectionReductionContext::published(ProjectionMode::Expanded),
+    );
+    match dispatch.execute_read(key).value() {
+        QueryResult::Value(node) => *node,
+        other => panic!("`{name}` has a type: {other:?}"),
+    }
+}
+
+/// Which call a consumer types the callbacks of.
+#[derive(Clone, Copy)]
+enum RoundCall {
+    /// `both(number, f, g)`, `f` typed by `typedF` and `g` by `typedG`: the
+    /// candidate's collector holds `T` and `U` when `g`'s parameter type
+    /// is mapped.
+    TwoCallbacks,
+    /// `echo(...[number], f)`, `f` typed by `typedEcho`: no collector is
+    /// held, and the typed call is checked again.
+    CallbackBesideSpread,
+}
+
+/// The call `case` names, the key of the call frame that drives it (its
+/// site one past the call's, so the call never meets the frame on the
+/// reentry stack), and the argument its consumer types each callback with.
+fn round_call(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    case: RoundCall,
+) -> (
+    verter_type_engine::semantic_query::ResolveCallKey,
+    verter_type_engine::semantic_query::ResolveCallKey,
+    Vec<verter_type_engine::semantic_query::CallArgKey>,
+) {
+    use super::call_resolve_tests::eager;
+    use verter_type_engine::semantic_query::{
+        ArgumentLiteralMode, CallArgKey, CallKind, PayloadArray, SemanticNodeId, TupleElement,
+    };
+    let argument = |ty: SemanticNodeId, spread: bool, context_sensitive: bool| CallArgKey::Eager {
+        first_pass: None,
+        ty,
+        spread,
+        literal_mode: ArgumentLiteralMode::Literal,
+        literal_provenance: None,
+        context_sensitive,
+        const_view: None,
+    };
+    let number = dispatch
+        .graph_arc()
+        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let (callee, args, typed) = match case {
+        RoundCall::TwoCallbacks => {
+            let f = callback_round_value(dispatch, "typedF");
+            let g = callback_round_value(dispatch, "typedG");
+            (
+                callback_round_value(dispatch, "both"),
+                vec![
+                    eager(number),
+                    argument(f, false, true),
+                    argument(g, false, true),
+                ],
+                vec![eager(number), eager(f), eager(g)],
+            )
+        }
+        RoundCall::CallbackBesideSpread => {
+            let f = callback_round_value(dispatch, "typedEcho");
+            let tuple = dispatch.graph_arc().intern_node(SemanticNodeData::Tuple {
+                elements: PayloadArray::from(
+                    vec![TupleElement {
+                        label: None,
+                        value: number,
+                        optional: false,
+                        rest: false,
+                    }]
+                    .into_boxed_slice(),
+                ),
+                readonly: false,
+            });
+            (
+                callback_round_value(dispatch, "echo"),
+                vec![argument(tuple, true, false), argument(f, false, true)],
+                vec![argument(tuple, true, false), eager(f)],
+            )
+        }
+    };
+    let call = super::call_resolve_tests::call_key_at(
+        dispatch,
+        CALLBACK_ROUNDS_FILE,
+        callee,
+        CallKind::Call,
+        None,
+        args,
+    );
+    let mut frame = call.clone();
+    frame.point.offset += 1;
+    (frame, call, typed)
+}
+
+/// The physical work call resolutions on `host` did, wherever they ran:
+/// the executor walks begun, the candidates whose applicability check
+/// began, and the argument relations their first inference pass ran.
+fn call_round_work(host: &crate::VerterHost) -> [u64; 3] {
+    let stats = host.project_type_store().semantic_graph().stats_snapshot();
+    [
+        stats.call_walks_begun,
+        stats.call_candidates_begun,
+        stats.call_arguments_related,
+    ]
+}
+
+fn call_round_work_since(after: [u64; 3], before: [u64; 3]) -> [u64; 3] {
+    [
+        after[0] - before[0],
+        after[1] - before[1],
+        after[2] - before[2],
+    ]
+}
+
+/// The display of the return type a resolved call selected.
+fn round_call_answer(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    result: &verter_type_engine::semantic_query::ResolvedCallResult,
+) -> String {
+    match result {
+        verter_type_engine::semantic_query::ResolvedCallResult::Selected {
+            return_type, ..
+        } => crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+            dispatch,
+            *return_type,
+            0,
+        ),
+        other => panic!("the call selects its candidate: {other:?}"),
+    }
+}
+
+/// `case`'s call driven in place on a fresh host, as a synchronous
+/// consumer drives it — each callback typed and the call resumed over it —
+/// and the call work that did. Its premise: the round the last callback's
+/// typing completes executes the call again, so two walks begin.
+fn synchronous_round_call(case: RoundCall) -> (String, [u64; 3]) {
+    let host = callback_rounds_host();
+    let _request =
+        verter_type_engine::request_context::install_test_request_for(CALLBACK_ROUNDS_FILE);
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let _scope = dispatch.enter_construction_scope();
+    let (frame, call, typed) = round_call(&dispatch, case);
+    let before = call_round_work(&host);
+    let step = dispatch.drive_contextual_call_in_place_for_tests(frame, call, typed);
+    let work = call_round_work_since(call_round_work(&host), before);
+    let verter_type_engine::project_semantic_dispatch::call_resolve::ResolveCallStep::Complete(
+        result,
+    ) = &step
+    else {
+        panic!("the synchronous consumer's call answers: {step:?}");
+    };
+    let answer = round_call_answer(&dispatch, result);
+    assert_eq!(
+        work[0], 2,
+        "premise: the call is executed again once its last callback is typed"
+    );
+    assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+    (answer, work)
+}
+
+/// The reads a call frame needs that are signature lists, once the
+/// consumer typed a callback on this thread.
+fn signature_lists_after_a_typed_callback(key: &SemanticQueryKey) -> bool {
+    matches!(key, SemanticQueryKey::SignaturesOfType { .. })
+        && verter_type_engine::project_semantic_dispatch::call_callbacks_typed_here_for_tests() >= 1
+}
+
+/// What a call frame driving a contextual call on the continuation runtime
+/// did while the reads `held` selects were produced by another task.
+struct RoundCallRun {
+    /// The first poll, under a probe that forbids every wait, returned
+    /// `Pending`.
+    yielded: bool,
+    /// The callbacks the consumer typed by the end of the first poll.
+    typed_at_hold: usize,
+    /// The suspensions the call made with a candidate's collector held.
+    suspensions: Vec<verter_type_engine::project_semantic_dispatch::CallSuspensionForTests>,
+    /// Work done by the first poll.
+    at_hold: [u64; 3],
+    /// A second poll here while still held, under a probe that forbids
+    /// every wait, and then its task polled on another thread, stayed
+    /// pending.
+    repolled_pending: bool,
+    pending_elsewhere: Option<bool>,
+    /// Work done by those repolls.
+    repoll_work: [u64; 3],
+    /// How many reads another task held for the frame.
+    held: usize,
+    /// The producers going away woke the frame.
+    woken: bool,
+    /// Work done over the whole polled read.
+    work: [u64; 3],
+    answer: String,
+}
+
+/// Resume `entry`'s pending task on another thread until it completes,
+/// parking there between polls until woken, and deliver its answer here.
+fn resume_round_call_elsewhere(
+    entry: &mut verter_type_engine::project_semantic_dispatch::SemanticQueryPoll<
+        '_,
+        '_,
+        crate::resolver_core::HostCapabilities,
+    >,
+) -> verter_type_engine::semantic_query::CacheRead<QueryResult<SemanticQueryValue>> {
+    let task = entry.task().expect("a pending root has a task");
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| semantic_poll_contract::poll_until_ready(|waker| task.poll(waker)))
+            .join()
+            .expect("the released task completes on another thread")
+    });
+    match entry.poll(Waker::noop()) {
+        Poll::Ready(read) => read,
+        Poll::Pending => panic!("a task completed elsewhere delivers on its entry's thread"),
+    }
+}
+
+/// `case`'s call driven by a call frame polled at the production entry on a
+/// fresh host, its consumer typing each callback as the call names it,
+/// while another task produces each read the frame needs that `held`
+/// selects; released, the frame's task resumes on another thread and the
+/// answer is delivered here.
+fn poll_round_call(case: RoundCall, held: Option<fn(&SemanticQueryKey) -> bool>) -> RoundCallRun {
+    use verter_type_engine::project_semantic_dispatch::{
+        call_callbacks_typed_here_for_tests, drive_contextual_call_here_for_tests,
+        hold_call_needs_here_for_tests, take_call_suspensions_for_tests, ContextualCallProbe,
+    };
+    let host = callback_rounds_host();
+    let _request =
+        verter_type_engine::request_context::install_test_request_for(CALLBACK_ROUNDS_FILE);
+    let mut dispatch = ProjectSemanticDispatch::new(&*host);
+    let scope = dispatch.enter_construction_scope();
+    let graph = host.project_type_store().semantic_graph();
+    let (frame, call, typed) = round_call(&dispatch, case);
+    let counter = Arc::new(CountingWaker::default());
+    let waker = Waker::from(Arc::clone(&counter));
+    let _ = take_call_suspensions_for_tests();
+    let before = call_round_work(&host);
+    let mut entry = dispatch.poll_query(SemanticQueryKey::ResolveCall(Box::new(frame)));
+    drive_contextual_call_here_for_tests(Some(ContextualCallProbe { call, typed }));
+    hold_call_needs_here_for_tests(held);
+    let first = {
+        let _forbid = verter_execution::blocking::WaitProbe::forbid();
+        entry.poll(&waker)
+    };
+    hold_call_needs_here_for_tests(None);
+    let typed_at_hold = call_callbacks_typed_here_for_tests();
+    drive_contextual_call_here_for_tests(None);
+    let at_hold = call_round_work_since(call_round_work(&host), before);
+    let suspensions = take_call_suspensions_for_tests();
+    let (yielded, held, repolled_pending, pending_elsewhere, repoll_work, read) = match first {
+        Poll::Ready(read) => (false, 0, false, None, [0; 3], read),
+        Poll::Pending => {
+            let repolled_pending = {
+                let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                entry.poll(&waker).is_pending()
+            };
+            let pending_elsewhere = entry.task().map(|task| {
+                assert_send(task);
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| task.poll(&waker).is_pending())
+                        .join()
+                        .expect("the pending poll returns")
+                })
+            });
+            let repoll_work = call_round_work_since(
+                call_round_work_since(call_round_work(&host), before),
+                at_hold,
+            );
+            let held = entry
+                .task()
+                .map_or(0, |task| task.release_held_call_needs_for_tests());
+            let read = resume_round_call_elsewhere(&mut entry);
+            (
+                true,
+                held,
+                repolled_pending,
+                pending_elsewhere,
+                repoll_work,
+                read,
+            )
+        }
+    };
+    let woken = counter.0.load(std::sync::atomic::Ordering::SeqCst) >= 1;
+    drop(entry);
+    let answer = match read.value() {
+        QueryResult::Value(SemanticQueryValue::ResolveCall(result)) => {
+            round_call_answer(&dispatch, result.as_ref())
+        }
+        other => panic!("the frame answers the call it drove: {other:?}"),
+    };
+    let run = RoundCallRun {
+        yielded,
+        typed_at_hold,
+        suspensions,
+        at_hold,
+        repolled_pending,
+        pending_elsewhere,
+        repoll_work,
+        held,
+        woken,
+        work: call_round_work_since(call_round_work(&host), before),
+        answer,
+    };
+    assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+    assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+    assert!(graph.resident_flight_keys_for_tests().is_empty());
+    drop(scope);
+    drop(dispatch);
+    run
+}
+
+/// A contextual call driven on a frame, whose consumer typed `f`, continues
+/// its walk: `f`'s typing relates into the candidate's collector, and
+/// mapping `g`'s parameter type under the `U` it inferred reads a
+/// signature list another task is producing. The first poll, which may not
+/// wait, returns `Pending` at that list with the collector holding `T` and
+/// `U` and no candidate check begun. Polled again, here and on another
+/// thread, it stays pending and does no work. Released, it resumes on
+/// another thread with the walk it began — the synchronous consumer
+/// executes the call again — and answers as the synchronous consumer does,
+/// with the same candidate and argument work and nothing left open.
+#[test]
+fn a_contextual_call_waiting_on_a_signature_list_its_resumed_candidate_reads_keeps_its_collector_and_does_not_walk_again(
+) {
+    let (synchronous, synchronous_work) = synchronous_round_call(RoundCall::TwoCallbacks);
+    assert_eq!(
+        synchronous_work[1], 1,
+        "premise: the synchronous call checks its candidate once, after both callbacks are typed"
+    );
+    let run = poll_round_call(
+        RoundCall::TwoCallbacks,
+        Some(signature_lists_after_a_typed_callback),
+    );
+    assert!(
+        run.yielded,
+        "the call yields at the signature list instead of waiting the producer out"
+    );
+    let last = run
+        .suspensions
+        .last()
+        .unwrap_or_else(|| panic!("the call suspends with its collector held"));
+    assert!(
+        matches!(
+            last.needs.as_slice(),
+            [SemanticQueryKey::SignaturesOfType { .. }]
+        ),
+        "it waits on a signature list `g`'s mapping reads: {last:?}"
+    );
+    assert_eq!(
+        last.collected_candidates, 2,
+        "its collector holds what the seed inferred for `T` and `f`'s typing for `U`"
+    );
+    assert_eq!(run.typed_at_hold, 1, "the consumer typed `f`, not yet `g`");
+    assert_eq!(
+        run.at_hold,
+        [1, 0, 0],
+        "one walk began, and no candidate check before the list is read"
+    );
+    assert!(run.held > 0);
+    assert!(run.repolled_pending);
+    assert_eq!(run.pending_elsewhere, Some(true));
+    assert_eq!(run.repoll_work, [0; 3], "a pending repoll does no work");
+    assert!(run.woken, "the producer going away wakes the frame");
+    assert_eq!(
+        run.work,
+        [1, synchronous_work[1], synchronous_work[2]],
+        "the call walks once across its rounds, with the synchronous candidate and argument work"
+    );
+    assert_eq!(run.answer, synchronous);
+}
+
+/// A contextual call driven on a frame, nothing held, walks once across
+/// both callback rounds — each round continues the walk over its retained
+/// plan — where the synchronous consumer's last round executes the call
+/// again. It answers as the synchronous consumer does, with the same
+/// candidate and argument work.
+#[test]
+fn a_contextual_call_on_a_frame_walks_once_across_its_callback_rounds_to_the_synchronous_answer() {
+    let (synchronous, synchronous_work) = synchronous_round_call(RoundCall::TwoCallbacks);
+    let run = poll_round_call(RoundCall::TwoCallbacks, None);
+    assert!(
+        !run.yielded,
+        "nothing is held: the frame answers on its first poll"
+    );
+    assert_eq!(run.typed_at_hold, 2, "the consumer typed both callbacks");
+    assert_eq!(
+        run.work,
+        [1, synchronous_work[1], synchronous_work[2]],
+        "one walk, with the synchronous candidate and argument work"
+    );
+    assert_eq!(run.answer, synchronous);
+}
+
+/// A contextual call waiting, with its collector held, on a signature list
+/// its resumed candidate's mapping reads, released while pending — its
+/// request abandoned, or the frame's task dropped on another thread —
+/// closes what it opened: no session is left that could still collect, no
+/// obligation frame stays open, and no flight or wait remains. The call
+/// then resolves in place to the synchronous answer.
+#[test]
+fn a_contextual_call_released_while_its_resumed_candidate_waits_leaves_nothing_open() {
+    use verter_type_engine::project_semantic_dispatch::{
+        call_callbacks_typed_here_for_tests, drive_contextual_call_here_for_tests,
+        hold_call_needs_here_for_tests, take_call_suspensions_for_tests, ContextualCallProbe,
+    };
+    let (synchronous, _) = synchronous_round_call(RoundCall::TwoCallbacks);
+    for dropped_elsewhere in [false, true] {
+        let host = callback_rounds_host();
+        let _request =
+            verter_type_engine::request_context::install_test_request_for(CALLBACK_ROUNDS_FILE);
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let (frame, call, typed) = round_call(&dispatch, RoundCall::TwoCallbacks);
+        let waker = Waker::from(Arc::new(CountingWaker::default()));
+        let _ = take_call_suspensions_for_tests();
+        drive_contextual_call_here_for_tests(Some(ContextualCallProbe {
+            call: call.clone(),
+            typed: typed.clone(),
+        }));
+        hold_call_needs_here_for_tests(Some(signature_lists_after_a_typed_callback));
+        dispatch
+            .with_semantic_task_for_tests(
+                SemanticQueryKey::ResolveCall(Box::new(frame.clone())),
+                |slot| {
+                    let task = slot.as_mut().expect("the task is lent");
+                    let pending = {
+                        let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                        task.poll_for_tests(&waker).is_pending()
+                    };
+                    hold_call_needs_here_for_tests(None);
+                    assert!(pending, "the call yields at the signature list");
+                    assert_eq!(call_callbacks_typed_here_for_tests(), 1);
+                    let suspensions = take_call_suspensions_for_tests();
+                    let last = suspensions
+                        .last()
+                        .unwrap_or_else(|| panic!("the call suspends with its collector held"));
+                    assert!(
+                        matches!(
+                            last.needs.as_slice(),
+                            [SemanticQueryKey::SignaturesOfType { .. }]
+                        ),
+                        "it waits on a signature list `g`'s mapping reads: {last:?}"
+                    );
+                    assert_eq!(last.collected_candidates, 2);
+                    if dropped_elsewhere {
+                        let task = slot.take().expect("the task is lent");
+                        std::thread::scope(|scope| {
+                            scope
+                                .spawn(move || drop(task))
+                                .join()
+                                .expect("the task drops on another thread");
+                        });
+                    }
+                    // Otherwise the task is left pending: the entry takes it back.
+                },
+            )
+            .expect("the cold root runs as a task");
+        drive_contextual_call_here_for_tests(None);
+        assert_eq!(
+            dispatch.open_request_state_for_tests(),
+            NOTHING_OPEN,
+            "the released call closes what it opened (dropped elsewhere: {dropped_elsewhere})"
+        );
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        let resident = graph.resident_flight_keys_for_tests();
+        assert!(
+            resident.is_empty(),
+            "the call's flights and the held producers go: {resident:?}"
+        );
+        let step = dispatch.drive_contextual_call_in_place_for_tests(frame, call, typed);
+        let verter_type_engine::project_semantic_dispatch::call_resolve::ResolveCallStep::Complete(
+            result,
+        ) = &step
+        else {
+            panic!("the call resolves after the release: {step:?}");
+        };
+        assert_eq!(round_call_answer(&dispatch, result), synchronous);
+    }
+}
+
+/// A callback named beside a spread argument holds no collector: the typed
+/// call is checked again. On a frame the round continues the walk over its
+/// retained plan, the typed callback entered into it — the candidate is
+/// checked again, as the synchronous consumer's re-execution checks it,
+/// but no second walk begins — and answers as the synchronous consumer
+/// does.
+#[test]
+fn a_callback_beside_a_spread_argument_is_rechecked_over_the_retained_plan_without_walking_again() {
+    let (synchronous, synchronous_work) = synchronous_round_call(RoundCall::CallbackBesideSpread);
+    assert_eq!(
+        synchronous_work[1], 2,
+        "premise: the typed call's candidate is checked again"
+    );
+    let run = poll_round_call(RoundCall::CallbackBesideSpread, None);
+    assert!(
+        !run.yielded,
+        "nothing is held: the frame answers on its first poll"
+    );
+    assert_eq!(run.typed_at_hold, 1, "the consumer typed the callback");
+    assert_eq!(run.work[0], 1, "one walk across both rounds");
+    assert_eq!(
+        run.work[1], synchronous_work[1],
+        "the candidate is checked again on the frame too"
+    );
+    assert_eq!(run.answer, synchronous);
+}
+
 /// A contextual call whose callback reads a `typeof` another task is
 /// producing suspends its function's evaluation with the call's candidate
 /// collector held: `T` holds what `1` inferred, out of the transaction
@@ -8102,7 +8651,7 @@ mod semantic_poll_contract {
     fn relation_premise() -> (ReadSummary, [u64; 3]) {
         let (synchronous, work) = synchronous_relation();
         assert!(
-            synchronous.0.contains("Assignable"),
+            synchronous.0.contains("Assignable") && !synchronous.0.contains("NotAssignable"),
             "premise: the pair is assignable: {synchronous:?}"
         );
         assert!(
@@ -8408,7 +8957,7 @@ mod semantic_poll_contract {
         let synchronous = read_summary(&dispatch, &read);
         let work = member_relation_work_since(member_relation_work(&host), before);
         assert!(
-            synchronous.0.contains("Assignable"),
+            synchronous.0.contains("Assignable") && !synchronous.0.contains("NotAssignable"),
             "premise: the pair is assignable: {synchronous:?}"
         );
         assert!(
@@ -8645,15 +9194,19 @@ mod semantic_poll_contract {
         let _scope = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
         let (relate, leaf) = member_relation_keys(&host, &dispatch, ("Left", "Right"));
-        let (other, lease) = hold_producer(&host, graph, leaf);
+        let (other, lease) = hold_producer(&host, graph, leaf.clone());
         let _ = verter_type_engine::project_semantic_dispatch::relation::take_relation_suspensions_for_tests();
         let mut entry = dispatch.poll_query(relate.clone());
-        let pending = while_held(lease, || {
+        let (pending, held_flights) = while_held(lease, || {
             let pending = entry.poll(Waker::noop()).is_pending();
             drop(entry);
-            pending
+            (pending, graph.resident_flight_keys_for_tests())
         });
         assert!(pending, "the root yields while its later member is held");
+        assert!(
+            held_flights.contains(&leaf),
+            "the released root leaves the held producer's flight alone: {held_flights:?}"
+        );
         assert_eq!(
             verter_type_engine::project_semantic_dispatch::relation::take_relation_suspensions_for_tests().len(),
             1,
@@ -8685,12 +9238,12 @@ mod semantic_poll_contract {
         let _scope = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
         let (relate, leaf) = member_relation_keys(&host, &dispatch, ("Left", "Right"));
-        let (other, lease) = hold_producer(&host, graph, leaf);
+        let (other, lease) = hold_producer(&host, graph, leaf.clone());
         let request = budgeted_request(1);
         let counter = Arc::new(CountingWaker::default());
         let waker = Waker::from(Arc::clone(&counter));
         let wakes = || counter.0.load(std::sync::atomic::Ordering::SeqCst);
-        let (first, woken, next) = {
+        let (first, woken, next, held_flights) = {
             let _request = verter_type_engine::request_context::RequestContextGuard::install(
                 Arc::clone(&request),
             );
@@ -8709,12 +9262,16 @@ mod semantic_poll_contract {
                     Poll::Ready(read) => Some(read),
                     Poll::Pending => None,
                 };
-                (first, woken, next)
+                (first, woken, next, graph.resident_flight_keys_for_tests())
             });
             drop(entry);
             observed
         };
         assert!(first, "the root yields while its later member is held");
+        assert!(
+            held_flights.contains(&leaf),
+            "the cancelled root leaves the held producer's flight alone: {held_flights:?}"
+        );
         assert!(
             woken,
             "the request's cancellation wakes the root with the producer still held"
