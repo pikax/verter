@@ -429,3 +429,190 @@ fn opening_an_import_chain_reads_each_file_a_bounded_number_of_times() {
         );
     }
 }
+
+/// A program with `allowJs` whose member imports a JavaScript file outside
+/// its `include`, which itself imports, lists both JavaScript files before
+/// the member, and builds its order once. Reading the imported file probes
+/// for its declaration companion; that resolution takes the reading program
+/// as the importer's owner rather than settling configured programs again,
+/// which would start the same program's order inside its own construction.
+/// The component's public API, read through the same settling, renders.
+///
+/// Mutation: settling configured programs for an unlisted importer the walk
+/// is reading starts a second build of the order inside the first, which the
+/// build limit turns into a panic instead of a stack overflow.
+#[test]
+fn program_order_does_not_reenter_when_a_js_import_outside_include_is_read() {
+    let limit = crate::program_order::OrderBuildLimitForTests::set(1);
+    let host = host(
+        serde_json::json!({
+            "compilerOptions": {
+                "module": "preserve",
+                "moduleResolution": "bundler",
+                "allowJs": true,
+                "noEmit": true,
+                "noLib": true
+            },
+            "include": ["src/**/*"]
+        }),
+        &[
+            (
+                "src/entry.ts",
+                "import { lib } from '../lib/lib.js';\nexport const usesLib = lib;\n",
+            ),
+            (
+                "lib/lib.js",
+                "import { helper } from './helper.js';\nexport const lib = helper;\n",
+            ),
+            ("lib/helper.js", "export const helper = 1;\n"),
+            (
+                "src/App.vue",
+                "<script setup lang=\"ts\">\nconst a = 1;\n</script>\n",
+            ),
+        ],
+    );
+    host.ingest_configured_programs();
+    let order = host.program_file_order(&format!("{ROOT}/src/entry.ts"), &mut std::iter::empty());
+    let ranks: Vec<u32> = ["lib/helper.js", "lib/lib.js", "src/entry.ts"]
+        .iter()
+        .map(|name| order.rank(&format!("{ROOT}/{name}")))
+        .collect();
+    assert!(
+        ranks.windows(2).all(|pair| pair[0] < pair[1]) && ranks[2] != u32::MAX,
+        "the imported JavaScript files precede their importer: {ranks:?}"
+    );
+    assert_eq!(validated(&host), Some(order.fingerprint()));
+    let app = format!("{ROOT}/src/App.vue");
+    let api = host
+        .get_public_api_batch(&[app.as_str()])
+        .into_iter()
+        .next()
+        .expect("one slot");
+    assert!(
+        matches!(api, Ok(Some(_))),
+        "the component renders its public API"
+    );
+    assert_eq!(limit.peak(), 1, "each order build ran outside every other");
+}
+
+/// Two threads settling the same disk program at once, whose member imports
+/// an unlisted JavaScript file, each build the order without starting it
+/// inside its own construction, and both end: a walk's reads and the
+/// resolutions they drive stay on the walk's thread, and a concurrent build
+/// on another thread is a second walk, not a re-entry.
+#[test]
+fn concurrent_settles_of_a_program_importing_unlisted_javascript_both_end() {
+    use verter_workspace::WorkspaceAccess;
+    let dir = tempfile::tempdir().unwrap();
+    let directory = dir.path().canonicalize().unwrap();
+    let root = verter_workspace::canonicalize_path(directory.to_str().unwrap());
+    std::fs::create_dir_all(directory.join("src")).unwrap();
+    std::fs::create_dir_all(directory.join("lib")).unwrap();
+    let config = directory.join("tsconfig.json");
+    let config_id = verter_workspace::canonicalize_path(config.to_str().unwrap());
+    std::fs::write(
+        &config,
+        r#"{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","allowJs":true,"noLib":true},"include":["src/**/*"]}"#,
+    )
+    .unwrap();
+    for (name, source) in [
+        (
+            "src/entry.ts",
+            "import { lib } from '../lib/lib.js';\nexport const usesLib = lib;\n",
+        ),
+        (
+            "lib/lib.js",
+            "import { helper } from './helper.js';\nexport const lib = helper;\n",
+        ),
+        ("lib/helper.js", "export const helper = 1;\n"),
+    ] {
+        std::fs::write(directory.join(name), source).unwrap();
+    }
+    let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+        verter_workspace::FilesystemOptions::default(),
+    ));
+    let project = verter_workspace::configured_ide_project(
+        workspace.as_ref(),
+        root.clone(),
+        root.clone(),
+        &config_id,
+    );
+    workspace.configure_resolver(vec![project]);
+    let host = Arc::new(VerterHost::new(HostConfig::default(), workspace));
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let (send, receive) = std::sync::mpsc::channel();
+    for _ in 0..2 {
+        let (host, barrier, send) = (Arc::clone(&host), Arc::clone(&barrier), send.clone());
+        // Detached: a settle that never ends fails the test at the deadline
+        // below instead of holding it.
+        std::thread::spawn(move || {
+            let limit = crate::program_order::OrderBuildLimitForTests::set(1);
+            barrier.wait();
+            host.ingest_configured_programs();
+            let _ = send.send(limit.peak());
+        });
+    }
+    drop(send);
+    for _ in 0..2 {
+        let peak = receive
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("each settle ends without starting its order inside itself");
+        assert!(peak <= 1, "{peak} builds of one order at once on a thread");
+    }
+    let order = host.program_file_order(&format!("{root}/src/entry.ts"), &mut std::iter::empty());
+    let ranks: Vec<u32> = ["lib/helper.js", "lib/lib.js", "src/entry.ts"]
+        .iter()
+        .map(|name| order.rank(&format!("{root}/{name}")))
+        .collect();
+    assert!(
+        ranks.windows(2).all(|pair| pair[0] < pair[1]) && ranks[2] != u32::MAX,
+        "the imported JavaScript files precede their importer: {ranks:?}"
+    );
+}
+
+/// A program importing a `node:` built-in lists no file for it, as
+/// TypeScript's program does (the module is an ambient declaration of
+/// `@types/node`, which a `/// <reference types>` pulls in when installed),
+/// and publishes its order with or without `@types/node`.
+#[test]
+fn a_node_builtin_import_pulls_in_no_file_and_the_order_publishes() {
+    for with_types in [false, true] {
+        let mut files = vec![(
+            "main.ts",
+            "/// <reference types=\"node\" />\n\
+             import { Buffer } from 'node:buffer';\n\
+             export const b = Buffer;\n",
+        )];
+        if with_types {
+            files.extend([
+                (
+                    "node_modules/@types/node/package.json",
+                    "{\"name\":\"@types/node\",\"types\":\"index.d.ts\"}",
+                ),
+                (
+                    "node_modules/@types/node/index.d.ts",
+                    "declare module 'node:buffer' { export const Buffer: unknown; }\n",
+                ),
+            ]);
+        }
+        let host = host(
+            serde_json::json!({ "compilerOptions": { "noLib": true }, "files": ["main.ts"] }),
+            &files,
+        );
+        let order = host.program_file_order(&format!("{ROOT}/main.ts"), &mut std::iter::empty());
+        assert_eq!(
+            validated(&host),
+            Some(order.fingerprint()),
+            "the order publishes (@types/node {with_types})"
+        );
+        let types = order.rank(&format!("{ROOT}/node_modules/@types/node/index.d.ts"));
+        let main = order.rank(&format!("{ROOT}/main.ts"));
+        assert!(main != u32::MAX);
+        assert_eq!(types < main, with_types, "@types/node {with_types}");
+        assert_eq!(
+            order.len(),
+            1 + usize::from(with_types),
+            "only main.ts and @types/node (@types/node {with_types})"
+        );
+    }
+}

@@ -86,14 +86,7 @@ impl NativeFs {
         let os_path = to_os_path(path);
         match std::fs::read_to_string(&os_path) {
             Ok(source) => Ok(Some(Arc::from(source))),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                Ok(None)
-            }
+            Err(error) if is_stable_absence(error.kind()) => Ok(None),
             Err(error) => Err(error),
         }
     }
@@ -113,12 +106,7 @@ impl NativeFs {
         let os_path = to_os_path(path);
         let mut file = match std::fs::File::open(&os_path) {
             Ok(file) => file,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
+            Err(error) if is_stable_absence(error.kind()) => {
                 return Ok(BoundedFileRead::Missing);
             }
             Err(error) => return Err(error),
@@ -144,14 +132,7 @@ impl NativeFs {
         match std::fs::metadata(&os_path) {
             Ok(metadata) if metadata.is_file() => Ok(Some(metadata.len())),
             Ok(_) => Ok(None),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                Ok(None)
-            }
+            Err(error) if is_stable_absence(error.kind()) => Ok(None),
             Err(error) => Err(error),
         }
     }
@@ -208,12 +189,7 @@ impl NativeFs {
                 false,
             )),
             Ok(_) => Ok((verter_session_query::resolution::PathProbe::Unknown, false)),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
+            Err(error) if is_stable_absence(error.kind()) => {
                 Ok((verter_session_query::resolution::PathProbe::Absent, false))
             }
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok((
@@ -265,14 +241,7 @@ impl NativeFs {
         let os_path = to_os_path(&key);
         match std::fs::canonicalize(&os_path) {
             Ok(path) => Ok(Some(normalize_path_str(&path.to_string_lossy()))),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                Ok(None)
-            }
+            Err(error) if is_stable_absence(error.kind()) => Ok(None),
             Err(error) => Err(error),
         }
     }
@@ -357,7 +326,12 @@ impl NativeFs {
         let os_path = to_os_path(dir);
         let os_path = normalize_read_dir_path(&os_path);
         let entries = std::fs::read_dir(os_path.as_ref()).map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
+            // A directory whose name the file system cannot hold does not
+            // exist, the same as a missing one.
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename
+            ) {
                 VfsError::NotFound(dir.to_string())
             } else {
                 VfsError::Io(e)
@@ -545,6 +519,20 @@ fn attribute_probe(os_path: &str) -> Option<(verter_session_query::resolution::P
         },
         false,
     ))
+}
+
+/// Whether an I/O error proves the path holds nothing, now and until the
+/// tree changes: it is missing, a component is not a directory, or the
+/// name is one the file system cannot hold (Windows refuses `node:buffer`).
+/// Every other failure is uncertainty, never absence.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_stable_absence(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::NotADirectory
+            | std::io::ErrorKind::InvalidFilename
+    )
 }
 
 /// Convert a canonical ID (forward slashes) to an OS path.
@@ -947,6 +935,42 @@ mod tests {
             verter_session_query::resolution::PathProbe::Absent,
             "ENOTDIR is stable absence, not transient filesystem uncertainty"
         );
+    }
+
+    /// A name the file system cannot hold names nothing, now or later: a
+    /// live probe, read and realpath of it answer absence, not an I/O error
+    /// a resolution would retry and never retain. A component longer than
+    /// any file system allows is refused on every platform; Windows also
+    /// refuses a `:` in a name, as in `node_modules/node:buffer`.
+    #[test]
+    fn a_name_the_file_system_cannot_hold_is_stable_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().replace('\\', "/");
+        let long = format!("{root}/{}", "n".repeat(300));
+        let mut names = vec![long.clone(), format!("{long}/index.ts")];
+        let mut directories = vec![long];
+        if cfg!(windows) {
+            std::fs::create_dir(dir.path().join("node_modules")).unwrap();
+            names.push(format!("{root}/node_modules/node:buffer"));
+            names.push(format!("{root}/node_modules/node:buffer/index.ts"));
+            directories.push(format!("{root}/node_modules/node:buffer"));
+        }
+        let fs = NativeFs::new();
+        for name in names {
+            assert_eq!(
+                fs.probe_path_live(&name).ok(),
+                Some(verter_session_query::resolution::PathProbe::Absent),
+                "{name}"
+            );
+            assert_eq!(fs.read_file_live(&name).ok(), Some(None), "{name}");
+            assert_eq!(fs.realpath_live(&name).ok(), Some(None), "{name}");
+        }
+        for directory in directories {
+            assert!(
+                matches!(fs.read_dir(&directory), Err(VfsError::NotFound(_))),
+                "{directory}"
+            );
+        }
     }
 
     #[test]

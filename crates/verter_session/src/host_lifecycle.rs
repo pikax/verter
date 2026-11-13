@@ -378,18 +378,27 @@ impl VerterHost {
             };
         let workspace = self.workspace();
         let root = workspace.published_root();
-        if root.as_ref().is_some_and(|root| {
+        // An importer no configured project lists is owned by the program
+        // that imports it. A program walk reading the importer is building
+        // that membership right now, so its resolutions take the walk's
+        // program; any other settles configured programs first.
+        let unlisted = root.as_ref().is_some_and(|root| {
             !root.snapshot.owners_for_file(&importer).iter().any(|id| {
                 matches!(
                     root.snapshot.project(*id).payload,
                     verter_workspace::ProjectPayload::Configured { .. }
                 )
             })
-        }) {
+        });
+        let walking_owner = unlisted
+            .then(|| self.walk_reading_owner(&importer))
+            .flatten();
+        if unlisted && walking_owner.is_none() {
             self.ingest_configured_programs();
         }
         let root = workspace.published_root();
-        let reachable_owner = root.as_ref().and_then(|root| {
+        let reachable_owner = walking_owner.or_else(|| {
+            let root = root.as_ref()?;
             let project = root
                 .snapshot
                 .project(self.project_for_canonical_in_snapshot(&importer, &root.snapshot)?);

@@ -3733,3 +3733,65 @@ fn a_root_is_never_a_prunable_parent() {
     );
     assert_eq!(prunable_parent("relative"), None);
 }
+
+/// A `node:` built-in names no package. Resolving one, with or without
+/// `@types/node` installed, reads no `node_modules` path (Windows cannot
+/// even hold `node:buffer` as a name), answers no file, as TypeScript does
+/// (the module comes from an ambient `declare module "node:buffer"`), and
+/// retains that miss.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn node_builtins_read_no_node_modules_and_retain_their_miss() {
+    const CONTEXT: ResolutionContext = ResolutionContext {
+        phase: ResolvePhase::ProviderGraph,
+        kind: ResolveRequestKind::TypeImport,
+    };
+    for with_types in [false, true] {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root_path = canonical_temp_root(&temp);
+        std::fs::create_dir_all(root_path.join("src")).expect("src dir");
+        std::fs::write(
+            root_path.join("src/main.ts"),
+            "import { Buffer } from 'node:buffer';\nexport const b = Buffer;\n",
+        )
+        .expect("importer");
+        if with_types {
+            std::fs::create_dir_all(root_path.join("node_modules/@types/node")).expect("types dir");
+            std::fs::write(
+                root_path.join("node_modules/@types/node/index.d.ts"),
+                "declare module 'node:buffer' { export const Buffer: unknown; }\n",
+            )
+            .expect("types");
+        }
+        let root = temp_canonical_id(&root_path);
+        let importer = format!("{root}/src/main.ts");
+        let workspace = FilesystemWorkspace::new(FilesystemOptions {
+            roots: vec![root.clone()],
+            eager_preload: false,
+        });
+        WorkspaceAccess::configure_resolver(
+            &workspace,
+            vec![crate::resolver::ide_project_config(
+                root.clone(),
+                root.clone(),
+                Some(format!("{root}/tsconfig.json")),
+            )],
+        );
+        let published = workspace.load_published().expect("published root");
+        let _ = workspace.native_fs.take_live_reads_for_test();
+        let outcome = WorkspaceRead::resolve_import_at_published(
+            &workspace,
+            &published,
+            &importer,
+            "node:buffer",
+            CONTEXT,
+        );
+        let reads = workspace.native_fs.take_live_reads_for_test();
+        assert!(outcome.result().is_none(), "@types/node {with_types}");
+        assert!(outcome.is_cacheable(), "the miss is retained");
+        assert!(
+            !reads.iter().any(|(_, path)| path.contains("node:")),
+            "no disk read names the built-in: {reads:?}"
+        );
+    }
+}
