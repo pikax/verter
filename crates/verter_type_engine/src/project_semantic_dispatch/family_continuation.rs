@@ -347,13 +347,13 @@ impl FamilyBuild {
             Self::ClassStaticSurface(build) => PortRead::ClassStatic(build.declaration_read()),
             Self::ApparentType(build) => build.global_port(),
             Self::ResolveDecl(build) => build.port_read(),
+            Self::ProjectPath(build) => build.walk.port_read(),
             Self::MacroPayload(_)
             | Self::ReduceIntersection(_)
             | Self::OverloadSet(_)
             | Self::ClassInstanceSurface(_)
             | Self::CycleGate(_)
-            | Self::TemplateUnion(..)
-            | Self::ProjectPath(_) => unreachable!("this family reads no resolver port"),
+            | Self::TemplateUnion(..) => unreachable!("this family reads no resolver port"),
         }
     }
 }
@@ -522,8 +522,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // computed (`projection_hops_walked`).
         let build = match build {
             FamilyBuild::ProjectPath(build) => {
-                let mut deliver = || super::narrow_value_cache_read(deliver());
-                return self.resume_project_path(*build, &mut deliver);
+                return self.resume_project_path(*build, deliver);
             }
             build => build,
         };
@@ -576,6 +575,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         build: FamilyBuild,
         serve: Option<IndexedInputServe>,
     ) -> FamilyStep {
+        // A path walk's file reads are its wrapper lookup's; its stages are
+        // not counted.
+        let build = match build {
+            FamilyBuild::ProjectPath(build) => {
+                return self
+                    .resume_project_path_lookup(*build, super::walk::LookupAnswer::Source(serve));
+            }
+            build => build,
+        };
         self.graph().record_continuation_resumed();
         match build {
             FamilyBuild::CycleGate(build) => self
@@ -585,7 +593,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .continuation_stage()
                 .resume_macro_payload_owner(build, serve),
             FamilyBuild::TemplateUnion(..) => unreachable!("a template union is a query read"),
-            FamilyBuild::ProjectPath(_) => unreachable!("a path walk reads queries only"),
+            FamilyBuild::ProjectPath(_) => unreachable!("a path walk resumed above"),
             FamilyBuild::ResolveDecl(build) => self
                 .continuation_stage()
                 .resume_resolve_decl_source(*build, serve),
@@ -609,6 +617,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// stands at.
     #[inline(never)]
     pub(super) fn resume_family_port(&self, build: FamilyBuild, answer: PortAnswer) -> FamilyStep {
+        let build = match build {
+            FamilyBuild::ProjectPath(build) => {
+                return self
+                    .resume_project_path_lookup(*build, super::walk::LookupAnswer::Port(answer));
+            }
+            build => build,
+        };
         self.graph().record_continuation_resumed();
         match (build, answer) {
             (FamilyBuild::ClassStaticSurface(build), PortAnswer::ClassStatic(answer)) => self
@@ -629,10 +644,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 | FamilyBuild::OverloadSet(_)
                 | FamilyBuild::ClassInstanceSurface(_)
                 | FamilyBuild::CycleGate(_)
-                | FamilyBuild::TemplateUnion(..)
-                | FamilyBuild::ProjectPath(_),
+                | FamilyBuild::TemplateUnion(..),
                 _,
             ) => unreachable!("this family reads no resolver port"),
+            (FamilyBuild::ProjectPath(_), _) => unreachable!("a path walk resumed above"),
         }
     }
 

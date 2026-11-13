@@ -106,7 +106,7 @@ impl GlobalWrapper {
 }
 
 /// Where a global wrapper read stands before its interface's instantiation
-/// ([`ProjectSemanticDispatch::global_wrapper_read`]).
+/// ([`ProjectSemanticDispatch::global_wrapper_surface_in`]).
 pub(super) enum WrapperRead {
     /// Settled without reading: no project, or no such declaration.
     Settled(GlobalWrapper),
@@ -166,23 +166,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
-    /// [`Self::global_wrapper_surface`] up to its interface's
-    /// instantiation, which a path hop reads as its own transition: the
-    /// global lookup is answered here, in place, as a port.
-    pub(super) fn global_wrapper_read(
-        &self,
-        name: &str,
-        args: &[SemanticNodeId],
-        canonical: &str,
-    ) -> WrapperRead {
-        self.global_wrapper_read_in(
-            name,
-            args,
-            canonical,
-            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Shallow),
-        )
-    }
-
     /// The instantiation a member read off the global wrapper `name` over
     /// `args` reads in `canonical`'s project: `None` when it settles
     /// without one.
@@ -193,7 +176,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         args: &[SemanticNodeId],
         canonical: &str,
     ) -> Option<SemanticQueryKey> {
-        match self.global_wrapper_read(name, args, canonical) {
+        match self.global_wrapper_read_in(
+            name,
+            args,
+            canonical,
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Shallow),
+        ) {
             WrapperRead::Read(key) => Some(key),
             WrapperRead::Settled(_) => None,
         }
@@ -212,17 +200,44 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let Some(declaration) = self.first_global_declaration(canonical, name) else {
             return WrapperRead::Settled(GlobalWrapper::Absent);
         };
+        WrapperRead::Read(self.global_wrapper_key_in(&declaration, name, args, context))
+    }
+
+    /// The instantiation of the global wrapper `name` over `args` that
+    /// `declaration`, its first declaration, declares — what a member read
+    /// off the wrapper reads once its
+    /// lookup found the declaration ([`Self::global_wrapper_surface`] is the
+    /// same read made in place).
+    pub(super) fn global_wrapper_key(
+        &self,
+        declaration: &verter_session_query::type_solver::host::ResolvedRootIdentity,
+        name: &str,
+        args: &[SemanticNodeId],
+    ) -> SemanticQueryKey {
+        self.global_wrapper_key_in(
+            declaration,
+            name,
+            args,
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Shallow),
+        )
+    }
+
+    fn global_wrapper_key_in(
+        &self,
+        declaration: &verter_session_query::type_solver::host::ResolvedRootIdentity,
+        name: &str,
+        args: &[SemanticNodeId],
+        context: ProjectionReductionContext,
+    ) -> SemanticQueryKey {
         let slot = self.type_slot_for(
             declaration.canonical_id.clone(),
             declaration.owner,
             Arc::from(name),
         );
-        WrapperRead::Read(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
-                slot,
-                Arc::from(args.to_vec().into_boxed_slice()),
-                self.instantiate_context_for(declaration.canonical_id.as_ref(), context),
-            ),
+        SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+            slot,
+            Arc::from(args.to_vec().into_boxed_slice()),
+            self.instantiate_context_for(declaration.canonical_id.as_ref(), context),
         ))
     }
 
