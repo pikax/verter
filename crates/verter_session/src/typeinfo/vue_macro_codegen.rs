@@ -292,6 +292,22 @@ pub(crate) enum VueMacroDependencyFailure {
         /// enum derives `Ord` and `Span` does not.
         macro_span: (u32, u32),
     },
+    /// The authored macro root is an imported surface-tier dependency whose
+    /// payload lookup ended early (budget, recursion, or an unfinished
+    /// traversal), so its absence is not established. Same fields as
+    /// [`Self::MissingRoot`].
+    IncompleteRoot {
+        /// Analyzer macro inventory index.
+        macro_index: usize,
+        /// Exact top-level lexical owner of the macro/import binding.
+        owner: verter_type_expr::TopLevelOwnerId,
+        /// Exact authored import source.
+        import_source: String,
+        /// Exact authored local type name.
+        type_name: String,
+        /// The originating macro call's own span (`(start, end)`).
+        macro_span: (u32, u32),
+    },
     /// A resolved root dropped one imported heritage/intersection/union arm.
     UnresolvedSurfaceArm {
         /// Analyzer macro inventory index.
@@ -1221,16 +1237,36 @@ impl VerterHost {
             });
             let payload = payload_owner.as_ref().map(|root| root.id());
             if payload.is_none() {
+                // A lookup that ended early has not shown the root absent:
+                // its rows stay distinguishable from a complete miss.
+                let lookup_ended_early = payload_local.is_partial();
                 state.dependency_failures.extend(
                     demand_row
                         .surface_dependency_failures()
                         .iter()
-                        .map(|failure| VueMacroDependencyFailure::MissingRoot {
-                            macro_index: failure.macro_index(),
-                            owner: mac.owner,
-                            import_source: failure.import_source().to_owned(),
-                            type_name: failure.type_name().to_owned(),
-                            macro_span: failure.macro_span(),
+                        .map(|failure| {
+                            let macro_index = failure.macro_index();
+                            let owner = mac.owner;
+                            let import_source = failure.import_source().to_owned();
+                            let type_name = failure.type_name().to_owned();
+                            let macro_span = failure.macro_span();
+                            if lookup_ended_early {
+                                VueMacroDependencyFailure::IncompleteRoot {
+                                    macro_index,
+                                    owner,
+                                    import_source,
+                                    type_name,
+                                    macro_span,
+                                }
+                            } else {
+                                VueMacroDependencyFailure::MissingRoot {
+                                    macro_index,
+                                    owner,
+                                    import_source,
+                                    type_name,
+                                    macro_span,
+                                }
+                            }
                         }),
                 );
             }

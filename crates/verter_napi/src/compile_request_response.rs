@@ -335,6 +335,26 @@ pub fn compile_request_failure_to_napi(
                 diagnosticCode: None,
             }
         }
+        host::CompileRequestFailure::DependenciesIncomplete {
+            canonical_id,
+            gaps: _,
+            diagnostics,
+        } => {
+            let message = diagnostic_message(
+                &diagnostics,
+                "compile request dependencies are incomplete",
+            );
+            NapiCompileRequestFailure {
+                kind: "dependenciesIncomplete".to_string(),
+                canonicalId: canonical_id,
+                message,
+                diagnostics: host_diagnostics_to_napi(&diagnostics, source),
+                requestedFramework: None,
+                registeredFramework: None,
+                productKind: None,
+                diagnosticCode: None,
+            }
+        }
     }
 }
 
@@ -359,7 +379,8 @@ pub(crate) fn compile_request_failure_status(failure: &host::CompileRequestFailu
         host::CompileRequestFailure::Host(error) => crate::host_error_status(error),
         host::CompileRequestFailure::FrameworkMismatch { .. }
         | host::CompileRequestFailure::UnsupportedProduct { .. }
-        | host::CompileRequestFailure::Refused { .. } => Status::InvalidArg,
+        | host::CompileRequestFailure::Refused { .. }
+        | host::CompileRequestFailure::DependenciesIncomplete { .. } => Status::InvalidArg,
         host::CompileRequestFailure::ProductNotProduced { .. }
         | host::CompileRequestFailure::RuntimeSurfaceRefused { .. } => Status::GenericFailure,
     }
@@ -420,6 +441,7 @@ pub(crate) fn failure_canonical_id<'a>(
         | host::CompileRequestFailure::UnsupportedProduct { canonical_id, .. }
         | host::CompileRequestFailure::ProductNotProduced { canonical_id, .. }
         | host::CompileRequestFailure::RuntimeSurfaceRefused { canonical_id, .. }
-        | host::CompileRequestFailure::Refused { canonical_id, .. } => canonical_id,
+        | host::CompileRequestFailure::Refused { canonical_id, .. }
+        | host::CompileRequestFailure::DependenciesIncomplete { canonical_id, .. } => canonical_id,
     }
 }

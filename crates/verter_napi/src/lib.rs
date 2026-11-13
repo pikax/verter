@@ -4675,6 +4675,51 @@ mod tests {
         assert!(projected.diagnostics.diagnostics.is_empty());
     }
 
+    /// A compile whose macro type dependencies are incomplete projects its
+    /// own failure kind, not a refusal, and keeps the refusal's message,
+    /// diagnostics, status and canonical id.
+    ///
+    /// Mutation recipe: map the incomplete-dependencies arm to the
+    /// `"refused"` kind. The kind assertion goes red.
+    #[test]
+    fn dependencies_incomplete_projects_its_own_kind_and_keeps_the_diagnostics() {
+        let message = "missing macro type dependency './types' for type 'Props' in '/src/App.vue'";
+        let failure = host::CompileRequestFailure::DependenciesIncomplete {
+            canonical_id: "/src/App.vue".to_string(),
+            gaps: vec![host::CompileDependencyGap::Route {
+                importer: "/src/types/index.ts".to_string(),
+                specifier: "./video".to_string(),
+                refused: false,
+            }],
+            diagnostics: host::DiagnosticsSnapshot {
+                diagnostics: vec![host::HostDiagnostic {
+                    severity: host::HostSeverity::Error,
+                    code: "HOST_MISSING_MACRO_TYPE_DEP".to_string(),
+                    message: message.to_string(),
+                    arguments: Vec::new(),
+                    span: verter_span::Span::new(0, 4),
+                }],
+                has_errors: true,
+            },
+        };
+        assert_eq!(compile_request_failure_status(&failure), Status::InvalidArg);
+        assert_eq!(failure_canonical_id(&failure, "fallback"), "/src/App.vue");
+        let projected = compile_request_failure_to_napi(failure, "fallback".to_string(), None);
+        assert_eq!(projected.kind, "dependenciesIncomplete");
+        assert_eq!(projected.canonicalId, "/src/App.vue");
+        assert_eq!(projected.message, message);
+        assert!(projected.diagnostics.hasErrors);
+        assert_eq!(
+            projected
+                .diagnostics
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code.as_str())
+                .collect::<Vec<_>>(),
+            ["HOST_MISSING_MACRO_TYPE_DEP"]
+        );
+    }
+
     // Mutation recipe: format construction refusals with `{error:?}`.
     // The public message then contains `DuplicateProduct(RuntimeClient)`.
     #[test]

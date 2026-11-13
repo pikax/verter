@@ -19,12 +19,17 @@
 //!   repeated wildcard re-export scans are expensive.
 //!
 //! Module layout:
+//! - [`compile_blocker_hydration`] — pollable compile-blocker hydration
+//!   and its typed outcome.
+//! - [`compile_inputs`] — the input side of a host compile: the one
+//!   coherent compiler-input capture and the framework execution inputs
+//!   prepared from it, with the macro dependency verdict.
 //! - [`compile_request_build`] — the bound compile lanes' session side:
 //!   the framework host-backend demand constructors, the host-backed
-//!   bound execution dispatch (`execute_bound_host_products`) with its
-//!   arm-local framework execution-input preparation, refusal mapping,
-//!   and the shared result carriers both `compile_entry` and
-//!   `compile_entry_runtime_render` consume.
+//!   bound execution dispatch (`execute_bound_host_products`) over
+//!   prepared execution inputs, refusal mapping, and the shared result
+//!   carriers both `compile_entry` and `compile_entry_runtime_render`
+//!   consume.
 //! - [`frontier_helpers`] — route-cache and wildcard-ranking helpers.
 //! - [`native_host_binding`] — the sealed request-scoped
 //!   `BoundNativeHostRequest` binding substrate over the registered
@@ -39,6 +44,12 @@
 //! - [`vue_script_extract`] — free helpers for SFC `<script>` extraction
 //!   and template-converter input shaping.
 
+mod compile_blocker_hydration;
+mod compile_inputs;
+// The request route's compile-input tests: hydration, capture and the
+// dependency verdict.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod compile_inputs_tests;
 mod compile_request_build;
 mod dependency_resolution;
 mod external_type_resolution;

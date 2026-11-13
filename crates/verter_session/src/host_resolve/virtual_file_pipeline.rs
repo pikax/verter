@@ -14,6 +14,9 @@ use verter_type_engine::instant::Instant;
 // The runtime-render half of this module is native-only: the bound
 // framework backends, their refusal mappers and `Main` assembly all live
 // behind the same target gate as the render entry points that call them.
+use super::compile_inputs::{
+    prepare_execution_inputs, CompileInputsFailure, ExecutionInputDemand, SharedDependencyAxis,
+};
 use super::compile_request_build::{
     execute_bound_host_products, no_carrier_artifact_diagnostics, HostProductsFailure,
 };
@@ -29,6 +32,7 @@ use super::native_host_binding::BoundNativeHostRequest;
 use super::vue_script_extract::template_converter_inputs;
 use crate::hash::compile_profile_hash;
 use crate::id::{parse_raw_id, render_ids, render_single_id};
+use crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand;
 use crate::types::*;
 use crate::CompileTarget;
 use crate::VerterHost;
@@ -561,116 +565,6 @@ impl VerterHost {
         })
     }
 
-    /// Ensure a file is compiled and cached for the given profile.
-    ///
-    /// Unlike [`get_virtual_file`](Self::get_virtual_file), this does not require
-    /// specifying a `VirtualNodeKind`. It simply ensures the compilation cache is
-    /// populated so that subsequent `get_ide()`, `get_analysis()`, or
-    /// `get_virtual_file()` calls hit the cache.
-    ///
-    /// Returns `Ok(())` on success (cache hit or successful compilation).
-    /// Returns `Err(HostError)` if the file is missing or compilation fails.
-    pub(super) fn hydrate_compile_blockers(&self, canonical_id: &str) {
-        let Some(blockers) = self.get_compile_blockers(canonical_id) else {
-            return;
-        };
-
-        let mut blocker_ids = std::collections::BTreeSet::new();
-        let mut pending_routes = Vec::new();
-
-        // Blocker hydration and dependency edges are import-graph
-        // bookkeeping: they take every complete answer, retained or not.
-        for request in blockers.external_source_requests {
-            let resolved = match self
-                .resolve_for_persistent_state(
-                    canonical_id,
-                    &request.specifier,
-                    verter_session_query::resolution::ResolutionContext {
-                        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
-                        kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
-                    },
-                )
-                .into_delivered()
-            {
-                Some(resolution) => {
-                    let Some(resolution) = resolution else {
-                        if request.resolved_canonical_id != canonical_id {
-                            blocker_ids.insert(request.resolved_canonical_id);
-                        }
-                        continue;
-                    };
-                    pending_routes.push((
-                        request.specifier,
-                        resolution.source_id.clone(),
-                        verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
-                    ));
-                    resolution.source_id
-                }
-                None => return,
-            };
-            if resolved != canonical_id {
-                blocker_ids.insert(resolved);
-            }
-        }
-
-        for dep in blockers.macro_type_deps.iter() {
-            let type_resolution = self.resolve_for_persistent_state(
-                canonical_id,
-                &dep.import_source,
-                verter_session_query::resolution::ResolutionContext {
-                    phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
-                    kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
-                },
-            );
-            let resolved = match type_resolution.into_delivered() {
-                Some(resolution) => match resolution {
-                    Some(resolution) => {
-                        pending_routes.push((
-                            dep.import_source.clone(),
-                            resolution.source_id.clone(),
-                            verter_session_query::resolution::ResolveRequestKind::TypeImport,
-                        ));
-                        Some(resolution)
-                    }
-                    None => match self
-                        .resolve_for_persistent_state(
-                            canonical_id,
-                            &dep.import_source,
-                            verter_session_query::resolution::ResolutionContext {
-                                phase:
-                                    verter_session_query::resolution::ResolvePhase::CodegenBlocker,
-                                kind:
-                                    verter_session_query::resolution::ResolveRequestKind::EsmImport,
-                            },
-                        )
-                        .into_delivered()
-                    {
-                        Some(resolution) => resolution.inspect(|resolution| {
-                            pending_routes.push((
-                                dep.import_source.clone(),
-                                resolution.source_id.clone(),
-                                verter_session_query::resolution::ResolveRequestKind::EsmImport,
-                            ));
-                        }),
-                        None => return,
-                    },
-                },
-                None => return,
-            }
-            .map(|resolution| resolution.source_id);
-            if let Some(resolved) = resolved.filter(|resolved| resolved != canonical_id) {
-                blocker_ids.insert(resolved);
-            }
-        }
-
-        for (_specifier, resolved, _kind) in pending_routes {
-            self.record_resolved_dependency_edge(canonical_id, &resolved);
-        }
-        for blocker_id in blocker_ids {
-            let _ = self.ensure_loaded(&blocker_id);
-        }
-    }
-
     /// R3/R26/R28 cold-compute prefetch: resolve and load the cross-file
     /// dependency surface the compile-tier fact tracer will observe
     /// before the tracer is installed.
@@ -960,6 +854,15 @@ impl VerterHost {
         }
     }
 
+    /// Ensure a file is compiled and cached for the given profile.
+    ///
+    /// Unlike [`get_virtual_file`](Self::get_virtual_file), this does not require
+    /// specifying a `VirtualNodeKind`. It simply ensures the compilation cache is
+    /// populated so that subsequent `get_ide()`, `get_analysis()`, or
+    /// `get_virtual_file()` calls hit the cache.
+    ///
+    /// Returns `Ok(())` on success (cache hit or successful compilation).
+    /// Returns `Err(HostError)` if the file is missing or compilation fails.
     #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub fn ensure_compiled(
         &self,
@@ -3411,23 +3314,60 @@ impl VerterHost {
             );
         }
 
+        // The execution inputs of the binding's own framework arm are
+        // prepared first, complete: the Vue macro bundle, the restated
+        // dependency axis, and the dependency verdict. The Vue macro bundle
+        // demand FOLLOWS the caller's target instead of always asking for
+        // the heaviest one. A TSX-only (IDE) compile takes the public binding
+        // names; only a target that renders the runtime `props` option
+        // object pays for per-member broad-runtime classification. Every Vue
+        // compile produces at least the names bundle, because the shared
+        // payload resolution underneath it is what yields this file's macro
+        // dependency diagnostics and its transitive macro type dependencies.
+        // These lanes have no typed failure channel for an incomplete
+        // dependency, so it refuses with the same diagnostics as a missing
+        // one.
+        let demand = match &binding {
+            BoundNativeHostRequest::Vue(_) => ExecutionInputDemand::Vue {
+                macros: VueMacroCodegenDemand::for_compile_target(profile.target)
+                    .unwrap_or(VueMacroCodegenDemand::RuntimeBindingNames),
+                axis: SharedDependencyAxis::Restate,
+            },
+            BoundNativeHostRequest::Svelte(_) => ExecutionInputDemand::Svelte {
+                css_hash_override: profile.svelte_css_hash_override.clone(),
+                axis: SharedDependencyAxis::Restate,
+            },
+        };
+        let inputs = match prepare_execution_inputs(self, snapshot, demand) {
+            Ok(inputs) => inputs,
+            Err(CompileInputsFailure::Missing(payload)) => {
+                return Err(diagnostics.merge(payload));
+            }
+            Err(CompileInputsFailure::Incomplete {
+                diagnostics: payload,
+                ..
+            }) => {
+                return Err(diagnostics.merge(payload));
+            }
+            Err(CompileInputsFailure::Aborted(abort)) => {
+                return Ok(CompileEntryOutcome::Aborted(abort));
+            }
+        };
+
         // One backend call per host-backed request: the consumed binding's
-        // catalog arm yields the backend, that arm prepares its own
-        // framework execution inputs, the backend issues the multi-product
-        // admission over the SAME presented artifact (an unsupported
-        // option, an unproducible demand, or a malformed Svelte token
-        // refuses typed at issuance, before any codegen input is built),
-        // and the product execution consumes the admission by value — one
-        // request, one backend call, one admitted population. Nothing
-        // above this call resolves, prepares, or refuses on any
-        // framework's semantic execution inputs.
+        // catalog arm yields the backend, the backend issues the
+        // multi-product admission over the SAME presented artifact (an
+        // unsupported option, an unproducible demand, or a malformed Svelte
+        // token refuses typed at issuance, before any codegen input is
+        // built), and the product execution consumes the admission by value
+        // — one request, one backend call, one admitted population.
         // See `compile_request_build::execute_bound_host_products`.
         let products = match execute_bound_host_products(
-            self,
             binding,
             artifact,
             profile,
             snapshot,
+            inputs,
             want_runtime,
             want_ide,
             want_template_data,
@@ -3437,9 +3377,6 @@ impl VerterHost {
             Ok(products) => products,
             Err(HostProductsFailure::Fatal(payload)) => {
                 return Err(diagnostics.merge(payload));
-            }
-            Err(HostProductsFailure::Aborted(abort)) => {
-                return Ok(CompileEntryOutcome::Aborted(abort));
             }
             // The backend fail-closed on the runtime surface THIS request
             // asked for (all-or-none), and the transaction ends here: no
