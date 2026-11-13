@@ -1,8 +1,10 @@
 //! The session side of the bound host compile routes: demand
-//! construction, bound-backend execution dispatch, the host-backed
-//! lane's arm-local framework execution-input preparation, refusal
-//! mapping, and the result-carrier plumbing shared by
+//! construction, bound-backend execution dispatch over prepared execution
+//! inputs, refusal mapping, and the result-carrier plumbing shared by
 //! [`crate::host_resolve::virtual_file_pipeline`]'s compile lanes.
+//!
+//! Execution inputs are prepared before any function here is called
+//! ([`super::compile_inputs`]); nothing here waits on a dependency.
 //!
 //! The two profile-derived lanes construct no session-side
 //! `CompileRequest`: each builds the framework host backend's own typed
@@ -18,9 +20,9 @@
 //! is the third route and inverts only that step: the caller's canonical
 //! request IS the demand document, admitted verbatim, and NOTHING on that
 //! route derives a demand from a `CompileProfile` or reconstructs one from
-//! the request. It shares every other stage — the same arm-local
-//! execution-input preparation, the same bound backend, the same
-//! consume-once admission, the same single product execution.
+//! the request. It shares every other stage — the same prepared execution
+//! inputs, the same bound backend, the same consume-once admission, the
+//! same single product execution.
 //!
 //! There is no shared framework fork here: the demand constructor is
 //! selected by the request-scoped native host binding's catalog arm (the
@@ -29,11 +31,11 @@
 //! option-attempt builders so they can never diverge on which profile
 //! axes reach option admission.
 
+use super::compile_inputs::PreparedExecutionInputs;
 use crate::types::*;
 use verter_compiler::framework_common::{
     SvelteHostExecutionInputs, SvelteHostMultiProductDemand, SvelteHostRuntimeRenderDemand,
-    SvelteSuppliedStyle, VueHostExecutionInputs, VueHostMultiProductDemand,
-    VueHostRuntimeRenderDemand,
+    SvelteSuppliedStyle, VueHostMultiProductDemand, VueHostRuntimeRenderDemand,
 };
 
 /// The demanded product set shared by both framework constructors.
@@ -165,8 +167,8 @@ fn vue_option_attempt_from_profile(
 }
 
 /// The host-backed compile lane's ONE bound execution: the consumed
-/// binding's catalog arm yields the backend, that arm prepares its own
-/// framework execution inputs, the backend issues the demand-specific
+/// binding's catalog arm yields the backend and takes its own framework's
+/// prepared execution inputs, the backend issues the demand-specific
 /// multi-product admission over the SAME presented artifact, and the
 /// product execution consumes that admission by value — one request, one
 /// backend call, one admitted parse/semantic/projection/plan/emit
@@ -175,20 +177,13 @@ fn vue_option_attempt_from_profile(
 /// are paired by the admission's parse key, so admitting one artifact and
 /// executing another is unrepresentable at this seam.
 ///
-/// Framework EXECUTION INPUTS are prepared inside the arm that consumes
-/// them, never by the generic route above this dispatch: an arm resolves
-/// the cross-file semantic inputs its own backend reads, restates the
-/// compiled file's dependency/semantic axis with the transitive
-/// dependencies that resolution observed, and refuses on its own
-/// dependency diagnostics. A carrier therefore cannot reach another
-/// framework's producer, refusal, or execution-input carrier — the
-/// generic route has no framework execution-input value to hand it.
-///
-/// The axis restatement is arm-local but not framework-conditional: it is
-/// a property of the compiled file, it REPLACES rather than merges, and
-/// it runs BEFORE the arm's own dependency refusal so a compile refused
-/// for an unresolvable macro type still records the dependencies whose
-/// repair must invalidate it.
+/// Framework EXECUTION INPUTS arrive prepared and complete
+/// ([`super::compile_inputs::prepare_execution_inputs`]): the caller
+/// resolved the cross-file semantic inputs, restated the dependency axis
+/// and settled the dependency verdict before this call, which waits on
+/// nothing. Each arm takes only its own framework's inputs; inputs
+/// prepared for another framework are refused with the execution-refused
+/// diagnostic, never compiled.
 ///
 /// Every refusal is typed and fail-closed — never a fallback lane,
 /// framework, or compatibility compiler:
@@ -203,11 +198,11 @@ fn vue_option_attempt_from_profile(
 ///   after it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_bound_host_products(
-    host: &crate::VerterHost,
     binding: super::native_host_binding::BoundNativeHostRequest,
     artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
     profile: &CompileProfile,
     snapshot: &CompileInput,
+    inputs: PreparedExecutionInputs,
     want_runtime: bool,
     want_ide: bool,
     want_template_data: bool,
@@ -228,29 +223,11 @@ pub(crate) fn execute_bound_host_products(
                 artifact,
                 &snapshot.canonical_id,
             );
-            // The Vue macro bundle demand FOLLOWS the caller's target
-            // instead of always asking for the heaviest one. A TSX-only
-            // (IDE) compile takes the public binding names; only a target
-            // that renders the runtime `props` option object pays for
-            // per-member broad-runtime classification, which resolves every
-            // member's type through the shared semantic engine. This arm
-            // always produces at least the names bundle, because the shared
-            // payload resolution underneath it is what yields this file's
-            // macro dependency diagnostics and its transitive macro type
-            // dependencies.
-            let macro_demand =
-                crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::for_compile_target(
-                    profile.target,
-                )
-                .unwrap_or(
-                    crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::RuntimeBindingNames,
-                );
-            let mut inputs = prepare_vue_execution_inputs(
-                host,
-                snapshot,
-                macro_demand,
-                SharedDependencyAxis::Restate,
-            )?;
+            let PreparedExecutionInputs::Vue(mut inputs) = inputs else {
+                return Err(HostProductsFailure::Fatal(
+                    inputs_for_another_framework_diagnostics(&snapshot.canonical_id, source_len),
+                ));
+            };
             inputs.want_main = want_main;
             let demand = vue_host_products_demand(
                 profile,
@@ -288,12 +265,11 @@ pub(crate) fn execute_bound_host_products(
                 artifact,
                 &snapshot.canonical_id,
             );
-            let inputs = prepare_svelte_execution_inputs(
-                host,
-                snapshot,
-                profile.svelte_css_hash_override.clone(),
-                SharedDependencyAxis::Restate,
-            );
+            let PreparedExecutionInputs::Svelte(inputs) = inputs else {
+                return Err(HostProductsFailure::Fatal(
+                    inputs_for_another_framework_diagnostics(&snapshot.canonical_id, source_len),
+                ));
+            };
             // The Svelte-bound demand decodes the profile's Svelte option
             // tokens through the SAME typed decode boundary the render
             // lane uses: a malformed token refuses HERE, never a silent
@@ -334,172 +310,6 @@ pub(crate) fn execute_bound_host_products(
                 })
         }
     }
-}
-
-/// Whether a compile route restates the compiled file's shared
-/// dependency/semantic axis.
-///
-/// The axis is REPLACED, not merged, and it is the invalidation input for
-/// the cache slots the profile-derived lanes publish. A route that
-/// publishes a slot therefore MUST restate it. A route that publishes
-/// nothing has no slot to invalidate — and restating from its own,
-/// possibly narrower, macro demand would overwrite a cached lane's
-/// recorded edges with a set that no longer covers them, so a
-/// cache-writing lane could then miss an invalidation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SharedDependencyAxis {
-    /// Replace the file's recorded transitive dependency/semantic edges
-    /// with this compile's own — the profile-derived lanes, which publish
-    /// cache slots that invalidate against the axis.
-    Restate,
-    /// Leave the recorded axis exactly as it stands. The stateless
-    /// caller-supplied-request route, which publishes no cache slot: it
-    /// owes no invalidation record and must not narrow another lane's.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    LeaveUntouched,
-}
-
-/// The Vue arm's own cross-file execution-input preparation: resolve the
-/// macro bundle at the demanded depth, restate the compiled file's
-/// dependency/semantic axis (when the route owns one) with the transitive
-/// dependencies that resolution observed, refuse on this file's macro
-/// dependency diagnostics, and build the ephemeral execution-input
-/// carrier.
-///
-/// The axis restatement runs BEFORE the dependency refusal so a compile
-/// refused for an unresolvable macro type still records the dependencies
-/// whose repair must invalidate it — otherwise fixing the missing type
-/// would never re-run this file.
-///
-/// Shared by both Vue issuance routes so a caller-supplied canonical
-/// request and a profile-derived demand execute over identical resolved
-/// inputs; the routes differ only in the demand document they admit and
-/// in whether they own the shared dependency axis.
-//
-// `VueHostExecutionInputs` carries one `#[cfg(any(test, feature =
-// "test-support"))]` field, and that cfg is evaluated in `verter_compiler`,
-// not here: `verter_session/test-support` forwards to `verter_scheduler`, so
-// nothing this crate can spell predicts whether the field exists. The struct
-// update tail is what makes the literal correct in every combination --
-// `Default` supplies exactly the fields that were compiled. Naming the field
-// under a local cfg instead fails `cargo check --workspace` with E0560.
-#[allow(clippy::needless_update)]
-fn prepare_vue_execution_inputs(
-    host: &crate::VerterHost,
-    snapshot: &CompileInput,
-    macro_demand: crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand,
-    axis: SharedDependencyAxis,
-) -> Result<VueHostExecutionInputs, HostProductsFailure> {
-    let macro_output = host
-        .produce_vue_macro_codegen(&snapshot.canonical_id, macro_demand)
-        .map_err(HostProductsFailure::Aborted)?;
-    vue_execution_inputs_from_macro_output(host, snapshot, macro_output, axis)
-}
-
-/// [`prepare_vue_execution_inputs`] for a host root: the macro bundle is
-/// produced by the pollable path, which hands the root's driver its
-/// producer and dispatch steps through `work`.
-async fn prepare_vue_execution_inputs_pollable<'h>(
-    host: &'h crate::VerterHost,
-    snapshot: &CompileInput,
-    macro_demand: crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand,
-    axis: SharedDependencyAxis,
-    work: &crate::root_continuation::RootWorkSlot<'h>,
-) -> Result<VueHostExecutionInputs, HostProductsFailure> {
-    let macro_output = host
-        .produce_vue_macro_codegen_pollable(&snapshot.canonical_id, macro_demand, work)
-        .await
-        .map_err(HostProductsFailure::Aborted)?;
-    vue_execution_inputs_from_macro_output(host, snapshot, macro_output, axis)
-}
-
-/// The Vue execution inputs over one produced macro bundle: restate the
-/// dependency axis (when the route owns one), refuse on this file's macro
-/// dependency diagnostics, and build the ephemeral execution-input carrier.
-#[allow(clippy::needless_update)]
-fn vue_execution_inputs_from_macro_output(
-    host: &crate::VerterHost,
-    snapshot: &CompileInput,
-    macro_output: crate::typeinfo::vue_macro_codegen::VueMacroCodegenOutput,
-    axis: SharedDependencyAxis,
-) -> Result<VueHostExecutionInputs, HostProductsFailure> {
-    let macro_dependency_diagnostics =
-        super::vue_macro_dependency_diagnostics::collect(host, snapshot, &macro_output);
-    if axis == SharedDependencyAxis::Restate {
-        let transitive_macro_type_deps: std::collections::BTreeSet<String> =
-            macro_output.transitive_canonicals.iter().cloned().collect();
-        host.sync_transitive_macro_type_dependencies(
-            &snapshot.canonical_id,
-            &transitive_macro_type_deps,
-        );
-    }
-    if !macro_dependency_diagnostics.is_empty() {
-        return Err(HostProductsFailure::Fatal(DiagnosticsSnapshot::from_vec(
-            macro_dependency_diagnostics,
-        )));
-    }
-    // The host-resolved Vue cross-file inputs ride on the typed,
-    // ephemeral `VueExecutionInputs` carrier — excluded from
-    // `CompileRequest` identity, and reachable only from here.
-    let vue_facts = verter_compiler::compile::types::VueExecutionInputs {
-        prop_constness_overrides: None, // populated by the cross-file optimizer
-        style_v_bind_vars: snapshot.style_v_bind_vars.clone(),
-        style_v_bind_usage_complete: Some(snapshot.style_v_bind_usage_complete),
-        template_binding_metadata: None,
-        template_used_vars: None,
-        runtime_template_hole: false,
-        runtime_inline_template_chunk: false,
-        prepared_styles: snapshot.prepared_styles.clone(),
-    };
-    let (style_specifiers, custom_specifiers) = crate::compile::vue_main_host_identifiers(
-        &snapshot.canonical_id,
-        snapshot.meta.style_langs.len(),
-        snapshot.meta.custom_types.len(),
-        &snapshot.meta,
-    );
-    Ok(VueHostExecutionInputs {
-        block_content: snapshot.block_content_inputs.clone(),
-        vue_facts: Some(vue_facts),
-        // The one macro-semantic channel: exactly what the TypeInfo
-        // producer built for this compile's target demand, staged into
-        // the compile transaction by the compiler-side entry.
-        vue_macros: macro_output.compiler_input(),
-        prepared_styles: snapshot.prepared_styles.clone(),
-        canonical_id: snapshot.canonical_id.clone(),
-        style_specifiers,
-        custom_specifiers,
-        project_identity: host.host_view_project_identity_for(&snapshot.canonical_id),
-        want_main: true,
-        has_script: snapshot.meta.has_script,
-        has_template: snapshot.meta.has_template,
-        script_lang: snapshot.meta.script_lang.clone(),
-        ..Default::default()
-    })
-}
-
-/// The Svelte arm's own execution-input preparation.
-///
-/// This arm's execution inputs come entirely from the presented artifact
-/// and the caller's inputs, so it contributes no cross-file semantic type
-/// dependencies. A route that OWNS the axis still restates it with that
-/// empty contribution: the axis is REPLACED, not merged, so skipping the
-/// restatement would leave a previous compute's edges standing for this
-/// file. Placed before the caller's demand decode for the same reason the
-/// Vue arm places it before its dependency refusal — a refused compile
-/// still restates the axis.
-fn prepare_svelte_execution_inputs(
-    host: &crate::VerterHost,
-    snapshot: &CompileInput,
-    css_hash_override: Option<String>,
-    axis: SharedDependencyAxis,
-) -> SvelteHostExecutionInputs {
-    if axis == SharedDependencyAxis::Restate {
-        host.sync_transitive_macro_type_dependencies(
-            &snapshot.canonical_id,
-            &std::collections::BTreeSet::new(),
-        );
-    }
-    svelte_host_execution_inputs(snapshot, css_hash_override)
 }
 
 /// The Svelte execution inputs every host route hands the compiler.
@@ -602,56 +412,38 @@ pub(crate) enum SuppliedRequestFailure {
 /// to the bound backend's canonical-request admission verbatim and never
 /// re-derives products, framework options, or source identity from any
 /// other vocabulary. Everything else is identical to the profile-derived
-/// lane — the same arm-local execution-input preparation, the same bound
-/// backend, the same consume-once admission, the same single product
-/// execution — because the demand document is the only thing that
-/// differs between the two.
+/// lane — the same prepared execution inputs, the same bound backend, the
+/// same consume-once admission, the same single product execution —
+/// because the demand document is the only thing that differs between the
+/// two.
 ///
-/// The Vue macro bundle depth follows the request's OWN product set: a
-/// runtime product renders the runtime `props` / `model` option objects
-/// and is the one demand that pays for per-member broad-runtime
-/// classification; every other demand takes the public binding names.
+/// The inputs arrive prepared and complete
+/// ([`super::compile_inputs::prepare_execution_inputs_pollable`]); this
+/// function waits on nothing. Inputs prepared for another framework than
+/// the binding's are refused with the execution-refused diagnostic.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub(crate) async fn execute_supplied_host_request<'h>(
-    host: &'h crate::VerterHost,
+pub(crate) fn execute_supplied_host_request(
     binding: super::native_host_binding::BoundNativeHostRequest,
     artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
     request: verter_compiler::compile_request::CompileRequest,
     snapshot: &CompileInput,
-    work: &crate::root_continuation::RootWorkSlot<'h>,
+    inputs: PreparedExecutionInputs,
 ) -> Result<BoundCompiledProducts, SuppliedRequestFailure> {
     use super::native_host_binding::BoundNativeHostRequest;
     use crate::host_compile_audit::{debug_assert_compile_bound_attribution, BoundCompileRoute};
-    use crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand;
-    use verter_compiler::compile_request::ProductKind;
     use verter_compiler::framework_common::FrameworkHostIntegrationBackend as _;
 
     let source_len = snapshot.source.len() as u32;
-    let wants_runtime = request.products().iter().any(|product| {
-        matches!(
-            product.kind(),
-            ProductKind::RuntimeClient | ProductKind::RuntimeServer
-        )
-    });
+    let inputs_for_another_framework = || {
+        SuppliedRequestFailure::Products(HostProductsFailure::Fatal(
+            inputs_for_another_framework_diagnostics(&snapshot.canonical_id, source_len),
+        ))
+    };
     match binding {
         BoundNativeHostRequest::Vue(bound) => {
-            let macro_demand = if wants_runtime {
-                VueMacroCodegenDemand::Runtime
-            } else {
-                VueMacroCodegenDemand::RuntimeBindingNames
+            let PreparedExecutionInputs::Vue(inputs) = inputs else {
+                return Err(inputs_for_another_framework());
             };
-            // The macro bundle is the one input that waits on dependency
-            // work; it is produced before the backend and its compile arena
-            // exist, so neither is held while the root suspends.
-            let inputs = prepare_vue_execution_inputs_pollable(
-                host,
-                snapshot,
-                macro_demand,
-                SharedDependencyAxis::LeaveUntouched,
-                work,
-            )
-            .await
-            .map_err(SuppliedRequestFailure::Products)?;
             let (backend, attribution) = bound.into_host_backend();
             debug_assert_compile_bound_attribution(
                 BoundCompileRoute::HostBacked,
@@ -714,17 +506,9 @@ pub(crate) async fn execute_supplied_host_request<'h>(
                 artifact,
                 &snapshot.canonical_id,
             );
-            // The Svelte `cssHash` scope-class override is a host-resolved
-            // EXECUTION input with no canonical-request field, so this
-            // route leaves it unset and the carrier derives its own scope
-            // class. A caller that needs a specific class still has the
-            // profile-derived lane.
-            let inputs = prepare_svelte_execution_inputs(
-                host,
-                snapshot,
-                None,
-                SharedDependencyAxis::LeaveUntouched,
-            );
+            let PreparedExecutionInputs::Svelte(inputs) = inputs else {
+                return Err(inputs_for_another_framework());
+            };
             let alloc = oxc_allocator::Allocator::new();
             let alloc = &alloc;
             let admission = backend
@@ -770,6 +554,26 @@ pub(crate) async fn execute_supplied_host_request<'h>(
                 })
         }
     }
+}
+
+/// `HOST_COMPILE_REQUEST_EXECUTION_REFUSED` for execution inputs prepared
+/// for another framework than the bound carrier's. The callers prepare
+/// from the binding's own arm, so this is a refusal rather than a panic for
+/// a pairing they cannot build.
+fn inputs_for_another_framework_diagnostics(
+    canonical_id: &str,
+    source_len: u32,
+) -> DiagnosticsSnapshot {
+    DiagnosticsSnapshot::from_vec(vec![HostDiagnostic {
+        severity: HostSeverity::Error,
+        code: "HOST_COMPILE_REQUEST_EXECUTION_REFUSED".to_string(),
+        message: format!(
+            "compile execution refused for '{canonical_id}': the execution inputs were \
+             prepared for another framework"
+        ),
+        arguments: Vec::new(),
+        span: verter_span::Span::new(0, source_len),
+    }])
 }
 
 /// `HOST_COMPILE_PRODUCT_UNSUPPORTED`: the bound host integration has no
@@ -1372,8 +1176,6 @@ pub(crate) enum HostProductsFailure {
     },
     /// A fatal refusal: the diagnostics payload for the compile failure.
     Fatal(DiagnosticsSnapshot),
-    /// The semantic inputs were aborted: nothing is published.
-    Aborted(verter_type_engine::semantic_query::ExecutionAbort),
 }
 
 /// Maps the Vue bound backend's multi-product execution refusal for the

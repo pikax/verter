@@ -446,7 +446,9 @@ interface HostCompileFailureBase {
 
 /** Typed terminal failure for one plural-route entry. */
 export type HostCompileFailure =
-  | (HostCompileFailureBase & { kind: "host" | "refused" | "binding" })
+  | (HostCompileFailureBase & {
+      kind: "host" | "refused" | "dependenciesIncomplete" | "binding";
+    })
   | (HostCompileFailureBase & {
       kind: "frameworkMismatch";
       requestedFramework: string;

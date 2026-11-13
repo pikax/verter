@@ -399,6 +399,58 @@ fn root_continuations_compile_root_hands_its_producer_to_its_driver() {
     assert_eq!(compile_owner(&host), cold_code);
 }
 
+/// A driver that advances the work a compile root hands out by polling it,
+/// rather than running it, gets the answer the synchronous entry gives: the
+/// polled producer runs its body, answers that it progressed, and the root
+/// then answers from the bundle it produced.
+#[test]
+fn a_driver_that_polls_handed_out_producer_work_gets_the_driven_answer() {
+    let host = host();
+    let expected = compile_owner(&host);
+    let mut root = host.begin_compile_request(OWNER, owner_compile_request());
+    let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let mut producers_polled = 0;
+    let answer = loop {
+        let polled = {
+            let _forbid = WaitProbe::forbid();
+            root.poll(&waker)
+        };
+        if let Poll::Ready(answer) = polled {
+            break answer;
+        }
+        let Some(mut work) = root.take_work() else {
+            std::thread::park();
+            continue;
+        };
+        let producer = work.is_producer();
+        let progressed = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let here = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+                    loop {
+                        if let Poll::Ready(progressed) = work.poll(&here) {
+                            break progressed;
+                        }
+                        std::thread::park();
+                    }
+                })
+                .join()
+                .expect("the handed-out work answers")
+        });
+        if producer {
+            producers_polled += 1;
+            assert!(progressed, "a polled producer answers that it progressed");
+        } else if !progressed {
+            std::thread::park();
+        }
+    };
+    assert_eq!(producers_polled, 1);
+    assert_eq!(
+        compiled_texts(answer.expect("the owner compiles")),
+        expected
+    );
+}
+
 /// A compile root whose macro bundle another root is producing suspends on
 /// it: its poll answers `Pending` without entering a wait while the other
 /// root's handed-out producer is held, and running that producer wakes it

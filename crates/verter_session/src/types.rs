@@ -3077,6 +3077,55 @@ pub enum CompileRequestFailure {
         /// The refusal's diagnostics.
         diagnostics: DiagnosticsSnapshot,
     },
+    /// The compile could not prove its macro type dependencies present or
+    /// absent from the inputs this host holds. Nothing was published and
+    /// nothing was retained.
+    ///
+    /// The gaps are deterministic for a given host state: the same inputs
+    /// name the same gaps. Supplying a gap can let the compile proceed far
+    /// enough to name a deeper one, so a caller retries only while it is
+    /// supplying something new. A gap it already supplied that is named
+    /// again, or an answer naming only [`CompileDependencyGap::Lookup`] or
+    /// refused [`CompileDependencyGap::Route`] gaps (which no upsert or
+    /// route can supply), is terminal.
+    DependenciesIncomplete {
+        /// The canonical id the request executed against.
+        canonical_id: String,
+        /// Sorted, deduplicated, never empty.
+        gaps: Vec<CompileDependencyGap>,
+        /// The same diagnostics a refusal for this dependency carries.
+        diagnostics: DiagnosticsSnapshot,
+    },
+}
+
+/// One input a compile could not establish while proving its macro type
+/// dependencies present or absent.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CompileDependencyGap {
+    /// `specifier`, imported by `importer`, has no route on this host
+    /// (`refused == false`: a witnessed miss) or its route could not be
+    /// admitted (`refused == true`).
+    Route {
+        /// The canonical id of the importing file.
+        importer: String,
+        /// The import specifier as authored.
+        specifier: String,
+        /// Whether the route was refused rather than witnessed missing.
+        refused: bool,
+    },
+    /// The route resolves to `canonical`, which this host cannot load.
+    File {
+        /// The canonical id that could not be loaded.
+        canonical: String,
+    },
+    /// The lookup of `type_name` from `import_source` ended early (budget,
+    /// recursion, or an unfinished traversal).
+    Lookup {
+        /// The import specifier the type is imported from.
+        import_source: String,
+        /// The imported type's name.
+        type_name: String,
+    },
 }
 
 // `TscResponse` and its labeled-rendering selectors live in a PRIVATE child

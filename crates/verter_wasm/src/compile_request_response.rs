@@ -283,6 +283,14 @@ pub(crate) fn compile_request_failure_to_string(failure: &host::CompileRequestFa
             "refused host compile request for {canonical_id}{}",
             rendered_diagnostics(diagnostics)
         ),
+        Failure::DependenciesIncomplete {
+            canonical_id,
+            gaps: _,
+            diagnostics,
+        } => format!(
+            "incomplete dependencies for host compile request {canonical_id}{}",
+            rendered_diagnostics(diagnostics)
+        ),
     }
 }
 

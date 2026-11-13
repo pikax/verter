@@ -112,24 +112,35 @@ impl RootAmbient {
 /// next poll answers that abandonment. Dropping a dispatch opportunity leaves
 /// the admitted dependency live: a later poll may offer more work or remain
 /// pending. Drop the root itself to withdraw its subscription and ownership.
+///
+/// The work is itself pollable ([`Self::poll`]): a driver may advance it
+/// on any thread, one poll at a time, and poll it again after a wake.
+/// [`Self::run`] is the same work driven to its end on the calling thread.
 #[must_use = "a root that handed out work waits for it to run"]
 pub struct RootWork<'h>(RootWorkKind<'h>);
 
+/// The stored body of handed-out work, advanced by [`RootWork::poll`].
+type WorkBody<'h, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'h>>;
+
 enum RootWorkKind<'h> {
     /// A dependency's sole producer, transferred out of the root's poll.
-    Produce(Box<dyn FnOnce() + Send + 'h>),
+    /// `None` once it has answered.
+    Produce(Option<WorkBody<'h, ()>>),
     /// One dispatch step of the scheduler a dependency the root admitted
-    /// waits in; answers whether it dispatched anything.
-    Dispatch(Box<dyn FnOnce() -> bool + Send + 'h>),
+    /// waits in; answers whether it dispatched anything. `None` once it
+    /// has answered.
+    Dispatch(Option<Box<dyn FnOnce() -> bool + Send + 'h>>),
 }
 
 impl<'h> RootWork<'h> {
     pub(crate) fn produce(producer: impl FnOnce() + Send + 'h) -> Self {
-        Self(RootWorkKind::Produce(Box::new(producer)))
+        Self(RootWorkKind::Produce(Some(Box::pin(async move {
+            producer();
+        }))))
     }
 
     pub(crate) fn dispatch(step: impl FnOnce() -> bool + Send + 'h) -> Self {
-        Self(RootWorkKind::Dispatch(Box::new(step)))
+        Self(RootWorkKind::Dispatch(Some(Box::new(step))))
     }
 
     /// Whether this is a dependency's producer — CPU work a driver places
@@ -139,17 +150,47 @@ impl<'h> RootWork<'h> {
         matches!(self.0, RootWorkKind::Produce(_))
     }
 
-    /// Run the work on this thread. Answers whether it made progress: a
-    /// producer always does; a dispatch step only when it dispatched
-    /// something, and otherwise the dependency's own settlement wakes the
-    /// root.
-    pub fn run(self) -> bool {
-        match self.0 {
-            RootWorkKind::Produce(producer) => {
-                producer();
-                true
+    /// Advance the work on this thread: `Ready(progressed)` once it has run
+    /// to its end, with the same meaning as [`Self::run`]'s answer, or
+    /// `Pending` once it waits on a dependency that wakes `waker`. Poll
+    /// again after a wake.
+    ///
+    /// Dropping a producer before `Ready` abandons it, and the root's next
+    /// poll answers that abandonment. Dropping a dispatch step leaves the
+    /// dispatch opportunity live.
+    ///
+    /// # Panics
+    ///
+    /// When the work already answered.
+    pub fn poll(&mut self, waker: &Waker) -> Poll<bool> {
+        const ANSWERED: &str = "handed-out work is not polled after it answered";
+        match &mut self.0 {
+            RootWorkKind::Produce(slot) => {
+                let body = slot.as_mut().expect(ANSWERED);
+                match body.as_mut().poll(&mut Context::from_waker(waker)) {
+                    Poll::Ready(()) => {
+                        *slot = None;
+                        Poll::Ready(true)
+                    }
+                    Poll::Pending => Poll::Pending,
+                }
             }
-            RootWorkKind::Dispatch(step) => step(),
+            RootWorkKind::Dispatch(slot) => Poll::Ready(slot.take().expect(ANSWERED)()),
+        }
+    }
+
+    /// Run the work on this thread: [`Self::poll`] driven to its end.
+    /// Answers whether it made progress: a producer always does; a dispatch
+    /// step only when it dispatched something, and otherwise the
+    /// dependency's own settlement wakes the root.
+    pub fn run(mut self) -> bool {
+        match self.poll(Waker::noop()) {
+            Poll::Ready(progressed) => progressed,
+            Poll::Pending => verter_execution::blocking::block_on(
+                verter_execution::blocking::WaitFamily::Root,
+                None,
+                |waker| self.poll(waker),
+            ),
         }
     }
 }
@@ -159,7 +200,7 @@ impl<'h> RootWork<'h> {
 pub(crate) struct RootWorkSlot<'h>(Arc<parking_lot::Mutex<Option<RootWork<'h>>>>);
 
 impl<'h> RootWorkSlot<'h> {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(Arc::new(parking_lot::Mutex::new(None)))
     }
 
@@ -181,7 +222,7 @@ impl<'h> RootWorkSlot<'h> {
         drop(replaced);
     }
 
-    fn take(&self) -> Option<RootWork<'h>> {
+    pub(crate) fn take(&self) -> Option<RootWork<'h>> {
         self.0.lock().take()
     }
 }
