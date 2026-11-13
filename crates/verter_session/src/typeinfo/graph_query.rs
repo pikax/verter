@@ -19,10 +19,11 @@
 //!    Unbounded export is therefore structurally rejected: an expanded
 //!    closure without explicit in-range budgets cannot pass validation.
 //! 2. **Operation gate** — this entry serves the resolve-symbol and
-//!    expand-around operations ONLY. A validated envelope for any other
-//!    operation is refused with a typed `MalformedPayload` (fail-closed:
-//!    no silent re-route to the string-expression evaluator, no
-//!    dual-running authority).
+//!    expand-around operations ONLY. The validator has already answered
+//!    an operation the host does not serve with `UnsupportedOperation`;
+//!    a served framework-surface envelope sent to this entry is refused
+//!    with a typed `MalformedPayload` (fail-closed: no silent re-route,
+//!    no dual-running authority).
 //! 3. **Closure gate** — the resolve-symbol bounded walk serves the
 //!    root-only / one-level / expanded closure kinds. A path policy or
 //!    a projection-required policy names behavior this operation does
@@ -91,6 +92,7 @@ use verter_protocol::verter::v1::{
 #[cfg(feature = "semantic-observe")]
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::host_resolve_type_audit::TypeResolutionRequestError;
+use crate::typeinfo::request_validation::ServedOperation;
 use crate::VerterHost;
 use verter_type_engine::request_context::RequestContextGuard;
 use verter_type_engine::semantic_query::ProjectionMode;
@@ -254,35 +256,41 @@ impl VerterHost {
                 return (error_response(error), payload);
             }
         };
+        let operation = validated.operation();
         let request = validated.into_inner();
 
         // OPERATION GATE — this entry serves resolve-symbol and
-        // expand-around only. The validator proved the operation/payload
-        // pair is coherent; a coherent envelope for a DIFFERENT operation is
-        // refused here, fail-closed, before any resolution.
-        if request.operation == Operation::ExpandAround as i32 {
-            let Some(type_info_graph_request::Payload::ExpandAround(expand)) = request.payload
-            else {
+        // expand-around. The validator proved the operation is served and
+        // its payload arm coherent; a served framework-surface envelope
+        // belongs to the framework entry and is refused here, fail-closed,
+        // before any resolution.
+        match operation {
+            ServedOperation::ResolveSymbol => {}
+            ServedOperation::ExpandAround => {
+                let Some(type_info_graph_request::Payload::ExpandAround(expand)) = request.payload
+                else {
+                    let payload = TypeInfoGraphPayload::from_validation_error(
+                        GraphOperationTag::ExpandAround,
+                    );
+                    return (
+                        error_response(malformed(
+                            "expand-around payload arm missing after validation",
+                        )),
+                        payload,
+                    );
+                };
+                return self.execute_expand_around(&expand);
+            }
+            ServedOperation::FrameworkSurfaces => {
                 let payload =
-                    TypeInfoGraphPayload::from_validation_error(GraphOperationTag::ExpandAround);
+                    TypeInfoGraphPayload::from_validation_error(GraphOperationTag::ResolveSymbol);
                 return (
                     error_response(malformed(
-                        "expand-around payload arm missing after validation",
+                        "this entry serves the resolve-symbol and expand-around operations only",
                     )),
                     payload,
                 );
-            };
-            return self.execute_expand_around(&expand);
-        }
-        if request.operation != Operation::ResolveSymbol as i32 {
-            let payload =
-                TypeInfoGraphPayload::from_validation_error(GraphOperationTag::ResolveSymbol);
-            return (
-                error_response(malformed(
-                    "this entry serves the resolve-symbol and expand-around operations only",
-                )),
-                payload,
-            );
+            }
         }
         let Some(type_info_graph_request::Payload::ResolveSymbol(resolve)) = request.payload else {
             // Unreachable after validation; refused rather than assumed.

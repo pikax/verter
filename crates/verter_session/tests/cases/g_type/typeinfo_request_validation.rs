@@ -99,6 +99,7 @@ fn err_variant_label(err: &wire::TypeInfoRequestError) -> &'static str {
         type_info_request_error::Kind::UnknownFrameworkProfile(_) => "UnknownFrameworkProfile",
         type_info_request_error::Kind::StaleBasis(_) => "StaleBasis",
         type_info_request_error::Kind::UnknownNodeRef(_) => "UnknownNodeRef",
+        type_info_request_error::Kind::UnsupportedOperation(_) => "UnsupportedOperation",
     }
 }
 
@@ -390,33 +391,137 @@ fn supported_schema_versions_constant_contains_current() {
 
 // ───────── Operation discriminator + payload mismatch ─────────
 
+/// A served operation whose payload arm belongs to another operation is a
+/// client bug: `MalformedPayload`, never the unserved-operation answer.
+/// The current schema clears every served operation's floor, so only the
+/// payload check can refuse.
 #[test]
-fn graph_request_with_mismatched_operation_payload_fails() {
-    let request = wire::TypeInfoGraphRequest {
-        schema_version: MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
-        // Operation says "ProjectPath" but payload carries ResolveSymbol.
-        operation: wire::Operation::ProjectPath as i32,
-        payload: Some(wire_request::Payload::ResolveSymbol(
-            valid_resolve_symbol_request(),
-        )),
+fn a_served_operation_with_the_wrong_payload_stays_malformed() {
+    let cases = [
+        (
+            wire::Operation::ExpandAround,
+            wire_request::Payload::ResolveSymbol(valid_resolve_symbol_request()),
+        ),
+        (
+            wire::Operation::ResolveSymbol,
+            wire_request::Payload::FrameworkSurface(framework_surface_request_with(
+                well_shaped_profile(),
+                TYPEINFO_GRAPH_SCHEMA_VERSION,
+            )),
+        ),
+    ];
+    for (operation, payload) in cases {
+        let request = wire::TypeInfoGraphRequest {
+            schema_version: TYPEINFO_GRAPH_SCHEMA_VERSION,
+            operation: operation as i32,
+            payload: Some(payload),
+        };
+        let err = validate_type_info_graph_request(&request).unwrap_err();
+        assert_eq!(
+            err_variant_label(&err),
+            "MalformedPayload",
+            "{operation:?} with another operation's payload is malformed"
+        );
+    }
+}
+
+/// The operations the host does not serve. Each is refused whole as
+/// `UnsupportedOperation`, whatever payload it carries.
+const UNSERVED_OPERATIONS: &[wire::Operation] = &[
+    wire::Operation::EvaluateExpression,
+    wire::Operation::ProjectPath,
+    wire::Operation::Relate,
+    wire::Operation::FlowNarrowingAt,
+    wire::Operation::ContextualTypeAt,
+];
+
+fn assert_unsupported(
+    request: &wire::TypeInfoGraphRequest,
+    requested: wire::Operation,
+    case: &str,
+) {
+    let err = validate_type_info_graph_request(request).unwrap_err();
+    let Some(type_info_request_error::Kind::UnsupportedOperation(unsupported)) = &err.kind else {
+        panic!(
+            "{requested:?} at schema {} with {case} must be UnsupportedOperation, got {}",
+            request.schema_version,
+            err_variant_label(&err)
+        );
     };
-    let err = validate_type_info_graph_request(&request).unwrap_err();
-    assert_eq!(err_variant_label(&err), "MalformedPayload");
+    // Resolve-symbol is the proto default (0): an unset echo would name it.
+    assert_eq!(
+        unsupported.operation, requested as i32,
+        "the refusal echoes the requested operation"
+    );
 }
 
 #[test]
-fn graph_request_with_relate_operation_through_graph_path_fails() {
-    // `relate` has its own dedicated request shape; receiving it
-    // through the graph envelope is a payload mismatch.
-    let request = wire::TypeInfoGraphRequest {
-        schema_version: MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
-        operation: wire::Operation::Relate as i32,
+fn every_unserved_operation_is_unsupported_never_malformed() {
+    for &operation in UNSERVED_OPERATIONS {
+        for version in [
+            MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+            TYPEINFO_GRAPH_SCHEMA_VERSION,
+        ] {
+            // Its own (coherent) payload arm; relate has none, so it carries
+            // the resolve-symbol arm.
+            assert_unsupported(
+                &legacy_envelope(operation, version),
+                operation,
+                "its coherent payload",
+            );
+            // Another operation's payload arm.
+            let mismatched = if operation == wire::Operation::ProjectPath {
+                wire_request::Payload::ResolveSymbol(valid_resolve_symbol_request())
+            } else {
+                wire_request::Payload::ProjectPath(valid_project_path_request())
+            };
+            assert_unsupported(
+                &wire::TypeInfoGraphRequest {
+                    schema_version: version,
+                    operation: operation as i32,
+                    payload: Some(mismatched),
+                },
+                operation,
+                "a mismatched payload",
+            );
+            // No payload at all.
+            assert_unsupported(
+                &wire::TypeInfoGraphRequest {
+                    schema_version: version,
+                    operation: operation as i32,
+                    payload: None,
+                },
+                operation,
+                "no payload",
+            );
+        }
+    }
+}
+
+/// The global schema check and the operation decode answer before the
+/// served-operation check: an unserved operation at an unsupported version
+/// is `UnknownSchemaVersion`, and an operation number outside the enum is
+/// `InvalidMode`.
+#[test]
+fn refusal_order_is_schema_then_operation_then_unsupported() {
+    for version in [1u32, TYPEINFO_GRAPH_SCHEMA_VERSION + 1] {
+        let request = legacy_envelope(wire::Operation::Relate, version);
+        let err = validate_type_info_graph_request(&request).unwrap_err();
+        assert_eq!(
+            err_variant_label(&err),
+            "UnknownSchemaVersion",
+            "an unserved operation at schema {version} is refused for its version first"
+        );
+    }
+    let unknown_operation = wire::TypeInfoGraphRequest {
+        schema_version: TYPEINFO_GRAPH_SCHEMA_VERSION,
+        operation: 99,
         payload: Some(wire_request::Payload::ResolveSymbol(
             valid_resolve_symbol_request(),
         )),
     };
-    let err = validate_type_info_graph_request(&request).unwrap_err();
-    assert_eq!(err_variant_label(&err), "MalformedPayload");
+    let err = validate_type_info_graph_request(&unknown_operation).unwrap_err();
+    assert_eq!(err_variant_label(&err), "InvalidMode");
 }
 
 // ───────── Flow / Contextual / Expand / Framework surface ─────────
@@ -717,11 +822,12 @@ fn framework_surface_request_well_formed_passes() {
 // UnknownSchemaVersion, because v2 stays globally supported; NOT a
 // new error oneof arm, because v2 clients could not decode one).
 
-/// Builds a valid envelope for one legacy graph-payload operation at
-/// the given schema version.
+/// Builds an envelope whose payload arm matches `operation` at the given
+/// schema version. Relate has no graph payload arm, so it carries the
+/// resolve-symbol arm.
 fn legacy_envelope(operation: wire::Operation, schema_version: u32) -> wire::TypeInfoGraphRequest {
     let payload = match operation {
-        wire::Operation::ResolveSymbol => {
+        wire::Operation::ResolveSymbol | wire::Operation::Relate => {
             wire_request::Payload::ResolveSymbol(valid_resolve_symbol_request())
         }
         wire::Operation::EvaluateExpression => {
@@ -761,8 +867,8 @@ fn legacy_envelope(operation: wire::Operation, schema_version: u32) -> wire::Typ
         wire::Operation::ExpandAround => wire_request::Payload::ExpandAround(
             expand_around_request_with(Some(well_shaped_node_ref())),
         ),
-        wire::Operation::Relate | wire::Operation::FrameworkSurfaces => {
-            panic!("legacy_envelope covers the six legacy graph-payload operations only")
+        wire::Operation::FrameworkSurfaces => {
+            panic!("framework-surface envelopes are built by framework_surface_envelope")
         }
     };
     wire::TypeInfoGraphRequest {
@@ -772,34 +878,22 @@ fn legacy_envelope(operation: wire::Operation, schema_version: u32) -> wire::Typ
     }
 }
 
-/// The five legacy graph-payload operations, asserted OP-BY-OP (not
-/// sampled). `Relate` rides a dedicated request shape outside this
-/// envelope; its op-minimum is pinned through the direct
-/// `validate_schema_version_for_operation` walk below. Expand-around left
-/// this set at schema 12 (`expand_around_operation_requires_schema_twelve`).
-const LEGACY_GRAPH_PAYLOAD_OPERATIONS: &[wire::Operation] = &[
-    wire::Operation::ResolveSymbol,
-    wire::Operation::EvaluateExpression,
-    wire::Operation::ProjectPath,
-    wire::Operation::FlowNarrowingAt,
-    wire::Operation::ContextualTypeAt,
-];
-
+/// Resolve-symbol is the one served operation whose floor is the global
+/// minimum: it validates from schema 2 through the current version. The
+/// unserved operations never validate (`UNSERVED_OPERATIONS`), and their
+/// floors stay pinned through the direct
+/// `validate_schema_version_for_operation` walk below. Expand-around's
+/// floor is 12 (`expand_around_operation_requires_schema_twelve`).
 #[test]
-fn every_legacy_operation_accepts_schema_two_and_three_op_by_op() {
-    for &operation in LEGACY_GRAPH_PAYLOAD_OPERATIONS {
-        for version in [
-            MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
-            TYPEINFO_GRAPH_SCHEMA_VERSION,
-        ] {
-            validate_type_info_graph_request(&legacy_envelope(operation, version)).unwrap_or_else(
-                |err| {
-                    panic!(
-                        "legacy operation {operation:?} must accept schema {version}, got {err:?}"
-                    )
-                },
-            );
-        }
+fn resolve_symbol_accepts_the_minimum_and_current_schema() {
+    for version in [
+        MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+        TYPEINFO_GRAPH_SCHEMA_VERSION,
+    ] {
+        validate_type_info_graph_request(&legacy_envelope(wire::Operation::ResolveSymbol, version))
+            .unwrap_or_else(|err| {
+                panic!("resolve-symbol must accept schema {version}, got {err:?}")
+            });
     }
 }
 

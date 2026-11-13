@@ -23,7 +23,7 @@
 
 use std::sync::Arc;
 
-use verter_audit::payloads::typeinfo_graph::GraphOperationTag;
+use verter_audit::payloads::typeinfo_graph::{GraphOperationTag, TypeInfoDegradationReasonTag};
 use verter_audit::RequestKind;
 use verter_protocol::typeinfo::graph::{
     self as wire, Operation, ProjectionMode, TYPEINFO_GRAPH_SCHEMA_VERSION,
@@ -195,15 +195,9 @@ fn unbounded_expansion_is_structurally_rejected() {
     ));
 }
 
-#[test]
-fn an_unserved_operation_is_refused_fail_closed() {
-    let host = host_with_fixture();
-    // A VALIDATED evaluate-expression envelope (op and payload arm
-    // coherent) reaching THIS entry is refused with a typed malformed
-    // error naming the operation gate — this entry serves the
-    // resolve-symbol and expand-around operations only; it never silently re-routes to the
-    // legacy string-expression evaluator (no dual-running authority).
-    let envelope = TypeInfoRequest {
+/// A coherent evaluate-expression envelope: operation and payload arm agree.
+fn evaluate_expression_envelope() -> TypeInfoRequest {
+    TypeInfoRequest {
         schema_version: TYPEINFO_GRAPH_SCHEMA_VERSION,
         operation: Operation::EvaluateExpression as i32,
         payload: Some(type_info_graph_request::Payload::EvaluateTypeExpression(
@@ -239,27 +233,121 @@ fn an_unserved_operation_is_refused_fail_closed() {
                 include_projection: vec![],
             },
         )),
-    };
-    let (response, _record) = host.resolve_symbol_graph_with_audit(envelope).into_parts();
-    let error = response.expect_err("an operation this entry does not serve is a typed error");
-    match error.kind {
-        Some(type_info_request_error::Kind::MalformedPayload(payload)) => {
-            let detail = payload.detail;
-            assert!(
-                detail.contains("resolve-symbol and expand-around operations only"),
-                "the refusal names the operation gate, got {detail:?}"
+    }
+}
+
+/// A relate envelope. Relate has no graph payload arm; it carries the
+/// resolve-symbol arm.
+fn relate_envelope() -> TypeInfoRequest {
+    let mut envelope = resolve_envelope("/types.ts", "Foo", ProjectionMode::Expanded);
+    envelope.operation = Operation::Relate as i32;
+    envelope
+}
+
+/// Sends `envelope` to both production entries that take the graph
+/// envelope and returns each entry's error with its audit payload.
+fn refusals_at_both_entries(
+    host: &VerterHost,
+    envelope: &TypeInfoRequest,
+) -> [(
+    &'static str,
+    wire::TypeInfoRequestError,
+    verter_audit::RequestKindPayload,
+); 2] {
+    let (graph, graph_record) = host
+        .resolve_symbol_graph_with_audit(envelope.clone())
+        .into_parts();
+    let (framework, framework_record) = host
+        .resolve_framework_surface_with_audit(envelope.clone())
+        .into_parts();
+    [
+        (
+            "graph entry",
+            graph.expect_err("the graph entry refuses"),
+            graph_record.kind_payload,
+        ),
+        (
+            "framework-surface entry",
+            framework.expect_err("the framework-surface entry refuses"),
+            framework_record.kind_payload,
+        ),
+    ]
+}
+
+/// The validator, which both entries run first, refuses an operation the
+/// host does not serve. Neither entry answers it as a malformed payload or
+/// reaches execution: each audits a request-validation refusal.
+#[test]
+fn both_entries_refuse_an_unserved_operation_before_execution() {
+    let host = host_with_fixture();
+    for (requested, envelope) in [
+        (
+            Operation::EvaluateExpression,
+            evaluate_expression_envelope(),
+        ),
+        (Operation::Relate, relate_envelope()),
+    ] {
+        for (entry, error, audit) in refusals_at_both_entries(&host, &envelope) {
+            match error.kind {
+                Some(type_info_request_error::Kind::UnsupportedOperation(unsupported)) => {
+                    assert_eq!(
+                        unsupported.operation, requested as i32,
+                        "the {entry} echoes the requested operation"
+                    );
+                }
+                other => {
+                    panic!("the {entry} answers {requested:?} UnsupportedOperation, got {other:?}")
+                }
+            }
+            let verter_audit::RequestKindPayload::TypeInfoGraph(payload) = &audit else {
+                panic!("the {entry} audits a TypeInfoGraph payload, got {audit:?}");
+            };
+            assert_eq!(
+                payload.degradation_reasons,
+                vec![TypeInfoDegradationReasonTag::RequestValidation],
+                "the {entry} records the refusal as request validation"
             );
         }
-        other => panic!("expected the typed malformed refusal, got {other:?}"),
     }
+}
+
+/// Refusing an unserved operation reads no store view at either entry.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
+#[test]
+fn an_unserved_operation_reads_no_store_view() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let host = host_with_fixture();
+    let before = host.provenance().store_view_from_host_reads.load(Relaxed);
+    for envelope in [evaluate_expression_envelope(), relate_envelope()] {
+        let _ = refusals_at_both_entries(&host, &envelope);
+    }
+    assert_eq!(
+        host.provenance().store_view_from_host_reads.load(Relaxed),
+        before,
+        "an unserved operation is refused before any store-view read"
+    );
+    // Control: a served request through the same entry does read one, so
+    // the counter observes this route.
+    let _ = host
+        .resolve_symbol_graph_with_audit(resolve_envelope(
+            "/types.ts",
+            "Foo",
+            ProjectionMode::Expanded,
+        ))
+        .into_parts();
+    assert!(
+        host.provenance().store_view_from_host_reads.load(Relaxed) > before,
+        "a served resolve-symbol request reads the store view"
+    );
 }
 
 #[test]
 fn an_op_payload_mismatch_is_rejected_by_the_envelope_validator() {
     let host = host_with_fixture();
     let mut envelope = resolve_envelope("/types.ts", "Foo", ProjectionMode::Expanded);
-    envelope.operation = Operation::EvaluateExpression as i32;
-    let _ = &mut envelope; // payload arm intentionally left as resolve_symbol
+    // A served operation whose payload arm is resolve-symbol.
+    envelope.operation = Operation::ExpandAround as i32;
     let (response, _record) = host.resolve_symbol_graph_with_audit(envelope).into_parts();
     let error = response.expect_err("op/payload mismatch is a typed error");
     assert!(matches!(

@@ -30,6 +30,7 @@ export {
   TypeInfoRequestErrorUnknownFrameworkProfileSchema,
   TypeInfoRequestErrorStaleBasisSchema,
   TypeInfoRequestErrorUnknownNodeRefSchema,
+  TypeInfoRequestErrorUnsupportedOperationSchema,
   NodeRefSchema,
   GraphProjectionRequestSchema,
   // Graph node messages (kept as the prefixed names — the schema is
@@ -158,6 +159,7 @@ export type {
   NodeRef,
   TypeInfoRequestErrorStaleBasis,
   TypeInfoRequestErrorUnknownNodeRef,
+  TypeInfoRequestErrorUnsupportedOperation,
   GraphSpanRef,
   GraphStringTable,
   GraphProjectionRequest,
@@ -202,7 +204,9 @@ export type {
  * graph-local target (fields 1 and 2) and names its position by `nodeRef`
  * (field 8); `GraphHandle` and `GraphTypeNodeRef` are deleted. A reference
  * the host does not hold is the `unknownNodeRef` error arm, one whose basis
- * no longer describes the current inputs is `staleBasis`.
+ * no longer describes the current inputs is `staleBasis`. An operation the
+ * host does not serve is the `unsupportedOperation` error arm at every
+ * accepted version; it echoes the requested operation.
  * Schema 2 stays accepted for the legacy operations; the framework-surface
  * operation requires 11 and the expand-around operation 12.
  */
