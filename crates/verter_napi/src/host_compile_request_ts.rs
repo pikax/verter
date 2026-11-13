@@ -1,106 +1,107 @@
-//! Renderer for the published TypeScript declaration of the host compile
-//! request, and the owner of the structural metadata it renders from.
+//! Renderer for the published TypeScript declarations of the host compile
+//! request and its response, and the macros that declare the JS-facing
+//! unions it renders from.
 //!
-//! The Rust declarations that DECODE the request are the single authority
-//! for its shape: the framework-tagged [`NapiHostCompileRequest`] and
-//! product-tagged [`NapiRequestedProduct`] unions in
-//! [`crate::host_compile_request`], and the `verter_protocol` DTOs their
-//! arms carry. `packages/native/host-compile-request.generated.ts` is a
-//! GENERATED, BYTE-PINNED projection of those declarations — nothing in it
-//! is written by hand, so a field, variant, optionality or string-union
-//! member that changes on the Rust side and is not regenerated fails the
-//! freshness guard instead of shipping a declaration the decoder refuses.
+//! The Rust declarations the bindings DECODE and SERIALISE are the single
+//! authority for these shapes. Three generated, byte-pinned files project
+//! them, and nothing in any of them is written by hand:
 //!
-//! Two structural sources feed the render, and neither reads Rust source
+//! - `packages/native/host-compile-request.generated.ts` — the request, from
+//!   the framework-tagged [`NapiHostCompileRequest`] and product-tagged
+//!   [`NapiRequestedProduct`] unions in [`crate::host_compile_request`] and
+//!   the `verter_protocol` DTOs their arms carry;
+//! - `packages/native/host-compile-response.generated.ts` — the native
+//!   response, from the unions and objects the native binding serialises in
+//!   [`crate::compile_request_response`];
+//! - `packages/wasm/src/compile-response.generated.ts` — the browser
+//!   response, from the `Browser*` declarations in
+//!   `verter_protocol::compile_response` that the browser binding
+//!   serialises.
+//!
+//! A field, arm, optionality or string-union member that changes on the
+//! Rust side and is not regenerated fails the freshness guard instead of
+//! shipping a declaration the binding does not keep.
+//!
+//! Two structural sources feed each render, and neither reads Rust source
 //! text:
 //!
-//! - The nested DTOs project through their `ts_rs::TS` derives, and the
-//!   SET of them is the request union's transitive `ts_rs` dependency
-//!   closure rather than a list kept here. Each carries
-//!   `#[ts(rename = "Host…")]` so the published name is declared beside
-//!   the schema, and `#[ts(optional_fields = nullable)]` so a serde
-//!   `Option<T>` slot projects as `field?: T | null` — omitted,
-//!   `undefined` and `null` all decode to `None`.
-//! - The two JS-facing tagged unions project through
-//!   [`tagged_js_union`], which emits the serde enum AND its arm table
-//!   from ONE declaration list. An arm cannot exist without a row, and a
-//!   row cannot exist without an arm.
+//! - Plain objects project through their `ts_rs::TS` derives, and the SET
+//!   of them is the root's transitive `ts_rs` dependency closure rather
+//!   than a list kept here. Each carries `#[ts(rename = "Host…")]` so the
+//!   published name is declared beside the schema.
+//! - Unions project through the metadata their declaring macro emits from
+//!   ONE declaration list — [`tagged_js_union`] for the decoded request,
+//!   [`js_object_union`] for the native response, and
+//!   `verter_protocol::serialized_js_union` for the browser response and the
+//!   missing-input rows. An arm cannot exist without a row, and a row cannot
+//!   exist without an arm. Arms that share a published name and a shape
+//!   publish as one declaration whose tag is the union of their tags.
 //!
-//! `ts-rs` prints an advisory while compiling the two unions, because it
-//! does not model serde's enum-level `deny_unknown_fields`. That is
-//! accurate: TypeScript has no direct equivalent, and the closedness the
-//! decoder enforces surfaces in the projection as excess-property
-//! checking against a closed object type.
+//! A name a render references but does not declare is a shared host type
+//! written elsewhere (`HostDiagnosticsSnapshot`, `HostIdeResponse`, …): the
+//! render imports it from the module its file names, so the import list is
+//! derived from what the declarations reach, never kept beside them.
 //!
-//! Generation is a COMMAND — `pnpm gen:host-request-ts`, or
-//! `cargo run -p verter_napi --features generate-host-request-ts --bin
-//! generate_host_compile_request_ts`. The freshness guard renders in
-//! memory and byte-compares; it never writes.
+//! Generation is a COMMAND — `pnpm gen:host-request-ts`, or `cargo run -p
+//! verter_napi --features generate-host-request-ts --bin
+//! generate_host_compile_request_ts` — which writes all three files. The
+//! freshness guard renders in memory and byte-compares; it never writes.
 
 use std::any::TypeId;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt::Write as _;
 
 use ts_rs::{Config, TypeVisitor, TS};
+use verter_protocol::compile_response::{
+    BrowserCompileRequestResponse, BrowserCompiledProduct, FfiMissingInput,
+};
 
+pub use verter_protocol::js_union::{ArmField, ArmShape, TaggedArm, TaggedUnion};
+
+use crate::compile_request_response::{
+    NapiCompileRequestFailure, NapiCompileRequestsEntry, NapiCompiledProduct,
+};
 use crate::host_compile_request::{NapiHostCompileRequest, NapiRequestedProduct};
 
-/// The committed path of the generated declaration, relative to the
-/// workspace root. The generator binary and the freshness guard both
-/// resolve it from here.
+/// The committed path of the generated request declaration, relative to the
+/// workspace root.
 pub const HOST_COMPILE_REQUEST_TS_PATH: &str = "packages/native/host-compile-request.generated.ts";
 
-// ─── structural metadata for a JS-facing tagged union ────────────────────
+/// The committed path of the generated native response declaration.
+pub const HOST_COMPILE_RESPONSE_TS_PATH: &str =
+    "packages/native/host-compile-response.generated.ts";
 
-/// The shape an arm of a tagged union carries beside its tag.
-pub enum ArmShape {
-    /// A newtype arm: the tag object intersected with a named payload type.
-    Payload(String),
-    /// A struct arm's own fields. Empty means the arm is the tag alone.
-    Fields(Vec<ArmField>),
+/// The committed path of the generated browser response declaration.
+pub const BROWSER_COMPILE_RESPONSE_TS_PATH: &str =
+    "packages/wasm/src/compile-response.generated.ts";
+
+/// Every generated declaration file: its committed path, relative to the
+/// workspace root, and its render. The generator binary writes exactly
+/// these, and the freshness guard pins exactly these.
+#[must_use]
+pub fn generated_declarations() -> Vec<(&'static str, String)> {
+    vec![
+        (
+            HOST_COMPILE_REQUEST_TS_PATH,
+            render_host_compile_request_ts(),
+        ),
+        (
+            HOST_COMPILE_RESPONSE_TS_PATH,
+            render_host_compile_response_ts(),
+        ),
+        (
+            BROWSER_COMPILE_RESPONSE_TS_PATH,
+            render_browser_compile_response_ts(),
+        ),
+    ]
 }
 
-/// One named field of a struct arm, with its projected TypeScript type.
-pub struct ArmField {
-    /// The wire key, which is the Rust field identifier. The two are one
-    /// value, not two that agree: the macro reads the field through
-    /// `stringify!` — the same identifier serde reads — and its grammar
-    /// admits no attribute on a variant field, so a rename that could
-    /// separate them has nowhere to be written.
-    pub name: &'static str,
-    /// The projected TypeScript type, resolved through `ts_rs`.
-    pub ts_type: String,
-}
+// ─── the union declaration macros ────────────────────────────────────────
 
-/// One arm of a tagged union: its published name, its tag value, its
-/// shape and its documentation.
-pub struct TaggedArm {
-    /// The published TypeScript name of this arm.
-    pub ts_name: &'static str,
-    /// The tag value that selects this arm at decode.
-    pub tag_value: &'static str,
-    /// Documentation lines, in source order.
-    pub docs: &'static [&'static str],
-    /// What the arm carries beside its tag.
-    pub shape: ArmShape,
-}
-
-/// A JS-facing tagged union: the arms plus the key that discriminates them.
-pub struct TaggedUnion {
-    /// The published TypeScript name of the union.
-    pub ts_name: &'static str,
-    /// The property every arm carries to discriminate itself.
-    pub tag_key: &'static str,
-    /// Documentation lines, in source order.
-    pub docs: &'static [&'static str],
-    /// The arms, in declaration order.
-    pub arms: Vec<TaggedArm>,
-}
-
-/// Declares a JS-facing tagged union once: the serde enum the boundary
-/// decodes AND the structural metadata the TypeScript projection renders
-/// from come out of the same list, so an arm cannot exist without a row
-/// and a row cannot name an arm that does not exist.
+/// Declares a JS-facing tagged union the request DECODES once: the serde
+/// enum the boundary decodes AND the structural metadata the TypeScript
+/// projection renders from come out of the same list, so an arm cannot
+/// exist without a row and a row cannot name an arm that does not exist.
 ///
 /// Three arm forms are supported, matching what the decoder needs: a
 /// newtype arm over a payload DTO, a struct arm with named fields, and a
@@ -112,6 +113,10 @@ pub struct TaggedUnion {
 /// spelling from the variant identifier, so the value the projection
 /// publishes and the value the decoder answers to are the same token rather
 /// than two spellings a probe has to catch drifting apart.
+///
+/// TypeScript has no direct equivalent of `deny_unknown_fields`: the
+/// closedness the decoder enforces surfaces in the projection as
+/// excess-property checking against a closed object type.
 macro_rules! tagged_js_union {
     (
         $(#[doc = $union_doc:literal])*
@@ -122,9 +127,8 @@ macro_rules! tagged_js_union {
             ),* $(,)?
         }
     ) => {
-        #[derive(serde::Deserialize, Debug, Clone, PartialEq, Eq, ts_rs::TS)]
+        #[derive(serde::Deserialize, Debug, Clone, PartialEq, Eq)]
         #[serde(tag = $tag_key, deny_unknown_fields)]
-        #[ts(rename = $union_ts)]
         $(#[doc = $union_doc])*
         $vis enum $Name {
             $(
@@ -134,48 +138,135 @@ macro_rules! tagged_js_union {
             )*
         }
 
-        impl $Name {
-            /// The structural metadata the TypeScript projection renders
-            /// from, in declaration order.
-            pub fn ts_union(cfg: &::ts_rs::Config) -> $crate::host_compile_request_ts::TaggedUnion {
-                $crate::host_compile_request_ts::TaggedUnion {
-                    ts_name: $union_ts,
-                    tag_key: $tag_key,
-                    docs: &[$($union_doc),*],
-                    arms: vec![$(
-                        $crate::host_compile_request_ts::TaggedArm {
-                            ts_name: $arm_ts,
-                            tag_value: $tag_value,
-                            docs: &[$($arm_doc),*],
-                            shape: tagged_js_union!(@shape cfg, $body),
-                        }
-                    ),*],
-                }
+        ::verter_protocol::js_union_ts! {
+            $Name [$tag_key] as $union_ts docs [$($union_doc),*] {
+                $( $body => [$tag_value] as $arm_ts docs [$($arm_doc),*] ),*
             }
         }
-    };
-
-    (@shape $cfg:ident, ( $payload:ty )) => {
-        $crate::host_compile_request_ts::ArmShape::Payload(
-            <$payload as ::ts_rs::TS>::name($cfg),
-        )
-    };
-    (@shape $cfg:ident, { }) => {
-        $crate::host_compile_request_ts::ArmShape::Fields(::std::vec::Vec::new())
-    };
-    (@shape $cfg:ident, { $($field:ident : $ty:ty),* $(,)? }) => {
-        $crate::host_compile_request_ts::ArmShape::Fields(vec![$(
-            $crate::host_compile_request_ts::ArmField {
-                name: stringify!($field),
-                ts_type: <$ty as ::ts_rs::TS>::name($cfg),
-            }
-        ),*])
     };
 }
 
 pub(crate) use tagged_js_union;
 
-// ─── the render ──────────────────────────────────────────────────────────
+/// Declares a JS-facing object union the native binding SERIALISES: the
+/// enum, its conversion to a JavaScript object and the structural metadata
+/// the TypeScript projection renders from all come out of one declaration
+/// list.
+///
+/// Every arm is a struct arm whose fields are native values in their own
+/// right. The conversion writes the tag first (for a tagged union) and then
+/// every field in declaration order, each through its own native
+/// conversion, so the object a caller receives is exactly the object a
+/// `#[napi(object)]` struct with those fields would produce — key order
+/// included. An untagged union's arms are told apart by which slot is
+/// `null`, and its arms say so with a `JsNull` field.
+///
+/// A field's wire key is its identifier, so a camelCase key is written as
+/// one.
+macro_rules! js_object_union {
+    (@emit
+        [$($union_doc:literal),*] $vis:vis $Name:ident [$($tag_key:literal)?] as $union_ts:literal {
+            $(
+                [$($arm_doc:literal),*] $variant:ident { $($field:ident : $ty:ty),* }
+                [$($arm_key:literal => $tag_value:literal)?] as $arm_ts:literal;
+            )*
+        }
+    ) => {
+        $(#[doc = $union_doc])*
+        $vis enum $Name {
+            $(
+                $(#[doc = $arm_doc])*
+                $variant { $($field: $ty),* },
+            )*
+        }
+
+        impl $Name {
+            /// Writes this value's properties onto `object`: the tag first,
+            /// then every field in declaration order.
+            pub(crate) fn write_properties(
+                self,
+                object: &mut ::napi::bindgen_prelude::Object<'_>,
+            ) -> ::napi::Result<()> {
+                use ::napi::bindgen_prelude::JsObjectValue as _;
+                match self {
+                    $(
+                        Self::$variant { $($field),* } => {
+                            $( object.set_named_property($arm_key, $tag_value)?; )?
+                            $( object.set_named_property(::core::stringify!($field), $field)?; )*
+                        }
+                    )*
+                }
+                Ok(())
+            }
+
+            /// The tag this value is published under, or `None` for an arm
+            /// of an untagged union.
+            pub fn tag(&self) -> ::std::option::Option<&'static str> {
+                match self {
+                    $( Self::$variant { .. } => ::verter_protocol::__js_union_opt!($($tag_value)?), )*
+                }
+            }
+        }
+
+        impl ::napi::bindgen_prelude::ToNapiValue for $Name {
+            unsafe fn to_napi_value(
+                env: ::napi::bindgen_prelude::sys::napi_env,
+                val: Self,
+            ) -> ::napi::Result<::napi::bindgen_prelude::sys::napi_value> {
+                let env = ::napi::Env::from_raw(env);
+                let mut object = ::napi::bindgen_prelude::Object::new(&env)?;
+                val.write_properties(&mut object)?;
+                Ok(::napi::bindgen_prelude::JsValue::raw(&object))
+            }
+        }
+
+        ::verter_protocol::js_union_ts! {
+            $Name [$($tag_key)?] as $union_ts docs [$($union_doc),*] {
+                $( { $($field : $ty),* } => [$($tag_value)?] as $arm_ts docs [$($arm_doc),*] ),*
+            }
+        }
+    };
+    (
+        $(#[doc = $union_doc:literal])*
+        $vis:vis enum $Name:ident tagged $tag_key:literal as $union_ts:literal {
+            $(
+                $(#[doc = $arm_doc:literal])*
+                $variant:ident { $($field:ident : $ty:ty),* $(,)? }
+                    => $tag_value:literal as $arm_ts:literal
+            ),* $(,)?
+        }
+    ) => {
+        $crate::host_compile_request_ts::js_object_union! { @emit
+            [$($union_doc),*] $vis $Name [$tag_key] as $union_ts {
+                $(
+                    [$($arm_doc),*] $variant { $($field : $ty),* }
+                    [$tag_key => $tag_value] as $arm_ts;
+                )*
+            }
+        }
+    };
+    (
+        $(#[doc = $union_doc:literal])*
+        $vis:vis enum $Name:ident untagged as $union_ts:literal {
+            $(
+                $(#[doc = $arm_doc:literal])*
+                $variant:ident { $($field:ident : $ty:ty),* $(,)? } as $arm_ts:literal
+            ),* $(,)?
+        }
+    ) => {
+        $crate::host_compile_request_ts::js_object_union! { @emit
+            [$($union_doc),*] $vis $Name [] as $union_ts {
+                $(
+                    [$($arm_doc),*] $variant { $($field : $ty),* } [] as $arm_ts;
+                )*
+            }
+        }
+    };
+}
+
+pub(crate) use js_object_union;
+
+// ─── the renders ─────────────────────────────────────────────────────────
 
 /// Render the published TypeScript declaration of the host compile
 /// request.
@@ -186,50 +277,133 @@ pub(crate) use tagged_js_union;
 #[must_use]
 pub fn render_host_compile_request_ts() -> String {
     let cfg = Config::new();
-    let mut out = String::from(HEADER);
+    render_module(
+        &cfg,
+        REQUEST_HEADER,
+        None,
+        vec![
+            union_of::<NapiRequestedProduct>(NapiRequestedProduct::ts_union(&cfg)),
+            union_of::<NapiHostCompileRequest>(NapiHostCompileRequest::ts_union(&cfg)),
+        ],
+        |walk| walk.visit::<NapiHostCompileRequest>(),
+    )
+}
 
-    for declaration in nested_declarations(&cfg) {
+/// Render the published TypeScript declaration of the native binding's
+/// compile response: what `compileRequest` returns and throws, and what
+/// each `compileRequests` entry carries.
+#[must_use]
+pub fn render_host_compile_response_ts() -> String {
+    let cfg = Config::new();
+    render_module(
+        &cfg,
+        NATIVE_RESPONSE_HEADER,
+        Some("./host-types"),
+        vec![
+            union_of::<FfiMissingInput>(FfiMissingInput::ts_union(&cfg)),
+            union_of::<NapiCompiledProduct>(NapiCompiledProduct::ts_union(&cfg)),
+            union_of::<NapiCompileRequestFailure>(NapiCompileRequestFailure::ts_union(&cfg)),
+            union_of::<NapiCompileRequestsEntry>(NapiCompileRequestsEntry::ts_union(&cfg)),
+        ],
+        |walk| walk.visit::<NapiCompileRequestsEntry>(),
+    )
+}
+
+/// Render the published TypeScript declaration of the browser binding's
+/// compile response.
+#[must_use]
+pub fn render_browser_compile_response_ts() -> String {
+    let cfg = Config::new();
+    render_module(
+        &cfg,
+        BROWSER_RESPONSE_HEADER,
+        Some("@verter/native/host-types"),
+        vec![union_of::<BrowserCompiledProduct>(
+            BrowserCompiledProduct::ts_union(&cfg),
+        )],
+        |walk| walk.visit::<BrowserCompileRequestResponse>(),
+    )
+}
+
+/// A union the render publishes from its metadata, keyed by the type the
+/// closure walk meets it as.
+struct RenderedUnion {
+    id: TypeId,
+    union: TaggedUnion,
+}
+
+fn union_of<U: 'static>(union: TaggedUnion) -> RenderedUnion {
+    RenderedUnion {
+        id: TypeId::of::<U>(),
+        union,
+    }
+}
+
+/// Render one generated module: its header, the imports of the shared
+/// names it references, every plain declaration the root reaches, then
+/// each union in the order given.
+fn render_module(
+    cfg: &Config,
+    header: &str,
+    imports_from: Option<&str>,
+    unions: Vec<RenderedUnion>,
+    visit_root: impl FnOnce(&mut ClosureWalk<'_>),
+) -> String {
+    let mut walk = ClosureWalk {
+        cfg,
+        // The unions are rendered by `render_tagged_union` under their
+        // arms' published names. They are walked for what they reach and
+        // never emitted as plain declarations.
+        tagged: unions.iter().map(|rendered| rendered.id).collect(),
+        visited: HashSet::new(),
+        open: Vec::new(),
+        nodes: Vec::new(),
+        referenced: BTreeSet::new(),
+    };
+    visit_root(&mut walk);
+
+    let declared: BTreeSet<&str> = walk
+        .nodes
+        .iter()
+        .map(|node| node.name.as_str())
+        .chain(unions.iter().map(|rendered| rendered.union.ts_name))
+        .collect();
+    let imported: Vec<&str> = walk
+        .referenced
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !declared.contains(name))
+        .collect();
+
+    let mut out = String::from(header);
+    if !imported.is_empty() {
+        let module = imports_from.unwrap_or_else(|| {
+            panic!(
+                "the render references {imported:?}, which it neither declares nor has a \
+                 module to import from"
+            )
+        });
+        out.push_str("import type {\n");
+        for name in &imported {
+            let _ = writeln!(out, "  {name},");
+        }
+        let _ = writeln!(out, "}} from \"{module}\";\n");
+    }
+
+    for declaration in order_declarations(walk.nodes) {
         out.push_str(&declaration);
         out.push('\n');
     }
-
-    render_tagged_union(&mut out, &NapiRequestedProduct::ts_union(&cfg));
-    render_tagged_union(&mut out, &NapiHostCompileRequest::ts_union(&cfg));
+    for rendered in &unions {
+        render_tagged_union(&mut out, &rendered.union);
+    }
 
     // Exactly one trailing newline: the arm renderer separates blocks
     // with a blank line, and the last block ends the file.
     format!("{}\n", out.trim_end())
 }
 
-/// Every nested declaration the request reaches, ordered so a type is
-/// declared before it is referenced.
-///
-/// The set is DERIVED, never listed: it is the transitive `ts_rs`
-/// dependency closure of the request union. A hand-written list is a
-/// second place a declaration has to be added, and the byte pin cannot
-/// tell "the list is complete" from "the list is what it was" — a field
-/// of a newly reachable DTO reddens the pin once, and a regeneration
-/// makes it green again with the published file referencing a name it
-/// never declares. Reaching the type is what declares it.
-fn nested_declarations(cfg: &Config) -> Vec<String> {
-    let mut walk = ClosureWalk {
-        cfg,
-        // The two unions are rendered by `render_tagged_union` under their
-        // arms' published names. They are walked for what they reach and
-        // never emitted here.
-        tagged: vec![
-            TypeId::of::<NapiHostCompileRequest>(),
-            TypeId::of::<NapiRequestedProduct>(),
-        ],
-        visited: HashSet::new(),
-        open: Vec::new(),
-        nodes: Vec::new(),
-    };
-    walk.visit::<NapiHostCompileRequest>();
-    order_declarations(walk.nodes)
-}
-
-/// One declarable type in the request's `ts_rs` closure.
+/// One declarable type in a render's `ts_rs` closure.
 struct ClosureNode {
     /// The published TypeScript name.
     name: String,
@@ -239,26 +413,40 @@ struct ClosureNode {
     references: BTreeSet<String>,
 }
 
-/// Collects every declarable type the request reaches, with the edges
-/// between them.
+/// Collects every declarable type a root reaches, with the edges between
+/// them, and every published name the reached types are known by.
+///
+/// The set of declarations is DERIVED, never listed: it is the transitive
+/// `ts_rs` dependency closure of the root. A hand-written list is a second
+/// place a declaration has to be added, and the byte pin cannot tell "the
+/// list is complete" from "the list is what it was" — a field of a newly
+/// reachable DTO reddens the pin once, and a regeneration makes it green
+/// again with the published file referencing a name it never declares.
+/// Reaching the type is what declares it.
 struct ClosureWalk<'a> {
     cfg: &'a Config,
-    /// Types the tagged-union renderer owns: traversed, never emitted.
+    /// Types the union renderer owns: traversed, never emitted.
     tagged: Vec<TypeId>,
     visited: HashSet<TypeId>,
     /// The reference sets of the declarations still being expanded, one
     /// frame per level of the walk.
     open: Vec<BTreeSet<String>>,
     nodes: Vec<ClosureNode>,
+    /// Every type name the reached types are published under.
+    referenced: BTreeSet<String>,
 }
 
 impl TypeVisitor for ClosureWalk<'_> {
     fn visit<T: TS + 'static + ?Sized>(&mut self) {
-        // A derived declaration has an output path; a primitive, container
-        // or wrapper has none and is not declared. Containers still reach
-        // their element types: `ts_rs` visits both the field type and its
-        // generic arguments, so `Option<T>` and `BTreeMap<K, V>` deliver
-        // `T`, `K` and `V` here in their own right.
+        if let Some(name) = published_type_name(&T::name(self.cfg)) {
+            self.referenced.insert(name.to_string());
+        }
+        // A derived declaration has an output path; a primitive, container,
+        // wrapper or shared type written elsewhere has none and is not
+        // declared. Containers still reach their element types: `ts_rs`
+        // visits both the field type and its generic arguments, so
+        // `Option<T>` and `BTreeMap<K, V>` deliver `T`, `K` and `V` here in
+        // their own right.
         if T::output_path().is_none() {
             return;
         }
@@ -288,6 +476,22 @@ impl TypeVisitor for ClosureWalk<'_> {
     }
 }
 
+/// The type a projected name refers to, when it names one: a leading
+/// identifier that starts with a capital and is followed by nothing or by
+/// an indexed access (`HostRequestedProduct["kind"]`).
+///
+/// A primitive (`string`, `null`), a generic application (`Array<…>`,
+/// `Record<…>`) and an inline object or union name no type of their own.
+fn published_type_name(name: &str) -> Option<&str> {
+    let end = name
+        .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '$'))
+        .unwrap_or(name.len());
+    let (head, rest) = name.split_at(end);
+    let names_a_type = head.starts_with(|ch: char| ch.is_ascii_uppercase())
+        && (rest.is_empty() || rest.starts_with('['));
+    names_a_type.then_some(head)
+}
+
 /// Order the closure so a declaration follows everything it references,
 /// breaking ties by published name so the render does not inherit the
 /// walk's order — which `ts_rs` derives from a hash set and does not
@@ -308,7 +512,7 @@ fn order_declarations(nodes: Vec<ClosureNode>) -> Vec<String> {
                     .all(|reference| reference == &node.name || !pending.contains_key(reference))
             })
             .map(|node| node.name.clone())
-            .expect("the request's type closure is a directed acyclic graph");
+            .expect("a render's type closure is a directed acyclic graph");
         let node = pending
             .remove(&ready)
             .expect("just selected from `pending`");
@@ -482,26 +686,78 @@ fn push_trimmed(out: &mut Vec<String>, current: &str) {
     }
 }
 
-/// Render a tagged union: each arm under its own published name, then the
-/// union that discriminates them.
-fn render_tagged_union(out: &mut String, union: &TaggedUnion) {
+/// The arms of a union that publish as one declaration: the first arm
+/// under that published name, and every tag value the name answers to.
+struct PublishedArm<'a> {
+    arm: &'a TaggedArm,
+    tags: Vec<&'static str>,
+}
+
+/// Group a union's arms by published name, in first-appearance order.
+///
+/// Arms that share a name must share a shape, and only the first may carry
+/// documentation unless the rest repeat it: one declaration cannot publish
+/// two shapes or two descriptions.
+fn published_arms(union: &TaggedUnion) -> Vec<PublishedArm<'_>> {
+    let mut published: Vec<PublishedArm<'_>> = Vec::new();
     for arm in &union.arms {
+        match published
+            .iter_mut()
+            .find(|group| group.arm.ts_name == arm.ts_name)
+        {
+            Some(group) => {
+                assert!(
+                    group.arm.shape == arm.shape,
+                    "the arms published as `{}` in `{}` carry different shapes",
+                    arm.ts_name,
+                    union.ts_name,
+                );
+                assert!(
+                    arm.docs.is_empty() || arm.docs == group.arm.docs,
+                    "the arms published as `{}` in `{}` carry different documentation",
+                    arm.ts_name,
+                    union.ts_name,
+                );
+                group.tags.extend(arm.tag_value);
+            }
+            None => published.push(PublishedArm {
+                arm,
+                tags: arm.tag_value.into_iter().collect(),
+            }),
+        }
+    }
+    published
+}
+
+/// Render a union: each published arm under its own name, then the union
+/// that discriminates them.
+fn render_tagged_union(out: &mut String, union: &TaggedUnion) {
+    let published = published_arms(union);
+    for PublishedArm { arm, tags } in &published {
         out.push_str(&render_docs(arm.docs));
-        let tag = format!("{}: \"{}\"", union.tag_key, arm.tag_value);
-        match &arm.shape {
-            ArmShape::Payload(payload) => {
+        let tag = union.tag_key.map(|key| {
+            let values: Vec<String> = tags.iter().map(|tag| format!("\"{tag}\"")).collect();
+            format!("{key}: {}", values.join(" | "))
+        });
+        match (&arm.shape, &tag) {
+            (ArmShape::Payload(payload), Some(tag)) => {
                 let _ = writeln!(
                     out,
                     "export type {} = {{ {tag} }} & {payload};",
                     arm.ts_name
                 );
             }
-            ArmShape::Fields(fields) if fields.is_empty() => {
+            (ArmShape::Payload(payload), None) => {
+                let _ = writeln!(out, "export type {} = {payload};", arm.ts_name);
+            }
+            (ArmShape::Fields(fields), Some(tag)) if fields.is_empty() => {
                 let _ = writeln!(out, "export type {} = {{ {tag} }};", arm.ts_name);
             }
-            ArmShape::Fields(fields) => {
+            (ArmShape::Fields(fields), tag) => {
                 let _ = writeln!(out, "export interface {} {{", arm.ts_name);
-                let _ = writeln!(out, "  {tag};");
+                if let Some(tag) = tag {
+                    let _ = writeln!(out, "  {tag};");
+                }
                 for field in fields {
                     let _ = writeln!(out, "  {}: {};", field.name, field.ts_type);
                 }
@@ -513,8 +769,8 @@ fn render_tagged_union(out: &mut String, union: &TaggedUnion) {
 
     out.push_str(&render_docs(union.docs));
     let _ = writeln!(out, "export type {} =", union.ts_name);
-    for (index, arm) in union.arms.iter().enumerate() {
-        let terminator = if index + 1 == union.arms.len() {
+    for (index, PublishedArm { arm, .. }) in published.iter().enumerate() {
+        let terminator = if index + 1 == published.len() {
             ";"
         } else {
             ""
@@ -542,9 +798,9 @@ fn render_docs(docs: &[&str]) -> String {
     out
 }
 
-/// The file header. States the decoder's rules, which is what every
-/// declaration below projects.
-const HEADER: &str = r#"// @generated by verter — DO NOT EDIT BY HAND.
+/// The request file's header. States the decoder's rules, which is what
+/// every declaration below projects.
+const REQUEST_HEADER: &str = r#"// @generated by verter — DO NOT EDIT BY HAND.
 //
 // The tag-discriminated host compile request the native adapter decodes,
 // projected from the Rust declarations that decode it. Regenerate with
@@ -569,5 +825,37 @@ const HEADER: &str = r#"// @generated by verter — DO NOT EDIT BY HAND.
 // Nothing in this shape decides whether a compile is legal: the product
 // set, the backend/product pairing and option support are the compiler's
 // own rules, reported as its own refusals after the request is accepted.
+
+"#;
+
+/// The native response file's header.
+const NATIVE_RESPONSE_HEADER: &str = r#"// @generated by verter — DO NOT EDIT BY HAND.
+//
+// The typed host compile response the native adapter returns and throws,
+// projected from the Rust declarations it serialises. Regenerate with
+// `pnpm gen:host-request-ts`; a hand edit, or a Rust change without a
+// regen, fails the freshness guard.
+//
+// - A product row and a failure are discriminated by `kind`; a batch entry
+//   by which of `response` and `failure` is `null`.
+// - An optional field is absent, never `null`, when it has no value.
+// - `compileRequest` throws a failure as an `Error` whose `message` is the
+//   failure's message and which carries every other field of its arm as an
+//   own property.
+
+"#;
+
+/// The browser response file's header.
+const BROWSER_RESPONSE_HEADER: &str = r#"// @generated by verter — DO NOT EDIT BY HAND.
+//
+// The typed host compile response the browser adapter returns, projected
+// from the Rust declarations it serialises. Regenerate with
+// `pnpm gen:host-request-ts`; a hand edit, or a Rust change without a
+// regen, fails the freshness guard.
+//
+// - A product row is discriminated by `kind`.
+// - An optional field is absent (`undefined`), never `null`, when it has no
+//   value.
+// - A refusal is thrown as a string; there is no partial response.
 
 "#;

@@ -2,6 +2,9 @@ pub mod graph;
 
 pub mod types;
 
+pub mod compile_response;
+pub mod js_union;
+
 pub mod component_meta;
 pub mod consumer_compatibility_manifest;
 pub mod participation;

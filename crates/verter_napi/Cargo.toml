@@ -32,7 +32,10 @@ semantic-observe = ["verter_session/semantic-observe", "dep:backtrace"]
 # builds (crates/verter_alloc documents the trade-off).
 system-allocator = ["verter_alloc/system-allocator"]
 
-# The generator that writes `packages/native/host-compile-request.generated.ts`.
+# The generator that writes the generated host compile request and response
+# declarations (`packages/native/host-compile-request.generated.ts`,
+# `packages/native/host-compile-response.generated.ts` and
+# `packages/wasm/src/compile-response.generated.ts`).
 # Declared explicitly so `required-features` can keep it out of the default
 # target set: without a `[[bin]]` row it is auto-discovered and built by every
 # `cargo build` of this package, the cross-compiled publish builds included.
@@ -74,9 +77,10 @@ napi-derive = "3"
 backtrace = { version = "0.3.76", optional = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-# The published TypeScript declaration of the host compile request is
-# RENDERED from the Rust declarations that decode it
-# (`src/host_compile_request_ts.rs`), never hand-written beside them.
+# The published TypeScript declarations of the host compile request and
+# response are RENDERED from the Rust declarations that decode and
+# serialise them (`src/host_compile_request_ts.rs`), never hand-written
+# beside them.
 ts-rs = "12"
 serde_json = { workspace = true }
 oxc_allocator = { workspace = true }

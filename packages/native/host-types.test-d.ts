@@ -131,12 +131,14 @@ void [
 import type {
   HostAnalysisProduct,
   HostCompiledProduct,
+  HostCompileFailure,
   HostCompileResponse,
   HostCompileRequest,
   HostCompileRequestsEntry,
   HostDeclarationsProduct,
   HostIdeCompanionProduct,
   HostIdeResponse,
+  HostMissingInput,
   HostPublicApiProduct,
   HostRequestedProduct,
   HostSvelteCompatibility,
@@ -183,6 +185,31 @@ const typedEntries = typedHost.compileRequests([
 type BatchRouteReturnsOneTerminalEnvelopePerInput = Expect<
   Equal<(typeof typedEntries)[number], HostCompileRequestsEntry>
 >;
+type FailureKindsAreExactlyTheTerminalFailures = Expect<
+  Equal<
+    HostCompileFailure["kind"],
+    | "host"
+    | "frameworkMismatch"
+    | "unsupportedProduct"
+    | "productNotProduced"
+    | "runtimeSurfaceRefused"
+    | "refused"
+    | "dependenciesIncomplete"
+    | "binding"
+  >
+>;
+type MissingInputKindsAreExactlyTheThreeGaps = Expect<
+  Equal<HostMissingInput["kind"], "route" | "file" | "lookup">
+>;
+/** Only the incomplete-dependencies arm names its missing inputs. */
+declare const typedFailure: HostCompileFailure;
+if (typedFailure.kind === "dependenciesIncomplete") {
+  const missing: HostMissingInput[] = typedFailure.missingInputs;
+  void missing;
+} else {
+  // @ts-expect-error -- no other failure kind carries `missingInputs`.
+  void typedFailure.missingInputs;
+}
 // @ai-generated - Typed IDE products expose their public UTF-16 metadata.
 declare const typedIde: HostIdeResponse;
 const typedIdeBindingStart = typedIde.destructuredBlock?.bindings[0]?.sourceStart;
