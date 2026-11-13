@@ -455,7 +455,7 @@ impl VerterHost {
         })
     }
 
-    /// The expand-around executor body (OP04), after validation: one
+    /// The expand-around executor body, after validation: one
     /// whole-tuple lookup, one captured view, admission, replay, bounded
     /// export, and the currentness fence. See the module docs.
     fn execute_expand_around(

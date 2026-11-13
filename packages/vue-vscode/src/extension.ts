@@ -151,7 +151,7 @@ const activation = createActivationRoot<ActivationRuntime>(async (session) => {
 });
 
 /**
- * The effective participation cells of the current server (COX0), replaced
+ * The effective participation cells of the current server, replaced
  * by every receipt. The client middleware and the decoration providers gate
  * on the same cells, so a change is announced to both.
  */
@@ -907,7 +907,7 @@ async function startVueLanguageServer(
   const cssDiagnostics = languages.createDiagnosticCollection("verter-css");
   attempt.add(cssDiagnostics);
 
-  // Participation (COX0): the host observes, the server decides. The cells of
+  // Participation: the host observes, the server decides. The cells of
   // the newest receipt gate every client-local producer (the CSS service and
   // the decorations) and every request this client sends for a carrier.
   const observeParticipation = (): ParticipationObservation => {
@@ -1116,7 +1116,7 @@ async function startVueLanguageServer(
             : null,
           served ? next(document, position, context, token) : undefined,
         ]);
-        // A result is shown only while its cell still admits it (COX0): a
+        // A result is shown only while its cell still admits it: a
         // withdrawal during the await never refills the display.
         const cssResult = admits(document, "completion", "style") ? cssRaw : null;
         const lspResult = admits(document, "completion") ? lspRaw : undefined;
@@ -1162,7 +1162,7 @@ async function startVueLanguageServer(
             : null,
           served ? next(document, position, token) : undefined,
         ]);
-        // A result is shown only while its cell still admits it (COX0): a
+        // A result is shown only while its cell still admits it: a
         // withdrawal during the await never refills the display.
         const cssResult = admits(document, "hover", "style") ? cssRaw : null;
         const lspResult = admits(document, "hover") ? lspRaw : undefined;
@@ -1198,7 +1198,7 @@ async function startVueLanguageServer(
           cssServed ? getCssService().findDocumentColors(uri, source, document.version) : [],
           served ? next(document, token) : [],
         ]);
-        // A result is shown only while its cell still admits it (COX0): a
+        // A result is shown only while its cell still admits it: a
         // withdrawal during the await never refills the display.
         const cssResult = admits(document, "documentColor", "style") ? cssRaw : [];
         const lspResult = admits(document, "documentColor") ? lspRaw : [];
@@ -1265,7 +1265,7 @@ async function startVueLanguageServer(
             : [],
           served ? next(document, position, token) : undefined,
         ]);
-        // A result is shown only while its cell still admits it (COX0): a
+        // A result is shown only while its cell still admits it: a
         // withdrawal during the await never refills the display.
         const cssResult = admits(document, "documentHighlight", "style") ? cssRaw : [];
         const lspResult = admits(document, "documentHighlight") ? lspRaw : undefined;

@@ -1,8 +1,8 @@
 //! Minimal non-overlapping edit geometry: the deterministic edit set between
 //! authored bytes and one rendered result.
 //!
-//! The locked algorithm (`fixtures/formatter/laws.json` `edits`, contract
-//! FD13) uses the rendered result's ordered source-backed segments as stable
+//! The locked algorithm (`fixtures/formatter/laws.json` `edits`)
+//! uses the rendered result's ordered source-backed segments as stable
 //! anchors. A segment's binding anchors only when its authored range is
 //! addressable in the authored source, ordered after the previous anchor, not
 //! bounded inside an authored CRLF pair, and its rendered bytes equal its
@@ -39,7 +39,7 @@ pub struct FormatEdit {
     pub text: String,
 }
 
-/// Work counters for one derivation, in the FMT0 lock's units.
+/// Work counters for one derivation, in the units of `catalogs/formatter-performance-v1.toml`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EditWork {
     /// Scalar-to-scalar comparisons: anchor verification plus gap prefix and

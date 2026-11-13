@@ -1,6 +1,5 @@
 /**
- * Per-profile participation for the VS Code host (COX0; contract
- * `docs/arch/kernel/cox0d-participation.md`).
+ * Per-profile participation for the VS Code host.
  *
  * The host never decides participation. It sends the Rust server one
  * normalized input — the `verter.participation` preset, the optional visual

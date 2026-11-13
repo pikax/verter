@@ -8085,7 +8085,7 @@ defineProps<{ data: Foo }>()
     );
 }
 
-/// FIX 3 #2a — ALIAS-CHAIN cross-file heritage through the Vue macro surface:
+/// ALIAS-CHAIN cross-file heritage through the Vue macro surface:
 /// `defineProps<ChildProps>` where `ChildProps extends MiddleAlias` and
 /// `MiddleAlias = BaseProps` (a one-hop alias of an imported interface). The
 /// published props must include the base members reached through the alias hop.
@@ -8157,7 +8157,7 @@ defineProps<ChildProps>()
     );
 }
 
-/// FIX 3 #2b — TWO-LEVEL cross-file heritage through the Vue macro surface:
+/// TWO-LEVEL cross-file heritage through the Vue macro surface:
 /// `GrandchildProps extends ChildProps` (file B) `extends BaseProps` (file A),
 /// each declared in a different file. The published props must include members
 /// from all three levels.
@@ -8299,7 +8299,7 @@ defineProps<DepProps>()
     );
 }
 
-/// FIX-1 regression (audited / LSP-facing output route): the cold resolve
+/// Regression (audited / LSP-facing output route): the cold resolve
 /// inside `get_component_meta_output_with_resolution` is PINNED to the
 /// entry's ONE captured store view. A dependency mutation landing between
 /// the capture and the resolve must yield a view-CONSISTENT response —
@@ -8360,7 +8360,7 @@ fn audited_output_cold_resolve_is_pinned_to_the_captured_store_view() {
     );
 }
 
-/// FIX-1 regression (locator-only analysis entry): the cold resolve inside
+/// Regression (locator-only analysis entry): the cold resolve inside
 /// `get_component_meta` is PINNED to the entry's ONE captured store view —
 /// same barrier-controlled mutation, same view-consistency contract as the
 /// audited output route above.
@@ -8392,7 +8392,7 @@ fn analysis_entry_cold_resolve_is_pinned_to_the_captured_store_view() {
     assert_eq!(fresh.props.len(), 2);
 }
 
-/// FIX-1 regression (resolution-bearing locator entry): the cold resolve
+/// Regression (resolution-bearing locator entry): the cold resolve
 /// inside `get_component_meta_with_resolution` is PINNED to the entry's ONE
 /// captured store view.
 #[test]

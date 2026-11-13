@@ -4,7 +4,7 @@ This page specifies planned Stencil tooling. The reviewed data in
 [the contract manifest](../../tests/framework-stencil/STN0/manifest.json) and
 [rejection cases](../../tests/framework-stencil/STN0/cases.md) do not claim shipped
 support. No adapter, validator, compiler invocation or dependency change lands
-with this contract. STN1 adds the lock validator under STN1-ACV; REG0 discovers it
+with this contract. STN1 adds the lock validator under STN1-ACV; the framework registry discovers it
 without a root test script edit.
 
 ## Release and activation

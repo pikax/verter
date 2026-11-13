@@ -16,7 +16,7 @@ pub(crate) struct ReadinessBasis {
 struct ObservedEnvironment {
     generation: Option<u64>,
     /// The participation fence the basis was admitted under: a participation
-    /// transition retires every publication computed before it (COX0).
+    /// transition retires every publication computed before it.
     participation: u64,
     // Weak identity prevents address reuse without retaining a retired root's payload.
     workspace: Option<std::sync::Weak<verter_workspace::PublishedRoot>>,

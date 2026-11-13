@@ -1,5 +1,4 @@
-//! Participation wire inputs (COX0; contract
-//! `docs/arch/kernel/cox0d-participation.md`).
+//! Participation wire inputs.
 //!
 //! A host sends its participation scope as normalized data: resolved
 //! presets, validated competing-tool ownership cells, the optional visual

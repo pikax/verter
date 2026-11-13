@@ -28,8 +28,8 @@ The reviewed contract data lives in `tests/framework-mdx/MDX0/`:
 
 The validator is not part of this decision. MDX1G adds `contract.ts` and
 `mdx-lock.spec.ts` (`MDX1G-ACV`) and implements every row of `cases.md`
-against these products; REG0's `scripts/run-framework-locks.mjs` discovers it.
-Until then the products are data that REG0, FWA1 and FCH1 read.
+against these products; the registry's `scripts/run-framework-locks.mjs` discovers it.
+Until then the products are data that the framework registry, FWA1 and FCH1 read.
 
 ## Baseline
 

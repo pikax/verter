@@ -34,7 +34,7 @@ export interface CssValidationProvider {
 export function createCssDiagnosticsUpdater(
   getCssService: () => CssValidationProvider,
   cssDiagnostics: Pick<vscode.DiagnosticCollection, "set">,
-  // The document's stylesheet diagnostics participation cell (COX0): a
+  // The document's stylesheet diagnostics participation cell: a
   // withdrawn cell validates and publishes nothing. Checked again after the
   // await, so a withdrawal mid-validation never refills the display.
   admits: (document: vscode.TextDocument) => boolean = () => true,

@@ -119,14 +119,14 @@ fn is_under_dir_canonicalizes_both_sides() {
 
 #[test]
 fn is_under_dir_filesystem_root_contains_everything() {
-    // FIX 1 regression: "/" is the root; "/foo" IS under it.
+    // Regression: "/" is the root; "/foo" IS under it.
     assert!(is_under_dir("/foo", "/"));
     assert!(is_under_dir("/foo/bar", "/"));
 }
 
 #[test]
 fn is_under_dir_drive_root_contains_drive_paths() {
-    // FIX 1 regression: "c:/" is the drive-root; "c:/foo" IS under it.
+    // Regression: "c:/" is the drive-root; "c:/foo" IS under it.
     assert!(is_under_dir("c:/foo", "c:/"));
     assert!(is_under_dir("c:/foo/bar", "c:/"));
 }
@@ -194,7 +194,7 @@ fn longest_project_root_falls_back_to_workspace_root() {
 
 #[test]
 fn longest_project_root_picks_longest_canonical_not_raw_length() {
-    // FIX 2 regression: a raw `//?/` extended root has an inflated raw length
+    // Regression: a raw `//?/` extended root has an inflated raw length
     // that can beat a genuinely deeper canonical root. The contract is longest
     // CANONICAL root. `//?/C:/r` canonicalizes to `c:/r` (len 4) and `c:/r/p`
     // (len 6) is the deeper match — but raw `//?/C:/r` (len 8) is longer.

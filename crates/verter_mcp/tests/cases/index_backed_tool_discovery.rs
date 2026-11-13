@@ -432,11 +432,11 @@ async fn population_tools_answer_the_fixture_populations() {
     assert!(health.is_object(), "{health}");
 }
 
-/// COX0 (UAK0 `D11`): the component-API queries admit through this
-/// invocation's own participation scope before any index read, never through
-/// a framework identity. Another scope (an editor's) has no say. A withdrawn
-/// query answers its typed refusal, never an empty report, and a unit whose
-/// own cell is withdrawn leaves the answer partial and named.
+/// The component-API queries admit through this invocation's own participation
+/// scope before any index read, never through a framework identity. Another
+/// scope (an editor's) has no say. A withdrawn query answers its typed refusal,
+/// never an empty report, and a unit whose own cell is withdrawn leaves the
+/// answer partial and named.
 #[tokio::test]
 async fn component_api_queries_follow_the_invocation_scope() {
     use verter_protocol::participation::ParticipationInput;

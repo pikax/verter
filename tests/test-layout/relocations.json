@@ -1833,7 +1833,7 @@
     ],
     "to": [
       "verter_compiler",
-      "compile::tests::general::r5_fix1_enum_non_static_ts_wrapped_member_still_rejected"
+      "compile::tests::general::enum_non_static_ts_wrapped_member_still_rejected"
     ]
   },
   {
@@ -1843,7 +1843,7 @@
     ],
     "to": [
       "verter_compiler",
-      "compile::tests::general::r5_fix1_enum_nonnull_and_assertion_wrapped_members_stay_valid"
+      "compile::tests::general::enum_nonnull_and_assertion_wrapped_members_stay_valid"
     ]
   },
   {
@@ -1853,21 +1853,21 @@
     ],
     "to": [
       "verter_compiler",
-      "compile::tests::general::r5_fix1_enum_ts_wrapped_literal_members_stay_valid"
+      "compile::tests::general::enum_ts_wrapped_literal_members_stay_valid"
     ]
   },
   {
     "from": ["verter_compiler", "compile::tests::r5_fix2_object_and_array_literals_stay_rejected"],
     "to": [
       "verter_compiler",
-      "compile::tests::general::r5_fix2_object_and_array_literals_stay_rejected"
+      "compile::tests::general::object_and_array_literals_stay_rejected"
     ]
   },
   {
     "from": ["verter_compiler", "compile::tests::r5_fix2_static_compositions_are_literal_const"],
     "to": [
       "verter_compiler",
-      "compile::tests::general::r5_fix2_static_compositions_are_literal_const"
+      "compile::tests::general::static_compositions_are_literal_const"
     ]
   },
   {
@@ -1877,7 +1877,7 @@
     ],
     "to": [
       "verter_compiler",
-      "compile::tests::general::r5_fix3_nested_validator_function_local_stays_valid"
+      "compile::tests::general::nested_validator_function_local_stays_valid"
     ]
   },
   {
@@ -1887,7 +1887,7 @@
     ],
     "to": [
       "verter_compiler",
-      "compile::tests::scripts::r5_fix3_one_char_setup_local_array_element_is_error"
+      "compile::tests::scripts::one_char_setup_local_array_element_is_error"
     ]
   },
   {
@@ -1897,7 +1897,7 @@
     ],
     "to": [
       "verter_compiler",
-      "compile::tests::scripts::r5_fix3_one_char_setup_local_nested_default_is_error"
+      "compile::tests::scripts::one_char_setup_local_nested_default_is_error"
     ]
   },
   {
@@ -1907,7 +1907,7 @@
     ],
     "to": [
       "verter_compiler",
-      "compile::tests::scripts::r5_fix3_setup_local_inside_nested_function_body_is_error"
+      "compile::tests::scripts::setup_local_inside_nested_function_body_is_error"
     ]
   },
   {

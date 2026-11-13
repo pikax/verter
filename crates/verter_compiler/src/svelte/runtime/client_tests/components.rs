@@ -1351,7 +1351,7 @@ fn props_rest_excluded_member_read_stays_local_with_context() {
 
 #[test]
 fn props_named_members_and_rest_share_one_declarator_plan() {
-    // FIX-5 unification anchor: a `$props()` destructure with a DEFAULT-bearing
+    // Unification anchor: a `$props()` destructure with a DEFAULT-bearing
     // named member (`a = 1` → prop source), a no-default named member (`b` →
     // `$$props.b`), AND a rest binding drives ALL THREE consumers off the ONE
     // `PropsDeclaratorPlan` — the read forms, the `$.rest_props` hoist (excludes
@@ -1530,10 +1530,10 @@ fn props_whole_object_computed_key_member_stays_local() {
 
 #[test]
 fn props_rest_parenthesized_member_read_delocalizes() {
-    // FIX-1: author parens around the IMMEDIATE member object are transparent —
+    // Author parens around the IMMEDIATE member object are transparent —
     // `(rest).x` / `((rest)).x` / `(all).a` de-localize to `$$props.KEY` exactly
-    // like the bare form. Oracle svelte@5.56.10: `$$props.x` / `$$props.a`. RED at
-    // c0c2ff2aa (the Identifier guard blocked the paren, leaving `(rest).x`).
+    // like the bare form. Oracle svelte@5.56.10: `$$props.x` / `$$props.a`. Guards
+    // against an Identifier guard that blocks the paren and leaves `(rest).x`.
     let rest = emit(
         "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += (rest).x + ((rest)).z}>x</button>\n",
         "App.svelte",
@@ -1559,7 +1559,7 @@ fn props_rest_parenthesized_member_read_delocalizes() {
 
 #[test]
 fn props_rest_parenthesized_member_does_not_rekey_nested_chain() {
-    // FIX-1 control: the paren-peel is OBJECT-ONLY — a nested chain `(rest).x.y`
+    // Paren-peel control: the paren-peel is OBJECT-ONLY — a nested chain `(rest).x.y`
     // stays keyed on its ROOT property `x` (the inner member de-localizes `x`),
     // never re-keyed to `y`. Oracle: `$$props.x.y`.
     let js = emit(
@@ -1579,10 +1579,10 @@ fn props_rest_parenthesized_member_does_not_rekey_nested_chain() {
 
 #[test]
 fn props_rest_member_write_target_stays_verbatim() {
-    // FIX-2: de-localization is READ-only. A DIRECT member-write target — plain
+    // De-localization is READ-only. A DIRECT member-write target — plain
     // `=`, prefix/postfix `++`/`--`, compound `+=`, logical `??=` — stays the
-    // verbatim `rest.KEY`. RED at c0c2ff2aa (which de-localized the write LHS to
-    // `$$props.x = 1`).
+    // verbatim `rest.KEY`. Guards against de-localizing the write LHS to
+    // `$$props.x = 1`.
     //
     // First-hand oracle re-probe (svelte@5.56.10): EVERY row is emitted FULLY
     // verbatim, including the compound/logical forms:
@@ -1620,7 +1620,7 @@ fn props_rest_member_write_target_stays_verbatim() {
 
 #[test]
 fn props_rest_paren_write_verbatim_but_paren_read_delocalizes() {
-    // FIX-1 + FIX-2 order-coupling: after the paren-peel exposes `(rest).x` to the
+    // Paren-peel and read-only de-localization order-coupling: after the paren-peel exposes `(rest).x` to the
     // disposition, a paren-wrapped WRITE target still stays verbatim while a
     // paren-wrapped READ de-localizes — the read/write split fires THROUGH the
     // paren. Oracle: write `(rest).x = 1` keeps the local; read `(rest).x` →
@@ -1641,7 +1641,7 @@ fn props_rest_paren_write_verbatim_but_paren_read_delocalizes() {
 
 #[test]
 fn props_rest_deep_lvalue_root_member_delocalizes() {
-    // FIX-2 deep lvalue: for `rest.x.y = 1` the DIRECT write target is `rest.x.y`
+    // Deep lvalue: for `rest.x.y = 1` the DIRECT write target is `rest.x.y`
     // (verbatim), but its ROOT member `rest.x` is a READ sub-expression that
     // de-localizes — so the whole lvalue lowers to `$$props.x.y = 1`. Oracle
     // svelte@5.56.10.
@@ -1661,7 +1661,7 @@ fn props_rest_deep_lvalue_root_member_delocalizes() {
 
 #[test]
 fn props_rest_plain_assign_bare_member_rhs_stays_verbatim() {
-    // FIX-6: the oracle's `rest`→`$$props` de-localization is a COARSE,
+    // The oracle's `rest`→`$$props` de-localization is a COARSE,
     // position-based guard (svelte@5.56.10 `Identifier.js`): the `rest` identifier
     // rewrites to `$$props` only when `grand_parent.type !== 'AssignmentExpression'
     // && grand_parent.type !== 'UpdateExpression'`. A single static `rest.KEY`
@@ -1670,8 +1670,8 @@ fn props_rest_plain_assign_bare_member_rhs_stays_verbatim() {
     // the member's grand-parent stays the AssignmentExpression and the guard fails.
     // Paren-transparent (official ESTree has no paren node) and LHS-agnostic (the
     // guard never inspects the target). First-hand oracle svelte@5.56.10:
-    // `sink = rest.y` → `$.set(sink, rest.y, true)`. RED at ba4af31bc (Verter's
-    // read/write split over-de-localized the bare-RHS READ to `$$props.y`).
+    // `sink = rest.y` → `$.set(sink, rest.y, true)`. Guards against Verter's
+    // read/write split over-de-localizing the bare-RHS READ to `$$props.y`.
 
     // (1) Bare `rest.KEY` as the entire RHS of a plain `=` → verbatim `rest.y`.
     let js = emit(
@@ -1756,14 +1756,14 @@ fn props_rest_plain_assign_bare_member_rhs_stays_verbatim() {
 // ── optional-chain rest/whole member reads PRESERVE the `?.` ──
 // De-localization replaces ONLY the object identifier (`rest`/`all` → `$$props`),
 // never the whole member span, so the optional axis, property spelling, and any
-// downstream chain stay verbatim from source. Each correctness test is RED at
-// ff1ca89a1 (whole-member replacement dropped the `?.`) and GREEN after the fix.
+// downstream chain stay verbatim from source. Each correctness test guards
+// against a whole-member replacement that drops the `?.`.
 
 #[test]
 fn props_rest_optional_member_read_preserves_optional_chain() {
     // Oracle svelte@5.56.10: `rest?.x` → `$$props?.x` (attr AND handler); the CONTROL
-    // `rest.x` → `$$props.x` (dotted). RED at ff1ca89a1: whole-member replacement
-    // emitted the `?.`-dropped `$$props.x` for the optional form.
+    // `rest.x` → `$$props.x` (dotted). A whole-member replacement
+    // would emit the `?.`-dropped `$$props.x` for the optional form.
     let opt = emit(
         "<script>let { a, ...rest } = $props();</script>\n<div title={rest?.x}></div>\n",
         "App.svelte",
@@ -1802,7 +1802,7 @@ fn props_rest_optional_member_read_preserves_optional_chain() {
 #[test]
 fn props_whole_object_optional_member_preserves_optional_chain() {
     // Whole-object capture `let all = $props()` behaves identically: `all?.x` →
-    // `$$props?.x`. Oracle svelte@5.56.10. RED at ff1ca89a1 (dropped to `$$props.x`).
+    // `$$props?.x`. Oracle svelte@5.56.10. Guards against dropping to `$$props.x`.
     let js = emit(
         "<script>let all = $props();</script>\n<div title={all?.x}></div>\n",
         "App.svelte",
@@ -1830,8 +1830,8 @@ fn props_whole_object_optional_member_preserves_optional_chain() {
 fn props_rest_optional_member_chain_preserves_every_optional_hop() {
     // A downstream chain stays verbatim from source: `rest?.x.y` → `$$props?.x.y`
     // (the inner `?.x` de-localizes the ROOT, `.y` verbatim); a CHAINED optional
-    // `rest?.x?.y` → `$$props?.x?.y` keeps BOTH `?.`. Oracle svelte@5.56.10. RED at
-    // ff1ca89a1 (dropped the first `?.`: `$$props.x.y` / `$$props.x?.y`).
+    // `rest?.x?.y` → `$$props?.x?.y` keeps BOTH `?.`. Oracle svelte@5.56.10. Guards
+    // against dropping the first `?.` (`$$props.x.y` / `$$props.x?.y`).
     let mixed = emit(
         "<script>let { a, ...rest } = $props();</script>\n<div title={rest?.x.y}></div>\n",
         "App.svelte",
@@ -1865,7 +1865,7 @@ fn props_rest_optional_receiver_call_preserves_optional_chain() {
     // §10a sibling — an optional-RECEIVER call `rest?.x()` in ATTR context (the
     // handler-statement form hits the pre-existing NonDelegatedEvent deferral, out of
     // scope) de-localizes the callee to `$$props?.x()`. Oracle svelte@5.56.10:
-    // `$$props?.x()`. RED at ff1ca89a1 (emitted `$$props.x()`).
+    // `$$props?.x()`. Guards against emitting `$$props.x()`.
     let js = emit(
         "<script>let { a, ...rest } = $props();</script>\n<div title={rest?.x()}></div>\n",
         "App.svelte",
@@ -1980,7 +1980,7 @@ fn props_rest_optional_write_target_fails_closed() {
 
 #[test]
 fn props_rest_compound_assign_nonsignal_target_stays_verbatim() {
-    // FIX-7 (class closure): the oracle's coarse Assignment-child guard keeps a bare
+    // Compound/logical assignment closure: the oracle's coarse Assignment-child guard keeps a bare
     // `rest.KEY` / `all.KEY` that is the WHOLE RHS of an assignment VERBATIM unless
     // svelte's own `AssignmentExpression` pre-rewrite re-parents the RHS under a
     // Binary/Logical. That pre-rewrite (`build_assignment_value`) fires ONLY for a
@@ -1988,11 +1988,11 @@ fn props_rest_compound_assign_nonsignal_target_stays_verbatim() {
     // `$.set(sig, $.get(sig) OP rhs)`); a plain-local identifier, ANY object-member
     // target (incl. `$state`), and a rest-member target are NOT pre-rewritten, so the
     // `rest.KEY` grand-parent stays the AssignmentExpression → the guard keeps it
-    // verbatim. FIX-6 already covered plain `=` (target-agnostic); FIX-7 extends the
+    // verbatim. The plain `=` case is already covered (target-agnostic); this extends the
     // verbatim record to a compound/logical `OP=` when `classify_target(left) ∈
-    // {PlainIdent, Member}`. RED at 82580a74a (Verter gated the verbatim record on
-    // `operator == Assign` ONLY, so it over-de-localized every compound/logical RHS to
-    // `$$props.KEY` regardless of target). First-hand oracle svelte@5.56.10 confirms
+    // {PlainIdent, Member}`. Guards against gating the verbatim record on
+    // `operator == Assign` ONLY, which over-de-localizes every compound/logical RHS to
+    // `$$props.KEY` regardless of target. First-hand oracle svelte@5.56.10 confirms
     // every positive below stays verbatim and every control below de-localizes.
 
     // (1) $state MEMBER target, compound `+=` — svelte does NOT re-wrap a member
@@ -2064,7 +2064,7 @@ fn props_rest_compound_assign_nonsignal_target_stays_verbatim() {
     // (7) CONTROL — a bare reassignable-SIGNAL identifier target ($state) MUST still
     // de-localize: svelte pre-rewrites `sink += rest.y` → `$.set(sink, $.get(sink) +
     // rhs)`, re-parenting the RHS under a Binary → the guard passes → `$$props.y`.
-    // Proves FIX-7 does NOT over-correct. Oracle: `$.set(sink, $.get(sink) + $$props.y)`.
+    // Proves the compound/logical verbatim rule does NOT over-correct. Oracle: `$.set(sink, $.get(sink) + $$props.y)`.
     let signal_compound = emit(
         "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += rest.y}>x</button>\n",
         "App.svelte",
@@ -2088,11 +2088,11 @@ fn props_rest_compound_assign_nonsignal_target_stays_verbatim() {
 
 #[test]
 fn props_rest_parenthesized_dollar_member_no_longer_fails_open() {
-    // FIX-1 closes the FAIL-OPEN: `(rest).$$slots` / `(all).$$slots` reached the
-    // verbatim leaf at c0c2ff2aa (emitted an undefined read, NO error). After the
+    // The paren-peel closes the FAIL-OPEN: `(rest).$$slots` / `(all).$$slots` would reach the
+    // verbatim leaf without it (emitting an undefined read, NO error). With the
     // paren-peel the `$$`-member reject fires THROUGH the paren, so the component
     // REJECTS. (The exact official code `props_illegal_name` is asserted by the
-    // FIX-3 negatives.)
+    // `$$`-member negatives.)
     assert!(
         emit_result(
             "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += (rest).$$slots}>x</button>\n"
@@ -2133,7 +2133,7 @@ fn props_rest_dollar_member_fails_closed() {
     // `$$`-prefixed member of the rest binding is an OFFICIAL compile error
     // (`props_illegal_name`), NOT a deferrable unsupported feature. Verter fails
     // closed carrying the exact official code through the official-reject quadrant.
-    // RED at c0c2ff2aa (which routed it as `Unsupported(MagicIdentifier)`).
+    // Guards against routing it as `Unsupported(MagicIdentifier)`.
     let err = emit_result(
         "<script>let { a, ...rest } = $props(); let sink = $state(0);</script>\n<button onclick={() => sink += rest.$$slots}>x</button>\n",
     )
@@ -2183,8 +2183,8 @@ fn props_whole_object_dollar_member_fails_closed() {
 
 #[test]
 fn props_rest_parenthesized_dollar_member_is_official_reject() {
-    // FIX-1 + FIX-3: the PAREN form `(rest).$$slots` / `(all).$$slots` — a FAIL-OPEN
-    // at c0c2ff2aa (emitted an undefined read, NO error) — now rejects THROUGH the
+    // The PAREN form `(rest).$$slots` / `(all).$$slots` — a FAIL-OPEN
+    // (emitting an undefined read, NO error) — rejects THROUGH the
     // paren-peel with the SAME official `props_illegal_name` code as the direct
     // form. Closes the fail-open with the correct quadrant + code.
     for src in [

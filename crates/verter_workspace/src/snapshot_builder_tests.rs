@@ -182,7 +182,7 @@ fn empty_exclude_fills_defaults() {
     );
 }
 
-// ── FIX 1: default-include + path reconciliation, end-to-end through the
+// ── Default-include + path reconciliation, end-to-end through the
 // production config parse chain, asserting BOTH membership paths AGREE ──
 
 /// Drive the FULL production chain for one tsconfig body: parse membership from
@@ -298,12 +298,12 @@ fn inherited_explicit_empty_include_owns_nothing_on_both_paths() {
 
 #[test]
 fn exclude_only_owns_default_include_minus_exclude_on_both_paths() {
-    // FIX 1: `{"exclude":["dist"]}` keeps the implicit default include MINUS the
+    // `{"exclude":["dist"]}` keeps the implicit default include MINUS the
     // excludes — it OWNS `src/Foo.vue`/`src/Foo.svelte` and REJECTS
     // `dist/Foo.vue`. Asserted on BOTH the `StaticMembershipSpec::matches` path
     // AND the live `IdeProjectConfig::matches_file` path, which MUST AGREE.
     //
-    // DISCRIMINATING: before FIX 1 the producer emitted an empty include for an
+    // DISCRIMINATING: the producer used to emit an empty include for an
     // exclude-only config ⇒ `StaticMembershipSpec::matches` owned NOTHING (the
     // red on path 1); the two paths also DIVERGED (the live path's
     // `!exclude.is_empty()` fallback owned everything-not-excluded).
@@ -334,12 +334,12 @@ fn exclude_only_owns_default_include_minus_exclude_on_both_paths() {
 
 #[test]
 fn explicit_empty_files_owns_nothing_on_both_paths() {
-    // FIX 1 distinction: an explicit `"files": []` solution-style config owns
+    // An explicit `"files": []` solution-style config owns
     // NOTHING but its references — distinct from "no files key" (which gets the
     // default include). BOTH paths must agree it owns nothing.
     //
-    // DISCRIMINATING on path 2: before FIX 4 the `!exclude.is_empty()` fallback
-    // made the live path own everything-not-excluded (the TS-default exclude is
+    // DISCRIMINATING on path 2: the `!exclude.is_empty()` fallback used to
+    // make the live path own everything-not-excluded (the TS-default exclude is
     // non-empty) — the red.
     let (spec, ide) = parse_both_paths("d:/ws", r#"{ "files": [], "references": [] }"#);
 
@@ -356,7 +356,7 @@ fn explicit_empty_files_owns_nothing_on_both_paths() {
 
 #[test]
 fn default_and_include_exclude_agree_on_both_paths() {
-    // FIX 1 cases (c) default (no keys) and (d) include+exclude: both paths agree.
+    // Cases (c) default (no keys) and (d) include+exclude: both paths agree.
     let (spec_default, ide_default) = parse_both_paths("d:/ws", r#"{ "compilerOptions": {} }"#);
     assert!(
         spec_default.matches(&CanonicalPath::new("d:/ws/src/Foo.vue")),

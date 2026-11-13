@@ -165,9 +165,9 @@ of the VS Code extension and TypeScript-plugin client wiring. At the CPF1
 cutover their generators read `T01` and `T03` rows instead of joining
 `descriptor.rs` with the extension table (`CAT-D04`), and their bytes do not
 change (`MB01`). The freshness tests keep failing on a hand edit (`MB02`).
-REG0 later splits each mirror into one generated file per family behind a
-byte-equal index (`MB03`, `REG0-AC1`). The per-framework client branches that
-remain are COX0's (`D10`); the per-family VS Code contributions are REG0's
+The framework registry later splits each mirror into one generated file per family behind a
+byte-equal index (`MB03`). The per-framework client branches that
+remain are COX0's (`D10`); the per-family VS Code contributions are the registry's
 (`C05`).
 
 ## Displaced routes recorded here
@@ -218,7 +218,7 @@ WASM, client) and the new rules' cases:
   with every semantic change and ignores presentation order.
 
 CPF1 executes the registration matrix and the duplicate-owner rejection
-(`CPF1-AC-R2`). COX0, XSDK1, REG0 and VID0T own the cases the matrix assigns
+(`CPF1-AC-R2`). COX0, XSDK1, the framework registry and VID0T own the cases the matrix assigns
 to them.
 
 ## Findings recorded for the receiving owners
@@ -231,10 +231,10 @@ to them.
 - **Table order is provider order today** (`CAT-F02`, CPF1).
   `composed_rows_keep_the_frontend_catalog_order` pins the static frontend
   order; `DM01` replaces it.
-- **REG0's grammar-key proposal conflicts with `CR02`** (`CAT-F03`, REG0).
-  REG0's charter adds a `CarrierGrammarConfig::Framework(FrameworkCarrierKey)`
+- **The framework registry's grammar-key proposal conflicts with `CR02`** (`CAT-F03`).
+  The registry's charter adds a `CarrierGrammarConfig::Framework(FrameworkCarrierKey)`
   arm with pre-allocated keys, while UAK0 `D01` has CPF1 replace the central
-  enum with owner-local configs. REG0 must place its grammar keys in family
+  enum with owner-local configs. The registry must place its grammar keys in family
   row modules over the CPF1 shape.
 - **Result caches hang off registration rows** (`CAT-F04`, TIF1).
   `FrameworkRegistration.surface_store` carries

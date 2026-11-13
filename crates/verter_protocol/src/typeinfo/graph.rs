@@ -346,7 +346,7 @@ pub use wire::UniqueSymbolKeyExpr;
 /// leave the field empty and keeps the one-entry-per-known-kind response.
 /// v9 stays accepted under that older contract.
 ///
-/// v11 types the `Component` selector's framework (TR06, VID0 `V-D02`):
+/// v11 types the `Component` selector's framework:
 /// `ComponentSelector.framework_adapter_id` (field 4, an open adapter
 /// string) is reserved and `ComponentSelector.framework_profile` (field 5,
 /// a `FrameworkProfileRef`: the 32-byte digest of one host-admitted
@@ -359,8 +359,8 @@ pub use wire::UniqueSymbolKeyExpr;
 /// typed selector built from the admitted identity. v10 stays accepted for
 /// every other operation.
 ///
-/// v12 addresses exported positions by host-issued [`NodeRef`]s (TR06,
-/// TIF-D02): `GraphNodeIdMapEntry.node_ref` (field 3, add-only) publishes
+/// v12 addresses exported positions by host-issued [`NodeRef`]s:
+/// `GraphNodeIdMapEntry.node_ref` (field 3, add-only) publishes
 /// the address of each exactly replayable exported node, independent of
 /// `include_provenance`. `ExpandGraphAroundRequest` reserves its parent
 /// graph handle and graph-local target (fields 1 and 2) and names its

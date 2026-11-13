@@ -318,7 +318,7 @@ fn ambiguous_configured_resolution_for_overlap() {
 
 #[test]
 fn incomparable_configured_roots_overlap_is_ambiguous() {
-    // FIX-6 (snapshot reachability): the genuine incomparable-overlap branch is
+    // Snapshot reachability: the genuine incomparable-overlap branch is
     // reachable ONLY in the snapshot path, because `ConfiguredMembership::contains`
     // matches `materialized_files` exact entries WITHOUT a root gate (unlike the
     // resolver path's `normalized_starts_with(file, root)`). Two configured

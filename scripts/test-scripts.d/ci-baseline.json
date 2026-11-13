@@ -1,5 +1,5 @@
 {
-  "owner": "CIF-BASELINE",
+  "owner": "ci-baseline",
   "tests": [
     {
       "runner": "node-test",

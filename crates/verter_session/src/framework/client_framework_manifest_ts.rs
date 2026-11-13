@@ -148,7 +148,7 @@ pub fn render_client_framework_manifest_ts() -> String {
         carrier_exts.into_iter(),
     );
     out.push_str(
-        "\n// Every participation capability facet key (COX0), in vocabulary order: the\n\
+        "\n// Every participation capability facet key, in vocabulary order: the\n\
          // only operation spellings a host may name in a participation input.\n",
     );
     render_multiline_str_array(
@@ -170,7 +170,7 @@ struct FrameworkRow {
     client_language_id: String,
     adapter_module_exts: Vec<String>,
     /// The lower-hex digest of the profile this host's registry mints from
-    /// the descriptor's manifest (COX0 participation cells name it).
+    /// the descriptor's manifest (participation cells name it).
     participation_profile_id: String,
     descriptor: FrameworkAdapterDescriptor,
 }

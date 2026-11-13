@@ -73,7 +73,7 @@ fn sorted<'a>(facts: impl IntoIterator<Item = &'a FactVersionRef>) -> Vec<String
 ///
 /// A resolution fact names the population of the workspace engine that
 /// decided it, and every engine mints its own `SessionFingerprint`
-/// (#1016). One host's facts therefore name exactly one session
+/// One host's facts therefore name exactly one session
 /// population; a second would mean a fact from another session leaked
 /// into this host's read set.
 fn session_population(facts: &[FactVersionRef]) -> Option<ResolutionPopulation> {
@@ -210,7 +210,7 @@ fn published_component_meta_signature_equals_finalized_tracer_read_set() {
         .collect();
 
     // The trace ran on its own host, whose engine minted its own
-    // session population (#1016), so its resolution facts name that
+    // session population, so its resolution facts name that
     // population where the published rail names the first host's.
     // Rebase exactly that one population — nothing else about any fact
     // — so the comparison below still requires every resolution fact's

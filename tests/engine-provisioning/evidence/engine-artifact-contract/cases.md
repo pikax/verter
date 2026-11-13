@@ -4,9 +4,9 @@ Selected case IDs: `EPR1-AC1`, `EPR1-AC2`, `EPR1-AC3`, `EPR1-AC4`, `EPR1-AC-IDEN
 
 Commands (run on the candidate; this file is not an execution transcript):
 
-- `node --test tests/engine-provisioning/EPR1/engine-contract.test.mjs`, in `pnpm run test:scripts:ci`
-- `node tests/engine-provisioning/EPR1/tools/validate-engine-validation-ownership.mjs --structural`
-- `node tests/engine-provisioning/EPR1/tools/validate-engine-validation-ownership.mjs --live`, wherever the plan controller is reachable; it fails rather than passes without one
+- `node --test tests/engine-provisioning/engine-artifact-contract/engine-contract.test.mjs`, in `pnpm run test:scripts:ci`
+- `node tests/engine-provisioning/engine-artifact-contract/tools/validate-engine-validation-ownership.mjs --structural`
+- `node tests/engine-provisioning/engine-artifact-contract/tools/validate-engine-validation-ownership.mjs --live`, wherever the plan controller is reachable; it fails rather than passes without one
 - `pnpm --filter docs check`, changed-file `pnpm exec oxfmt --check`, and `pnpm exec vitest run packages/vue-vscode/src/package.spec.ts`
 
 | Case                  | Contract proof in `engine-contract.test.mjs`                                                    | Runtime proof, not yet executed                                   |

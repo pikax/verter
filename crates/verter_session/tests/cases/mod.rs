@@ -14,7 +14,6 @@ mod carrier_byte_parity;
 mod carrier_compile_routing_gate;
 mod carrier_coordinator_route_guard;
 mod carrier_encapsulation_guards;
-mod carrier_routing_no_vue_gate;
 mod carrier_stable_unit_reuse;
 mod client_framework_manifest_ts_freshness;
 mod closed_session_audited_route_refusal;

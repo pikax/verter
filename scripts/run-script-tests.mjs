@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Script-test discovery runner (SCR0).
+// Script-test discovery runner.
 //
 // Replaces the two root `package.json` `&&` chains (`test:scripts` /
 // `test:scripts:ci`) with one runner over per-owner registration fragments in
@@ -44,7 +44,7 @@
 //   * `node-test` runs `node --test <file>`; `nodeFlags` prepend node flags
 //     (the sfc-projection specs run under `--experimental-strip-types`).
 //   * `vitest` runs `vitest run <file>`.
-//   * `node` runs `node <file>` (a sub-runner such as REG0's
+//   * `node` runs `node <file>` (a sub-runner such as the framework-lock suite's
 //     `scripts/run-framework-locks.mjs`).
 //   * `pnpm` runs `pnpm run <script>`, validated against the root
 //     package.json (the replaced chains invoked

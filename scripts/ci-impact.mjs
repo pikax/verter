@@ -323,10 +323,6 @@ export const PATH_FILTERS = Object.freeze({
     // The CLI contract tests run in js-build-test and read both JSON inputs.
     "tests/cli/**",
     "docs/arch/cli/*.json",
-    // The closure validator's self-tests run in this lane's script-test step.
-    "tools/validate-architecture-closure.mjs",
-    "tools/architecture-closure/**",
-    "schemas/architecture-closure.schema.json",
     "tests/formatter/**",
     "tests/kernel/LRA0/**",
     // The rule/action inventory's data test requires these row sources to exist.
@@ -342,7 +338,7 @@ export const PATH_FILTERS = Object.freeze({
     "crates/verter_lsp/src/server/aux_features.rs",
     "crates/verter_lsp/src/type_provider/merge/feature_merges.rs",
     "catalogs/formatter-*.toml",
-    "tests/engine-provisioning/EPR1/**",
+    "tests/engine-provisioning/engine-artifact-contract/**",
     "tests/engine-provisioning/EPR0/products/*.json",
     "docs/arch/engine-provisioning.md",
     "fixtures/formatter/**",

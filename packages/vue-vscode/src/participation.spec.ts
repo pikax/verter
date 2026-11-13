@@ -23,7 +23,7 @@ function observe(active: string[], preset = "auto"): ParticipationObservation {
 const vue = CLIENT_FRAMEWORKS.find((framework) => framework.frameworkId === "vue")!;
 const svelte = CLIENT_FRAMEWORKS.find((framework) => framework.frameworkId === "svelte")!;
 
-describe("participation input (COX0)", () => {
+describe("participation input", () => {
   it("ships only declarations that name served frameworks and known facets", () => {
     for (const declaration of COMPETING_TOOLS) {
       expect(declarationProblem(declaration), declaration.key).toBeUndefined();
@@ -85,7 +85,7 @@ describe("participation input (COX0)", () => {
   });
 });
 
-describe("participation cells (COX0)", () => {
+describe("participation cells", () => {
   const receipt: ParticipationReceipt = {
     mask: "0".repeat(64),
     fence: 3,

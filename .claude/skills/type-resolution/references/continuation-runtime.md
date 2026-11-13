@@ -74,7 +74,7 @@ Architectural target for the project-global cache cutover:
   reads never satisfy it; an `Instantiate` key driven outside any drive
   runs on the continuation runtime and never reaches the synchronous
   claim, so arming one stays refused. Inventory:
-  `crates/verter_type_engine/observe-inventory/SKR-FLIGHT-RENDEZVOUS.md`.
+  `crates/verter_type_engine/observe-inventory/flight-rendezvous.md`.
 
 Concrete expectation:
 

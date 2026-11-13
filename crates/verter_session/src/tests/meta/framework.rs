@@ -2275,7 +2275,7 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
     assert_eq!(err.inner_index, Some(0));
 }
 
-/// FIX-3 regression: a failed INTERIOR required locator inside a
+/// Regression: a failed INTERIOR required locator inside a
 /// successfully-composed root FAILS the output with the typed
 /// `InteriorSourceMiss` (carrying the nested position path) — never an
 /// `Ok` whose lane silently renders the interior miss as `Unknown`.
@@ -2427,7 +2427,7 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
     }
 }
 
-/// FIX-3 non-conflation control: a genuinely ABSENT schema position (an
+/// Non-conflation control: a genuinely ABSENT schema position (an
 /// unannotated parameter, a deliberately slot-less signature return — `None`
 /// by SCHEMA) is NOT
 /// a failed dereference: the output SUCCEEDS and the position renders as

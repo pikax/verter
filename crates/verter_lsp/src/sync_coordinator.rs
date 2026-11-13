@@ -1370,7 +1370,7 @@ async fn coordinator_loop(
                     }
                     let mut publish_diagnostics = signal.force_diagnostics;
                     // A document whose participation scope has no Full facet
-                    // (COX0) owes this tick no provider sync and no recompile:
+                    // owes this tick no provider sync and no recompile:
                     // its publication carries only admitted facets, which is
                     // none, so it clears. Its owed sync bit stays for the
                     // transition that re-admits it.
@@ -2870,7 +2870,7 @@ pub(crate) async fn provider_diagnostics_batch(
     canonical_id: &str,
     native: Vec<Diagnostic>,
 ) -> ProviderDiagnosticBatch {
-    // A withdrawn TypeScript publication cell queries no provider (COX0).
+    // A withdrawn TypeScript publication cell queries no provider.
     if !crate::participation::DiagnosticFacets::admitted(documents, canonical_id).typescript {
         return ProviderDiagnosticBatch::complete(native);
     }

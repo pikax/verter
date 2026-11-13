@@ -546,7 +546,7 @@ pub fn trace_event_flow(server: &VerterMcpServer, params: &TraceEventFlowParams)
 
 /// One query over classified component-API facts (lifecycle hooks,
 /// `provide`/`inject`, `defineComponent`, stores), admitted in this
-/// invocation's own participation scope (COX0; UAK0 `D11`) before any index
+/// invocation's own participation scope before any index
 /// or owner read, never through a framework identity.
 struct ComponentApiQuery {
     operation: CapabilityOperation,

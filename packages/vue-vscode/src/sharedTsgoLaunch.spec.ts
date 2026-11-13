@@ -142,7 +142,7 @@ describe("discoverNativePreviewTsgo", () => {
     expect(discoverNativePreviewTsgo({ env: {}, exists: () => false })).toBeUndefined();
   });
 
-  // ── DISCRIMINATING (W5/FIX-1): discovery must try EVERY tsdk source, not stop
+  // ── DISCRIMINATING: discovery must try EVERY tsdk source, not stop
   //    at the first one. The observed real session: a workspace `typescript.tsdk`
   //    pointing at `node_modules/typescript/lib` (a TS 5.x dir with NO native
   //    engine) MASKED the installed Native Preview bundle, and tier 1 reported
@@ -166,7 +166,7 @@ describe("discoverNativePreviewTsgo", () => {
     ).toEqual({ path: bin, source: "native-preview bundle" });
   });
 
-  // ── DISCRIMINATING (W5/FIX-2): a tsdk dir holding the LEGACY `tsgo[.exe]`
+  // ── DISCRIMINATING: a tsdk dir holding the LEGACY `tsgo[.exe]`
   //    engine name still resolves — discovery looked for `tsc.exe` ONLY, so a
   //    directory containing `tsgo.exe` was invisible. ─────────────────────────────
   it("accepts the legacy tsgo engine name inside a tsdk dir", () => {
@@ -183,7 +183,7 @@ describe("discoverNativePreviewTsgo", () => {
     ).toEqual({ path: bin, source: "typescript.native-preview.tsdk" });
   });
 
-  // ── DISCRIMINATING (W5/FIX-2): a tsdk setting left pointing at a Verter-STAGED
+  // ── DISCRIMINATING: a tsdk setting left pointing at a Verter-STAGED
   //    control dir must NEVER be adopted as the "real" engine — the bytes there
   //    are the relay shim, so relaying to them is a shim→shim loop. Discovery
   //    skips it and keeps going. RED before the fix: the staged `tsgo.exe` is
@@ -208,7 +208,7 @@ describe("discoverNativePreviewTsgo", () => {
   });
 });
 
-describe("nativePreviewTsdkCandidates (W5/FIX-1: every source, never collapsed)", () => {
+describe("nativePreviewTsdkCandidates (every source, never collapsed)", () => {
   // ── DISCRIMINATING: all four configured sources survive as SEPARATE ordered
   //    candidates. The extension used `a || b || c || bundle`, which discarded
   //    every source after the first non-empty one. ────────────────────────────────
@@ -237,7 +237,7 @@ describe("nativePreviewTsdkCandidates (W5/FIX-1: every source, never collapsed)"
   });
 });
 
-describe("orphanedControlDirs (W5/FIX-2: staging must not leak)", () => {
+describe("orphanedControlDirs (staging must not leak)", () => {
   const now = 1_000_000_000_000;
   const hour = 3_600_000;
 
@@ -324,7 +324,7 @@ describe("buildShimSpawnArgs", () => {
 });
 
 describe("prepareEditorTsdk", () => {
-  // ── DISCRIMINATING (W5/FIX-2): Native Preview does NOT spawn `<tsdk>/tsgo`.
+  // ── DISCRIMINATING: Native Preview does NOT spawn `<tsdk>/tsgo`.
   //    Its tsdk validator reads `<tsdk>/package.json`, requires `name` + a
   //    `bin` entry, and then stats
   //    `<node_modules>/@typescript/<name>-<platform>-<arch>/lib/<bin>[.exe]`.
@@ -495,7 +495,7 @@ describe("planSharedTsgo (fail-closed)", () => {
     expect(plan.reason).toMatch(/tsgo|tsdk/i);
   });
 
-  // ── DISCRIMINATING (W5/FIX-1): the EXACT observed real session — the Native
+  // ── DISCRIMINATING: the EXACT observed real session — the Native
   //    Preview extension IS installed and its bundled engine EXISTS, but a
   //    workspace `typescript.tsdk` points at `node_modules/typescript/lib`
   //    (TS 5.x, no native engine). Collapsing the settings to the first

@@ -1,4 +1,4 @@
-//! Profile-qualified capability identity (`I10`, `docs/arch/kernel/identities.md`).
+//! Profile-qualified capability identity (`docs/arch/kernel/identities.md`).
 
 use std::fmt;
 
@@ -44,7 +44,7 @@ impl ProfileRef {
 
 macro_rules! capability_operations {
     ($( $(#[$doc:meta])* $variant:ident => $key:literal, optional = $optional:literal; )*) => {
-        /// One separately withdrawable operation facet of the COX0D inventory.
+        /// One separately withdrawable operation facet of the capability inventory.
         ///
         /// Several facets can share one transport method (diagnostic producers,
         /// code-action kinds); an adapter maps its methods onto facets. The
@@ -142,7 +142,7 @@ capability_operations! {
     CompiledCodeInspection => "inspection.compiledCode", optional = false;
     VirtualFileInspection => "inspection.virtualFiles", optional = false;
     SourceMapInspection => "inspection.sourceMap", optional = false;
-    /// Atomic workspace contributions and bounded index reads (IDX0).
+    /// Atomic workspace contributions and bounded index reads.
     WorkspaceContribution => "workspace.contribution", optional = false;
     ProjectCheck => "check.project", optional = false;
     Compile => "compile", optional = false;
@@ -154,12 +154,12 @@ impl fmt::Display for CapabilityOperation {
     }
 }
 
-/// A capability qualified by its profile (`I10`): one operation facet of one
+/// A capability qualified by its profile: one operation facet of one
 /// catalog profile.
 ///
 /// Minted only from its two inputs, so a new release (a new
 /// [`FrameworkProfileId`]) yields a new capability identity while the carrier
-/// capability stays equal (`R02`). The project-capability bit that gates a
+/// capability stays equal. The project-capability bit that gates a
 /// registry candidate is the separate [`crate::ProjectCapabilityId`].
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CapabilityId {

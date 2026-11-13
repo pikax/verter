@@ -752,4 +752,4 @@ frozen arena reservation once, including spare capacity, rather than counting
 bump-backed children again. These data-only measurements do not choose admission
 or change the standalone prepared compiler's production boundary. The owning
 accounting conventions are in
-`crates/verter_type_engine/observe-inventory/SKR-OWN-ACCOUNT-ARTIFACTS.md`.
+`crates/verter_type_engine/observe-inventory/parse-artifact-storage-accounting.md`.

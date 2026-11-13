@@ -25,8 +25,8 @@ The reviewed data lives in `tests/framework-astro/AST0/`:
 | `corpus/` | The Astro grammar corpus: valid files and recovery files |
 
 The executable validator is not here. AST1G adds `contract.ts` and
-`astro-lock.spec.ts` (`AST1G-ACV`), and REG0's `scripts/run-framework-locks.mjs`
-discovers the spec. Until then FWA1, REG0 and FCH1 read the products as data.
+`astro-lock.spec.ts` (`AST1G-ACV`), and the registry's `scripts/run-framework-locks.mjs`
+discovers the spec. Until then FWA1, the framework registry and FCH1 read the products as data.
 
 ## Baseline at the described head
 
@@ -96,7 +96,7 @@ is comparison data only. No build or dev output is consumed.
 ## Activation
 
 FWA1's `FrameworkActivation` record is the only activation source. Its Astro
-row lives in REG0's `crates/verter_session/src/framework/families/astro.rs`:
+row lives in the framework registry's `crates/verter_session/src/framework/families/astro.rs`:
 
 - dependency name `astro`, no aliases, no per-file pragma, no non-npm route;
 - admitted release `astro-7.3.8`, read from the version lock;
@@ -231,7 +231,7 @@ registers with every kind `UNSUPPORTED` (`AST1-AC5`).
 ## Wire tag
 
 `FRAMEWORK_TAG_ASTRO = 10`, from the class-B allocation 10–14 (class A holds
-6–9). REG0 pre-allocates it with disposition `DeferredVertical`; AST1 flips it
+6–9). The framework registry pre-allocates it with disposition `DeferredVertical`; AST1 flips it
 to `Registered` in the family module (`AST1-AC5`). `OPEN_CANONICAL` (5) is a
 structural non-tag — `tag_disposition` returns `None` for it — and is
 rejected, as are a reused value and any value in 6–9.

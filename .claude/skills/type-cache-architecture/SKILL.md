@@ -454,7 +454,7 @@ values through `insert`, which replaces the payload and its pin together.
 Copy-only counters retain mutable entry access.
 No capture feature gates these charges, and no admission limit refuses them.
 The full allocation conventions and field owners are recorded in
-`crates/verter_type_engine/observe-inventory/SKR-OWN-ACCOUNT-ARTIFACTS.md`.
+`crates/verter_type_engine/observe-inventory/parse-artifact-storage-accounting.md`.
 
 **Refusal routing.** `RetentionRefusal::{Oversized, Pressure}` both map
 to `NonAdmissionReason::RetentionPressure`,

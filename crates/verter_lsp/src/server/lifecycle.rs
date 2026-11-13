@@ -90,7 +90,7 @@ pub(super) async fn handle_initialize(
         std::sync::atomic::Ordering::Release,
     );
     server.subscriptions.install(demand.subscriptions);
-    // The host's initial participation input (COX0). An invalid one refuses
+    // The host's initial participation input. An invalid one refuses
     // initialization rather than silently serving `auto`.
     if let Some(input) = params
         .initialization_options
@@ -282,14 +282,14 @@ pub(super) async fn handle_initialize(
         server.documents.host().language_classifier(),
     );
     // A method the client registers dynamically is registered after
-    // `initialized` from the participation mask instead (COX0).
+    // `initialized` from the participation mask instead.
     let _ = server.dynamic_registrations.set(
         crate::capabilities::registration::DynamicRegistrations::negotiate(
             &params.capabilities,
             &mut capabilities,
         ),
     );
-    // The participation receipt of the initial input (COX0): the effective
+    // The participation receipt of the initial input: the effective
     // cells a host gates its own client-local producers on.
     if let Some(serde_json::Value::Object(experimental)) = capabilities.experimental.as_mut() {
         experimental.insert(
@@ -576,7 +576,7 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
     }]);
 
     // E. Register every dynamically registrable method the participation
-    // mask admits (COX0), without waiting for the watcher reply: these
+    // mask admits, without waiting for the watcher reply: these
     // methods have no static advertisement to fall back on meanwhile.
     let _ = tokio::join!(watcher_registration, server.reconcile_registrations());
 }
@@ -633,7 +633,7 @@ pub(super) async fn handle_did_open(
         return;
     }
     // A document whose participation scope has no Full facet owes no eager
-    // work (COX0, DEM0 `DEM-D06`): the open above retained its bytes for a
+    // work: the open above retained its bytes for a
     // later admitted demand, and nothing else is scheduled for it.
     if crate::participation::document_owes_no_eager_work(&server.documents, uri) {
         tracing::info!(
@@ -922,8 +922,8 @@ pub(super) async fn handle_did_change(
         tracing::info!("did_change EXIT (virtual) v{version}");
         return;
     }
-    // A participation scope with no Full facet owes the edit no eager work
-    // (COX0, DEM0 `DEM-D06`): the commit above retained its bytes.
+    // A participation scope with no Full facet owes the edit no eager work:
+    // the commit above retained its bytes.
     if crate::participation::document_owes_no_eager_work(&server.documents, &uri) {
         tracing::info!("did_change EXIT (participation owes no eager work) v{version}");
         return;

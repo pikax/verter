@@ -135,7 +135,7 @@ and receiving acceptance, is the capability matrix product.
 
 `FRAMEWORK_TAG_EMBER_GLIMMER = 13`, from the framework wire-tag allocation
 table. It lands with the adapter descriptor in GLM1 (`GLM1-AC6`) and is
-pre-allocated by REG0. It does not collide with the live tags (1–4), the
+pre-allocated by the framework registry. It does not collide with the live tags (1–4), the
 class-A range (6–9) or another family's planned value. `OPEN_CANONICAL` (5) is
 a structural non-tag: `tag_disposition` returns `None` for it, and it never
 identifies an adapter.

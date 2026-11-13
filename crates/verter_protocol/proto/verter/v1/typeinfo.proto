@@ -1001,7 +1001,7 @@ message FrameworkSurfaceRequest {
   repeated FrameworkSurfaceKind requested_kinds = 9;
 }
 
-// ComponentSelector — the typed `Component` selector (TR06): a file, an
+// ComponentSelector — the typed `Component` selector: a file, an
 // export name and the typed framework profile the component is read under.
 //
 // Schema 11 retired the open adapter-id string (field 4, reserved) in

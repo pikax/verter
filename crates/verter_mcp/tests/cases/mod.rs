@@ -3,7 +3,6 @@
 //! entry is its own module so per-entry helpers stay in disjoint scopes —
 //! do NOT centralise shared helpers here, and keep this list sorted.
 
-mod carrier_routing_no_vue_gate;
 mod http_readiness;
 mod index_backed_tool_discovery;
 // Reads optional audit capture: runs in the instrumentation lane.

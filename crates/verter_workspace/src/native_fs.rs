@@ -582,7 +582,7 @@ mod tests {
 
     #[test]
     fn normalize_path_str_delegates_to_canonical_owner() {
-        // FIX 3 regression: the owner strips `//?/UNC/` BEFORE `//?/`, so a
+        // Regression: the owner strips `//?/UNC/` BEFORE `//?/`, so a
         // Windows UNC file canonicalizes to `//server/share/...`, NOT
         // `UNC/server/share/...` (the old generic `//?/` strip).
         assert_eq!(

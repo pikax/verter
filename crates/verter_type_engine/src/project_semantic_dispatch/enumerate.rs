@@ -1325,7 +1325,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Chain X closure (Q1-X) —
+    /// The
     /// **non-emitting** key-domain membership predicate for path
     /// admission.
     ///
@@ -1699,7 +1699,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Chain X closure (Q1-X) — non-emitting member-presence admission backed
+    /// Non-emitting member-presence admission backed
     /// by the parse-fact `FactKey::MemberPresence` substrate.
     ///
     /// Looks up the file artifact for `(canonical, observed_hash)` and

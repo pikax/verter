@@ -528,7 +528,7 @@ fn carrier_with_no_conflict_resolves_cleanly() {
 
 #[test]
 fn real_file_at_jsx_carrier_path_downgrades_to_ambiguous() {
-    // FIX 2: the carrier-companion path must be DERIVED from the
+    // The carrier-companion path must be DERIVED from the
     // `VirtualFileNaming` descriptor, not hardcoded to `.tsx`. Vue's `ide`
     // policy is `JsxConditional { jsx: ".jsx", non_jsx: ".tsx" }`, so a real
     // user file at the JSX carrier path `Foo.vue.jsx` (the companion for a
@@ -567,7 +567,7 @@ fn real_file_at_jsx_carrier_path_downgrades_to_ambiguous() {
 
 #[test]
 fn tsx_carrier_path_still_detected_after_descriptor_derivation() {
-    // FIX 2 regression guard: deriving from the descriptor must KEEP the `.tsx`
+    // Regression guard: deriving from the descriptor must KEEP the `.tsx`
     // (non-JSX) carrier path detected for Vue, and the `.tsx` Svelte carrier.
     for ext in ["vue", "svelte"] {
         let source = format!("d:/ws/src/Foo.{ext}");
@@ -599,7 +599,7 @@ fn tsx_carrier_path_still_detected_after_descriptor_derivation() {
 
 #[test]
 fn non_canonical_source_uri_still_detects_carrier_conflict() {
-    // FIX 5: the conflict pass must normalize `source_uri` at its entry, like the
+    // The conflict pass must normalize `source_uri` at its entry, like the
     // rest of `verter_workspace::resolver`. A non-canonical caller URI (uppercase
     // drive / backslashes) must NOT be able to bypass the disk-occupancy probe on
     // a case-insensitive FS. The real carrier file is stored at the CANONICAL

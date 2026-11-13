@@ -1,6 +1,5 @@
 //! Per-profile participation: whether Verter serves one capability cell for
-//! one profile, document selector and demand purpose (COX0; contract
-//! `docs/arch/kernel/cox0d-participation.md`).
+//! one profile, document selector and demand purpose.
 //!
 //! This module is pure data: the preset and mode vocabulary, the
 //! profile-qualified [`CapabilityId`], and the immutable

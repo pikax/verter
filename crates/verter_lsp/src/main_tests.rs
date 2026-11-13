@@ -547,7 +547,7 @@ fn managed_fallback_start_announcements_follow_the_rendezvous_attestation() {
     );
 }
 
-// ── W5/FIX-4 + FIX-3: the managed fallback is CAPABILITY-driven, and it
+// ── The managed fallback is CAPABILITY-driven, and it
 //    never claims a provider it cannot obtain. `choose_managed_engine` is
 //    the pure decision the IO probe feeds; every arm below is a state a
 //    real workspace reaches. ──────────────────────────────────────────────
@@ -608,7 +608,7 @@ fn managed_fallback_admits_tsserver_when_no_tsgo_exists() {
     }
 }
 
-// ── DISCRIMINATING (FIX-3): nothing obtainable ⇒ None WITH a reason, never
+// ── DISCRIMINATING: nothing obtainable ⇒ None WITH a reason, never
 //    a provider that would later report "connected" with no engine. ────────
 #[test]
 fn managed_fallback_reports_none_with_a_reason_when_no_engine_exists() {
@@ -624,7 +624,7 @@ fn managed_fallback_reports_none_with_a_reason_when_no_engine_exists() {
     }
 }
 
-// ── DISCRIMINATING (FIX-3): tsserver present but Node absent is still no
+// ── DISCRIMINATING: tsserver present but Node absent is still no
 //    engine — the reason names Node, not a bare "not found". ───────────────
 #[test]
 fn managed_fallback_reports_none_when_tsserver_has_no_node() {
@@ -641,7 +641,7 @@ fn managed_fallback_reports_none_when_tsserver_has_no_node() {
     }
 }
 
-// ── DISCRIMINATING (FIX-3, Corpus C shape): a workspace with ZERO
+// ── DISCRIMINATING: a workspace with ZERO
 //    tsconfigs obtains NO managed engine — both engines are project-bound —
 //    and the reason says so instead of claiming a connected provider. ──────
 #[test]
@@ -678,7 +678,7 @@ fn no_engine_reason_carries_the_resolver_tier_notes() {
     }
 }
 
-// ── DISCRIMINATING (W5/FIX-4): candidate ENUMERATION is existence-only, so a
+// ── DISCRIMINATING: candidate ENUMERATION is existence-only, so a
 //    TypeScript 5.x workspace contributes its `node_modules/.bin/tsc.cmd`
 //    shim. Counting that as an available tsgo sends the session down the tsgo
 //    route, where it dies at the version gate — the exact "no engine at all"

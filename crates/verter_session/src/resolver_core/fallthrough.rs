@@ -3388,7 +3388,7 @@ mod tests {
         );
     }
 
-    // ── FIX-2: absorbing cross-branch source merge (Unset ≠ Conflict) ──
+    // ── absorbing cross-branch source merge (Unset ≠ Conflict) ──
 
     fn resolved_branch(
         key: &str,
@@ -3473,7 +3473,7 @@ mod tests {
         }))
     }
 
-    /// FIX-2 regression (props): with THREE branches whose sources disagree
+    /// Regression (props): with THREE branches whose sources disagree
     /// (A: `string` → B: `number` → C: `boolean`), the flat accepted column
     /// publishes the honest `None` — NEVER a later branch's type. The former
     /// `Option` accumulator conflated "conflict" (`None` after A/B disagree)
@@ -3524,7 +3524,7 @@ mod tests {
         );
     }
 
-    /// FIX-2 regression (events): the identical absorbing-conflict rule
+    /// Regression (events): the identical absorbing-conflict rule
     /// applies to the accepted-event payload column.
     #[test]
     fn three_branch_event_disagreement_finalizes_flat_payload_to_honest_unknown() {
@@ -3574,7 +3574,7 @@ mod tests {
         );
     }
 
-    /// FIX-2 regression (scope-aware identity): two children publishing the
+    /// Regression (scope-aware identity): two children publishing the
     /// SAME closed-`Ref` SPELLING from DIFFERENT declaration origins are NOT
     /// in agreement — the spelling names two different declarations, so the
     /// flat column publishes the honest `None` instead of collapsing onto
@@ -3619,12 +3619,12 @@ mod tests {
         );
     }
 
-    /// FIX-2 control: genuine agreement still keeps the flat source — the
+    /// Control: genuine agreement still keeps the flat source — the
     /// same child contributing the same scope-relative spelling in every
     /// branch, AND two different children contributing the same fully
     /// ANCHORED source (the anchor pins one declaration regardless of
     /// publisher).
-    /// FIX-3 regression (scope threading, merge half): the agreed
+    /// Regression (scope threading, merge half): the agreed
     /// PRODUCING scope survives `MergedSourceState::finalize` onto the flat
     /// merged row (`type_source_scope` / `payload_scope`), so the output
     /// boundary can raise the whole inherited source — nested
@@ -3689,7 +3689,7 @@ mod tests {
         );
     }
 
-    /// FIX-3 regression (scope threading, clone half): the owner-clone
+    /// Regression (scope threading, clone half): the owner-clone
     /// boundary threads the TERMINAL origin scope across hops — a child
     /// accepted row that was ITSELF inherited (its `type_source_scope`
     /// already names the grandchild) keeps the grandchild as the producing

@@ -6865,7 +6865,7 @@ fn invalidate_canonical_prunes_emptied_cross_canonical_shard() {
 /// A producer that returns a `Value` carrying `result_is_partial = true`
 /// must NOT be admitted to the family memo. Pre-FIX the admission gate
 /// keyed ONLY on `cache_suppress`; a build that surfaced a partial value
-/// without also setting `cache_suppress` (the exact pre-FIX-1 producer bug)
+/// without also setting `cache_suppress` (the exact producer bug the finalise enforcement now prevents)
 /// was published as a complete `MemoEntry`, then reconstructed as a
 /// COMPLETE `CacheRead` (`result_is_partial = false`) on a later warm read
 /// and republished as a complete component-meta result.
@@ -6877,7 +6877,7 @@ fn invalidate_canonical_prunes_emptied_cross_canonical_shard() {
 /// `result_is_partial ⟹ cache_suppress` invariant catches the laundering
 /// attempt and aborts rather than poisoning the shared memo.
 ///
-/// DISCRIMINATION: reverting the FIX-2 admission `debug_assert!` + OR gate
+/// DISCRIMINATION: reverting the admission `debug_assert!` + OR gate
 /// makes this build publish a warm `MemoEntry` (no panic), so the
 /// `#[should_panic]` expectation fails.
 ///
@@ -6906,8 +6906,8 @@ fn memo_admission_debug_asserts_against_partial_without_suppress() {
             let id = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
             let mut out: QueryBuildOutput = (QueryResult::Value(id), empty_signature()).into();
             // The laundering shape: a COMPLETE Value that surfaced a
-            // partial WITHOUT setting cache_suppress (the pre-FIX-1
-            // producer bug). The FIX-2 admission invariant must catch this.
+            // partial WITHOUT setting cache_suppress (the producer
+            // bug). The admission invariant must catch this.
             out.mark_partial();
             out.cache_suppress = false;
             out
@@ -6919,15 +6919,15 @@ fn memo_admission_debug_asserts_against_partial_without_suppress() {
 ///
 /// A genuine partial (invariant-holding: `result_is_partial = true` AND
 /// `cache_suppress = true`, exactly what `finalise_traced_build_output`
-/// produces after FIX-1) must leave NO `MemoEntry`. A fresh request on the
+/// produces) must leave NO `MemoEntry`. A fresh request on the
 /// SAME store for the SAME key must COLD-REBUILD — never warm-hit the
 /// (refused) partial as complete.
 ///
-/// DISCRIMINATION: reverting the FIX-2 admission gate (back to keying only
+/// DISCRIMINATION: reverting the admission gate (back to keying only
 /// on `cache_suppress`) keeps THIS case refused (cache_suppress=true), so
 /// the discriminating force here is the no-launder behavior of the whole
 /// partial class — paired with the `#[should_panic]` test above which
-/// isolates the OR/assert. Reverting FIX-1's finalise enforcement would let
+/// isolates the OR/assert. Reverting the finalise enforcement would let
 /// a partial reach admission with `cache_suppress=false` and warm — caught
 /// by the should_panic peer.
 #[test]

@@ -456,6 +456,73 @@ fn named_mapped_index_completes_with_and_without_audit_capture() {
     }
 }
 
+/// Reading one literal key of a mapped type evaluates the mapping for that
+/// key alone: the conditional and substitution work of
+/// `{ [K in keyof Big]: … }['k7']` is the same over a 32-key and a 96-key
+/// source. Reading every key (`[keyof Big]`) on the same hosts is the
+/// control: its work grows with the width, so the counters do see a
+/// whole-surface build when one happens.
+#[test]
+fn a_literal_key_of_a_mapped_type_evaluates_only_that_key() {
+    use std::sync::Arc;
+    use verter_type_expr::{LiteralValue, TypeExpr};
+    let read = |width: usize, index: &str| {
+        let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
+            crate::HostConfig::default(),
+            &[("/mapped", r#"{ "compilerOptions": { "strict": true } }"#)],
+        );
+        let source = mapped_tags_source(width)
+            + "type __Probe = { [K in keyof Big]: Big[K] extends number ? 'n' : Big[K] extends string ? 's' : 'b' }"
+            + &format!("[{index}]; export {{}};");
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some("/mapped/scenario.ts".into()),
+                input_id: "/mapped/scenario.ts".into(),
+                source: Arc::from(source),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: vec![],
+            })
+            .expect("fixture admitted");
+        let (outcome, _) = host
+            .resolve_named_symbol_with_audit("/mapped/scenario.ts", "__Probe", None)
+            .into_parts();
+        let node = outcome
+            .expect("named demand must complete")
+            .expect("probe exists");
+        let bytes = host
+            .project_node_to_type_expr_json_bytes(&node)
+            .expect("a settled host")
+            .expect("the answer projects");
+        let answer: TypeExpr = serde_json::from_slice(&bytes).expect("valid answer");
+        let stats = host.project_type_store().semantic_graph().stats_snapshot();
+        (
+            answer,
+            (
+                stats.conditional_decided_count,
+                stats.substitute_memo_misses,
+            ),
+        )
+    };
+
+    let (narrow_answer, narrow_work) = read(32, "'k7'");
+    let (wide_answer, wide_work) = read(96, "'k7'");
+    let selected = TypeExpr::Literal(LiteralValue::String("s".into()));
+    assert_eq!(narrow_answer, selected, "`k7` holds a string literal");
+    assert_eq!(wide_answer, selected, "`k7` holds a string literal");
+    assert_eq!(
+        narrow_work, wide_work,
+        "(conditionals decided, substitutions) of one key must not depend on the source width"
+    );
+
+    let (_, every_key_narrow) = read(32, "keyof Big");
+    let (_, every_key_wide) = read(96, "keyof Big");
+    assert!(
+        every_key_wide.0 > every_key_narrow.0,
+        "reading every key decides more conditionals over more keys \
+         ({every_key_narrow:?} at 32 keys, {every_key_wide:?} at 96)"
+    );
+}
+
 #[test]
 fn selected_mapped_class_members_keep_the_source_receiver() {
     assert_navigate_mapped_value(

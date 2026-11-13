@@ -1185,7 +1185,7 @@ fn arm_cold_body_pre_resolve_hook(hook: impl FnOnce() + 'static) {
     });
 }
 
-/// The FIX-1 torn-result fixture: `/dep.ts` publishes the whole props
+/// The torn-result fixture: `/dep.ts` publishes the whole props
 /// payload; a SIBLING owner pre-materializes the dep's artifacts under the
 /// ORIGINAL content so the pinned cold compute can read the captured view's
 /// candidates; the owner under test stays COLD.
@@ -1225,7 +1225,7 @@ fn mutate_pinned_view_dep(project: &Arc<MetaProject>) {
 }
 
 /// A `TypeBodySlot` locator anchored at a declaration that does not exist —
-/// the failed REQUIRED interior dereference every FIX-3 composite fixture
+/// the failed REQUIRED interior dereference every composite fixture
 /// embeds.
 fn missing_interior_slot() -> verter_type_expr::locators::TypeBodySlot {
     verter_type_expr::locators::TypeBodySlot {

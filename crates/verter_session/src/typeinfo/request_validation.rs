@@ -133,7 +133,7 @@ pub const SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS: &[u32] = &[
 ];
 
 /// Minimum schema version the framework-surface operation accepts: 11,
-/// the typed `ComponentSelector.framework_profile` (TR06). The operation's
+/// the typed `ComponentSelector.framework_profile`. The operation's
 /// request vocabulary below 11 (the open `framework_adapter_id` string,
 /// reserved since v11, and the pre-v10 all-known-kinds demand) is
 /// retired, not kept beside the typed selector: a framework-surface
@@ -147,7 +147,7 @@ pub const FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION: u32 = 11;
 
 /// Minimum schema version the expand-around operation accepts: 12, the
 /// host-issued [`NodeRef`](verter_protocol::typeinfo::graph::NodeRef)
-/// position (TR06, TIF-D02). The retired parent-graph handle and graph-local
+/// position. The retired parent-graph handle and graph-local
 /// target (fields 1 and 2, reserved since v12) never named a position the
 /// host could admit, so an expand-around request below 12 is rejected with
 /// [`TypeInfoRequestError::MalformedPayload`] (NOT `UnknownSchemaVersion`:

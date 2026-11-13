@@ -379,7 +379,7 @@ points (`resolve_named_symbol*`, `evaluate_type_expression_with_audit`) return
 `NodeRoot`s that `project_node_to_type_expr_json_bytes` validates against the
 host graph before projecting. The NAPI and WASM two-call projections carry that root between the
 calls. The task inventory
-[`SKR-OWN-PUBLIC.md`](../../../../crates/verter_type_engine/observe-inventory/SKR-OWN-PUBLIC.md)
+[`public-semantic-carriers.md`](../../../../crates/verter_type_engine/observe-inventory/public-semantic-carriers.md)
 lists every carrier, its route, its rule and its proof.
 
 ## Held-answer charge witness
@@ -444,6 +444,6 @@ builds. Detailed provenance/attribution remains behind the existing default-off
 `semantic-observe` feature; the substrate adds no always-on observation history.
 
 Field/store/hook classification is recorded in
-[`SKR-OWN-PREP.md`](../../../../crates/verter_type_engine/observe-inventory/SKR-OWN-PREP.md)
+[`counted-ownership-substrate.md`](../../../../crates/verter_type_engine/observe-inventory/counted-ownership-substrate.md)
 and, for the production lifetime authority, close and sidecar cleanup, in
-[`SKR-OWN-3.md`](../../../../crates/verter_type_engine/observe-inventory/SKR-OWN-3.md).
+[`lease-owned-graph-lifetime.md`](../../../../crates/verter_type_engine/observe-inventory/lease-owned-graph-lifetime.md).

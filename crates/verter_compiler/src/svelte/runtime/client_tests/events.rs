@@ -1003,7 +1003,7 @@ fn quoted_bind_value_function_pair_still_emits_bind_value() {
     // value) is official-VALID and emits `$.bind_value(input, get, set)` (verified
     // svelte@5.56.10) — the bind-expr lowering unwraps the quoted single-`{…}` inner, so
     // the function-pair classification is identical to the bare form. This is the
-    // POSITIVE CONTROL for FIX 1: the Mixed-aware group-reject gate + the defensive
+    // Positive control for the group-reject gate: the Mixed-aware group-reject gate + the defensive
     // identifier/member-only classifier check must NOT over-refuse a NON-group quoted
     // function-pair. Bare `bind:value={get, set}` is covered by
     // `bind_value_named_function_pair_lowers_decls_and_passes_idents`.
@@ -1024,7 +1024,7 @@ fn quoted_bind_value_function_pair_still_emits_bind_value() {
 
 #[test]
 fn bind_group_accumulator_renames_on_user_binding_collision() {
-    // FIX 2: the `bind:group` accumulator must be allocated through the SAME seeded,
+    // The `bind:group` accumulator must be allocated through the SAME seeded,
     // collision-aware name allocator the DOM-var stems use — NOT a hardcoded
     // `binding_group` constant. When the user declares their OWN `binding_group`,
     // official svelte@5.56.10 renames the accumulator to `binding_group_1` (keeping the

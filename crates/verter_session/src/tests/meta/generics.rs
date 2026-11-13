@@ -3375,7 +3375,7 @@ defineProps<{
     );
 }
 
-/// FIX 3 #3 — `defineProps<NoInfer<Base>>()` THROUGH macro-surface publication.
+/// `defineProps<NoInfer<Base>>()` THROUGH macro-surface publication.
 /// `NoInfer<T>` is an identity wrapper (it only affects inference, not the
 /// resolved type); the published props must be exactly the members of the
 /// imported `Base` surface.
@@ -3434,7 +3434,7 @@ defineProps<NoInfer<Base>>()
     );
 }
 
-/// FIX 3 #3 (alias-shell) — `export type Props = NoInfer<Base>; defineProps<Props>()`
+/// Alias-shell: `export type Props = NoInfer<Base>; defineProps<Props>()`
 /// THROUGH macro-surface publication. This is the harder shape than the direct
 /// `defineProps<NoInfer<Base>>()` case above: the macro type argument is a NAMED
 /// alias whose body is the `NoInfer` identity wrapper around the imported

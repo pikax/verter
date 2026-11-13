@@ -1807,3 +1807,255 @@ interface Helper {
         "only the direct local macro root should project into resolved_macros; helper companions should stay lazy",
     );
 }
+
+/// A host whose every imported macro type resolves to a one-row surface,
+/// recording the import source of each resolution it is asked for.
+struct SlotHelperTestHost {
+    surface_requests: std::cell::RefCell<Vec<String>>,
+}
+
+impl crate::resolver_core::DeclarationMetadataResolver for SlotHelperTestHost {
+    fn resolve_export_target(
+        &self,
+        _dep_canonical: &str,
+        _dep_owner: TopLevelOwnerId,
+        _requested_name: &str,
+    ) -> Option<ResolvedExportTarget> {
+        None
+    }
+
+    fn get_export_span_follow_reexports(
+        &self,
+        _dep_canonical: &str,
+        _requested_name: &str,
+    ) -> Option<Span> {
+        None
+    }
+
+    fn type_declaration_id(
+        &self,
+        _canonical_source: &str,
+        _owner: TopLevelOwnerId,
+        _resolved_name: &str,
+    ) -> Option<DeclarationId> {
+        None
+    }
+
+    fn resolve_type_dependency_canonical(
+        &self,
+        _from_canonical: &str,
+        import_source: &str,
+    ) -> Option<String> {
+        Some(format!("/node_modules/{import_source}/index.d.ts"))
+    }
+}
+
+impl ComponentMetaResolverHost for SlotHelperTestHost {
+    type Snapshot = TestSnapshot;
+    type EvalContext = ();
+
+    fn snapshot_imports<'a>(&self, snapshot: &'a Self::Snapshot) -> &'a [AnalyzedImport] {
+        &snapshot.imports
+    }
+
+    fn snapshot_macros<'a>(&self, snapshot: &'a Self::Snapshot) -> &'a [AnalyzedMacro] {
+        &snapshot.macros
+    }
+
+    fn snapshot_macro_type_deps<'a>(
+        &self,
+        snapshot: &'a Self::Snapshot,
+    ) -> &'a [verter_session_query::analysis::types::MacroTypeDep] {
+        &snapshot.macro_type_deps
+    }
+
+    fn build_eval_outputs(
+        &self,
+        _owner_canonical: &str,
+        _snapshot: &Self::Snapshot,
+        _eval_context: Option<&Self::EvalContext>,
+        _purpose: ComponentMetaResolutionPurpose,
+    ) -> ComponentMetaEvalOutputs {
+        ComponentMetaEvalOutputs::default()
+    }
+
+    fn resolve_native_props(
+        &self,
+        _owner_canonical: &str,
+        _import_source: &str,
+        _exported_name: &str,
+        _tracked_deps: &mut BTreeSet<String>,
+        _resolution_deps: &mut BTreeSet<String>,
+        _cache: &mut NativePropProjectionCache,
+    ) -> Option<Vec<ResolvedNativeProp>> {
+        None
+    }
+
+    fn resolve_imported_macro_surface(
+        &self,
+        _owner_canonical: &str,
+        import_source: &str,
+        exported_name: &str,
+        _tracked_deps: &mut BTreeSet<String>,
+        _resolution_deps: &mut BTreeSet<String>,
+        _cache: &mut NativePropProjectionCache,
+    ) -> Option<ResolvedImportedMacroSurface> {
+        self.surface_requests
+            .borrow_mut()
+            .push(import_source.to_string());
+        Some(ResolvedImportedMacroSurface {
+            declaration: ResolvedTypeDeclaration {
+                requested_name: exported_name.to_string(),
+                declaration_id: None,
+                resolved_name: exported_name.to_string(),
+                canonical_source: format!("/node_modules/{import_source}/index.d.ts"),
+                owner: TopLevelOwnerId::ordinary_file(),
+                span: Span::new(0, 40),
+                kind:
+                    verter_session_query::declarations::metadata::ResolvedDeclarationKind::Interface,
+                text: Some("export interface Slot { header(): unknown }".to_string()),
+            },
+            native_props: vec![crate::resolver_core::ResolvedNativeProp {
+                name: "header".to_string(),
+                is_optional: false,
+                type_annotation: Some("() => unknown".to_string()),
+                visibility: verter_type_expr::MemberVisibility::Public,
+                span: Span::default(),
+            }],
+        })
+    }
+
+    fn resolve_jsdoc_block(
+        &self,
+        _canonical_source: &str,
+        _span: Span,
+        _expanded: bool,
+        _tracked_deps: &mut BTreeSet<String>,
+    ) -> Option<ResolvedJsdocBlock> {
+        None
+    }
+
+    fn workspace_is_package_backed(&self, canonical_id: &str) -> bool {
+        canonical_id.contains("/node_modules/")
+    }
+
+    fn sync_transitive_macro_type_dependencies(
+        &self,
+        _canonical_id: &str,
+        _tracked_deps: &BTreeSet<String>,
+    ) {
+    }
+
+    fn current_dependency_fact_versions(
+        &self,
+        _canonical: &str,
+        _tracked_deps: &BTreeSet<String>,
+    ) -> Vec<FactVersionRef> {
+        Vec::new()
+    }
+}
+
+/// `import type { Slot } from "<import_source>"` + `defineSlots<Slot>()`.
+fn define_slots_of_imported_slot(import_source: &str) -> TestSnapshot {
+    TestSnapshot {
+        imports: vec![AnalyzedImport {
+            owner: TopLevelOwnerId::instance(0),
+            source: import_source.to_string(),
+            is_type_only: true,
+            bindings: vec![AnalyzedImportBinding {
+                name: "Slot".to_string(),
+                kind: ImportBindingKind::Named,
+                imported_name: Some("Slot".to_string()),
+                is_type_only: true,
+                vue_api: None,
+                span: Span::new(0, 4),
+            }],
+            span: Span::new(0, 30),
+            resolved_canonical_id: Some(format!("/node_modules/{import_source}/index.d.ts")),
+        }],
+        macros: vec![AnalyzedMacro {
+            edit_anchors: Default::default(),
+            owner: TopLevelOwnerId::instance(0),
+            kind: AnalyzedMacroKind::DefineSlots,
+            is_type_based: true,
+            type_references: vec!["Slot".to_string()],
+            binding_name: None,
+            model_name: None,
+            has_inherit_attrs_false: false,
+            prop_fields: Vec::new(),
+            emit_fields: Vec::new(),
+            slot_fields: Vec::new(),
+            default_keys: Vec::new(),
+            default_values: Vec::new(),
+            expose_fields: Vec::new(),
+            resolved_local_types: Vec::new(),
+            parsed_type_argument: None,
+            parsed_type_argument_scope: None,
+            span: Span::new(31, 50),
+        }],
+        macro_type_deps: vec![verter_session_query::analysis::types::MacroTypeDep {
+            macro_index: 0,
+            import_source: import_source.to_string(),
+            type_name: "Slot".to_string(),
+            macro_kind: AnalyzedMacroKind::DefineSlots,
+            macro_span: Span::new(31, 50),
+            usage: verter_session_query::analysis::types::MacroTypeDepUsage::Surface,
+        }],
+    }
+}
+
+/// The Vue runtime's own `Slot` helper named as a `defineSlots` type is not
+/// resolved as an imported slots surface; the same name from any other
+/// package is. The two components differ only in the import source.
+#[test]
+fn the_vue_slot_helper_is_not_resolved_as_a_slots_surface_but_a_same_named_type_is() {
+    let resolve = |import_source: &str| {
+        let host = SlotHelperTestHost {
+            surface_requests: std::cell::RefCell::new(Vec::new()),
+        };
+        let resolved = resolve_component_meta_parts(
+            &host,
+            "/src/App.vue",
+            &define_slots_of_imported_slot(import_source),
+            true,
+            None,
+            ComponentMetaResolutionPurpose::Full,
+        );
+        let rows: Vec<Vec<String>> = resolved
+            .resolved_macros
+            .iter()
+            .map(|entry| {
+                assert_eq!(entry.type_name, "Slot");
+                entry
+                    .native_props
+                    .iter()
+                    .map(|row| row.name.clone())
+                    .collect()
+            })
+            .collect();
+        (host.surface_requests.into_inner(), rows)
+    };
+
+    let (requests, rows) = resolve("vue");
+    assert!(
+        requests.is_empty(),
+        "the Vue `Slot` helper must not be resolved as a slots surface, got requests {requests:?}"
+    );
+    assert_eq!(
+        rows,
+        vec![Vec::<String>::new()],
+        "the Vue `Slot` helper stays a bare entry with no surface rows"
+    );
+
+    let (requests, rows) = resolve("my-lib");
+    assert_eq!(
+        requests,
+        vec!["my-lib".to_string()],
+        "a `Slot` type from another package is resolved as the slots surface"
+    );
+    assert_eq!(
+        rows,
+        vec![vec!["header".to_string()]],
+        "the other package's `Slot` surface rows are carried"
+    );
+}

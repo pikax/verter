@@ -245,10 +245,10 @@ mod allocation_ceiling {
     const CEILING_NUM: u128 = 12;
     const CEILING_DEN: u128 = 10;
 
-    /// Legacy `css::process_style` allocation counts recaptured on tree
-    /// `1548e5b23d199fd9c761d952f50b4ecb4d5888bb` with `--test-threads=1`
-    /// through `dual_pipeline_allocation_instrument::each_category_observes_both_pipelines`.
-    /// Live counts from that tree, not a copied historical table.
+    /// Legacy `css::process_style` allocation counts recaptured with
+    /// `--test-threads=1` through
+    /// `dual_pipeline_allocation_instrument::each_category_observes_both_pipelines`.
+    /// Live counts, not a copied historical table.
     const RETAINED_LEGACY_ALLOC: &[(&str, u64)] = &[
         ("class_rules", 422),
         ("descendant_selectors", 371),

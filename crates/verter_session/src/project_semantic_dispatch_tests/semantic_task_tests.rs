@@ -3544,7 +3544,7 @@ mod semantic_poll_contract {
     /// the body is evaluated once in all, and the root delivers exactly the
     /// synchronous entry's evidence, logical work included.
     #[test]
-    #[ignore = "a flow frame still drops its run at an unanswered read and evaluates the body again after the delivery (5 evaluations and 71 work against 4 and 68): the retained owned evaluator lands in the later SKR-ROOT-DISPATCH-FLOW conversions"]
+    #[ignore = "a flow frame still drops its run at an unanswered read and evaluates the body again after the delivery (5 evaluations and 71 work against 4 and 68): the frame does not yet keep its evaluator across the read"]
     fn a_flow_suspended_at_a_held_read_evaluates_its_body_once() {
         use verter_type_engine::project_semantic_dispatch::flow_return::flow_evaluations_for_tests;
         let (synchronous, synchronous_evaluations) = {
@@ -3622,7 +3622,7 @@ mod semantic_poll_contract {
     /// exactly the synchronous entry's evidence, logical work included, the
     /// body evaluated once across both threads.
     #[test]
-    #[ignore = "a flow frame still drops its run at an unanswered read and evaluates the body again after the delivery: the retained owned evaluator lands in the later SKR-ROOT-DISPATCH-FLOW conversions"]
+    #[ignore = "a flow frame still drops its run at an unanswered read and evaluates the body again after the delivery: the frame does not yet keep its evaluator across the read"]
     fn a_flow_held_at_its_bodys_read_resumes_on_another_thread_to_the_synchronous_read() {
         use verter_type_engine::project_semantic_dispatch::flow_return::flow_evaluations_for_tests;
         let (synchronous, synchronous_evaluations) = {

@@ -179,7 +179,7 @@ copy, never an alias of a retained payload.
 - **Parse artifacts and scheduler snapshots.** These are pinned on the same
   account, including lazy declaration-body growth and shared shallow-state
   ownership. Their allocation and field inventory is
-  [the artifact accounting inventory](SKR-OWN-ACCOUNT-ARTIFACTS.md).
+  [the artifact accounting inventory](parse-artifact-storage-accounting.md).
 
 ## Declared carve-outs
 

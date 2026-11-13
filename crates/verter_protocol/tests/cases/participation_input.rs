@@ -1,4 +1,4 @@
-//! COX0 participation wire input: a host crosses with typed profile
+//! Participation wire input: a host crosses with typed profile
 //! digests, selectors and opaque evidence only. Configuration errors refuse
 //! the input; invalid observations are reported and establish no overlap.
 
@@ -17,7 +17,7 @@ use verter_protocol::participation::{
 struct Path<'a>(&'a str);
 
 impl CanonicalEncode for Path<'_> {
-    const DOMAIN_TAG: &'static str = "cox0-test.source";
+    const DOMAIN_TAG: &'static str = "participation-test.source";
 
     fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
         encoder.field_str(1, self.0);
@@ -29,7 +29,7 @@ fn unit(uri: &str) -> SourceUnitId {
 }
 
 fn vue() -> ProfileRef {
-    let epoch = ProfileSchemaEpoch::for_schema_family("cox0-test.descriptor", 1);
+    let epoch = ProfileSchemaEpoch::for_schema_family("participation-test.descriptor", 1);
     ProfileRef::Carrier(CarrierProfileId::from_carrier("vue", &epoch))
 }
 

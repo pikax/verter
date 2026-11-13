@@ -77,7 +77,7 @@ impl EffectiveMode {
     }
 }
 
-/// The closed demand purpose (DEM0 `DR17`). It selects admission and budget,
+/// The closed demand purpose. It selects admission and budget,
 /// never a different semantic answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DemandPurpose {

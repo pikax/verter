@@ -25,7 +25,7 @@ use verter_language::{FrameworkAdapterId, LanguageId};
 use verter_protocol::typeinfo::graph::{FrameworkSurfaceKind, FrameworkTag};
 
 /// The descriptor-schema family of every built-in semantic-profile manifest
-/// (`identities.md` `I11`): the epoch behind each minted
+/// (`identities.md`, descriptor schema identity): the epoch behind each minted
 /// [`FrameworkProfileId`]. Bumping [`FRAMEWORK_PROFILE_DESCRIPTOR_SCHEMA_EPOCH`]
 /// re-mints every advertised profile and nothing else. It is a descriptor
 /// epoch, not the TypeInfo wire schema version.
@@ -38,19 +38,19 @@ pub const FRAMEWORK_PROFILE_DESCRIPTOR_SCHEMA_EPOCH: u32 = 1;
 /// the registered parser-grammar version the carrier catalog stamps on each
 /// row, so a grammar bump re-mints the carrier profiles (and through them the
 /// semantic profiles that claim them) — a release change never does
-/// (`identities.md` `R02`, `R04`).
+/// (`identities.md`, release law).
 pub const CARRIER_SYNTAX_SCHEMA_FAMILY: &str = "verter.carrier.syntax";
 
 /// One adapter registration's semantic-profile manifest: the inputs — and
-/// only the inputs — [`FrameworkProfileId`]'s law names (`identities.md`
-/// `I05`, `R02`, `R04`–`R07`).
+/// only the inputs — [`FrameworkProfileId`]'s law names (`identities.md`,
+/// profile identity and release law).
 ///
 /// The manifest declares exactly one EXACT release of one family, the majors
 /// the family's admitted line allows, and the carrier families the profile
 /// claims. Nothing here is derived from the adapter id, the display
 /// [`FrameworkTag`], a file extension or the adapter's implementation
 /// version: those are presentation or implementation metadata, never a
-/// release (`R03`). A declaration the release law rejects — a range, a
+/// release. A declaration the release law rejects — a range, a
 /// floating tag, a versions array, a bare family, an unadmitted major — fails
 /// registry CONSTRUCTION with its typed [`ReleaseDescriptorError`]; it is
 /// never coerced into a profile and never reaches a request.
@@ -58,8 +58,9 @@ pub const CARRIER_SYNTAX_SCHEMA_FAMILY: &str = "verter.carrier.syntax";
 /// The declared release means exactly those coordinates: `"3"`, `"3.0"` and
 /// `"3.0.0"` mint three different profiles, and an admitted major does not
 /// make every `3.x.y` package an instance of `"3"`. Reading the installed
-/// package release (`R08`) and per-package activation (`R09`) are FWA1's;
-/// this manifest is the declaration authority FWA1 feeds, not a second one.
+/// package release and per-package activation belong to the framework
+/// activation layer; this manifest is the declaration authority that layer
+/// feeds, not a second one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameworkProfileManifest {
     /// The semantic family key the release belongs to (`"vue"`, `"svelte"`).
@@ -269,7 +270,7 @@ pub struct FrameworkAdapterDescriptor {
     pub carrier_probe_rank: u32,
     /// The semantic-profile manifest this registration is the meaning of.
     /// The registry mints its [`FrameworkProfileId`] ONCE at construction;
-    /// the TypeInfo `Component` selector names that profile (TR06), never
+    /// the TypeInfo `Component` selector names that profile, never
     /// the adapter id or the display tag.
     pub profile_manifest: FrameworkProfileManifest,
 }

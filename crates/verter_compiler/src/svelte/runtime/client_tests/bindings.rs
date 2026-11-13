@@ -482,7 +482,7 @@ fn default_checked_with_mismatched_bind_value_fails_closed() {
 
 #[test]
 fn no_value_radio_group_bind_still_declares_binding_group() {
-    // FIX 3: a `bind:group` WITHOUT a `value` attr. Official svelte@5.56.10 STILL
+    // A `bind:group` WITHOUT a `value` attr. Official svelte@5.56.10 STILL
     // declares `const binding_group = []` and calls `$.bind_group(binding_group,
     // [], input, get, set)` (verified against the pinned compiler). Verter declared
     // `binding_group` ONLY when `group_values` was non-empty (the static-value
@@ -584,7 +584,7 @@ fn radio_group_bind_emits_component_fn_scoped_binding_group_and_per_input_value(
 
 #[test]
 fn bind_group_accumulator_keeps_binding_group_without_collision() {
-    // POSITIVE CONTROL for FIX 2: with NO user `binding_group`, the accumulator keeps the
+    // Positive control for the seeded accumulator: with NO user `binding_group`, the accumulator keeps the
     // canonical `binding_group` name (the seeded allocator's stem is unclaimed) — the
     // rename only triggers on a real collision. Guards against the allocator spuriously
     // renaming when there is no clash.
@@ -611,7 +611,7 @@ fn bind_group_accumulator_keeps_binding_group_without_collision() {
 
 #[test]
 fn independent_bind_groups_get_distinct_accumulators_in_source_order() {
-    // FIX 1 (R3c): two INDEPENDENT radio groups (`bind:group={a}` ×2, `bind:group={b}` ×2)
+    // Two INDEPENDENT radio groups (`bind:group={a}` ×2, `bind:group={b}` ×2)
     // must each get their OWN accumulator. Official svelte@5.56.10 emits `const binding_group =
     // []` AND `const binding_group_1 = []` — ONE accumulator per DISTINCT bound group target,
     // allocated in SOURCE ORDER (the first-appearing group is `binding_group`, the next
@@ -803,7 +803,7 @@ fn element_bind_this_identifier_still_emits_thunked_bind_this() {
 
 #[test]
 fn shared_bind_group_target_shares_one_accumulator() {
-    // FIX 1 (R3c): two inputs binding the SAME group target (`bind:group={g}` ×2) share ONE
+    // Two inputs binding the SAME group target (`bind:group={g}` ×2) share ONE
     // accumulator — official svelte@5.56.10 emits a single `const binding_group = []` and both
     // `$.bind_group` calls reference it. The distinct-group key is the structural bind target +
     // scope, so the same target collapses to one slot (the positive control that the per-group
@@ -850,7 +850,7 @@ fn shared_bind_group_target_shares_one_accumulator() {
 
 #[test]
 fn independent_bind_groups_renumber_past_a_user_binding_group_collision() {
-    // FIX 1 (R3c) × FIX-R3b: with a user-declared `binding_group` AND two INDEPENDENT groups,
+    // Per-group accumulators with a collision: with a user-declared `binding_group` AND two INDEPENDENT groups,
     // the collision-aware/seeded allocator bumps BOTH accumulators (`binding_group_1` /
     // `binding_group_2`) past the user's `binding_group`, each group still wired to its own.
     // Verified against svelte@5.56.10:
@@ -951,7 +951,7 @@ fn checked_bind_now_emits_remove_input_defaults_and_bind_checked() {
     );
 }
 
-// ── FIX 2: official HOST-ATTRIBUTE gates (typed-IR driven) ─────────────────────
+// ── Official HOST-ATTRIBUTE gates (typed-IR driven) ─────────────────────────────
 //
 // Several binds are valid ONLY when the host element carries a specific STATIC
 // attribute; official svelte@5.56.10 raises a COMPILE ERROR otherwise. The runtime
@@ -1222,7 +1222,7 @@ fn bind_group_with_static_radio_type_still_emits() {
     );
 }
 
-// ── FIX 2: the host-gate static-attr comparison uses ENTITY-DECODED text ────────
+// ── The host-gate static-attr comparison uses ENTITY-DECODED text ───────────────
 //
 // official decodes HTML entity references in static attribute text before the
 // `Text.data` comparison (`decode_character_references`), so `type="check&#98;ox"`
