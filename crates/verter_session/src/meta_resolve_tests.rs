@@ -9370,7 +9370,7 @@ defineSlots<Wrapper<{ id: string }>>()
 
 #[test]
 fn project_model_drops_non_model_cursor() {
-    // FIX-9: `project_model` enforces `PublishedSurfaceKind::Model` from the
+    // `project_model` enforces `PublishedSurfaceKind::Model` from the
     // cursor's CARRIED surface before publishing (`descend_published_member`
     // does NOT validate the cursor surface kind, so the API would otherwise be
     // weaker than the per-member admission invariant). A non-`Model` cursor MUST
@@ -9434,7 +9434,7 @@ const model = defineModel<string>()
         );
         assert!(
             result.is_none(),
-            "FIX-9: `project_model` MUST return `None` for a non-`Model` cursor (the kind check \
+            "`project_model` MUST return `None` for a non-`Model` cursor (the kind check \
              fails closed); got {result:?}"
         );
     }
@@ -9459,7 +9459,7 @@ const model = defineModel<string>()
         );
         assert!(
             result.is_some(),
-            "FIX-9: a `Model` cursor must NOT be rejected by the kind check — `defineModel<string>()` \
+            "a `Model` cursor must NOT be rejected by the kind check — `defineModel<string>()` \
              publishes a model field; got {result:?}"
         );
     }

@@ -6,7 +6,7 @@
 // (exposure-ownership map, reference-examples manifest), so these tests pin
 // its contract directly: id-ordered merge, duplicate rejection, both fragment
 // layouts, one directory listing per load, and a missing directory meaning an
-// absent collection. The reader tests (PG0/VSW0/DOC1/DOC5/DOC7) prove the
+// absent collection. The playground, web-extension and documentation reader tests prove the
 // readers consume this merged view; a fragment added here is visible to every
 // reader because no reader parses anything else.
 
@@ -85,15 +85,15 @@ test("nested entry fragments (<id>/example.json) merge like flat ones", () => {
 test("array fragments (owner-grouped rows) concatenate before the id sort", () => {
   const { root, fragments } = makeCase();
   writeFileSync(
-    join(fragments, "DX0.json"),
+    join(fragments, "owner-a.json"),
     JSON.stringify([
-      { id: "rails-policy.v1", owner: "DX0" },
-      { id: "cross-surface-inventory.v1", owner: "DX0" },
+      { id: "rails-policy.v1", owner: "owner-a" },
+      { id: "cross-surface-inventory.v1", owner: "owner-a" },
     ]),
   );
   writeFileSync(
-    join(fragments, "VSC1.json"),
-    JSON.stringify([{ id: "desktop-inventory.v1", owner: "VSC1" }]),
+    join(fragments, "owner-b.json"),
+    JSON.stringify([{ id: "desktop-inventory.v1", owner: "owner-b" }]),
   );
   const { rows } = loadShardedIndex(fragments, writeHeader(root, {}));
   assert.deepEqual(
@@ -134,7 +134,7 @@ test("the same id twice inside one array fragment fails the same way", () => {
 
 test("a fragment row without a string id fails with a typed error", () => {
   const { root, fragments } = makeCase();
-  writeFileSync(join(fragments, "broken.json"), JSON.stringify({ owner: "DX0" }));
+  writeFileSync(join(fragments, "broken.json"), JSON.stringify({ owner: "owner-a" }));
   assert.throws(
     () => loadShardedIndex(fragments, writeHeader(root, {})),
     (error) =>
@@ -175,7 +175,7 @@ test("adding one fragment (no other edit) makes its row visible on the next load
     before.rows.map((row) => row.id),
     ["alpha"],
   );
-  writeFileSync(join(fragments, "new-node.json"), JSON.stringify({ id: "beta", owner: "NEW0" }));
+  writeFileSync(join(fragments, "new-node.json"), JSON.stringify({ id: "beta", owner: "new-owner" }));
   const after = loadShardedIndex(fragments, header);
   assert.deepEqual(
     after.rows.map((row) => row.id),

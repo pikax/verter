@@ -18,7 +18,7 @@ node --test scripts/gate-telemetry-selftest.mjs
 node --test scripts/provider-ci-lane-selftest.mjs
 node --test scripts/gate-wasm-lane-selftest.mjs
 node --test scripts/check-integration-test-layout.test.mjs
-node --test tests/engine-provisioning/EPR1/engine-contract.test.mjs
+node --test tests/engine-provisioning/engine-artifact-contract/engine-contract.test.mjs
 node --test scripts/ci-junit-metadata.test.mjs
 node --test scripts/perturbation.test.mjs
 node --test scripts/githubctl/tests/protection.test.mjs

@@ -106,7 +106,7 @@ pub(super) fn phase_8_allow_list() -> std::collections::HashMap<&'static str, &'
         ),
         (
             "typeinfo_issued_refs",
-            "TIF1 seam 2 ruling: the private host-issued typeinfo reference index (typed query identity, committed native basis and replay locators per fact; 64 records, 1 MiB). Not a result memoiser: it retains no graph or evaluated IR, and every use re-validates the basis.",
+            "The private host-issued typeinfo reference index (typed query identity, committed native basis and replay locators per fact; 64 records, 1 MiB). Not a result memoiser: it retains no graph or evaluated IR, and every use re-validates the basis.",
         ),
         // (b) Single-cell handles whose `RwLock<Arc<dyn>>` shape matches
         //     the cache-detection pattern but whose semantics are

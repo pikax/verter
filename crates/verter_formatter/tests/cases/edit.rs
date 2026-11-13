@@ -1,5 +1,5 @@
 //! Minimal non-overlapping edit geometry: exact application, order and
-//! non-overlap, minimal boundaries and bounded derivation work (FD13).
+//! non-overlap, minimal boundaries and bounded derivation work.
 
 use verter_formatter::coordinates::{
     AuthoredFormatByteOffset, AuthoredFormatByteRange, CoordinateError, FormattedByteOffset,
@@ -108,7 +108,7 @@ fn splits_crlf_pair(text: &str, offset: u32) -> bool {
         && text.as_bytes()[offset] == b'\n'
 }
 
-/// FMT1B-AC2: sorted by authored position, non-overlapping, addressable at
+/// Edits are sorted by authored position, non-overlapping, addressable at
 /// scalar boundaries, free of no-op edits, never bounded inside a CRLF pair.
 fn assert_well_formed(set: &FormatEditSet, authored: &str) {
     for pair in set.edits().windows(2) {
@@ -187,7 +187,7 @@ fn locked_edit_law_examples_emit_exactly_the_locked_edits() {
     );
 }
 
-/// FMT1B-AC1: insert, delete, replace, Unicode and newline cases apply
+/// Insert, delete, replace, Unicode and newline cases apply
 /// exactly.
 #[test]
 fn table_cases_apply_exactly_for_every_edit_kind() {
@@ -412,7 +412,7 @@ fn adjacent_gaps_coalesce_only_when_no_retained_byte_separates_them() {
     );
 }
 
-/// FMT1B-AC3: unchanged prefix, suffix and internal stable regions are
+/// Unchanged prefix, suffix and internal stable regions are
 /// excluded; a whole-file replacement is never emitted when the locked
 /// algorithm proves a smaller set.
 #[test]
@@ -651,7 +651,7 @@ fn adversary_repetitive(size: usize) -> usize {
     assert_within_locked_work(&set, &authored, &rendered)
 }
 
-/// FMT1B-AC4: adversarial pairs stay within the locked work bound and grow
+/// Adversarial pairs stay within the locked work bound and grow
 /// linearly, with no quadratic fallback.
 #[test]
 fn adversarial_pairs_stay_within_the_locked_work_bounds() {
@@ -747,7 +747,7 @@ fn malformed_rendered_segments_and_bindings_are_refused() {
     );
 }
 
-/// FMT1B-AC2 at the construction boundary: a malformed set cannot be built,
+/// At the construction boundary, a malformed set cannot be built,
 /// and a set applied to a text where one of its edits does not fit is refused.
 #[test]
 fn construction_and_application_refuse_malformed_edit_sets() {

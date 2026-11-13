@@ -5678,7 +5678,7 @@ fn merge_rename_carrier_api_target_maps_via_api_sourcemap_and_is_included() {
     );
 }
 
-/// FIX 1 (encoding boundary): under a UTF-8-negotiated session, a carrier-API prop rename whose
+/// Encoding boundary: under a UTF-8-negotiated session, a carrier-API prop rename whose
 /// carrier line begins with NON-ASCII text resolves to the CORRECT carrier range.
 ///
 /// The API surface's `CodeTransform` source map indexes positions in UTF-16, while the LSP edit
@@ -5840,7 +5840,7 @@ fn merge_rename_vue_dts_is_dropped_not_zeroed() {
     );
 }
 
-/// FIX 2 (merge boundary): a carrier-API rename whose API surface is NOT YET SYNCED (the
+/// Merge boundary: a carrier-API rename whose API surface is NOT YET SYNCED (the
 /// identity-gated resolver DECLINES) and which has NO real on-disk backing file is DROPPED
 /// (fail-closed) — never mapped through a fresh source map at a guessed range.
 ///

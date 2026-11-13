@@ -184,8 +184,8 @@ const SUPPORTED_FIXTURES: &[&str] = &[
     // 5g-e REOPEN: OPTIONAL rest member reads preserve the `?.` — `rest?.x` →
     // `$$props?.x`, `rest?.x.y` → `$$props?.x.y` (attr context, batched into one
     // template_effect). De-localization replaces ONLY the object identifier, so the
-    // optional axis + downstream chain stay verbatim. Structurally RED at ff1ca89a1
-    // (whole-member replacement dropped the `?.` → `$$props.x`).
+    // optional axis + downstream chain stay verbatim. Guards against a
+    // whole-member replacement that drops the `?.` → `$$props.x`.
     "runes/props_rest_member_optional",
     // 5g-e REOPEN: the whole-object equivalent — `all?.x` → `$$props?.x`.
     "runes/props_whole_object_optional",
@@ -6345,8 +6345,8 @@ fn svelte_structural_conformance_discriminates_cosmetic_from_behavioral_diffs() 
     // comment trails `f();` (stmt[0]) on one side and `g();` (stmt[1]) on the other; both modules
     // have identical statements + the identical trailing comment text. A trailing `h();` keeps the
     // comment mid-module so OXC classifies BOTH as `pos=Trailing` with `attached_to = 0` (verified:
-    // attached_to-only anchoring maps BOTH to byte 0 → the first statement → false-PASS, the FIX-2
-    // bug). The Trailing→preceding-node occurrence path anchors side A on `stmt[0]` and side B on
+    // attached_to-only anchoring maps BOTH to byte 0 → the first statement → false-PASS, the
+    // original bug). The Trailing→preceding-node occurrence path anchors side A on `stmt[0]` and side B on
     // `stmt[1]`, so the move FAILS.
     assert!(
         !sigs_equal(

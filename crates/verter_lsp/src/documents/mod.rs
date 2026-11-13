@@ -48,13 +48,13 @@ pub struct DocumentRegistry {
     /// the host's lifetime, so protocol paths classify under the host's
     /// framework admission without borrowing the host per call.
     language_classifier: verter_session::framework::HostLanguageClassifier,
-    /// The participation authority of this editor scope (COX0): every
+    /// The participation authority of this editor scope: every
     /// request, publication and eager document task admits its capability
     /// cell here first.
     participation: Arc<verter_session::participation::ParticipationService>,
     /// Open documents whose scope disables every cell: their bytes are
-    /// retained, but nothing was parsed, projected or published for them
-    /// (COX0, PC04). Keyed by URI.
+    /// retained, but nothing was parsed, projected or published for them.
+    /// Keyed by URI.
     retained: dashmap::DashSet<String>,
     /// Map from document URI to document state.
     documents: DashMap<String, DocumentState>,
@@ -946,7 +946,7 @@ impl DocumentRegistry {
     /// to its framework row here and the host upsert parses it through the
     /// registered carrier.
     /// The canonical id and authoritative file language participation
-    /// qualifies `uri` by (COX0): an open document's own resolved language
+    /// qualifies `uri` by: an open document's own resolved language
     /// (an unsaved carrier has no carrier path), otherwise its path's.
     pub(crate) fn participation_subject(&self, uri: &Uri) -> (String, FileLanguage) {
         let open = self
@@ -1047,9 +1047,9 @@ impl DocumentRegistry {
         let submitted_source: Arc<str> = Arc::from(params.text.as_str());
 
         let file_language = self.document_file_language(&params.language_id, &canonical_id);
-        // A scope that disables every cell retains the bytes only (COX0,
-        // PC04): no upsert, parse, projection or overlay until it admits a
-        // cell again ([`Self::materialize_retained`]).
+        // A scope that disables every cell retains the bytes only:
+        // no upsert, parse, projection or overlay until it admits a cell
+        // again ([`Self::materialize_retained`]).
         if crate::participation::language_disables_every_cell(self, &file_language, &canonical_id) {
             return self.retain(params, canonical_id, submitted_source);
         }

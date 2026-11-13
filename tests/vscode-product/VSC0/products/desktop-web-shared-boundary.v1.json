@@ -17,7 +17,6 @@
       "analysis-response.spec.ts",
       "audit.spec.ts",
       "bindingTypeDisplay.spec.ts",
-      "carrier-routing-no-vue-gate.spec.ts",
       "claudeCodeDetection.spec.ts",
       "clientProcessLifetime.spec.ts",
       "css/cssDiagnosticsPublisher.spec.ts",

@@ -3621,7 +3621,7 @@ async fn drain_owner_loss_retracts_carrier_membership_from_the_ledger() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn drain_owner_transition_partial_failure_retains_stale_path_of_failed_kind() {
-    // FIX-2: on an owner transition where the IDE path genuinely changes
+    // On an owner transition where the IDE path genuinely changes
     // (.jsx→.tsx), the API sync succeeds but the new IDE `.tsx` sync FAILS.
     // The drain must NOT close the old live `.jsx` (its kind did not sync) and
     // must NOT leave committed state pointing at the unsynced `.tsx`. Pre-fix

@@ -20,9 +20,9 @@ The data lives in `tests/framework-htmx/HTX0/`:
 | `products/htmx-capability-matrix.json` | Operation × host × profile cells, one producer and acceptance per cell, and exclusions            |
 | `cases.md`                             | Clean controls and every planted row with its expected rejection reason                           |
 
-REG0, FWA1 and FCH1 consume these products as data. HTX1-ACV adds
+The framework registry, FWA1 and FCH1 consume these products as data. HTX1-ACV adds
 `contract.ts` and `htmx-lock.spec.ts` here and implements every planted twin.
-REG0's discovery runner finds that spec; this change edits no root script.
+The registry's discovery runner finds that spec; this change edits no root script.
 Until HTX1 lands, the products have reviewed case definitions rather than
 executable rejection coverage. The future lock command is
 `node --test tests/framework-htmx/HTX0/htmx-lock.spec.ts`.

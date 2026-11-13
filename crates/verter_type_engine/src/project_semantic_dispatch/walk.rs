@@ -1850,7 +1850,7 @@ impl WalkState {
 /// can be interned into `LiteralValue::Number(f64)` without any
 /// further conversion.
 ///
-/// G4.4 convention (bounded): every `IndexKey::Number` producer
+/// Integer-index convention (bounded): every `IndexKey::Number` producer
 /// (source lowering at `lower::shallow_lower_type_expr`, node
 /// normalisation at `evaluate::normalized_index_key_node`, generic
 /// substitution at `substitute::substitute_index_key_with_change_tracking`)
@@ -1865,7 +1865,7 @@ impl WalkState {
 /// `IndexKey::Computed` references rather than entering this fast
 /// path.
 ///
-/// G4.5 completion: the `IndexKey::Computed(_)` consumer arm in the
+/// Computed-key completion: the `IndexKey::Computed(_)` consumer arm in the
 /// Mapped narrowing path inspects the resolved node's data and
 /// recovers an f64 `LiteralKey::Number` directly when the node is a
 /// `SemanticNodeData::Literal(LiteralValue::Number(f))`. This closes
@@ -6025,7 +6025,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                     crate::semantic_query::PropertyKey::UniqueSymbol(identity)
                                 }
                                 IndexKey::Computed(resolved) => {
-                                    // G4.5 recovery: numeric literals outside
+                                    // Computed-key recovery: numeric literals outside
                                     // the i64 integer convention (`Foo[1.5]`,
                                     // `Foo[1e21]`, `Foo[1e-7]`) stay
                                     // `TypeNode` by the producer convention,

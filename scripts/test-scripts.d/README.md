@@ -9,7 +9,7 @@ own fragment here and does not edit root `package.json`.
 
 ```json
 {
-  "owner": "<task slug or area>",
+  "owner": "<area>",
   "tests": [
     {
       "runner": "node-test",
@@ -20,13 +20,13 @@ own fragment here and does not edit root `package.json`.
 }
 ```
 
-- `owner` — the task slug or area that owns the registrations.
+- `owner` — the area that owns the registrations (never a task id).
 - `runner` — one of:
   - `node-test` — runs `node --test <file>`; an optional `nodeFlags` array
     prepends node flags (e.g. `["--experimental-strip-types"]` for the
     sfc-projection TypeScript specs).
   - `vitest` — runs `vitest run <file>`.
-  - `node` — runs `node <file>`, for a sub-runner such as REG0's
+  - `node` — runs `node <file>`, for a sub-runner such as the framework-lock suite's
     `scripts/run-framework-locks.mjs`.
   - `pnpm` — runs `pnpm run <script>`; `script` must exist in the root
     `package.json` (used by `test:generic-interface-identity-oracle`).

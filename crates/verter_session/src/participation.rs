@@ -1,5 +1,4 @@
-//! The live participation service of one host participation scope (COX0;
-//! contract `docs/arch/kernel/cox0d-participation.md`).
+//! The live participation service of one host participation scope.
 //!
 //! It is the sole participation authority of its scope: it publishes one
 //! immutable [`CapabilityOwnershipMask`] together with the demand epoch that
@@ -16,9 +15,8 @@
 //! commit, client-local presentation) and discard work whose permit is no
 //! longer current.
 //!
-//! The demand epoch composes the mask identity with the fence. DEM0 `DR21`
-//! also composes the activation epoch; no activation-epoch producer exists
-//! yet, so it joins here when one does.
+//! The demand epoch composes the mask identity with the fence. It does not
+//! yet compose an activation epoch: no activation-epoch producer exists.
 //!
 //! Scopes are independent: an editor scope's service never governs an
 //! explicit CLI, browser or agent invocation, which owns its own service.

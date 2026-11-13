@@ -14,8 +14,8 @@ mod sealed {
 }
 
 /// The coordinate domain an [`OffsetIndex`] indexes: authored source bytes
-/// (`CD1`, [`SourceDomain`]) or generated-surface bytes (`CD3`,
-/// [`GeneratedDomain`]). An index of one domain accepts only that domain's
+/// ([`SourceDomain`]) or generated-surface bytes
+/// ([`GeneratedDomain`]). An index of one domain accepts only that domain's
 /// newtypes, so a source range cannot be converted against a generated
 /// surface, or the reverse, by passing raw integers in the wrong order.
 pub trait IndexDomain: sealed::Sealed {
@@ -29,9 +29,9 @@ pub trait IndexDomain: sealed::Sealed {
     fn range(range: Self::Range) -> (u32, u32);
 }
 
-/// Authored source bytes (`CD1`).
+/// Authored source bytes.
 pub struct SourceDomain;
-/// Generated-surface bytes (`CD3`).
+/// Generated-surface bytes.
 pub struct GeneratedDomain;
 
 impl sealed::Sealed for SourceDomain {}
@@ -116,7 +116,7 @@ fn record_source_visit(_units: usize) {}
 
 /// Validate that `byte_offset` names a position inside `source`: on a UTF-8
 /// character boundary and no further than end-of-file. Never snaps and never
-/// clamps (R06: exact or refused).
+/// clamps (a conversion is exact or refused).
 fn checked_boundary(source: &str, byte_offset: u32) -> Result<usize, CoordError> {
     let offset = byte_offset as usize;
     if offset > source.len() {
@@ -176,7 +176,7 @@ struct OffsetMark {
 }
 
 impl<'a> OffsetIndex<'a, SourceDomain> {
-    /// Index an authored source (`CD1`).
+    /// Index an authored source.
     #[must_use]
     pub fn new(source: &'a str) -> Self {
         Self::build(source)
@@ -184,7 +184,7 @@ impl<'a> OffsetIndex<'a, SourceDomain> {
 }
 
 impl<'a> OffsetIndex<'a, GeneratedDomain> {
-    /// Index a generated surface (`CD3`).
+    /// Index a generated surface.
     #[must_use]
     pub fn new_generated(source: &'a str) -> Self {
         Self::build(source)
@@ -412,7 +412,7 @@ pub(super) fn utf8_to_utf32_offset(text: &str, byte_offset: u32) -> Result<u32, 
 /// Input for a single binding's source span conversion.
 pub struct DestructuredBindingInput<'a> {
     pub name: &'a str,
-    /// The binding's authored-source range (`CD1`).
+    /// The binding's authored-source range.
     pub source: SourceByteRange,
 }
 

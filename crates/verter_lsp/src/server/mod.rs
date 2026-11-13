@@ -498,7 +498,7 @@ pub struct ServerCore {
     /// shared with every producer of one.
     pub(crate) subscriptions: Arc<crate::demand_plan::ClientSubscriptions>,
     /// The methods this client registers dynamically, negotiated at
-    /// `initialize` and reconciled against the participation mask (COX0).
+    /// `initialize` and reconciled against the participation mask.
     pub(crate) dynamic_registrations:
         std::sync::OnceLock<crate::capabilities::registration::DynamicRegistrations>,
     /// Cached verter diagnostics per document:
@@ -861,7 +861,7 @@ impl VerterLanguageServer {
         request.settle(&self.documents, response)
     }
 
-    /// Admit `operation`'s participation cell for `uri` (COX0) before any
+    /// Admit `operation`'s participation cell for `uri` before any
     /// producer starts, run `answer`, and serve it only while the demand epoch
     /// it was admitted under is current. A refused cell answers the typed
     /// refusal and drops `answer` unpolled, so it costs no work; a statically

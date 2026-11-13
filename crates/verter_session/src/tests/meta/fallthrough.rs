@@ -4998,12 +4998,12 @@ defineProps<WidgetProps>()
 }
 
 // ===========================================================================
-// FIX 3 — restored discriminating coverage for behaviours the deleted
+// Restored discriminating coverage for behaviours the deleted
 // equivalence harnesses owned, now driven through the typeinfo / Vue
 // macro-surface publication path.
 // ===========================================================================
 
-/// FIX 3 #1 — an inherited METHOD-STYLE slot's JSDoc `description` survives
+/// An inherited METHOD-STYLE slot's JSDoc `description` survives
 /// through cross-file heritage onto the published slot surface. Sibling slot
 /// tests assert names / bindings / returns but not the inherited slot
 /// description; this fills that gap.

@@ -35,7 +35,7 @@ pub(super) fn enrich_hover_with_provenance(
     hover: Option<Hover>,
 ) -> Option<Hover> {
     use std::sync::atomic::Ordering;
-    // The supplement is its own labelled inspection cell (COX0): a withdrawn
+    // The supplement is its own labelled inspection cell: a withdrawn
     // `hover.inspection` neither computes nor shows it.
     if !server.hover_provenance_enabled.load(Ordering::Relaxed)
         || !crate::participation::admits(

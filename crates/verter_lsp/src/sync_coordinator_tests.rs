@@ -5288,8 +5288,8 @@ async fn parent_diagnostics_when_opened_against(child_source: &str) -> Vec<Diagn
 }
 
 /// A serving provider owns prop validation, so Verter's component-usage
-/// diagnostics stand down; a provider that gave up for the session (COX0
-/// `providerUnavailable`) validates nothing, so they are kept.
+/// diagnostics stand down; a provider that gave up for the session
+/// (`providerUnavailable`) validates nothing, so they are kept.
 #[tokio::test]
 async fn component_usage_diagnostics_stay_when_the_provider_gave_up() {
     let documents = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(

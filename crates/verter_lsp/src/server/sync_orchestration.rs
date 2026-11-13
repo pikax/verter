@@ -1601,7 +1601,7 @@ impl VerterLanguageServer {
         // resolution under a ready snapshot — i.e. on a binding MISMATCH:
         //   * owner gain — `Unresolved` committed, the live snapshot now resolves
         //     an owner (the bootstrap/unowned→owned upgrade);
-        //   * R2-5 owner change/loss — a previously-`Owned` OPEN `.vue` whose
+        //   * owner change/loss — a previously-`Owned` OPEN `.vue` whose
         //     owner changed or disappeared (the live snapshot resolves a
         //     different owner or None). Without this, an already-synced open file
         //     early-returns on a stale `Owned` binding and stays stranded on a
@@ -1787,7 +1787,7 @@ impl VerterLanguageServer {
                     // `Unresolved`, preserves the live IDE TSX, drops AND
                     // CLOSES the stale owner-derived `.vue.ts`), queue it for a
                     // future owner reconciliation, and return. This is the
-                    // owner-loss/mismatch reconcile (R2-5): a previously-
+                    // owner-loss/mismatch reconcile: a previously-
                     // `Owned` open file that lost its owner must shed its stale
                     // `Owned` binding + owner-derived API path here, not retain
                     // them via an early return or an inline commit that leaks
@@ -1863,7 +1863,7 @@ impl VerterLanguageServer {
             })
             .unwrap_or(false);
 
-        // FIX-7: open/sync the NEW IDE path FIRST, then close the old one only
+        // Open/sync the NEW IDE path FIRST, then close the old one only
         // AFTER a successful sync (see the success arm below). On a jsx↔tsx
         // transition whose new sync fails, the old path must stay open and the
         // committed state must not point at the unsynced path — so the close is
@@ -2102,7 +2102,7 @@ impl VerterLanguageServer {
                     self.queue_snapshot_provider_sync(canonical_id.clone());
                 }
 
-                // FIX-7: only NOW — after the new path synced and the new state
+                // Only NOW — after the new path synced and the new state
                 // is committed — close the previous IDE path if it differs. On
                 // failure (the arms below) the old path is left untouched. A REFUSED
                 // (Superseded) owned commit closes nothing — the prior path may be a

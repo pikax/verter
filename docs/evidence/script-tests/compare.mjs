@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// SCR0-AC1 equivalence evidence: the fragment-driven runner reproduces the
+// Script-test baseline parity evidence: the fragment-driven runner reproduces the
 // replaced root `package.json` chains command-for-command, in the same order.
 //
 // Recorded inputs (frozen at the conversion, before `package.json` was
@@ -13,9 +13,9 @@
 // check, first, that the CLI prints exactly the resolver's view, then diff
 // the entries registered by `scripts/test-scripts.d/00-baseline.json` — the
 // migrated chain — against the recorded chains. The single excluded entry is
-// the runner's own self-test, the one registration SCR0 added next to the
-// migrated chain (it is `ci: false`, so the CI comparison has no exclusion);
-// fragments added by later nodes do not enter this comparison. The recorded
+// the runner's own self-test, the one registration the conversion added next
+// to the migrated chain (it is `ci: false`, so the CI comparison has no
+// exclusion); fragments added later do not enter this comparison. The recorded
 // diff is empty exactly when every migrated command matches, in order.
 
 import { spawnSync } from "node:child_process";
@@ -80,10 +80,10 @@ for (const [label, ci, recordedFile] of [
   const mismatches = diffLines(recorded, migrated, label);
   if (mismatches === 0) {
     console.log(
-      `SCR0-AC1 ${label}: ${recorded.length}/${recorded.length} recorded commands reproduced command-for-command, in order (diff empty)`,
+      `script-test baseline parity ${label}: ${recorded.length}/${recorded.length} recorded commands reproduced command-for-command, in order (diff empty)`,
     );
   } else {
-    console.log(`SCR0-AC1 ${label}: ${mismatches} mismatching command line(s) — diff NOT empty`);
+    console.log(`script-test baseline parity ${label}: ${mismatches} mismatching command line(s) — diff NOT empty`);
     failures++;
   }
 }

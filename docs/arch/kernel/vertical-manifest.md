@@ -83,7 +83,7 @@ There is no vertical manifest. The facts it will hold live in nine places:
 - **Option inventories** (`G05`). `vue-options.tsv`, `svelte-options.tsv`.
 - **A closed tag table** (`G06`). `FrameworkAdapterRegistry::tag_disposition`
   matches `FrameworkTag` by hand: Svelte `DeferredVertical` when absent,
-  React and Solid `OutOfScope`. This is VID0 `V-D03` (REG0).
+  React and Solid `OutOfScope`. This is VID0 `V-D03` (the framework registry).
 - **Generated client mirrors** (`G07`). The client framework manifest and the
   virtual-file naming mirror, byte-pinned by
   `client_framework_manifest_ts_is_byte_equal_to_the_rendered_registry` and
@@ -419,7 +419,7 @@ or full support declared over one) and `MN11` (merged Tailwind identity).
 | `VIM-D03` | duplicate component information                                             | UAK0 `D18`: per-request component scan                                                                                                                       | keep that assignment. IDX0 is not a successor of VIM0                                                                                                                                                                                                                                                                                                                                                                          | IDX0 (`IDX0-AC1`), path `UAK0` → `UAK1` → `CAT0` → `DEM0` → `IDX0`                                                                    |
 | `VIM-D04` | duplicate capability authority                                              | hand-maintained `capability-matrix.tsv` (`G01`)                                                                                                              | stops being an authority (`VM26`, `MN07`). VIM1 renders the canonical matrix under `verticals/` (`VIM1-AC-R2`). `FCH1-AC5` requires rendering the harness TSV from that matrix or deleting it. The TSV is not a G03–G05 seed. FCH1's charter path and domain contain the TSV; VIM1's do not. VIM1 already precedes FCH1. `FCH1-AC3` remains a coverage join | FCH1 (`FCH1-AC5`, ruling `fch1-matrix-cutover-acceptance` 2026-10-10), path `VIM0` → `VIM1` → `FCH1`; `VIM-T05` binds that acceptance |
 
-`G06` (`V-D03`, REG0) and `G07` (`CAT-D04`, CPF1) stay with their owners.
+`G06` (`V-D03`, the framework registry) and `G07` (`CAT-D04`, CPF1) stay with their owners.
 `VueOtherVersion` and `SvelteOtherVersion` are complement arms of `G02`.
 NCK5 deletes the arms with the enum (`VIM-F02`, `NCK5-AC1`). VIM1 proves a
 complement is a structural manifest failure (`MN01`, `VIM1-AC-R1`), not a cell.
@@ -477,7 +477,7 @@ rows, each with its own successor path and receiving acceptance.
   VIM1 and its charter path `crates/verter_compiler` contains the file. The
   hand matrix is rendered under `verticals/` and the harness TSV is FCH1's
   (`VIM-D04`, `VIM-T05`).
-- **The tag table calls React and Solid out of scope** (`VIM-F05`, REG0). The
+- **The tag table calls React and Solid out of scope** (`VIM-F05`, the framework registry). The
   plan now carries React and Solid verticals. `V-D03` retags the table; a
   manifest's existence, not a hand row, decides a tag's disposition.
 - **Family P0 locks plan their own capability matrices** (`VIM-F06`, VIM1).

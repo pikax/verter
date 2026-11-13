@@ -1762,7 +1762,7 @@ pub(crate) fn keyspace_budget_exceeded_admits_nothing() {
     );
 }
 
-/// FIX 2 guard — the shared template reducer models TS numeric / boolean /
+/// Guard: the shared template reducer models TS numeric / boolean /
 /// bigint literal interpolation. TS lexes `` `${1 | 2}` `` ⇒ `"1" | "2"`,
 /// `` `${true}` `` ⇒ `"true"`, and a bigint literal as its base-10 digits.
 /// Discriminates the pre-fix fail-closed code (which admitted ONLY string

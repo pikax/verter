@@ -847,7 +847,7 @@ fn rtk_slice_arrow_reducer_actions_answer_completely_and_grow_linearly() {
 
 /// The action union of a three-reducer slice differs from the checker's
 /// only in its member order: the gate version of the ten-reducer test in the
-/// nightly scale tier (semantic-difference ledger SDL-90), with the same
+/// nightly scale tier (the Redux Toolkit slice row of the semantic-difference ledger), with the same
 /// assertions: the stable-key order of `"s/r0"`, `"s/r1"` and `"s/r2"` is
 /// already not their reducer order.
 #[test]
@@ -859,7 +859,7 @@ mod nightly_scale {
     use super::*;
 
     /// The action union of a ten-reducer slice differs from the checker's
-    /// only in its member order (semantic-difference ledger SDL-90,
+    /// only in its member order (the semantic-difference ledger's Redux Toolkit slice row,
     /// `VerterStableV1` order-induced); its gate version is
     /// [`super::rtk_slice_actions_differ_from_the_checker_only_in_union_order`].
     #[test]

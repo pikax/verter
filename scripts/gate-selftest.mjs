@@ -5399,7 +5399,7 @@ fi
         ok = false;
       }
 
-      // (c) [FIX-1 — delete-on-empty] An ALL-implicit-CWD PATH must DELETE the env key, not assign "".
+      // (c) [delete-on-empty] An ALL-implicit-CWD PATH must DELETE the env key, not assign "".
       // The Rust freshness test reads `std::env::var_os("PATH")?`: a PRESENT empty value (`Some("")`) is
       // NOT None, so it reaches `std::env::split_paths("")`, which yields ONE empty PathBuf, and
       // `"".join("buf") == "buf"` (relative ⇒ CWD) resolves a CWD `buf` that RUNS — the fail-open. ONLY a

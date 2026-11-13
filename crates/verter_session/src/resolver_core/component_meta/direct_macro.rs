@@ -8,9 +8,10 @@ use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 
 use super::ComponentMetaResolutionPurpose;
 
-// Spelling-based role recognition (`DEM-D04`): EAK2 replaces this comparison
-// with canonical role evidence produced by EAK1. Until then it is the one
-// needle-level allowlist entry of the `carrier_routing_no_vue_gate` guard.
+// A `Slot` type imported from the Vue runtime package into a `defineSlots`
+// call is the framework's own slot helper, not an external macro type; the
+// same name from any other package is. This is the one spelling-based role
+// comparison that remains.
 pub(super) fn should_ignore_external_macro_type(dep: &MacroTypeDep) -> bool {
     dep.macro_kind == AnalyzedMacroKind::DefineSlots
         && dep.import_source == "vue"

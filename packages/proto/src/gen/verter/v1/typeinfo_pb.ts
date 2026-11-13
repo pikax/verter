@@ -4156,7 +4156,7 @@ export const FrameworkSurfaceRequestSchema: GenMessage<FrameworkSurfaceRequest> 
   messageDesc(file_verter_v1_typeinfo, 119);
 
 /**
- * ComponentSelector — the typed `Component` selector (TR06): a file, an
+ * ComponentSelector — the typed `Component` selector: a file, an
  * export name and the typed framework profile the component is read under.
  *
  * Schema 11 retired the open adapter-id string (field 4, reserved) in

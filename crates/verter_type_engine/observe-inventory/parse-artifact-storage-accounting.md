@@ -10,7 +10,7 @@ retention account. Isolated contexts exist only under test support.
 ## Measurement and ownership conventions
 
 The heap-block, Arc-block, capacity, inline-field and owned-cell conventions
-are those of [the common inventory](SKR-OWN-ACCOUNT.md). `HeapSize` derives
+are those of [the common inventory](semantic-allocation-ownership-and-charges.md). `HeapSize` derives
 destructure every field of every variant; adding an owning field requires
 measurement at compile time. Copy-only fields own no separate heap. No source,
 analysis, declaration, inventory or parser payload uses a fixed per-item weight.

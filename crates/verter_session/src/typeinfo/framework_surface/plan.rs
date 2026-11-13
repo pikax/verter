@@ -236,7 +236,7 @@ pub struct ResolvedComponentSelector {
     /// The component's export kind.
     pub export: ComponentExport,
     /// The admitted semantic profile the component is read under — the
-    /// typed half of the `Component` selector (TR06), resolved from the wire
+    /// typed half of the `Component` selector, resolved from the wire
     /// reference by the registry before any semantic work. Never a display
     /// family or an adapter spelling.
     pub framework_profile: verter_identity::successor::FrameworkProfileId,

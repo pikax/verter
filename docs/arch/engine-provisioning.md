@@ -292,7 +292,7 @@ Tama owns DAG validation; there is no repository roadmap validator to run.
 This section specifies the one descriptor, receipt and install/cache law every
 source adapter consumes before selection or execution. Like the policy above it
 adds no production type, evaluator, cache, adapter or status path. Machine forms
-live in `tests/engine-provisioning/EPR1/`: named schemas in
+live in `tests/engine-provisioning/engine-artifact-contract/`: named schemas in
 `schemas/engine-artifact.schema.json`; decision tables, vectors, limits and the
 obligation population in `products/engine-artifact-contract.v1.json`; and owners
 in `catalogs/engine-validation-ownership.toml`. A vector proves the specification
@@ -623,9 +623,9 @@ together is refused rather than read as a smaller universe.
 Run from the repository root:
 
 ```
-node --test tests/engine-provisioning/EPR1/engine-contract.test.mjs
-node tests/engine-provisioning/EPR1/tools/validate-engine-validation-ownership.mjs --structural
-node tests/engine-provisioning/EPR1/tools/validate-engine-validation-ownership.mjs --live
+node --test tests/engine-provisioning/engine-artifact-contract/engine-contract.test.mjs
+node tests/engine-provisioning/engine-artifact-contract/tools/validate-engine-validation-ownership.mjs --structural
+node tests/engine-provisioning/engine-artifact-contract/tools/validate-engine-validation-ownership.mjs --live
 ```
 
 CI runs the first command, which includes the structural mode and every refusal

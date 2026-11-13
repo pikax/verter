@@ -4485,7 +4485,7 @@ fn inline_static_ref_with_dotvue_default_import_stays_string() {
 }
 
 // =========================================================================
-// R5-FIX3 — scope-check detects setup-locals at any name length / nesting
+// Scope-check detects setup-locals at any name length / nesting
 // =========================================================================
 //
 // Official `checkInvalidScopeReference` walks EVERY referenced identifier in
@@ -4496,7 +4496,7 @@ fn inline_static_ref_with_dotvue_default_import_stays_string() {
 // content-relative name map, could overwrite a same-length setup binding.
 
 #[test]
-fn r5_fix3_one_char_setup_local_nested_default_is_error() {
+fn one_char_setup_local_nested_default_is_error() {
     let result = compile_sfc(
         "<script setup>\nimport { ref } from 'vue'\nconst f = ref(0)\ndefineProps({ x: { default: f } })\n</script>\n<template><div>x</div></template>",
     );
@@ -4512,7 +4512,7 @@ fn r5_fix3_one_char_setup_local_nested_default_is_error() {
 }
 
 #[test]
-fn r5_fix3_one_char_setup_local_array_element_is_error() {
+fn one_char_setup_local_array_element_is_error() {
     // 1-char setup-local as an array element inside defineEmits.
     let result = compile_sfc(
         "<script setup>\nimport { ref } from 'vue'\nconst e = ref('save')\ndefineEmits([e])\n</script>\n<template><div>x</div></template>",
@@ -4529,7 +4529,7 @@ fn r5_fix3_one_char_setup_local_array_element_is_error() {
 }
 
 #[test]
-fn r5_fix3_setup_local_inside_nested_function_body_is_error() {
+fn setup_local_inside_nested_function_body_is_error() {
     // A setup-local referenced INSIDE a nested function body but NOT shadowed
     // (no param/local of that name) is still an invalid scope reference —
     // official walkIdentifiers records it because it is not a function-scope local.

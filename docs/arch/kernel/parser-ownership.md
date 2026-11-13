@@ -328,8 +328,8 @@ attachment locks record "no parser".
 
 ## Parser homes
 
-REG0 creates `H01`–`H07` as empty skeleton crates under `crates/`, with their
-`[workspace.dependencies]` entries (`REG0-AC7`). The workspace's `crates/*`
+The framework registry creates `H01`–`H07` as empty skeleton crates under `crates/`, with their
+`[workspace.dependencies]` entries. The workspace's `crates/*`
 glob makes them members.
 
 - **Dependents.** Only the family's vertical modules (today the `verter_session`
@@ -365,7 +365,7 @@ rule (`PD02`) and the negatives that keep a new one out (`PN03`, `PN06`,
 | Id | Outcome or consumer | Owner |
 | -- | ------------------- | ----- |
 | `PAR-O01` | `ParserDecision` manifest section and typed catalog rendering | VIM1 (`VIM1-AC2`) |
-| `PAR-O02` | Parser homes `H01`–`H07` with manifest edges | REG0 (`REG0-AC7`) |
+| `PAR-O02` | Parser homes `H01`–`H07` with manifest edges | the framework registry |
 | `PAR-O03` | Ownership validator and negatives `PN01`–`PN12` | UAI0 (`UAI0-AC-R1`) |
 | `PAR-O04` | One resolved owner per grammar contract; `CL01`–`CL04`, `CL38` revalidated | UAI0 (`UAI0-AC1`) |
 | `PAR-O05` | Neutral HTML fork with lineage and no edge back | HWC1 (`HWC1-AC1`) |
@@ -373,7 +373,7 @@ rule (`PD02`) and the negatives that keep a new one out (`PN03`, `PN06`,
 | `PAR-C01` | OXC choke point and script-region parses | UAI0 (`UAI0-AC1`) |
 | `PAR-C02` | Parse identity and artifact caches: reuse rejection verified | PER0 (`PER0-AC2`) |
 | `PAR-C03` | `RecoverySnapshot`, `NativeSyntaxDiagnostic` | LSO1C (`LSO1C-AC3`) |
-| `PAR-C04` | Family carrier-grammar rows, owner-local | REG0 (`REG0-AC7`) |
+| `PAR-C04` | Family carrier-grammar rows, owner-local | the framework registry |
 | `PAR-C05` | Probe-manifest TOML reader | TOMLX (`TOMLX-AC1`) |
 | `PAR-C06` | Compiler request and stage identities consume the admitted parse | CMP1 (`CMP1-AC2`) |
 | `PAR-C07` | Neutral HTML fact authority | HWC1 (`HWC1-AC1`) |
@@ -416,8 +416,8 @@ binding has that node's successor path and its own receiving acceptance.
   `config.rs`. `verter_lsp` `config.rs` re-exports the diagnostics
   implementation. CENV keeps config meaning.
 - **Three hand-written JSDoc tag scanners** (`PAR-F06`, NCF-JD-JSDOC).
-- **REG0, LIQ1 and ERB1 place grammar work in `verter_language`** (`PAR-F07`).
-  - REG0 pre-registers `verter_language/src/carriers/` "when PAR0 places them
+- **The framework registry, LIQ1 and ERB1 place grammar work in `verter_language`** (`PAR-F07`).
+  - The registry pre-registers `verter_language/src/carriers/` "when PAR0 places them
     there". PAR0 does not, so `H01`–`H07` replace that location.
   - LIQ1 and ERB1 add central `CarrierGrammarConfig` arms and a private CST in
     `verter_language`. Both move to owner-local rows (CAT0 `CAT-F03`) and to

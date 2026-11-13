@@ -1,5 +1,5 @@
 /**
- * ARH7-AC2: reload or repeated activation must not duplicate registrations.
+ * Reload or repeated activation must not duplicate registrations.
  *
  * The composition root owns one ActivationSession. Concurrent activate()
  * shares that session; deactivate() disposes it; a later activate() starts

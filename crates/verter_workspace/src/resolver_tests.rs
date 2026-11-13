@@ -400,11 +400,11 @@ fn owner_selection_ignores_solution_style_root_membership() {
 
 #[test]
 fn live_resolver_files_are_immune_to_exclude() {
-    // FIX 4: in the LIVE `IdeProjectConfig::matches_file` path, an explicitly
+    // In the LIVE `IdeProjectConfig::matches_file` path, an explicitly
     // listed `files` entry under an excluded directory must still be OWNED —
     // `files` are immune to `exclude` (matching TS + the new `StaticMembershipSpec`).
     //
-    // DISCRIMINATING: before FIX 4 the exclude check ran BEFORE the files check,
+    // DISCRIMINATING: if the exclude check ran BEFORE the files check,
     // so `Keep.vue` (under the excluded `src/excluded`) was wrongly rejected ⇒
     // `nearest_config_for_path` returned `None` (the red). After the fix the file is
     // owned.
@@ -441,7 +441,7 @@ fn live_resolver_files_are_immune_to_exclude() {
 
 #[test]
 fn live_resolver_exclude_only_owns_default_include_minus_exclude() {
-    // FIX 1 (live path / path 2): an exclude-only config keeps the implicit
+    // Live path: an exclude-only config keeps the implicit
     // default include MINUS excludes. The producer synthesizes the default
     // include into the membership, so the LIVE resolver owns `src/Foo.vue` and
     // `src/Foo.svelte` and REJECTS `dist/Foo.vue`. (This mirrors what the new
@@ -478,11 +478,11 @@ fn live_resolver_exclude_only_owns_default_include_minus_exclude() {
 
 #[test]
 fn live_resolver_explicit_empty_files_owns_nothing() {
-    // FIX 1 distinction (live path): an explicit `files: []` solution-style
+    // Distinction (live path): an explicit `files: []` solution-style
     // config (with only the TS-default excludes, no include) owns NOTHING but
     // its references — it must NOT fall back to owning everything-not-excluded.
     //
-    // DISCRIMINATING: before FIX 4 the `!exclude.is_empty()` fallback made this
+    // DISCRIMINATING: an `!exclude.is_empty()` fallback would make this
     // own every non-excluded file (because the TS-default exclude is non-empty)
     // — the red. After the fix an empty-include + empty-files membership owns
     // nothing.
@@ -3344,7 +3344,7 @@ fn unowned_resolution_remains_unbounded() {
 
 #[test]
 fn normalize_canonical_id_strips_trailing_slash_via_owner() {
-    // FIX 4 regression: delegating to the canonical owner strips a strippable
+    // Regression: delegating to the canonical owner strips a strippable
     // trailing slash (the old impl left `c:/x/y/`).
     assert_eq!(normalize_canonical_id("c:/x/y/"), "c:/x/y");
     // UNC: `//?/UNC/` stripped before `//?/`.
@@ -3358,7 +3358,7 @@ fn normalize_canonical_id_strips_trailing_slash_via_owner() {
 
 #[test]
 fn collapse_path_still_collapses_dot_and_dotdot() {
-    // FIX 4: collapse_path keeps its `.`/`..` segment-collapse semantics even
+    // collapse_path keeps its `.`/`..` segment-collapse semantics even
     // though its front-half normalization now delegates to the owner.
     assert_eq!(collapse_path("c:/a/./b/../c"), "c:/a/c");
     assert_eq!(collapse_path("/a/b/../c"), "/a/c");

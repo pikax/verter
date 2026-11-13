@@ -103,7 +103,7 @@ export class VueApiDecorationProvider implements Disposable {
   > = new Map();
 
   /**
-   * `admits` is this decoration's participation cell for a document (COX0):
+   * `admits` is this decoration's participation cell for a document:
    * a withdrawn cell computes and shows nothing. `cellsChanged` re-evaluates
    * the active editor when the cells change.
    */
@@ -216,7 +216,7 @@ export class VueApiDecorationProvider implements Disposable {
       return;
     }
 
-    // The cell is re-checked after the await (COX0): a withdrawal while the
+    // The cell is re-checked after the await: a withdrawal while the
     // analysis was in flight never refills cleared decorations.
     if (!this.admits(editor.document)) {
       this.clearAllDecorations();

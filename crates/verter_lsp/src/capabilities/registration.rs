@@ -1,5 +1,4 @@
-//! Mask-derived dynamic registration of withdrawable capability cells (COX0;
-//! contract rows `StaticRegistration` and `UnsupportedDynamicRegistration`).
+//! Mask-derived dynamic registration of withdrawable capability cells.
 //!
 //! A method the client can register dynamically is not advertised
 //! statically. The server registers it after `initialized` while some served

@@ -1,5 +1,4 @@
-//! The LSP carrier of per-profile participation (COX0; contract
-//! `docs/arch/kernel/cox0d-participation.md`).
+//! The LSP carrier of per-profile participation.
 //!
 //! The server owns one `verter_session::participation::ParticipationService`
 //! for its editor scope. The host declares participation in
@@ -252,7 +251,7 @@ pub(crate) fn admitted_workspace_wide(
 }
 
 /// Whether the scope of a document of `language` at `canonical` disables
-/// every cell: an opening of it retains bytes only (PC04).
+/// every cell: an opening of it retains bytes only.
 pub(crate) fn language_disables_every_cell(
     documents: &DocumentRegistry,
     language: &verter_language::FileLanguage,
@@ -284,7 +283,7 @@ pub(crate) fn document_disables_every_cell(documents: &DocumentRegistry, uri: &U
 
 /// Whether no facet of this document's scope is `Full`: the scope admits at
 /// most explicitly demanded workspace semantics, so no eager open, edit,
-/// provider or publication work is owed to it (DEM0 `DEM-D06`).
+/// provider or publication work is owed to it.
 pub(crate) fn document_owes_no_eager_work(documents: &DocumentRegistry, uri: &Uri) -> bool {
     let site = DocumentSite::of(documents, uri);
     let state = documents.participation().state();
@@ -529,7 +528,7 @@ pub(crate) fn invalid_params(message: String) -> jsonrpc::Error {
 }
 
 /// Feed this scope the selected TypeScript authority's availability from
-/// its owner (COX0 `ProviderUnavailable`). Verter-only mode selects no
+/// its owner (`ProviderUnavailable`). Verter-only mode selects no
 /// authority; an editor-owned one is the editor's to report. A provider whose
 /// one lifecycle gives up for the session withdraws it then, and every open
 /// document republishes: its TypeScript facet refuses as
@@ -585,10 +584,10 @@ pub(crate) fn observe_provider_availability(
     });
 }
 
-/// The diagnostic facets one document's publication may carry (DEM0
-/// `DEM-D01`): each producer runs only when its own cell admits
-/// `DiagnosticsPublication`, so a withdrawn facet costs no producer work
-/// and publishes nothing, while the document's other facets still publish.
+/// The diagnostic facets one document's publication may carry: each producer
+/// runs only when its own cell admits `DiagnosticsPublication`, so a
+/// withdrawn facet costs no producer work and publishes nothing, while the
+/// document's other facets still publish.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct DiagnosticFacets {
     /// Compiler, projection-limit and environment diagnostics.

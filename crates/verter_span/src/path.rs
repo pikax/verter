@@ -740,7 +740,7 @@ pub fn longest_project_root<'a>(
     roots: &'a [String],
     workspace_root: &'a str,
 ) -> Cow<'a, str> {
-    // Canonicalize `file` once (FIX 2b) rather than per-iteration.
+    // Canonicalize `file` once rather than per-iteration.
     let p = canonicalize_path_cow(file);
     let p = p.as_ref();
 

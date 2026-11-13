@@ -296,13 +296,14 @@ fn a_deep_chain_over_a_reduced_budget_ends_on_the_work_rail() {
 /// `const` arrow functions and for the chain through local arrow
 /// functions.
 /// The other call shapes: the gate version of the 128-level test in the
-/// nightly scale tier. Each 32-level chain, longer than the cap, answers like
-/// its three-level chain under that chain's depth cap, and each 101-level
-/// chain runs on 768 KiB. The forms need 256 to
-/// 512 KiB of fixed stack, so 768 KiB leaves at most 5.1 KiB a level over 101
-/// levels, against at least the 4.0 to 6.0 KiB that 1 MiB leaves over 128
-/// levels for the same fixed need. The chains are past the checker's
-/// instantiation depth.
+/// nightly scale tier. Each 101-level chain answers like its three-level
+/// chain under that chain's depth cap, on a 768 KiB stack, in one
+/// evaluation: a chain that consumed query depth per level would be refused
+/// under the cap, and one that consumed native stack per level would
+/// overflow. The forms need 256 to 512 KiB of fixed stack, so 768 KiB leaves
+/// at most 5.1 KiB a level over 101 levels, against at least the 4.0 to
+/// 6.0 KiB that 1 MiB leaves over 128 levels for the same fixed need. The
+/// chains are past the checker's instantiation depth.
 #[test]
 fn chains_through_other_call_shapes_consume_no_depth_per_level_to_101_levels() {
     let shapes: [(&str, ChainSource, Vec<TypeExpr>); 3] = [
@@ -311,31 +312,22 @@ fn chains_through_other_call_shapes_consume_no_depth_per_level_to_101_levels() {
         ("local arrow", local_arrow_chain, vec![number(), string()]),
     ];
     for (shape, chain, arms) in shapes {
-        let (long, short, depth) = on_stack(8 << 20, move || {
+        let (short, depth) = on_stack(8 << 20, move || {
             let short_source = chain(3);
-            let depth = depth_needed(&short_source);
-            (
-                witness_under_caps(&chain(32), MAX_CONNECTED_PROJECTION_WORK, depth).0,
-                witness_outcome(&short_source),
-                depth,
-            )
+            (witness_outcome(&short_source), depth_needed(&short_source))
         });
         assert_tagged_value(&short, &arms);
-        // A chain longer than the cap that consumed depth per level would be
-        // refused under it.
         assert!(
-            depth < 32,
+            depth < 101,
             "the short {shape} chain needs a query depth of {depth}"
         );
+        let long = on_stack(768 << 10, move || {
+            witness_under_caps(&chain(101), MAX_CONNECTED_PROJECTION_WORK, depth).0
+        });
         assert_eq!(
             long, short,
-            "the 32-level {shape} chain answers like the short one under its depth cap \
-             ({depth})"
-        );
-        let on_small_stack = on_stack(768 << 10, move || witness_outcome(&chain(101)));
-        assert_eq!(
-            on_small_stack, short,
-            "the 101-level {shape} chain runs on a 768 KiB stack"
+            "the 101-level {shape} chain answers like the short one under its depth cap \
+             ({depth}) on a 768 KiB stack"
         );
     }
 }
@@ -628,16 +620,15 @@ fn module_chain_across_a_middle_edit(levels: usize) -> (Outcome, Outcome) {
     (before, witness(&host))
 }
 
-/// An edit to the middle module of a 64-module chain reaches the top: the
-/// gate version of the 201-module test in the nightly scale tier. Thirty-one
-/// modules sit above the edit, past the connected query depth a stale
+/// An edit to the middle module of a 101-module chain reaches the top: the
+/// gate version of the 201-module test in the nightly scale tier. Like it,
+/// the chain is past the checker's instantiation depth of 100, and the fifty
+/// modules above the edit reach past the connected query depth a stale
 /// candidate used to answer within; counting a stale candidate as answered,
-/// the edited chain misses at 64 modules, as at 128 and 201. A chain past
-/// the checker's instantiation depth is
-/// [`a_generic_chain_across_101_modules_answers_without_a_refusal`].
+/// the edited chain misses at 64 modules, as at 128 and 201.
 #[test]
-fn an_edit_in_the_middle_of_a_64_module_chain_reaches_the_top() {
-    const LEVELS: usize = 64;
+fn an_edit_in_the_middle_of_a_101_module_chain_reaches_the_top() {
+    const LEVELS: usize = 101;
     const {
         assert!(
             LEVELS - 1 - LEVELS / 2 > MAX_CONNECTED_QUERY_DEPTH as usize,

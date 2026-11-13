@@ -108,7 +108,7 @@
     "reason": "Dialect contract review case table; no ci.yml job reads its contents."
   },
   {
-    "glob": "tests/engine-provisioning/evidence/EPR1/cases.md",
+    "glob": "tests/engine-provisioning/evidence/engine-artifact-contract/cases.md",
     "reason": "Evidence index for review; no ci.yml job reads it."
   },
   {

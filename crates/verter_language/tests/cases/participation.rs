@@ -1,5 +1,4 @@
-//! COX0 participation mask contract (`docs/arch/kernel/cox0d-participation.md`):
-//! profile-qualified capability identity, per-cell modes, canonical mask
+//! Participation mask contract: profile-qualified capability identity, per-cell modes, canonical mask
 //! identity and the typed non-execution reason order.
 
 use verter_identity::encoding::{CanonicalDigest, CanonicalEncode, CanonicalEncoder};
@@ -17,7 +16,7 @@ use verter_language::participation::{
 };
 
 fn epoch() -> ProfileSchemaEpoch {
-    ProfileSchemaEpoch::for_schema_family("cox0-test.descriptor", 1)
+    ProfileSchemaEpoch::for_schema_family("participation-test.descriptor", 1)
 }
 
 fn carrier(family: &str) -> ProfileRef {
@@ -38,7 +37,7 @@ fn framework(family: &str, version: &str, major: u32) -> ProfileRef {
 struct Path<'a>(&'a str);
 
 impl CanonicalEncode for Path<'_> {
-    const DOMAIN_TAG: &'static str = "cox0-test.source";
+    const DOMAIN_TAG: &'static str = "participation-test.source";
 
     fn encode_fields(&self, encoder: &mut CanonicalEncoder) {
         encoder.field_str(1, self.0);
@@ -98,7 +97,7 @@ fn overlap(capability: CapabilityId, selector: SelectorScope, row: &str) -> Owne
     }
 }
 
-/// `R02` capability half: a new release re-mints the framework capability
+/// Capability half of the release law: a new release re-mints the framework capability
 /// and leaves the carrier capability equal; the facet alone is never the
 /// identity.
 #[test]
@@ -122,7 +121,7 @@ fn capability_identity_follows_its_profile_release() {
     assert_eq!(Op::from_key("vue"), None, "a display family is not a facet");
 }
 
-/// PC01 and PC09: under `auto`, a proven overlap withdraws exactly the
+/// Under `auto`, a proven overlap withdraws exactly the
 /// overlapping profile, selector and facet. Unrelated facets, profiles,
 /// documents and regions keep Full and still admit interactive demand.
 #[test]
@@ -213,7 +212,7 @@ fn auto_overlap_withdraws_only_the_overlapping_cell() {
     );
 }
 
-/// PC02: an explicit effective `full` wins over every competing-tool
+/// An explicit effective `full` wins over every competing-tool
 /// observation; installation alone (no declaration) withdraws nothing.
 #[test]
 fn explicit_full_wins_over_observed_overlap() {
@@ -251,7 +250,7 @@ fn explicit_full_wins_over_observed_overlap() {
 }
 
 /// Each preset's admission table, including `workspace` admitting only
-/// bounded workspace semantics and a caller-only batch check (PC03/PC04).
+/// bounded workspace semantics and a caller-only batch check.
 #[test]
 fn presets_admit_exactly_their_purposes() {
     use DemandPurpose::*;
@@ -390,7 +389,7 @@ fn the_most_specific_declaration_decides_in_any_order() {
     }
 }
 
-/// PC10: equivalent declarations in any order, duplicated, or with
+/// Equivalent declarations in any order, duplicated, or with
 /// different evidence for one cell mint one mask identity; a changed
 /// effective input mints another; contradictions and non-optional
 /// presentation withdrawals are refused before publication.
@@ -504,7 +503,7 @@ fn mask_identity_is_canonical_and_contradictions_are_refused() {
     }
 }
 
-/// PC05/PC06: provider absence, unsupported client support and a disabled
+/// Provider absence, unsupported client support and a disabled
 /// optional visual layer stay distinct from withdrawal and from each other;
 /// every restriction is kept and the primary reason follows the fixed order.
 #[test]
@@ -583,7 +582,7 @@ fn non_execution_reasons_stay_distinct_in_primary_order() {
         .primary,
         NonExecutionReason::ProviderUnavailable
     );
-    // Native work that needs no provider is still admitted (PC05).
+    // Native work that needs no provider is still admitted.
     assert!(typed(
         &hover,
         ProviderRequirement::NotRequired,

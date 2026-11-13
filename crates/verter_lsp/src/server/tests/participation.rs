@@ -1,6 +1,5 @@
-//! COX0: the LSP admits every semantic request, custom method and
-//! diagnostics producer through one participation gate
-//! (`docs/arch/kernel/cox0d-participation.md`).
+//! The LSP admits every semantic request, custom method and diagnostics
+//! producer through one participation gate.
 
 use super::*;
 use verter_language::participation::CapabilityOperation as Op;
@@ -57,14 +56,14 @@ fn profile_ref(server: &VerterLanguageServer, uri: &Uri) -> serde_json::Value {
     serde_json::json!({ "kind": kind, "id": profile.digest().to_hex() })
 }
 
-/// PC04/PC12: a disabled scope refuses a request with a typed reason even
-/// though the method stays statically advertised, and the same request is
-/// served again once the scope is re-enabled.
+/// A disabled scope refuses a request with a typed reason even though the
+/// method stays statically advertised, and the same request is served again
+/// once the scope is re-enabled.
 #[tokio::test]
 async fn disabled_scope_refuses_statically_advertised_requests() {
     let service = service();
     let server = service.inner();
-    let uri = open_test_vue(server, "/cox0/App.vue", APP);
+    let uri = open_test_vue(server, "/participation/App.vue", APP);
     assert!(host_server_capabilities(true)
         .folding_range_provider
         .is_some());
@@ -103,17 +102,17 @@ async fn disabled_scope_refuses_statically_advertised_requests() {
     assert!(server.folding_range(folding(&uri)).await.is_ok());
 }
 
-/// PC01/PC02/PC09: a proven overlap on one document's TypeScript diagnostic
-/// publication withdraws exactly that facet there. The document's other
-/// facets and requests, and every other document, are untouched; an explicit
-/// `full` for the facet wins over the overlap.
+/// A proven overlap on one document's TypeScript diagnostic publication
+/// withdraws exactly that facet there. The document's other facets and
+/// requests, and every other document, are untouched; an explicit `full` for
+/// the facet wins over the overlap.
 #[tokio::test]
 async fn overlap_withdraws_only_the_overlapping_diagnostic_facet() {
     use crate::participation::DiagnosticFacets;
     let service = service();
     let server = service.inner();
-    let app = open_test_vue(server, "/cox0/App.vue", APP);
-    let other = open_test_vue(server, "/cox0/Other.vue", APP);
+    let app = open_test_vue(server, "/participation/App.vue", APP);
+    let other = open_test_vue(server, "/participation/Other.vue", APP);
     let overlap = serde_json::json!({
         "profile": profile_ref(server, &app),
         "operation": "diagnostics.typescript",
@@ -155,13 +154,13 @@ async fn overlap_withdraws_only_the_overlapping_diagnostic_facet() {
     );
 }
 
-/// DEM0 `DEM-D01`: a document whose Verter diagnostic facets are all
-/// withdrawn runs no Verter producer and warms no cache entry.
+/// A document whose Verter diagnostic facets are all withdrawn runs no
+/// Verter producer and warms no cache entry.
 #[tokio::test]
 async fn withdrawn_verter_facets_run_no_producer() {
     let service = service();
     let server = service.inner();
-    let uri = open_test_vue(server, "/cox0/App.vue", APP);
+    let uri = open_test_vue(server, "/participation/App.vue", APP);
     server
         .update_participation(everywhere("workspace"))
         .await
@@ -179,13 +178,13 @@ async fn withdrawn_verter_facets_run_no_producer() {
     assert!(cache.is_empty(), "a withdrawn publication warms nothing");
 }
 
-/// PC07: an answer computed under a superseded demand epoch is never served,
-/// while an equivalent re-observation mints no epoch and leaves it current.
+/// An answer computed under a superseded demand epoch is never served, while
+/// an equivalent re-observation mints no epoch and leaves it current.
 #[tokio::test]
 async fn superseded_answers_are_never_served() {
     let service = service();
     let server = service.inner();
-    let uri = open_test_vue(server, "/cox0/App.vue", APP);
+    let uri = open_test_vue(server, "/participation/App.vue", APP);
 
     let unchanged = server
         .interactive(Op::FoldingRange, Some(&uri), async {
@@ -221,7 +220,7 @@ async fn superseded_answers_are_never_served() {
 async fn invalid_inputs_change_nothing() {
     let service = service();
     let server = service.inner();
-    let uri = open_test_vue(server, "/cox0/App.vue", APP);
+    let uri = open_test_vue(server, "/participation/App.vue", APP);
     let before = server.documents.participation().epoch();
     let error = server
         .update_participation(everywhere("off"))
@@ -250,8 +249,8 @@ async fn invalid_inputs_change_nothing() {
     assert!(server.folding_range(folding(&uri)).await.is_ok());
 }
 
-/// DEM0 `DEM-D06`: opening a document in a disabled scope retains its bytes
-/// and schedules no eager provider or diagnostics work.
+/// Opening a document in a disabled scope retains its bytes and schedules no
+/// eager provider or diagnostics work.
 #[tokio::test]
 async fn disabled_open_schedules_no_eager_work() {
     let service = service();
@@ -260,7 +259,7 @@ async fn disabled_open_schedules_no_eager_work() {
         .update_participation(everywhere("disabled"))
         .await
         .expect("valid input");
-    let uri: Uri = "file:///cox0/Closed.vue".parse().expect("uri");
+    let uri: Uri = "file:///participation/Closed.vue".parse().expect("uri");
     server
         .did_open(DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
@@ -288,7 +287,7 @@ async fn readmitted_document_rearms_provider_sync() {
         .update_participation(everywhere("disabled"))
         .await
         .expect("valid input");
-    let uri: Uri = "file:///cox0/Later.vue".parse().expect("uri");
+    let uri: Uri = "file:///participation/Later.vue".parse().expect("uri");
     server
         .did_open(DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
@@ -316,7 +315,7 @@ async fn readmitted_document_rearms_provider_sync() {
 async fn typescript_only_withdrawal_keeps_the_verter_cache() {
     let service = service();
     let server = service.inner();
-    let uri = open_test_vue(server, "/cox0/App.vue", APP);
+    let uri = open_test_vue(server, "/participation/App.vue", APP);
     server
         .update_participation(input(serde_json::json!({ "version": 1, "presets": [
             { "target": { "kind": "operation", "operation": "diagnostics.typescript" },
@@ -350,7 +349,7 @@ async fn provider_exhaustion_withdraws_only_the_typescript_facet() {
     let provider = Arc::new(MockTypeProvider::new());
     let service = make_hover_test_service(provider.clone());
     let server = service.inner();
-    let uri = open_test_vue(server, "/cox0/App.vue", APP);
+    let uri = open_test_vue(server, "/participation/App.vue", APP);
     let canonical = uri_to_canonical_id(&uri);
     assert_eq!(
         DiagnosticFacets::admitted(&server.documents, &canonical),
@@ -422,7 +421,7 @@ async fn verter_only_mode_starts_without_a_typescript_authority() {
     );
 }
 
-/// COX0 `StaticRegistration`: a method the client registers dynamically is
+/// Static registration: a method the client registers dynamically is
 /// not advertised statically. It stays registered while some served profile
 /// admits it, leaves the client once the mask withdraws it everywhere, and a
 /// withdrawal narrower than a profile keeps it registered (refused per
@@ -451,7 +450,7 @@ async fn dynamic_registration_follows_the_mask() {
 
     let service = service();
     let server = service.inner();
-    let app = open_test_vue(server, "/cox0/App.vue", APP);
+    let app = open_test_vue(server, "/participation/App.vue", APP);
     let hover_registered = || {
         registrations
             .desired(&server.documents)
@@ -505,9 +504,9 @@ async fn dynamic_registration_follows_the_mask() {
         .contains("workspace/symbol"));
 }
 
-/// PC04: a cold open and edits in a scope that disables every cell retain
-/// the bytes only, and nothing reaches the host. Re-admission runs the open
-/// the document was owed, on its newest bytes.
+/// A cold open and edits in a scope that disables every cell retain the
+/// bytes only, and nothing reaches the host. Re-admission runs the open the
+/// document was owed, on its newest bytes.
 #[tokio::test]
 async fn disabled_scope_retains_bytes_only() {
     const EDITED: &str = "<template>\n  <p>{{ msg }}</p>\n</template>\n<script setup lang=\"ts\">\nconst msg = 'edited'\n</script>\n";
@@ -517,7 +516,7 @@ async fn disabled_scope_retains_bytes_only() {
         .update_participation(everywhere("disabled"))
         .await
         .expect("valid input");
-    let uri: Uri = "file:///cox0/Retained.vue".parse().expect("uri");
+    let uri: Uri = "file:///participation/Retained.vue".parse().expect("uri");
     let canonical = uri_to_canonical_id(&uri);
     server
         .did_open(DidOpenTextDocumentParams {
@@ -597,9 +596,9 @@ async fn disabled_scope_retains_bytes_only() {
     assert_eq!(host_source(), Some(APP.to_owned()));
 }
 
-/// PC04 with a narrower re-admission: a region declaration that lifts one
-/// region of an otherwise disabled scope keeps the document materialized,
-/// so the region's positional demands are classified and served.
+/// With a narrower re-admission, a region declaration that lifts one region
+/// of an otherwise disabled scope keeps the document materialized, so the
+/// region's positional demands are classified and served.
 #[tokio::test]
 async fn region_readmission_keeps_the_document_materialized() {
     let service = service();
@@ -612,7 +611,7 @@ async fn region_readmission_keeps_the_document_materialized() {
         ]})))
         .await
         .expect("valid input");
-    let uri = open_test_vue(server, "/cox0/Styled.vue", APP);
+    let uri = open_test_vue(server, "/participation/Styled.vue", APP);
     assert!(!server.documents.is_retained(&uri));
 }
 
@@ -650,7 +649,7 @@ async fn code_action_kinds_are_separate_cells() {
 
     let service = service();
     let server = service.inner();
-    let uri = open_test_vue(server, "/cox0/App.vue", APP);
+    let uri = open_test_vue(server, "/participation/App.vue", APP);
     server
         .update_participation(input(serde_json::json!({ "version": 1, "presets": [
             { "target": { "kind": "operation", "operation": "codeAction.refactor" },
@@ -771,7 +770,7 @@ async fn completion_items_never_resolve_across_a_transition() {
 async fn workspace_wide_demands_need_every_served_profile() {
     let service = service();
     let server = service.inner();
-    let app = open_test_vue(server, "/cox0/App.vue", APP);
+    let app = open_test_vue(server, "/participation/App.vue", APP);
     let symbols = || {
         crate::participation::admit(
             &server.documents,
@@ -805,7 +804,7 @@ async fn workspace_scope_open_schedules_no_eager_work() {
         .update_participation(everywhere("workspace"))
         .await
         .expect("valid input");
-    let uri: Uri = "file:///cox0/Workspace.vue".parse().expect("uri");
+    let uri: Uri = "file:///participation/Workspace.vue".parse().expect("uri");
     server
         .did_open(DidOpenTextDocumentParams {
             text_document: TextDocumentItem {
@@ -821,15 +820,15 @@ async fn workspace_scope_open_schedules_no_eager_work() {
         .contains(&uri_to_canonical_id(&uri)));
 }
 
-/// PC09 at the server: a positional request is admitted against the cell of
-/// the region it lands in, so a stylesheet-region overlap refuses a hover in
+/// At the server, a positional request is admitted against the cell of the
+/// region it lands in, so a stylesheet-region overlap refuses a hover in
 /// `<style>` while template hover is still served.
 #[tokio::test]
 async fn positional_requests_carry_their_region_role() {
     const STYLED: &str = "<template>\n  <div class=\"a\">{{ msg }}</div>\n</template>\n<script setup lang=\"ts\">\nconst msg = 'hi'\n</script>\n<style>\n.a { color: red; }\n</style>\n";
     let service = service();
     let server = service.inner();
-    let uri = open_test_vue(server, "/cox0/Styled.vue", STYLED);
+    let uri = open_test_vue(server, "/participation/Styled.vue", STYLED);
     server
         .update_participation(input(serde_json::json!({ "version": 1, "ownership": [{
             "profile": profile_ref(server, &uri),
@@ -874,14 +873,14 @@ async fn positional_requests_carry_their_region_role() {
     );
 }
 
-/// PC09 at the host boundary: a stylesheet-region overlap withdraws only
-/// the style-region cell, and the receipt reports exactly that, so a host
-/// gates its client-local producers on the same cells.
+/// At the host boundary, a stylesheet-region overlap withdraws only the
+/// style-region cell, and the receipt reports exactly that, so a host gates
+/// its client-local producers on the same cells.
 #[tokio::test]
 async fn receipt_reports_region_cells_for_client_local_gating() {
     let service = service();
     let server = service.inner();
-    let app = open_test_vue(server, "/cox0/App.vue", APP);
+    let app = open_test_vue(server, "/participation/App.vue", APP);
     let profile = profile_ref(server, &app);
     let id = profile["id"].as_str().expect("profile id").to_owned();
     let receipt = server

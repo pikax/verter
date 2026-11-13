@@ -104,7 +104,7 @@ fn carrier_ownership_extension_rules() {
 
         // Case 7 — an EXCLUDE-ONLY config (no `files`/`include`) keeps the
         // implicit default include MINUS the excludes: it OWNS `src/Foo.{ext}`
-        // and REJECTS `dist/Foo.{ext}`. DISCRIMINATING for FIX 1: before the
+        // and REJECTS `dist/Foo.{ext}`. DISCRIMINATING: before the
         // default-include synthesis an exclude-only config owned NOTHING.
         let owned_src = format!("d:/ws/src/Foo.{ext}");
         let owned = resolve_with(

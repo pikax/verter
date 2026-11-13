@@ -1634,7 +1634,7 @@ fn store_meta_payload_stamps_flight_captured_generation_not_live() {
     );
 }
 
-/// FIX-4 regression: a per-item typed OUTPUT-materialization failure in the
+/// Regression: a per-item typed OUTPUT-materialization failure in the
 /// payload batch surfaces as a per-item `Err` slot — NEVER the `Ok(None)`
 /// missing sentinel (a real failure must not be reported as "component does
 /// not exist"), while sibling items keep succeeding (the batch does not

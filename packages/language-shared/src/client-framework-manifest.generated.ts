@@ -110,7 +110,7 @@ export const CLIENT_FRAMEWORK_LANGUAGE_IDS: readonly string[] = ["vue", "svelte"
 // Every framework carrier file extension, across registered frameworks.
 export const CLIENT_CARRIER_EXTENSIONS: readonly string[] = [".vue", ".svelte"];
 
-// Every participation capability facet key (COX0), in vocabulary order: the
+// Every participation capability facet key, in vocabulary order: the
 // only operation spellings a host may name in a participation input.
 export const PARTICIPATION_OPERATIONS: readonly string[] = [
   "hover",

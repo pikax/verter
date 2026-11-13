@@ -1544,7 +1544,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
     }
 }
 
-/// FIX 2 discrimination proof: a COMPLETE result that hits a BENIGN
+/// Discrimination proof: a COMPLETE result that hits a BENIGN
 /// non-cacheable inner memo (signature-overflow / unrootable self-root /
 /// ReturnOnly) MUST STILL warm the component-meta final cache.
 ///
@@ -1553,7 +1553,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
 /// so `observe_component_meta_read_suppress` MUST NOT raise the request's
 /// suppression flag for ANY of these complete results. Were a memo site to
 /// wrongly tag a benign non-cacheable winner with `result_is_partial = true`
-/// (the bug the memo fixtures encoded pre-FIX-2), this test would FAIL: the
+/// (the bug the memo fixtures used to encode), this test would FAIL: the
 /// flag would fire and the complete component-meta result would be wrongly
 /// refused warm promotion.
 #[test]
@@ -1657,7 +1657,7 @@ fn projectpath_over_instantiationref_budget_trip_withholds_value_and_does_not_wa
     // nested `Instantiate(Partial<…>)` (op 2) both pass the entry/raw-build
     // budget gates, so the walk reaches the builtin-utility mapper path;
     // `Partial`'s nested `KeyOf` / `MappedType` (op 3+) then trips the fuse
-    // INSIDE the instantiation, exercising the FIX-1 mapper-utility fold AND
+    // INSIDE the instantiation, exercising the mapper-utility fold AND
     // the walker fold — NOT the dispatch-entry post-trip early-exit.
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
         analysis_level: crate::types::AnalysisLevel::Full,
@@ -1702,7 +1702,7 @@ fn projectpath_over_instantiationref_budget_trip_withholds_value_and_does_not_wa
     // ProjectPath over the InstantiationRef. The walker unwraps the builtin
     // InstantiationRef → dispatches the nested `Instantiate` → the builtin
     // `Partial` mapper's nested KeyOf/MappedType trips the budget → the
-    // FIX-1 fold raises `result_is_partial`, threaded out through the
+    // mapper-utility fold raises `result_is_partial`, threaded out through the
     // builtin-utility tuple and the walker, and drained onto the build
     // output by `build_project_path`.
     let projectpath_key = SemanticQueryKey::ProjectPath {

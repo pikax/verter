@@ -1,6 +1,5 @@
-//! COX0 participation service: atomic mask/demand-epoch publication and the
-//! retirement fence (`docs/arch/kernel/cox0d-participation.md`, demand
-//! epochs and withdrawal).
+//! Participation service: atomic mask/demand-epoch publication and the
+//! retirement fence (demand epochs and withdrawal).
 
 use verter_identity::successor::{CarrierProfileId, ProfileSchemaEpoch};
 use verter_language::participation::{
@@ -23,7 +22,7 @@ fn preset(preset: ParticipationPreset) -> ParticipationInputs {
 }
 
 fn hover() -> CapabilityId {
-    let epoch = ProfileSchemaEpoch::for_schema_family("cox0-test.descriptor", 1);
+    let epoch = ProfileSchemaEpoch::for_schema_family("participation-test.descriptor", 1);
     CapabilityId::new(
         ProfileRef::Carrier(CarrierProfileId::from_carrier("vue", &epoch)),
         CapabilityOperation::Hover,
@@ -40,7 +39,7 @@ fn interactive(capability: &CapabilityId, provider: ProviderRequirement) -> Admi
     }
 }
 
-/// PC07/PC08: full → workspace → disabled → full advances the fence at each
+/// Full → workspace → disabled → full advances the fence at each
 /// effective step. The final mask equals the original one, yet no permit
 /// admitted under an earlier epoch is current again, and admission under
 /// each intermediate epoch follows that epoch's mask.
@@ -94,7 +93,7 @@ fn returning_to_an_earlier_mask_never_revives_earlier_work() {
         .admit(&interactive(&capability, ProviderRequirement::NotRequired))
         .expect("full admits hover again");
     assert!(service.is_current(&fresh));
-    // PC08: the incremental host answers like a fresh host given the same
+    // The incremental host answers like a fresh host given the same
     // final inputs.
     let fresh_host = ParticipationService::new();
     fresh_host
@@ -113,7 +112,7 @@ fn returning_to_an_earlier_mask_never_revives_earlier_work() {
     assert!(!fresh_host.is_current(&held));
 }
 
-/// PC10/PC13: an equivalent re-observation mints no epoch and leaves held
+/// An equivalent re-observation mints no epoch and leaves held
 /// work current; a provider-availability change mints a demand epoch on its
 /// own, and a refused mask publishes nothing.
 #[test]
@@ -189,7 +188,7 @@ fn equivalent_reobservation_refreshes_cell_evidence() {
     use verter_language::participation::{OwnershipDeclaration, OwnershipEvidence};
 
     let evidence = |row: &str| {
-        let mut encoder = CanonicalEncoder::new("cox0-test.evidence");
+        let mut encoder = CanonicalEncoder::new("participation-test.evidence");
         encoder.field_str(1, row);
         OwnershipEvidence(encoder.digest())
     };

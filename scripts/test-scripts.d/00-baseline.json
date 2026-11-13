@@ -137,7 +137,7 @@
     },
     {
       "runner": "node-test",
-      "file": "tests/engine-provisioning/EPR1/engine-contract.test.mjs",
+      "file": "tests/engine-provisioning/engine-artifact-contract/engine-contract.test.mjs",
       "ci": true,
       "ciIndex": 21
     },

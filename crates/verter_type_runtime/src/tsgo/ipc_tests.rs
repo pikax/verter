@@ -3545,7 +3545,7 @@ async fn cached_content_resolves_equivalent_path_forms_after_load_file() {
 }
 
 // ---------------------------------------------------------------------------
-// Workspace node_modules tsgo discovery + canonical precedence (FIX-1)
+// Workspace node_modules tsgo discovery + canonical precedence
 // ---------------------------------------------------------------------------
 
 /// Verify that kill_on_drop prevents orphaned child processes.
@@ -4328,7 +4328,7 @@ fn fold_lsp_resolve_detail_keeps_existing_when_resolve_empty() {
     assert_eq!(enriched.documentation.as_deref(), Some("the existing doc"));
 }
 
-// ── FIX-5: completion-detail enrichment is BOUNDED (list cap + concurrency) ──
+// ── Completion-detail enrichment is BOUNDED (list cap + concurrency) ──
 
 /// Build a completion carrying an `Lsp` resolve handle so it is eligible for
 /// `completionItem/resolve` enrichment.

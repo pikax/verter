@@ -419,6 +419,97 @@ fn an_unminted_profile_reference_is_unknown_framework_profile() {
     assert_eq!(expect_unknown_profile(&result), forged);
 }
 
+/// The semantic work a host has done so far: the shared graph's cold builds,
+/// instantiations, relation checks, decided conditionals and substitutions,
+/// and the file artifacts it holds.
+fn semantic_work(host: &VerterHost) -> [(&'static str, u64); 6] {
+    let store = host.project_type_store();
+    let stats = store.semantic_graph().stats_snapshot();
+    [
+        ("cold builds", stats.misses),
+        ("instantiations", stats.instantiate_count),
+        ("relation checks", stats.relation_check_count),
+        ("decided conditionals", stats.conditional_decided_count),
+        ("substitutions", stats.substitute_memo_misses),
+        (
+            "file artifacts",
+            store.file_artifacts().live_artifact_count() as u64,
+        ),
+    ]
+}
+
+/// The framework-surface wire entry validates the envelope first, then
+/// admits the selector's profile, and only then resolves anything. A
+/// malformed envelope is the typed malformed error even when its profile
+/// reference is also unknown, and neither a malformed envelope nor an
+/// unadmitted profile does any semantic work: the owner component stays
+/// unresolved until a well-formed, admitted request names it.
+///
+/// Mutation recipes: resolving the owner before validation or before
+/// admission makes a rejected request move the work counters; admitting
+/// the profile before validation answers the malformed envelope with a
+/// forged reference as `UnknownFrameworkProfile`.
+#[test]
+fn framework_surface_wire_executor_validates_first() {
+    let host = build_host();
+    let advertised = advertised_profile(&host, "vue");
+    let forged = wire::FrameworkProfileRef {
+        digest: vec![0xAB; wire::FRAMEWORK_PROFILE_DIGEST_LEN],
+    };
+    let current = wire::TYPEINFO_GRAPH_SCHEMA_VERSION;
+    let before = semantic_work(&host);
+
+    // An operation that disagrees with the payload arm.
+    let mut mismatched =
+        framework_envelope_versioned("/Parity.vue", Some(advertised.clone()), current, current);
+    mismatched.operation = wire::Operation::ResolveSymbol as i32;
+    host.type_info_with_audit(mismatched)
+        .as_result()
+        .expect_err("an operation / payload mismatch is the Err outcome");
+
+    // A schema the operation does not accept, naming a profile the host
+    // never minted: validation answers before admission could.
+    let malformed_and_forged =
+        framework_envelope_versioned("/Parity.vue", Some(forged.clone()), 10, 10);
+    let error = host
+        .type_info_with_audit(malformed_and_forged)
+        .as_result()
+        .expect_err("a sub-minimum schema version is the Err outcome")
+        .clone();
+    assert!(
+        matches!(
+            error.kind,
+            Some(type_info_request_error::Kind::MalformedPayload(_))
+        ),
+        "the malformed envelope is rejected before its profile is admitted, got {:?}",
+        error.kind
+    );
+
+    // A well-formed envelope naming a profile the host never minted.
+    let unadmitted =
+        framework_envelope_versioned("/Parity.vue", Some(forged.clone()), current, current);
+    assert_eq!(
+        expect_unknown_profile(&host.type_info_with_audit(unadmitted)),
+        forged
+    );
+
+    assert_eq!(
+        semantic_work(&host),
+        before,
+        "a rejected framework-surface request does no semantic work"
+    );
+
+    // Control: the same owner under the advertised profile resolves, so the
+    // counters above move when the executor does resolve.
+    let admitted = host.type_info_with_audit(framework_envelope(&host, "/Parity.vue", "vue"));
+    expect_payload(admitted.as_result().expect("an admitted request resolves"));
+    let after = semantic_work(&host);
+    assert!(
+        after[0].1 > before[0].1,
+        "resolving the component builds semantic queries: {before:?} -> {after:?}"
+    );
+}
+
 #[test]
 fn a_disabled_framework_profile_is_neither_advertised_nor_admitted() {
     // Admission follows the host's FrameworkOptions: a Vue-only host neither

@@ -17,10 +17,10 @@ The inventory lives in [tests/framework-preact/PRE0](../../tests/framework-preac
 | `products/preact-host-table.json`        | LSPX11 transport, tsgo operations and typed limitations, joined to each matrix cell         |
 | `cases.md`                               | Every planted row and its expected failure reason                                           |
 
-FWA1 reads the release and activation rows as data. REG0 consumes registration
+FWA1 reads the release and activation rows as data. The framework registry consumes registration
 metadata; FCH1 joins the matrix to delivered fixture evidence. PRE1 adds the
 executable lock validator and spec, including every planted row, under
-PRE1-ACV. REG0's `scripts/run-framework-locks.mjs` discovers that future spec.
+PRE1-ACV. The registry's `scripts/run-framework-locks.mjs` discovers that future spec.
 There is no validator, spec, schema enforcement or CI gate in this contract.
 
 ## Releases and profile identity
@@ -79,7 +79,7 @@ identity. The official [hooks reference](https://preactjs.com/guide/v11/hooks/#u
 describes the imperative handle. Model and Options are UNSUPPORTED, never
 empty supported facets. PRE3 owns projection, partiality and typed refusal.
 
-`FRAMEWORK_TAG_PREACT = 6` is the fixed allocation. REG0 pre-allocates the tag;
+`FRAMEWORK_TAG_PREACT = 6` is the fixed allocation. The framework registry pre-allocates the tag;
 PRE1 registers the family and owns PRE1-AC1. No proto edit lands here.
 `OPEN_CANONICAL` is a structural non-tag and cannot identify Preact.
 
@@ -133,4 +133,4 @@ data-only change. The ratified CI ownership exception adds only
 to `scripts/ci-inert-paths.json` (exported as `CI_INERT_PATHS`) atomically
 with this inventory. PRE1-ACV removes these
 entries and assigns the consumed inputs and executable specs to their existing
-consuming lane when its validator lands. REG0 retains runner discovery.
+consuming lane when its validator lands. The framework registry retains runner discovery.

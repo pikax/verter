@@ -61,9 +61,9 @@ const CARRIER_LITERAL_ALLOWLIST: &[&str] = &[
     // LSP / MCP / tooling feature files (frozen here so no NEW file grows
     // a literal). The LSP feature / server routing files and the MCP tool
     // surface were de-Vue-gated (carrier routing is carrier-generic, pinned
-    // by `carrier_lsp_routing_has_no_hardcoded_vue_gate` and
-    // `mcp_routing_has_no_hardcoded_vue_gate`), so their rows are gone from
-    // this shrink-only list.
+    // by `carrier_lsp_routing_has_no_hardcoded_vue_gate` and the MCP
+    // Svelte-carrier ingestion tests), so their rows are gone from this
+    // shrink-only list.
     "crates/verter_lsp/src/test_harness.rs",
     "crates/verter_tsc/src/tsconfig.rs",
     // The DX-baseline measurement harness — a deliberately self-contained

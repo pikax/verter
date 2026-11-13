@@ -28,8 +28,8 @@ The reviewed data lives in `tests/framework-angular/ANG0/`:
 | `cases.md` | every planted row the validator must reject, with its reason |
 
 The validator (`contract.ts` and `angular-lock.spec.ts`) is not here. ANG1G
-writes it (`ANG1G-ACV`) and `scripts/run-framework-locks.mjs` (`REG0-AC6`) runs
-it. Until then the products are read as data by FWA1, REG0 and FCH1 and are not
+writes it (`ANG1G-ACV`) and `scripts/run-framework-locks.mjs` runs
+it. Until then the products are read as data by FWA1, the framework registry and FCH1 and are not
 CI-checked. ANG1M adds `products/angular-displaced-routes.json` (`ANG1M-AC6`).
 
 ## Release
@@ -239,7 +239,7 @@ never satisfy a product claim.
 ## Wire tag
 
 `FRAMEWORK_TAG_ANGULAR = 11`, from the template allocation (class A holds 6–9,
-class B 10–14). REG0 pre-allocates it as `DeferredVertical` (`REG0-AC2`), and
+class B 10–14). The framework registry pre-allocates it as `DeferredVertical`, and
 ANG1 registers the adapter descriptor and flips `tag_disposition` to
 `Registered` (`ANG1-AC5`). `FRAMEWORK_TAG_OPEN_CANONICAL` (5) is a structural
 non-tag (`tag_disposition` returns `None`) and is rejected as an adapter tag.

@@ -20,7 +20,7 @@ node --test scripts/compiler-ci-lane-selftest.mjs
 node --test scripts/provider-ci-lane-selftest.mjs
 node --test scripts/gate-wasm-lane-selftest.mjs
 node --test scripts/check-integration-test-layout.test.mjs
-node --test tests/engine-provisioning/EPR1/engine-contract.test.mjs
+node --test tests/engine-provisioning/engine-artifact-contract/engine-contract.test.mjs
 node --test scripts/check-ci-aggregate.test.mjs
 node --test scripts/ci-concurrency-observe.test.mjs
 node --test scripts/ci-junit-metadata.test.mjs

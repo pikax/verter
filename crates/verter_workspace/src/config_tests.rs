@@ -454,13 +454,13 @@ fn membership_with_exclude() {
 
 #[test]
 fn exclude_only_carries_the_default_include() {
-    // FIX 1: a tsconfig with ONLY `exclude` (no `files`, no `include`) must keep
+    // A tsconfig with ONLY `exclude` (no `files`, no `include`) must keep
     // TypeScript's implicit default `**/*` include MINUS the excludes. The
     // producer (`load_project_membership_inner`) models the default include
     // EXPLICITLY: when neither `files` nor `include` is present, the produced
     // membership carries the default `{dir}/**/*` include glob.
     //
-    // DISCRIMINATING: before FIX 1 an exclude-only config produced
+    // DISCRIMINATING: an exclude-only config used to produce
     // `IncludeExclude { include: [], .. }` (empty include) ⇒ it owned NOTHING;
     // this asserts a NON-EMPTY default include is synthesized.
     let ws = crate::filesystem::FilesystemWorkspace::new(
@@ -614,7 +614,7 @@ fn missing_config_membership_stays_match_all() {
 
 #[test]
 fn explicit_empty_files_does_not_synthesize_default_include() {
-    // FIX 1 distinction: an EXPLICIT `"files": []` (solution-style, owns
+    // An EXPLICIT `"files": []` (solution-style, owns
     // nothing but its references) must stay DISTINCT from "no files key at all".
     // `has_files` is true here, so NO default include is synthesized — the
     // include stays empty (owns nothing but references).

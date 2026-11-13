@@ -8,15 +8,6 @@
 [test-groups.progressive-child-contract-completion]
 max-threads = 1
 
-# The flow-return speed gates that each evaluate a long chain (the
-# `Awaited` tail runs, 101- and 256-level call chains) on the debug build:
-# each is several seconds of CPU on its own, so three of them scheduled
-# together on a loaded worker contend for the same cores and read as one
-# another's load. They keep their 20-second deadline; they just do not
-# overlap each other.
-[test-groups.flow-speed-gates]
-max-threads = 1
-
 # ── Two tiers ────────────────────────────────────────────────────────────────
 # The GATE (profiles `default` and `ci`, which inherits the filter) runs every
 # test except the nightly scale tier. The NIGHTLY tier (profile `nightly`, run
@@ -98,10 +89,6 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 filter = 'test(svelte_progressive_component_completion_uses_committed_child_contract_)'
 test-group = 'progressive-child-contract-completion'
 
-[[profile.default.overrides]]
-filter = 'package(verter_session) & (test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_stop_at_verters_budget_and_cost_the_same_work_per_step) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_101_level_chain_returning_a_same_name_function_type_answers) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_101_level_chain_returning_a_same_name_generic_answers))'
-test-group = 'flow-speed-gates'
-
 [profile.ci]
 # The speed gate (see [profile.default]): flagged at 10s, failed at 20s.
 slow-timeout = { period = "10s", terminate-after = 2 }
@@ -129,10 +116,6 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 [[profile.ci.overrides]]
 filter = 'test(svelte_progressive_component_completion_uses_committed_child_contract_)'
 test-group = 'progressive-child-contract-completion'
-
-[[profile.ci.overrides]]
-filter = 'package(verter_session) & (test(=project_semantic_dispatch_tests::flow_return_coverage_tests::lib_awaited_tail_runs_stop_at_verters_budget_and_cost_the_same_work_per_step) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_101_level_chain_returning_a_same_name_function_type_answers) | test(=project_semantic_dispatch_tests::flow_return_coverage_tests::schedule::a_101_level_chain_returning_a_same_name_generic_answers))'
-test-group = 'flow-speed-gates'
 
 # Produce JUnit XML for dorny/test-reporter in CI
 [profile.ci.junit]

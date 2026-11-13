@@ -12,15 +12,13 @@
 //! - `script_fact_capture_is_syntax_only` — the syntax-capture half
 //!   documents and enforces the syntax-only contract (no import
 //!   resolution / capability reads in the capture surface).
-//! - `framework_surface_wire_executor_validates_first` — the executor
-//!   runs `validate_type_info_graph_request` BEFORE any registry lookup
-//!   or selector resolution.
 //!
 //! Each guard is a discriminating source scan: it FAILS against a tree
 //! that violates the rule (e.g. a third `pub fn` on the ctx, a resolver
-//! token in the ctx module, a registry lookup hoisted above the
-//! validator) and PASSES against the landed final-state tree. Companion
-//! self-tests pin the detectors' discrimination.
+//! token in the ctx module) and PASSES against the landed final-state
+//! tree. Companion self-tests pin the detectors' discrimination.
+//! Validation-first on the framework-surface wire entry is held by
+//! behaviour, in the `framework_surface_executor` suite.
 
 use std::path::PathBuf;
 
@@ -341,68 +339,6 @@ fn extract_fn_body(src: &str, name: &str) -> String {
         }
     }
     body.to_string()
-}
-
-#[test]
-fn framework_surface_wire_executor_validates_first() {
-    // The one typeinfo entry validates the envelope, then dispatches the
-    // served framework-surface operation to the executor body. Scope to the
-    // EXECUTABLE bodies, with comments stripped — a doc comment naming
-    // `validate_type_info_graph_request` must NOT satisfy the ordering, only
-    // the real call does.
-    let entry_src = read_src("crates/verter_session/src/typeinfo/graph_query.rs");
-    let entry = strip_comments(&extract_fn_body(&entry_src, "execute_type_info"));
-    let entry_validate_at = entry
-        .find("validate_type_info_graph_request")
-        .expect("the entry must call validate_type_info_graph_request");
-    let dispatch_at = entry
-        .find("self.execute_framework_surface(")
-        .expect("the entry must dispatch the framework-surface operation");
-    assert!(
-        entry_validate_at < dispatch_at,
-        "validation-first violated: the entry's `validate_type_info_graph_request` \
-         call (offset {entry_validate_at}) must precede the framework-surface \
-         dispatch (offset {dispatch_at})."
-    );
-
-    let src = read_src("crates/verter_session/src/typeinfo/framework_surface/executor.rs");
-    let body = strip_comments(&extract_fn_body(&src, "execute_framework_surface"));
-
-    // Every executor-body offset below follows the entry's validation, so the
-    // validation point is the start of the executor body. The registry's
-    // profile admission (`.resolve_profile(`) MUST precede any selector
-    // resolution — a malformed envelope is rejected before any registry /
-    // semantic work, and an unadmitted profile before any selector
-    // resolution. The executor never looks a registration up by adapter id.
-    let validate_at = 0;
-    let registry_lookup_at = body
-        .find(".resolve_profile(")
-        .expect("executor body must admit the selector's profile through the registry");
-    assert!(
-        !body.contains("framework_registry().get("),
-        "the executor dispatches by the admitted profile, never by an adapter-id lookup"
-    );
-    let resolve_selector_at = body
-        .find("resolve_component_selector")
-        .expect("executor body must resolve the component selector");
-
-    assert!(
-        validate_at < registry_lookup_at,
-        "validation-first violated: the `validate_type_info_graph_request` \
-         call (offset {validate_at}) must precede the registry's profile \
-         admission `.resolve_profile(` (offset {registry_lookup_at}) — a \
-         malformed envelope must be rejected before any registry dispatch."
-    );
-    assert!(
-        registry_lookup_at < resolve_selector_at,
-        "profile admission (offset {registry_lookup_at}) must precede selector \
-         resolution (offset {resolve_selector_at})."
-    );
-    assert!(
-        validate_at < resolve_selector_at,
-        "validation-first violated: the validation call (offset {validate_at}) \
-         must precede selector resolution (offset {resolve_selector_at})."
-    );
 }
 
 #[test]

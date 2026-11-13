@@ -79,7 +79,7 @@ fn current_owner_binding_reflects_resolver_owner_and_none() {
 
 #[test]
 fn committed_binding_matches_current_detects_owner_mismatch() {
-    // R2-4: the skip-when-already-loaded gate must distinguish a binding
+    // The skip-when-already-loaded gate must distinguish a binding
     // that still matches (safe to skip) from a changed/lost owner (must
     // reconcile).
     let owned_a = ProviderSyncState {
@@ -361,7 +361,7 @@ fn remove_sync_state_returns_all_active_paths() {
 
 #[test]
 fn open_unresolved_carrier_state_converts_prior_owned_to_unresolved() {
-    // FIX-1: an owned→unowned open Vue file must NOT keep its Owned binding
+    // An owned→unowned open Vue file must NOT keep its Owned binding
     // or its owner-derived `.vue.ts` API path; only the owner-independent
     // IDE TSX survives, and the binding is forced to Unresolved.
     let previous = ProviderSyncState {
@@ -520,7 +520,7 @@ fn open_unresolved_carrier_state_uses_desired_ext_on_jsx_flip() {
 
 #[test]
 fn dropped_api_path_on_unowned_conversion_returns_stale_owner_derived_api() {
-    // R2-8: owned→unowned conversion drops the owner-derived `.vue.ts`. The
+    // Owned→unowned conversion drops the owner-derived `.vue.ts`. The
     // caller must close it, so the helper must surface it as a close target.
     let previous = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/old/tsconfig.json".to_string()),
@@ -611,7 +611,7 @@ fn dropped_api_path_on_unowned_conversion_none_when_no_api_or_unchanged() {
 
 #[test]
 fn revert_unsynced_kinds_keeps_previous_path_for_failed_kind() {
-    // FIX-2: prior ide=.jsx (live), api=.ts (live); new owner wants
+    // Prior ide=.jsx (live), api=.ts (live); new owner wants
     // ide=.tsx, api=.ts. IDE sync FAILED (Api synced). The committed state
     // must revert IDE to the previous live `.jsx` rather than advertise the
     // unsynced `.tsx`.
@@ -703,7 +703,7 @@ fn genuinely_stale_after_sync_gates_on_kind_and_active() {
 
 #[test]
 fn genuinely_stale_after_sync_kind_gate_isolated_from_active_filter() {
-    // R2-7 isolation: exercise the per-kind gate INDEPENDENTLY of the active
+    // Isolation: exercise the per-kind gate INDEPENDENTLY of the active
     // filter. The stale IDE `.jsx` is NOT among the committed active paths
     // (the committed IDE path is `.tsx`), so the active filter alone would
     // NOT suppress it. Only the kind-gate (Ide ∉ synced_kinds) keeps it from
@@ -1171,7 +1171,7 @@ fn open_unresolved_commit_prior_owned_drops_and_surfaces_api_close() {
     // the committed state AND surfaced for an UNCONDITIONAL close, while the
     // owner-INDEPENDENT IDE path is preserved (never returned as the API
     // close target). Exercised on the row-9 shape (failed flip) to prove the
-    // API drop+close is independent of the IDE outcome (R2-8).
+    // API drop+close is independent of the IDE outcome.
     let prev = ProviderSyncState {
         owner_binding: ProviderOwnerBinding::Owned("/old/tsconfig.json".to_string()),
         ide_path: Some("/workspace/src/App.vue.jsx".to_string()),

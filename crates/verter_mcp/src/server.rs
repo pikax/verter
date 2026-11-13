@@ -246,7 +246,7 @@ pub struct VerterMcpServer {
     pub project_root: Option<PathBuf>,
     #[allow(dead_code)]
     pub config: McpServerConfig,
-    /// This agent invocation's own participation scope (COX0): its tools
+    /// This agent invocation's own participation scope: its tools
     /// admit their demands here, and no editor scope governs them.
     pub(crate) participation: Arc<verter_session::participation::ParticipationService>,
     // Used implicitly by rmcp's `#[tool_router]` / `#[tool_handler]` macros.
@@ -426,7 +426,7 @@ impl VerterMcpServer {
         router
     }
 
-    /// This invocation's own participation scope (COX0).
+    /// This invocation's own participation scope.
     pub fn participation(&self) -> &Arc<verter_session::participation::ParticipationService> {
         &self.participation
     }

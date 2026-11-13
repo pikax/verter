@@ -29,7 +29,7 @@ The reviewed contract data lives in `tests/framework-liquid/LIQ0/`:
 
 FWA1 reads the version lock and the activation row as data. LIQ4 reads the
 vocabulary as its only object and filter source. FCH1's coverage join and LIQ9
-read the matrix. REG0's lock runner finds the validator once LIQ1G adds it.
+read the matrix. The framework registry's lock runner finds the validator once LIQ1G adds it.
 
 ## Dialect profiles
 
@@ -245,7 +245,7 @@ ownership per capability at runtime; Unknown means Verter owns.
 Every "validator rejects" and "planted … fails" proof of LIQ0-AC1 to LIQ0-AC4
 moves unchanged to LIQ1G as LIQ1G-ACV. LIQ1G adds
 `tests/framework-liquid/LIQ0/contract.ts` and `liquid-lock.spec.ts`. They
-implement every row of `cases.md`, and REG0's runner discovers them. Until
+implement every row of `cases.md`, and the registry's runner discovers them. Until
 then the products are reviewed data, not CI-checked.
 
 ## Observed gaps

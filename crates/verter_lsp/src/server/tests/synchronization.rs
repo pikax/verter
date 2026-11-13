@@ -2155,14 +2155,14 @@ async fn open_vue_provider_state_survives_owner_none_snapshot_drain() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
-    // FIX-1 + R2-8: an OPEN Vue file that was previously `Owned` becomes unowned
+    // An OPEN Vue file that was previously `Owned` becomes unowned
     // when a ready snapshot resolves no owner for it. The drain MUST convert the
     // committed state to `Unresolved` (so `needs_owner_reconcile` can later
     // re-bind it) — it must NOT reuse the stale `Owned` binding (which would
     // panic the debug_assert and strand the file on a dead owner) and must NOT
     // carry the stale owner-derived `.vue.ts` API path. The live IDE TSX is
     // preserved and never closed; the dropped owner-derived `.vue.ts` IS closed
-    // (R2-8 — it is an orphaned provider artifact once unowned).
+    // (it is an orphaned provider artifact once unowned).
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let documents = DocumentRegistry::new(Arc::clone(&host));
     let uri: Uri = "file:///workspace/src/App.vue".parse().unwrap();
@@ -2182,7 +2182,7 @@ async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
     );
 
     let provider_sync_states = DashMap::new();
-    // Prior committed state is OWNED (the FIX-1 trigger) with a stale API path.
+    // Prior committed state is OWNED (the conversion trigger) with a stale API path.
     provider_sync_states.insert(
         "/workspace/src/App.vue".to_string(),
         ProviderSyncState {
@@ -2254,7 +2254,7 @@ async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
         )),
         "owned→unowned conversion must NOT close the open file's live IDE TSX, calls={calls:?}"
     );
-    // Positive (R2-8): the dropped owner-derived `.vue.ts` IS closed — once
+    // Positive: the dropped owner-derived `.vue.ts` IS closed — once
     // unowned no project provides it, so leaving it open leaks an orphan.
     assert!(
         calls.iter().any(|call| matches!(
@@ -2277,7 +2277,7 @@ async fn drain_owned_to_unowned_open_vue_converts_state_to_unresolved() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn open_unresolved_carrier_no_ide_output_commits_forced_unresolved_binding() {
-    // R2-1: the no-IDE branch of `sync_open_unresolved_carrier_provider_file` must
+    // The no-IDE branch of `sync_open_unresolved_carrier_provider_file` must
     // still COMMIT the forced-`Unresolved` state when a prior committed state
     // exists — never abandon the conversion and leave a stale `Owned` binding.
     // An owned→unowned OPEN Vue file with a transient IDE compile miss (ide=None)
@@ -2382,7 +2382,7 @@ async fn open_unresolved_carrier_no_ide_output_commits_forced_unresolved_binding
         )),
         "no-IDE preserve pass must not touch the live IDE TSX, calls={calls:?}"
     );
-    // R2-8: but the stale owner-derived `.vue.ts` dropped by the conversion MUST
+    // But the stale owner-derived `.vue.ts` dropped by the conversion MUST
     // be closed even on the no-IDE branch — the provider still holds it open and
     // it is invalid once unowned.
     assert!(
@@ -2396,7 +2396,7 @@ async fn open_unresolved_carrier_no_ide_output_commits_forced_unresolved_binding
 
 #[tokio::test(flavor = "multi_thread")]
 async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
-    // R2-8: converting an OPEN Vue file owned→unowned drops the owner-derived
+    // Converting an OPEN Vue file owned→unowned drops the owner-derived
     // `.vue.ts` API path from the committed state, but the provider still holds
     // that `.vue.ts` open. The conversion MUST close the stale `.vue.ts`
     // (orphaned artifact — no project provides it once unowned) while NEVER
@@ -3783,7 +3783,7 @@ const msg = 'hello'
 async fn preserve_open_unresolved_carrier_prior_owned_jsx_flip_failed_drops_api_retains_jsx() {
     // R5-1 prior-Owned row (combined with row 9): when the prior binding was
     // `Owned` and the new `.tsx` flip sync FAILS, the owner `.vue.ts` is dropped
-    // from state AND closed (R2-8, independent of the IDE outcome), while the
+    // from state AND closed (independent of the IDE outcome), while the
     // owner-INDEPENDENT prior live `.jsx` IDE path is RETAINED (still the active
     // path) and is NEVER closed.
     let provider = Arc::new(MockTypeProvider::new());
@@ -3860,7 +3860,7 @@ const msg = 'hello'
         state.api_path
     );
 
-    // The owner-derived `.vue.ts` is CLOSED (R2-8, independent of the IDE failure).
+    // The owner-derived `.vue.ts` is CLOSED (independent of the IDE failure).
     assert!(
         calls.iter().any(|call| matches!(
             call,
@@ -4570,7 +4570,7 @@ defineProps<{ msg: string }>()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_carrier_ide_unresolved_forces_unresolved_over_prior_owned() {
-    // R2-3: `sync_carrier_ide_unresolved` is a bootstrap "unresolved" sync — it is
+    // `sync_carrier_ide_unresolved` is a bootstrap "unresolved" sync — it is
     // unresolved BY DEFINITION. It reuses a prior committed state (to keep the
     // background-loaded bookkeeping) but must FORCE the binding to `Unresolved`.
     // Pre-fix it only defaulted to `Unresolved` when NO state existed; a prior
@@ -4582,7 +4582,7 @@ async fn sync_carrier_ide_unresolved_forces_unresolved_over_prior_owned() {
     let server = service.inner();
 
     let canonical_id = "/workspace/src/App.vue";
-    // Seed a prior committed OWNED state (the R2-3 trigger).
+    // Seed a prior committed OWNED state (the forced-unresolved trigger).
     server.commit_provider_sync_state(
         canonical_id,
         ProviderSyncState {
@@ -4625,7 +4625,7 @@ async fn sync_carrier_ide_unresolved_forces_unresolved_over_prior_owned() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_carrier_api_unresolved_forces_unresolved_over_prior_owned() {
-    // R2-3: `sync_carrier_api_unresolved` mirror — a bootstrap unresolved API sync
+    // `sync_carrier_api_unresolved` mirror — a bootstrap unresolved API sync
     // must force the binding to `Unresolved` even when reusing a prior `Owned`
     // committed state.
     let provider = Arc::new(MockTypeProvider::new());
@@ -4684,7 +4684,7 @@ async fn sync_carrier_api_unresolved_forces_unresolved_over_prior_owned() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn background_api_sync_never_closes_the_live_ide_tsx_on_owner_change() {
-    // R2-2: the `_in_background` API twin manages ONLY the API kind. An owner-key
+    // The `_in_background` API twin manages ONLY the API kind. An owner-key
     // change marks the (same-path) IDE `.tsx` stale via force-rebind. The pre-fix
     // path looped EVERY stale path and closed it — including the live IDE `.tsx`
     // — BEFORE syncing the API, killing hover even though it never re-syncs IDE.
@@ -4960,7 +4960,7 @@ defineProps<{ msg: string }>()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn background_api_sync_failure_retains_prior_api_path_and_state() {
-    // R2-2 (b): close-before-sync also meant an API sync failure left the old API
+    // Close-before-sync also meant an API sync failure left the old API
     // path closed. The fix syncs first; on failure nothing is committed and
     // nothing is closed — the prior state and prior API path are retained intact.
     let tmp = tempfile::tempdir().expect("temp dir");
@@ -5320,7 +5320,7 @@ async fn barrel_eager_sync_follows_aliased_reexport_hops() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sync_imported_carrier_api_lightweight_preserves_open_unowned_state() {
-    // FIX-5: the ready-no-owner arm of sync_imported_carrier_api_lightweight must
+    // The ready-no-owner arm of sync_imported_carrier_api_lightweight must
     // NOT clear+close+return for an OPEN `.vue` that is imported-by-an-open-file
     // and unowned. Pre-fix it called clear_provider_sync_state (removing state +
     // closing the live TSX) → re-triggered the no-ide_context bug on a sibling
@@ -5675,7 +5675,7 @@ const msg = 'hello'
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ensure_current_file_synced_reconciles_owned_open_vue_on_owner_loss() {
-    // R2-5: the foreground freshness check computed
+    // The foreground freshness check computed
     // `needs_owner_reconcile = is_unresolved() && ownership_ready`, which NEVER
     // fires for a previously-`Owned` OPEN Vue that becomes owner-None (its
     // binding is still `Owned`, not unresolved). With its IDE already synced and
@@ -6035,7 +6035,7 @@ const msg = 'updated'
 
 #[tokio::test(flavor = "multi_thread")]
 async fn current_file_sync_retains_old_ide_path_when_new_sync_fails() {
-    // FIX-7: the FOREGROUND ensure_current_file_synced must open/sync the NEW
+    // The FOREGROUND ensure_current_file_synced must open/sync the NEW
     // IDE path FIRST, commit on success, THEN close the old path. On a jsx→tsx
     // transition whose new `.tsx` sync FAILS, the old `.jsx` must NOT be closed
     // and committed state must not be left pointing at the unsynced `.tsx`.
@@ -9475,7 +9475,7 @@ async fn reconcile_does_not_reissue_close_for_an_in_flight_tombstone() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn resync_aliased_imports_retains_prior_path_when_replacement_sync_fails() {
-    // FIX-3: the aliased-import resync pass must use close-AFTER-successful-sync
+    // The aliased-import resync pass must use close-AFTER-successful-sync
     // (skip-active, per-kind), NOT close-before-sync. An open imported `.vue`
     // undergoing an owner-key change has its owner-INDEPENDENT `{src}.vue.ts`
     // marked stale by the force-rebind clause; pre-fix the pass closed it BEFORE
@@ -9603,7 +9603,7 @@ import Child from '@/components/Child.vue'
     .await;
 
     let calls = provider.file_sync_calls();
-    // R2-7 reach assertion (DISCRIMINATES a no-op discovery regression): the
+    // Reach assertion (DISCRIMINATES a no-op discovery regression): the
     // aliased pass must actually REACH the child and ATTEMPT to sync its
     // `{child}.vue.ts` despite the injected failure (`set_fail_sync_path` records
     // the open/update call BEFORE returning Err). If the alias-collection
@@ -9886,7 +9886,7 @@ import { Overlay } from './components'
 
 #[tokio::test(flavor = "multi_thread")]
 async fn resync_aliased_already_loaded_open_vue_reconciled_when_owner_lost() {
-    // R2-4: the aliased-import resync skips a fully-background-loaded import
+    // The aliased-import resync skips a fully-background-loaded import
     // BEFORE resolving its current owner. A stale-`Owned` OPEN `.vue` whose owner
     // disappeared (snapshot now resolves None) must still be RECONCILED — pre-fix
     // the `already_loaded` skip short-circuited it, leaving it stranded on the
@@ -10060,16 +10060,16 @@ defineProps<{ msg: string }>()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn resync_barrel_vue_dep_reconciles_open_owned_overlay_on_owner_loss() {
-    // FIX-4 + R2-7: an OPEN `.vue` reached as a barrel dependency whose owner
+    // An OPEN `.vue` reached as a barrel dependency whose owner
     // resolves to None must NOT have its provider state removed nor its IDE TSX
     // closed (the barrel pass previously called
     // remove_provider_sync_state_and_close_paths unconditionally for an
     // owner-None `.vue`). It must be reconciled in place: a prior `Owned` binding
-    // is converted to `Unresolved` (R2-4 barrel-pass gate + the open-document
-    // editor-liveness path) and the dropped owner-derived `.vue.ts` is closed
-    // (R2-8), while the live IDE TSX is preserved.
+    // is converted to `Unresolved` (barrel-pass gate + the open-document
+    // editor-liveness path) and the dropped owner-derived `.vue.ts` is closed,
+    // while the live IDE TSX is preserved.
     //
-    // The binding flip Owned→Unresolved + the `.vue.ts` close are the R2-7
+    // The binding flip Owned→Unresolved + the `.vue.ts` close are the
     // DISCRIMINATING reach signals: they only happen if the barrel→Vue-re-export
     // discovery actually REACHED Overlay. If discovery regressed to a no-op, the
     // seeded `Owned` binding would survive unchanged and nothing would close, so
@@ -10223,7 +10223,7 @@ defineProps<{ show: boolean }>()
     // Discriminator: the open Overlay's state must SURVIVE (pre-fix it was
     // removed by remove_provider_sync_state_and_close_paths) AND its stale
     // `Owned` binding must be RECONCILED to Unresolved. The binding flip only
-    // happens if the barrel pass actually reached Overlay (R2-7 reach signal #1).
+    // happens if the barrel pass actually reached Overlay (reach signal #1).
     let state = provider_sync_states
         .get(&overlay_id)
         .map(|entry| entry.clone())
@@ -10246,8 +10246,8 @@ defineProps<{ show: boolean }>()
     );
 
     let calls = provider.file_sync_calls();
-    // R2-7 reach signal #2 (DISCRIMINATES a no-op barrel-discovery regression):
-    // the dropped owner-derived `.vue.ts` must be CLOSED (R2-8). This only occurs
+    // Reach signal #2 (DISCRIMINATES a no-op barrel-discovery regression):
+    // the dropped owner-derived `.vue.ts` must be CLOSED. This only occurs
     // if the barrel → Vue-re-export discovery actually REACHED Overlay; a no-op
     // regression would leave the seeded `Owned`+`.vue.ts` state untouched and
     // close nothing, so the assertions would NOT pass vacuously.
@@ -10361,7 +10361,7 @@ defineProps<{ msg: string }>()
     );
 
     let calls = provider.file_sync_calls();
-    // …and CLOSED in the provider (R2-8), proving the conversion actually ran.
+    // …and CLOSED in the provider, proving the conversion actually ran.
     assert!(
         calls.iter().any(|call| matches!(
             call,
@@ -10470,7 +10470,7 @@ defineProps<{ msg: string }>()
     );
 
     let calls = provider.file_sync_calls();
-    // …and CLOSED in the provider (R2-8), proving the conversion actually ran
+    // …and CLOSED in the provider, proving the conversion actually ran
     // even though the compile gate would have failed.
     assert!(
         calls.iter().any(|call| matches!(

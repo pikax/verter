@@ -33,9 +33,9 @@ The reviewed contract data lives in `tests/framework-erb/ERB0/`:
 | `cases.md` | Every planted row the lock validator must reject, with its expected reason, and the positive cases |
 | `manifest.json` | The lock's products, mandatory cases and validator binding |
 
-FWA1, FCH1 and REG0 read these files as data. They are not CI-checked until
+FWA1, FCH1 and the framework registry read these files as data. They are not CI-checked until
 ERB1G lands the validator (`contract.ts`, `erb-lock.spec.ts`; `ERB1G-ACV`),
-which REG0's lock runner discovers.
+which the registry's lock runner discovers.
 
 ## Decisions
 

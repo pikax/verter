@@ -3894,7 +3894,7 @@ fn define_options_non_literal_enum_member_is_compile_error() {
 }
 
 // =========================================================================
-// R5-FIX1 — `is_static_node` unwraps TS wrappers (official `unwrapTSNode`)
+// `is_static_node` unwraps TS wrappers (official `unwrapTSNode`)
 // =========================================================================
 //
 // Official `isStaticNode` calls `unwrapTSNode(node)` FIRST, stripping
@@ -3904,7 +3904,7 @@ fn define_options_non_literal_enum_member_is_compile_error() {
 // `defineOptions`/`defineProps`/etc.
 
 #[test]
-fn r5_fix1_enum_ts_wrapped_literal_members_stay_valid() {
+fn enum_ts_wrapped_literal_members_stay_valid() {
     // `1 as const` / `2 satisfies number` unwrap to scalar literals → every
     // member is static → the enum is all-literal (literal-const) → referencing
     // it in defineOptions is valid (no scope-reference error).
@@ -3922,7 +3922,7 @@ fn r5_fix1_enum_ts_wrapped_literal_members_stay_valid() {
 }
 
 #[test]
-fn r5_fix1_enum_nonnull_and_assertion_wrapped_members_stay_valid() {
+fn enum_nonnull_and_assertion_wrapped_members_stay_valid() {
     // Non-null `!` and angle-bracket type-assertion wrappers over scalar
     // literals also unwrap to statics → all-literal enum stays valid.
     let result = compile_sfc(
@@ -3939,7 +3939,7 @@ fn r5_fix1_enum_nonnull_and_assertion_wrapped_members_stay_valid() {
 }
 
 #[test]
-fn r5_fix1_enum_non_static_ts_wrapped_member_still_rejected() {
+fn enum_non_static_ts_wrapped_member_still_rejected() {
     // `foo() as const` unwraps to a CALL expression — NOT static — so the enum
     // is setup-const and referencing it in defineOptions is rejected. This is
     // the negative guard proving the unwrap does not over-accept.
@@ -3956,7 +3956,7 @@ fn r5_fix1_enum_non_static_ts_wrapped_member_still_rejected() {
 }
 
 // =========================================================================
-// R5-FIX2 — `classify_const_init` static-node forms are `LiteralConst`
+// `classify_const_init` static-node forms are `LiteralConst`
 // =========================================================================
 //
 // Official `walkDeclaration` marks a const `literal-const` when
@@ -3965,7 +3965,7 @@ fn r5_fix1_enum_non_static_ts_wrapped_member_still_rejected() {
 // Object/array literals are NOT static (kept setup-const, `canNeverBeRef`).
 
 #[test]
-fn r5_fix2_static_compositions_are_literal_const() {
+fn static_compositions_are_literal_const() {
     for init in [
         "const K = 1 + 2",      // binary of literals
         "const K = -1",         // unary of a literal
@@ -3990,7 +3990,7 @@ fn r5_fix2_static_compositions_are_literal_const() {
 }
 
 #[test]
-fn r5_fix2_object_and_array_literals_stay_rejected() {
+fn object_and_array_literals_stay_rejected() {
     // Official isStaticNode is false for object/array expressions → setup-const
     // → rejected in defineOptions. The unwrap/static widening must NOT leak here.
     for init in ["const o = { a: 1 }", "const o = [1, 2]"] {
@@ -4009,7 +4009,7 @@ fn r5_fix2_object_and_array_literals_stay_rejected() {
 }
 
 #[test]
-fn r5_fix3_nested_validator_function_local_stays_valid() {
+fn nested_validator_function_local_stays_valid() {
     // A nested validator function param (`f`) shadowing the setup binding name
     // is a function-scope local — official does NOT reject it. The reference
     // `f > 0` resolves to the param, not the setup ref.

@@ -1268,7 +1268,7 @@ fn shadowed_effect_local_is_not_rewritten_and_not_refused() {
 
 #[test]
 fn rest_delete_target_delocalizes_as_a_read() {
-    // FIX-2 control (oracle svelte@5.56.10): a `delete rest.x` argument is a
+    // Read-only de-localization control (oracle svelte@5.56.10): a `delete rest.x` argument is a
     // reference READ — NOT an assignment/update lvalue — so it de-localizes to
     // `delete $$props.x`. This proves the write-verbatim gate is SCOPED to the
     // assignment/update lvalue surface (it never records a `delete` argument as a

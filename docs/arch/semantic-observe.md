@@ -100,9 +100,9 @@ new policy.
 
 ## Inventory format and ownership
 
-The inventory is the glob `crates/*/observe-inventory/*.md`. Each owner task
-writes one file at `crates/<owner's primary crate>/observe-inventory/<SLUG>.md`.
-The slug identifies its owner task. There is no shared index file. Group the
+The inventory is the glob `crates/*/observe-inventory/*.md`. Each owner
+writes one file at `crates/<owner's primary crate>/observe-inventory/<subsystem>.md`,
+named for the subsystem it inventories, never for a task id. There is no shared index file. Group the
 rows into one table per owner crate within that file, including rows for other
 crates that the same owner changes. Successors extend their own file, avoiding
 concurrent edits to other owners' files or this policy page. The consolidation

@@ -28,9 +28,9 @@ The reviewed contract data lives in `tests/framework-marko/MRK0/`:
 | `products/marko-capability-matrix.json` | Profiles, hosts, parser decisions, cells `C01`–`C56`, exclusions `X01`–`X07` and facets |
 | `cases.md` | Every planted row and the reason it must fail, per acceptance id |
 
-REG0, FWA1 and FCH1 read the products as data. Nothing checks them until
-MRK1G lands `contract.ts` and `marko-lock.spec.ts` (`MRK1G-ACV`), which REG0's
-`scripts/run-framework-locks.mjs` discovers (`REG0-AC6`).
+The framework registry, FWA1 and FCH1 read the products as data. Nothing checks them until
+MRK1G lands `contract.ts` and `marko-lock.spec.ts` (`MRK1G-ACV`), which the registry's
+`scripts/run-framework-locks.mjs` discovers.
 
 ## Baseline
 
@@ -232,11 +232,11 @@ to a passing fixture (`MRK9-AC1`), and MRK10 promotes only a full matrix
 | Id | Route at this head | Disposition | Owner |
 | -- | ------------------ | ----------- | ----- |
 | `M-D01` | A `.marko` file has no language row and falls through to unclassified handling | replace with a gated `LanguageRow` behind the FWA1 capability bit | MRK1 (`MRK1-AC6`), MRK1M (`MRK1M-AC5`) |
-| `M-D02` | `CarrierGrammarConfig` is a closed `Vue`/`Svelte` enum | add the Marko grammar configuration through REG0's family module | MRK1 (`MRK1-AC1`) |
+| `M-D02` | `CarrierGrammarConfig` is a closed `Vue`/`Svelte` enum | add the Marko grammar configuration through the framework registry's family module | MRK1 (`MRK1-AC1`) |
 | `M-D03` | `FrameworkTag` and `tag_disposition` have no Marko value or arm | add `MARKO = 12`, `Registered` with every surface kind `UNSUPPORTED` until MRK3 | MRK1 (`MRK1-AC6`), MRK3 (`MRK3-AC4`) |
 | `M-D04` | Framework release admission by string prefix (VID0 `V-D05`) is the existing version-admission route | never copied for Marko; activation reads the FWA1 record | FWA1 (`FWA1-AC1`), MRK1M (`MRK1M-AC5`) |
 | `M-D05` | The client manifest and virtual-file-naming mirrors have no Marko row | render the rows from the descriptor | MRK6 (`MRK6-AC4`) |
-| `M-D06` | The VS Code extension contributes no `.marko` language or grammar | contribute through REG0's generated fragment | MRK1G (`MRK1G-AC4`) |
+| `M-D06` | The VS Code extension contributes no `.marko` language or grammar | contribute through the framework registry's generated fragment | MRK1G (`MRK1G-AC4`) |
 | `M-D07` | The TS plugin's carrier routing is carrier-generic | keep it generic; no Marko-specific code | MRK6 (`MRK6-AC6`) |
 
 MRK10 closes each row with its owner's acceptance (`MRK10-AC4`). The same

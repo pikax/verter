@@ -1,4 +1,4 @@
-//! The participation gate of every semantic custom method (COX0).
+//! The participation gate of every semantic custom method.
 //!
 //! Each public method admits its own capability cell before its body runs
 //! and serves the answer only while that demand epoch is current, exactly
@@ -190,7 +190,7 @@ impl VerterLanguageServer {
 
 impl VerterLanguageServer {
     /// Bring the client's dynamic registrations in line with the current
-    /// participation mask (COX0): a method no served profile admits is
+    /// participation mask: a method no served profile admits is
     /// unregistered, a re-admitted one registered again.
     ///
     /// The transaction runs detached: a cancelled request that started it

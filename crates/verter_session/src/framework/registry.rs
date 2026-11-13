@@ -883,7 +883,7 @@ impl std::error::Error for FrameworkRegistryBuildError {}
 /// Two indexes over the same registrations: `registrations` serves the
 /// carrier / synth / projector / script-fact consumers that select by adapter
 /// id, and `profiles` serves the TypeInfo `Component` selector, which names
-/// a semantic profile (TR06) — the adapter spelling is never its key.
+/// a semantic profile — the adapter spelling is never its key.
 #[derive(Debug)]
 pub struct FrameworkAdapterRegistry {
     registrations: FxHashMap<FrameworkAdapterId, Arc<FrameworkRegistration>>,

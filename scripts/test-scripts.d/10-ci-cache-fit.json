@@ -1,9 +1,9 @@
 {
-  "owner": "DXM0",
+  "owner": "ci-cache-fit",
   "tests": [
     {
       "runner": "node-test",
-      "file": "scripts/lib/sharded-index.test.mjs",
+      "file": "scripts/ci-cache-fit.test.mjs",
       "ci": true
     }
   ]
