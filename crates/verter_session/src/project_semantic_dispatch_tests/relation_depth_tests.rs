@@ -12,7 +12,9 @@
 //! otherwise. A depth probe relates a leaf that fails (`1` to `string`)
 //! under the nesting: `2` below the limit, `1` past it.
 
-use super::checker_probe_lane_tests::{mismatches, mismatches_in_one_host};
+use super::checker_probe_lane_tests::{
+    mismatches, mismatches_in_one_host, mismatches_in_one_host_observing,
+};
 
 /// `Box` applied `depth` times around `inner`.
 fn boxed(depth: usize, inner: &str) -> String {
@@ -468,36 +470,6 @@ fn relating_wide_tuples_of_object_pairs_costs_the_same_per_element() {
     );
 }
 
-/// A union source of fewer than four members against a target that is no
-/// union is no recursion entry of its own (`skipCaching`): only each
-/// member's relation to the target is.
-///
-/// Measured over `type S0 = 1; type T0 = string;` and for `i` from 1 to
-/// `n`, `type Si = { v: S(i-1) } | Ti;` and `type Ti = { v: T(i-1) };`:
-/// `[Sn] extends [Tn] ? 1 : 2` is `2` at `n` 50 and 99 and `1` at 100 —
-/// one entry a level after the tuple's.
-#[test]
-fn a_small_union_source_is_no_recursion_entry_of_its_own() {
-    let failures: Vec<String> = [(50, "2"), (99, "2"), (100, "1")]
-        .into_iter()
-        .flat_map(|(depth, expected)| {
-            let mut source = String::from("type S0 = 1;\ntype T0 = string;\n");
-            for level in 1..=depth {
-                source.push_str(&format!(
-                    "type S{level} = {{ v: S{} }} | T{level};\ntype T{level} = {{ v: T{} }};\n",
-                    level - 1,
-                    level - 1
-                ));
-            }
-            let probe = format!("[S{depth}] extends [T{depth}] ? 1 : 2");
-            mismatches(&source, &[(probe.as_str(), expected)])
-                .into_iter()
-                .map(move |failure| format!("depth {depth}: {failure}"))
-        })
-        .collect();
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-}
-
 /// Relating two wide object types looks each target property up on the
 /// source without scanning it: the member comparisons key lookups make by
 /// scanning a surface grow linearly with the width at 500, 1,000 and 2,000
@@ -593,31 +565,66 @@ fn doubling_unions(depth: usize) -> String {
 /// that held on a `Maybe` answers `Maybe` again, as its `maybeKeys` do,
 /// so `2ⁿ` paths to one pair cost one relation of it.
 ///
-/// Measured over [`doubling_unions`]: `[Sn] extends [Tn] ? 1 : 2` and
-/// `[Un] extends [Tn] ? 1 : 2` are `1` at `n` 10, 20, 50, 99 and 100
-/// (`Maybe` past the depth at 100); `[Tn] extends [Sn] ? 1 : 2` is `2` at
-/// 10 and 20 and `1` from 50 — two entries a level, the object pair and
-/// the union target, so its depth is reached at 50.
+/// The gate version of [`nightly_scale::a_pair_every_union_member_reaches_is_related_once`],
+/// over [`doubling_unions`] with one host per depth: `[Sn] extends [Tn] ? 1 :
+/// 2` and `[Un] extends [Tn] ? 1 : 2` at 20 and 100 (`Maybe` past the depth at
+/// 100) and `[Tn] extends [Sn] ? 1 : 2` at 20 (`2`) and 50 (`1`, two entries a
+/// level, so its depth is reached at 50). Each answer is the checker's, and
+/// each row's structural reductions at the larger depth stay within 1.5 times
+/// the growth of the depth over the smaller one, so a pair a `Maybe` or a
+/// settled result no longer serves (`2ⁿ` reductions) fails by count, not by
+/// the clock.
 #[test]
-fn a_pair_every_union_member_reaches_is_related_once() {
+fn a_pair_every_union_member_reaches_is_related_once_at_the_gate_depths() {
+    let counter = super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests;
     let mut failures = Vec::new();
-    for (depth, reverse) in [(10, "2"), (20, "2"), (50, "1"), (99, "1"), (100, "1")] {
-        let rows = [
-            (format!("[S{depth}] extends [T{depth}] ? 1 : 2"), "1"),
-            (format!("[U{depth}] extends [T{depth}] ? 1 : 2"), "1"),
-            (format!("[T{depth}] extends [S{depth}] ? 1 : 2"), reverse),
-        ];
-        let rows: Vec<(&str, &str)> = rows
+    let mut reductions = std::collections::BTreeMap::new();
+    for (depth, rows) in [
+        (20, vec![("S", "T", "1"), ("U", "T", "1"), ("T", "S", "2")]),
+        (50, vec![("T", "S", "1")]),
+        (100, vec![("S", "T", "1"), ("U", "T", "1")]),
+    ] {
+        let probes: Vec<(String, &str)> = rows
+            .iter()
+            .map(|(source, target, answer)| {
+                (
+                    format!("[{source}{depth}] extends [{target}{depth}] ? 1 : 2"),
+                    *answer,
+                )
+            })
+            .collect();
+        let probe_rows: Vec<(&str, &str)> = probes
             .iter()
             .map(|(probe, answer)| (probe.as_str(), *answer))
             .collect();
+        let mut last = counter();
+        let mut deltas = Vec::new();
         failures.extend(
-            mismatches_in_one_host(&doubling_unions(depth), &rows)
-                .into_iter()
-                .map(|failure| format!("depth {depth}: {failure}")),
+            mismatches_in_one_host_observing(&doubling_unions(depth), &probe_rows, |_| {
+                let now = counter();
+                deltas.push(now - last);
+                last = now;
+            })
+            .into_iter()
+            .map(|failure| format!("depth {depth}: {failure}")),
         );
+        for ((source, target, _), delta) in rows.iter().zip(deltas) {
+            reductions.insert((*source, *target, depth), delta);
+        }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    for (source, target, small, large) in
+        [("S", "T", 20, 100), ("U", "T", 20, 100), ("T", "S", 20, 50)]
+    {
+        let (before, after) = (
+            reductions[&(source, target, small)],
+            reductions[&(source, target, large)],
+        );
+        assert!(
+            2 * after * small <= 3 * before.max(1) * large,
+            "relating [{source}n] to [{target}n] took {before} reductions at {small} levels and {after} at {large}"
+        );
+    }
 }
 
 /// The structural reductions relating [`doubling_unions`] makes grow by the
@@ -704,6 +711,74 @@ fn a_union_over_250_aliases_of_unions_relates_as_one_union_on_a_small_stack() {
 /// Each has a gate version outside this module.
 mod nightly_scale {
     use super::*;
+
+    /// A union whose every member reaches the same pair relates that pair once:
+    /// a pair already decided in the relation answers from the relation's own
+    /// settled results, as the checker's relation cache serves it, and a pair
+    /// that held on a `Maybe` answers `Maybe` again, as its `maybeKeys` do,
+    /// so `2ⁿ` paths to one pair cost one relation of it.
+    ///
+    /// Measured over [`doubling_unions`]: `[Sn] extends [Tn] ? 1 : 2` and
+    /// `[Un] extends [Tn] ? 1 : 2` are `1` at `n` 10, 20, 50, 99 and 100
+    /// (`Maybe` past the depth at 100); `[Tn] extends [Sn] ? 1 : 2` is `2` at
+    /// 10 and 20 and `1` from 50 — two entries a level, the object pair and
+    /// the union target, so its depth is reached at 50.
+    ///
+    /// Gate version: [`super::a_pair_every_union_member_reaches_is_related_once_at_the_gate_depths`].
+    #[test]
+    fn a_pair_every_union_member_reaches_is_related_once() {
+        let mut failures = Vec::new();
+        for (depth, reverse) in [(10, "2"), (20, "2"), (50, "1"), (99, "1"), (100, "1")] {
+            let rows = [
+                (format!("[S{depth}] extends [T{depth}] ? 1 : 2"), "1"),
+                (format!("[U{depth}] extends [T{depth}] ? 1 : 2"), "1"),
+                (format!("[T{depth}] extends [S{depth}] ? 1 : 2"), reverse),
+            ];
+            let rows: Vec<(&str, &str)> = rows
+                .iter()
+                .map(|(probe, answer)| (probe.as_str(), *answer))
+                .collect();
+            failures.extend(
+                mismatches_in_one_host(&doubling_unions(depth), &rows)
+                    .into_iter()
+                    .map(|failure| format!("depth {depth}: {failure}")),
+            );
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// A union source of fewer than four members against a target that is no
+    /// union is no recursion entry of its own (`skipCaching`): only each
+    /// member's relation to the target is.
+    ///
+    /// Measured over `type S0 = 1; type T0 = string;` and for `i` from 1 to
+    /// `n`, `type Si = { v: S(i-1) } | Ti;` and `type Ti = { v: T(i-1) };`:
+    /// `[Sn] extends [Tn] ? 1 : 2` is `2` at `n` 50 and 99 and `1` at 100 —
+    /// one entry a level after the tuple's.
+    ///
+    /// Gate version: [`super::a_small_union_source_opens_no_frame_of_its_own`], which holds the
+    /// same relation at 99 and 100 and counts the obligation frames.
+    #[test]
+    fn a_small_union_source_is_no_recursion_entry_of_its_own() {
+        let failures: Vec<String> = [(50, "2"), (99, "2"), (100, "1")]
+            .into_iter()
+            .flat_map(|(depth, expected)| {
+                let mut source = String::from("type S0 = 1;\ntype T0 = string;\n");
+                for level in 1..=depth {
+                    source.push_str(&format!(
+                        "type S{level} = {{ v: S{} }} | T{level};\ntype T{level} = {{ v: T{} }};\n",
+                        level - 1,
+                        level - 1
+                    ));
+                }
+                let probe = format!("[S{depth}] extends [T{depth}] ? 1 : 2");
+                mismatches(&source, &[(probe.as_str(), expected)])
+                    .into_iter()
+                    .map(move |failure| format!("depth {depth}: {failure}"))
+            })
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
 
     /// A union written over an alias of a union is the one union the checker's
     /// `getUnionType` flattens it to: related one level deep, whatever the
