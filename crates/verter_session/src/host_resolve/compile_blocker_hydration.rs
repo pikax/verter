@@ -19,17 +19,27 @@
 //! place, as the synchronous resolution and load entries do.
 //!
 //! The outcome is typed. A route that could not be admitted, or a blocker
-//! that could not be loaded, is recorded as a gap and hydration continues
-//! with the remaining blockers; it never stops early.
+//! whose load failed, is recorded as a gap and hydration continues with the
+//! remaining blockers. A load stopped by cancellation, supersession or
+//! shutdown is not a gap: it ends owned hydration with that abort, before
+//! the compile captures anything. Owned hydration also stops when the
+//! request it runs for is cancelled: it waits on each route and load
+//! together with a subscription on the request's cancellation, so the
+//! cancellation itself wakes it. A computation begun outside a request has
+//! no request cancellation and stops only through the host's own.
 
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::task::Poll;
 
+use crate::host_load::HostLoadError;
 use crate::root_continuation::{RootWork, RootWorkSlot};
 use crate::types::CompileDependencyGap;
 use crate::VerterHost;
+use verter_execution::cancellation::CancellationSubscription;
+use verter_scheduler::job::SchedulerError;
 use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
+use verter_type_engine::semantic_query::ExecutionAbort;
 
 /// How far hydration established a compile's blockers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +87,59 @@ fn blocker_context(kind: ResolveRequestKind) -> ResolutionContext {
     }
 }
 
+/// A blocker load's answer: whether it integrated, or the stop that ended
+/// it. Only a load that genuinely failed is "not integrated".
+pub(super) fn blocker_load_answer(
+    outcome: Result<bool, HostLoadError>,
+) -> Result<bool, ExecutionAbort> {
+    match outcome {
+        Ok(integrated) => Ok(integrated),
+        Err(HostLoadError::Cancelled) => Err(ExecutionAbort::Cancelled),
+        Err(HostLoadError::Superseded) => Err(ExecutionAbort::Superseded),
+        Err(HostLoadError::Shutdown | HostLoadError::Failed(SchedulerError::Shutdown)) => {
+            Err(ExecutionAbort::Shutdown)
+        }
+        Err(
+            HostLoadError::Failed(_)
+            | HostLoadError::Cycle
+            | HostLoadError::WrongHost
+            | HostLoadError::NoProgress,
+        ) => Ok(false),
+    }
+}
+
+/// Whether the request `stop` subscribes to is cancelled; otherwise
+/// `waker` is registered to be woken when it is.
+fn request_stopped(stop: &mut Option<CancellationSubscription>, waker: &std::task::Waker) -> bool {
+    stop.as_mut()
+        .is_some_and(|stop| stop.poll(waker).is_ready())
+}
+
+/// `computation`, ended with `Cancelled` as soon as the request `stop`
+/// subscribes to is cancelled. The subscription is checked before each
+/// poll of `computation` and again after one that is pending, so a
+/// cancellation between the two is still observed, and the cancellation
+/// itself wakes the waiting computation.
+async fn until_request_stops<F: Future>(
+    stop: &mut Option<CancellationSubscription>,
+    computation: F,
+) -> Result<F::Output, ExecutionAbort> {
+    let mut computation = std::pin::pin!(computation);
+    std::future::poll_fn(|cx| {
+        if request_stopped(stop, cx.waker()) {
+            return Poll::Ready(Err(ExecutionAbort::Cancelled));
+        }
+        match computation.as_mut().poll(cx) {
+            Poll::Ready(outcome) => Poll::Ready(Ok(outcome)),
+            Poll::Pending if request_stopped(stop, cx.waker()) => {
+                Poll::Ready(Err(ExecutionAbort::Cancelled))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    })
+    .await
+}
+
 impl VerterHost {
     /// Hydrate `canonical`'s compile blockers as a pollable computation run
     /// as the execution task installed on the polling thread.
@@ -84,13 +147,17 @@ impl VerterHost {
     /// While a blocker route is resolving, the computation hands the driver
     /// the resolution's producer through `work` and returns `Pending`; while
     /// a blocker load is pending, it hands the driver a scheduler dispatch
-    /// step. The resolution's or the load's completion, or the driver's next
-    /// poll, resumes it.
+    /// step. The resolution's or the load's completion, the cancellation of
+    /// the request installed while it runs, or the driver's next poll,
+    /// resumes it.
+    ///
+    /// A load stopped by cancellation, supersession or shutdown, or that
+    /// request's cancellation, ends hydration with that abort.
     pub(crate) async fn hydrate_compile_blockers_pollable<'h>(
         &'h self,
         canonical: &str,
         work: &RootWorkSlot<'h>,
-    ) -> BlockerHydration {
+    ) -> Result<BlockerHydration, ExecutionAbort> {
         self.hydrate_blockers(canonical, work, BlockerLoads::Owned)
             .await
     }
@@ -100,9 +167,18 @@ impl VerterHost {
         canonical: &str,
         work: &RootWorkSlot<'h>,
         loads: BlockerLoads,
-    ) -> BlockerHydration {
+    ) -> Result<BlockerHydration, ExecutionAbort> {
         let Some(blockers) = self.get_compile_blockers(canonical) else {
-            return BlockerHydration::Complete;
+            return Ok(BlockerHydration::Complete);
+        };
+        // In place, every route and load answers before its poll returns,
+        // so there is nothing a request's cancellation could interrupt.
+        let mut stop = match loads {
+            BlockerLoads::Owned => {
+                verter_type_engine::request_context::current_request_cancellation_token()
+                    .map(|token| token.subscribe())
+            }
+            BlockerLoads::InPlace => None,
         };
 
         let mut gaps = BTreeSet::new();
@@ -124,8 +200,9 @@ impl VerterHost {
                     ResolveRequestKind::SfcSrcAttr,
                     work,
                     loads,
+                    &mut stop,
                 )
-                .await;
+                .await?;
             let resolved = match route {
                 Some(Some(resolved)) => {
                     resolved_routes.push(resolved.clone());
@@ -153,8 +230,9 @@ impl VerterHost {
                     ResolveRequestKind::TypeImport,
                     work,
                     loads,
+                    &mut stop,
                 )
-                .await;
+                .await?;
             let route = match typed {
                 Some(None) => {
                     self.resolve_blocker_route(
@@ -163,8 +241,9 @@ impl VerterHost {
                         ResolveRequestKind::EsmImport,
                         work,
                         loads,
+                        &mut stop,
                     )
-                    .await
+                    .await?
                 }
                 route => route,
             };
@@ -185,14 +264,24 @@ impl VerterHost {
         for resolved in resolved_routes {
             self.record_resolved_dependency_edge(canonical, &resolved);
         }
+        // A request cancelled before the first load begins none.
+        if stop
+            .as_ref()
+            .is_some_and(|stop| stop.token().is_cancelled())
+        {
+            return Err(ExecutionAbort::Cancelled);
+        }
         for blocker_id in blocker_ids {
-            if !self.load_compile_blocker(&blocker_id, work, loads).await {
+            if !self
+                .load_compile_blocker(&blocker_id, work, loads, &mut stop)
+                .await?
+            {
                 gaps.insert(CompileDependencyGap::File {
                     canonical: blocker_id,
                 });
             }
         }
-        BlockerHydration::from_gaps(gaps)
+        Ok(BlockerHydration::from_gaps(gaps))
     }
 
     /// Resolve one blocker route: `Some(Some(target))` when it resolves,
@@ -201,7 +290,9 @@ impl VerterHost {
     /// Owned hydration resolves through
     /// [`Self::resolve_for_persistent_state_pollable`], the synchronous one
     /// through [`Self::resolve_for_persistent_state`]; both take the same
-    /// route and record the same witness and owner edge.
+    /// route and record the same witness and owner edge. An owned
+    /// resolution ends with `Cancelled` when the request `stop` subscribes
+    /// to is cancelled while it waits.
     async fn resolve_blocker_route<'h>(
         &'h self,
         canonical: &str,
@@ -209,7 +300,8 @@ impl VerterHost {
         kind: ResolveRequestKind,
         work: &RootWorkSlot<'h>,
         loads: BlockerLoads,
-    ) -> Option<Option<String>> {
+        stop: &mut Option<CancellationSubscription>,
+    ) -> Result<Option<Option<String>>, ExecutionAbort> {
         #[cfg(test)]
         if !matches!(kind, ResolveRequestKind::SfcSrcAttr)
             && self
@@ -219,42 +311,51 @@ impl VerterHost {
                 .as_deref()
                 == Some(specifier)
         {
-            return None;
+            return Ok(None);
         }
         let context = blocker_context(kind);
         let publication = match loads {
             BlockerLoads::Owned => {
-                self.resolve_for_persistent_state_pollable(canonical, specifier, context, work)
-                    .await
+                until_request_stops(
+                    stop,
+                    self.resolve_for_persistent_state_pollable(canonical, specifier, context, work),
+                )
+                .await?
             }
             BlockerLoads::InPlace => {
                 self.resolve_for_persistent_state(canonical, specifier, context)
             }
         };
-        publication
+        Ok(publication
             .into_delivered()
-            .map(|resolution| resolution.map(|resolution| resolution.source_id))
+            .map(|resolution| resolution.map(|resolution| resolution.source_id)))
     }
 
     /// Load one blocker, as the task polling the computation. Answers
-    /// whether the blocker is integrated.
+    /// whether the blocker is integrated, or the stop that ended its owned
+    /// load: the load's own, or the cancellation of the request `stop`
+    /// subscribes to. A stopped load is dropped and integrates nothing.
     async fn load_compile_blocker<'h>(
         &'h self,
         blocker_id: &str,
         work: &RootWorkSlot<'h>,
         loads: BlockerLoads,
-    ) -> bool {
+        stop: &mut Option<CancellationSubscription>,
+    ) -> Result<bool, ExecutionAbort> {
         if let BlockerLoads::InPlace = loads {
-            return self.ensure_loaded(blocker_id);
+            return Ok(self.ensure_loaded(blocker_id));
         }
         let task = verter_execution::tasks::ExecutionScope::current(&self.task_registry)
             .unwrap_or_else(|| self.task_registry.register_task());
         let cancellation = self.cooperative_drive.cancellation().clone();
         let mut load = self.begin_load(blocker_id, task, cancellation);
-        self.offering_dispatch_steps(work, std::future::poll_fn(|cx| load.poll(cx.waker())))
-            .await
-            .and_then(|commit| commit.apply(self))
-            .unwrap_or(false)
+        let loaded = self
+            .offering_dispatch_steps(
+                work,
+                until_request_stops(stop, std::future::poll_fn(|cx| load.poll(cx.waker()))),
+            )
+            .await?;
+        blocker_load_answer(loaded.and_then(|commit| commit.apply(self)))
     }
 
     /// `computation`, handing the driver a scheduler dispatch step through
@@ -288,8 +389,9 @@ impl VerterHost {
         let work = RootWorkSlot::new();
         let hydration = self.hydrate_blockers(canonical, &work, BlockerLoads::InPlace);
         // In-place resolutions and loads answer before their poll returns,
-        // so the computation never suspends.
+        // so the computation never suspends, and it takes no request stop.
         let hydration = std::pin::pin!(hydration);
         verter_execution::blocking::complete_now(hydration)
+            .unwrap_or_else(|_| unreachable!("in-place blocker hydration never stops typed"))
     }
 }
