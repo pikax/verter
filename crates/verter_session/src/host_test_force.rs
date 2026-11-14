@@ -67,6 +67,10 @@ pub(crate) struct TestForceKnobs {
     /// by a semantic frame's retained terminal outcome.
     #[cfg(test)]
     pub(crate) blocking_loads_begun: std::sync::atomic::AtomicUsize,
+    /// Number of resolution producers this host's pollable resolutions
+    /// handed to a root's driver instead of running them.
+    #[cfg(test)]
+    pub(crate) resolution_producers_handed_out: std::sync::atomic::AtomicUsize,
     /// The engine-owned forcing record, shared with every engine binding and
     /// macro-mirror selector this host attaches.
     pub(crate) engine: std::sync::Arc<verter_type_engine::engine_test_knobs::TestKnobs>,

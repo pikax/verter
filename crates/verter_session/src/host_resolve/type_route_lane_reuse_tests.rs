@@ -3,7 +3,7 @@
 //!
 //! The type-route policy resolves the specifier's `TypeImport` lane, its
 //! `EsmImport` fallback, and a second `TypeImport` lane on every delivered
-//! target ([`crate::VerterHost::normalize_type_target`]). A request keeps
+//! target ([`crate::VerterHost::type_route_policy`]). A request keeps
 //! each lane's resolution ([`TypeRouteLanes`]); a kept lane records its
 //! observations into the open witness scopes and re-notes an unretained
 //! answer exactly as the resolution does, and a change to the resolution

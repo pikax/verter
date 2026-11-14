@@ -493,10 +493,17 @@ pub(crate) fn drive_compat<F: Future<Output = Answer> + Unpin>(
                 &mut poll,
             )),
         });
-    answer.unwrap_or_else(|error| {
+    answer.unwrap_or_else(ResolutionError::into_refused_outcome)
+}
+
+impl ResolutionError {
+    /// The outcome a resolution that stopped this way answers: a typed
+    /// refusal, since no stop admits or delivers a partial answer. Every
+    /// driver of a continuation, owned or compatibility, answers through it.
+    pub fn into_refused_outcome(self) -> ResolutionOutcome {
         ResolutionOutcome::refused(
             None,
-            match error {
+            match self {
                 ResolutionError::Cancelled => verter_audit::NonAdmissionReason::Cancelled,
                 ResolutionError::Cycle => verter_audit::NonAdmissionReason::UnresolvedProvenance,
                 ResolutionError::ProducerDropped
@@ -504,5 +511,5 @@ pub(crate) fn drive_compat<F: Future<Output = Answer> + Unpin>(
                 | ResolutionError::Unsupported => verter_audit::NonAdmissionReason::ComputeFailed,
             },
         )
-    })
+    }
 }
