@@ -110,6 +110,70 @@ pub struct ComponentDomainGuarantees {
     pub props: MetadataFactGuarantee,
     pub events: MetadataFactGuarantee,
     pub slots: MetadataFactGuarantee,
+    pub models: MetadataFactGuarantee,
+    pub exposed: MetadataFactGuarantee,
+    pub accepted: MetadataFactGuarantee,
+    pub public_instance: MetadataFactGuarantee,
+    pub type_registry: MetadataFactGuarantee,
+}
+
+/// The single component-fact cause vocabulary. Both directions are generated
+/// from these rows by exhaustive enum adapters.
+#[macro_export]
+macro_rules! metadata_partial_reason_causes {
+    ($adapter:ident) => {
+        $adapter! {
+            BudgetExceeded => 1,
+            Cancelled => 2,
+            SupersededGeneration => 3,
+            UnstableState => 4,
+            SamePathRecursion => 5,
+            WalkerFatal => 6,
+            Propagated => 7,
+            DeferredEvaluationLimit => 8,
+            StructuralFactDemandLimit => 9,
+            SemanticQueryFault => 10,
+            MissingSemanticNodeData => 11,
+            ProjectionWorkLimit => 12,
+            ConnectedQueryDepthLimit => 13,
+            MissingDependency => 14,
+            FlowReturnUninferred => 15,
+            FlowReturnUnverified => 16,
+            FlowReturnNoSurface => 17,
+            UndecidedConditional => 18,
+            ConnectedMemoryLimit => 19,
+            OperationBudget => 20,
+            FanoutLimit => 21,
+        }
+    };
+}
+
+impl PublicInstanceCompleteness {
+    /// The producer claim, independent of individual member types.
+    pub fn guarantee(self) -> MetadataFactGuarantee {
+        match self {
+            Self::Exact => MetadataFactGuarantee::complete(false),
+            Self::Partial => MetadataFactGuarantee {
+                kind: 2,
+                causes: vec![103],
+                open: true,
+            },
+        }
+    }
+}
+
+impl AcceptedSurfaceCompleteness {
+    /// The producer claim, independent of individual member types.
+    pub fn guarantee(self) -> MetadataFactGuarantee {
+        match self {
+            Self::Exact => MetadataFactGuarantee::complete(false),
+            Self::LowerBound => MetadataFactGuarantee {
+                kind: 2,
+                causes: vec![103],
+                open: true,
+            },
+        }
+    }
 }
 
 /// Which macro kind produced the expansion diagnostics.
@@ -289,7 +353,8 @@ pub enum PublicInstanceMemberKind {
 }
 
 /// Whether the host believes the surfaced public-instance contract is complete.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PublicInstanceCompleteness {
     Exact,
     Partial,

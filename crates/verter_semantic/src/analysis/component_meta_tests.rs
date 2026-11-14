@@ -119,6 +119,8 @@ fn resolved_model_inputs(macros: &[AnalyzedMacro]) -> Vec<ResolvedMacroInput> {
             props_guarantee: None,
             events_guarantee: None,
             slots_guarantee: None,
+            models_guarantee: None,
+            exposed_guarantee: None,
         })
         .collect()
 }
@@ -293,6 +295,8 @@ fn resolved_emit_macro_input(
         props_guarantee: None,
         events_guarantee: None,
         slots_guarantee: None,
+        models_guarantee: None,
+        exposed_guarantee: None,
     }
 }
 
@@ -620,6 +624,8 @@ fn resolved_macro_projection_merges_all_entries_for_one_macro_index() {
             props_guarantee: None,
             events_guarantee: None,
             slots_guarantee: None,
+            models_guarantee: None,
+            exposed_guarantee: None,
         },
         crate::analysis::component_meta::ResolvedMacroInput {
             macro_index: 0,
@@ -632,6 +638,8 @@ fn resolved_macro_projection_merges_all_entries_for_one_macro_index() {
             props_guarantee: None,
             events_guarantee: None,
             slots_guarantee: None,
+            models_guarantee: None,
+            exposed_guarantee: None,
         },
     ];
 
@@ -671,6 +679,8 @@ fn svelte_producer_guarantees_classify_the_membership_lanes() {
         props_guarantee: Some(unavailable),
         events_guarantee: Some(open),
         slots_guarantee: None,
+        models_guarantee: None,
+        exposed_guarantee: None,
     }];
     let mut input = empty_input(&[]);
     input.resolved_macros = &resolved;
@@ -712,6 +722,8 @@ fn resolved_macro_projection_merges_metadata_without_splicing_evidence() {
             props_guarantee: None,
             events_guarantee: None,
             slots_guarantee: None,
+            models_guarantee: None,
+            exposed_guarantee: None,
         },
         crate::analysis::component_meta::ResolvedMacroInput {
             macro_index: 0,
@@ -724,6 +736,8 @@ fn resolved_macro_projection_merges_metadata_without_splicing_evidence() {
             props_guarantee: None,
             events_guarantee: None,
             slots_guarantee: None,
+            models_guarantee: None,
+            exposed_guarantee: None,
         },
     ];
 
@@ -921,6 +935,8 @@ fn define_emits_eval_cannot_supplement_resolver_owned_occurrences() {
         props_guarantee: None,
         events_guarantee: None,
         slots_guarantee: None,
+        models_guarantee: None,
+        exposed_guarantee: None,
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
@@ -1036,6 +1052,8 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
         props_guarantee: None,
         events_guarantee: None,
         slots_guarantee: None,
+        models_guarantee: None,
+        exposed_guarantee: None,
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
@@ -2275,6 +2293,8 @@ fn partial_identifier_props_keep_resolved_authority_and_authored_evidence() {
         props_guarantee: None,
         events_guarantee: None,
         slots_guarantee: None,
+        models_guarantee: None,
+        exposed_guarantee: None,
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
         exposed: Vec::new(),
@@ -2917,6 +2937,8 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
         props_guarantee: None,
         events_guarantee: None,
         slots_guarantee: None,
+        models_guarantee: None,
+        exposed_guarantee: None,
     }];
 
     let mut input = empty_input(&macros);
@@ -3775,6 +3797,8 @@ fn resolved_macros_supply_imported_metadata_without_snapshot_mutation() {
         props_guarantee: None,
         events_guarantee: None,
         slots_guarantee: None,
+        models_guarantee: None,
+        exposed_guarantee: None,
     }];
 
     let mut input = empty_input(&macros);
@@ -3844,6 +3868,8 @@ fn resolved_macros_merge_with_local_prop_fields_for_mixed_type_sources() {
         props_guarantee: None,
         events_guarantee: None,
         slots_guarantee: None,
+        models_guarantee: None,
+        exposed_guarantee: None,
     }];
 
     let mut input = empty_input(&macros);
@@ -3915,6 +3941,8 @@ fn native_framework_input_preserves_defaults_duplicate_event_publications_and_sl
         props_guarantee: None,
         events_guarantee: None,
         slots_guarantee: None,
+        models_guarantee: None,
+        exposed_guarantee: None,
     }];
     let mut input = empty_input(&macros);
     input.resolved_macros = &resolved_macros;
@@ -4139,6 +4167,8 @@ fn runtime_prop_type_payload_wins_over_host_unknown_placeholder() {
         props_guarantee: None,
         events_guarantee: None,
         slots_guarantee: None,
+        models_guarantee: None,
+        exposed_guarantee: None,
     }];
     let mut input = empty_input(&macros);
     input.resolved_macros = &resolved;

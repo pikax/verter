@@ -581,7 +581,14 @@ fn resolution_output_with(
 
 fn empty_analysis() -> verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
     verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
-        domain_guarantees: Default::default(),
+        domain_guarantees: verter_session_query::analysis::component_meta::ComponentDomainGuarantees {
+            models: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+            exposed: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+            accepted: verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::Exact.guarantee(),
+            public_instance: verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Exact.guarantee(),
+            type_registry: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+            ..Default::default()
+        },
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),
@@ -718,7 +725,14 @@ fn host_cpu_threads_forwards_to_host_config() {
 #[test]
 fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_information() {
     let analysis = verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
-        domain_guarantees: Default::default(),
+        domain_guarantees: verter_session_query::analysis::component_meta::ComponentDomainGuarantees {
+            models: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+            exposed: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+            accepted: verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::Exact.guarantee(),
+            public_instance: verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Exact.guarantee(),
+            type_registry: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+            ..Default::default()
+        },
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),
@@ -783,6 +797,11 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
     );
 
     let lanes = host::meta_resolve::MaterializedComponentMetaTypeLanes {
+        type_registry_declarations: vec![Some(
+            resolution.resolved_type_registry_meta[0]
+                .declaration
+                .clone(),
+        )],
         type_registry_entries: vec![verter_type_expr::TypeExpr::Unknown(
             verter_type_expr::UnknownValue::unsupported_syntax("{ label: string }"),
         )],
@@ -820,7 +839,14 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
 #[test]
 fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
     let analysis = verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
-        domain_guarantees: Default::default(),
+        domain_guarantees: verter_session_query::analysis::component_meta::ComponentDomainGuarantees {
+            models: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+            exposed: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+            accepted: verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::Exact.guarantee(),
+            public_instance: verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Exact.guarantee(),
+            type_registry: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+            ..Default::default()
+        },
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),
@@ -911,7 +937,21 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
         }],
         None,
     );
+    let mut last_declaration = resolution.resolved_type_registry_meta[0]
+        .declaration
+        .clone();
+    last_declaration.text = Some("type Button = number".to_string());
+    last_declaration.canonical_source = "/src/other.ts".to_string();
     let lanes = host::meta_resolve::MaterializedComponentMetaTypeLanes {
+        type_registry_declarations: vec![
+            Some(
+                resolution.resolved_type_registry_meta[0]
+                    .declaration
+                    .clone(),
+            ),
+            None,
+            Some(last_declaration),
+        ],
         type_registry_entries: vec![
             verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
                 empty_literal: false,
@@ -959,12 +999,12 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
     assert_eq!(
         ffi.type_registry[0].raw_type.as_deref(),
         Some("type Button = ComponentConfig<typeof theme, MissingAppConfig>"),
-        "the per-name declaration sidecar still joins the resolved metadata",
+        "the first declaration stays at its producer position",
     );
     assert_eq!(
         ffi.type_registry[2].raw_type.as_deref(),
-        Some("type Button = ComponentConfig<typeof theme, MissingAppConfig>"),
-        "a duplicate-name row joins the same declaration metadata by name",
+        Some("type Button = number"),
+        "duplicate names retain distinct positional declarations",
     );
     assert!(
         ffi.type_registry[1].declaration.is_none(),
@@ -975,7 +1015,14 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
 #[test]
 fn component_meta_ffi_exposes_root_info_summary() {
     let analysis = verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
-        domain_guarantees: Default::default(),
+        domain_guarantees: verter_session_query::analysis::component_meta::ComponentDomainGuarantees {
+            models: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+            exposed: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+            accepted: verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::Exact.guarantee(),
+            public_instance: verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Exact.guarantee(),
+            type_registry: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+            ..Default::default()
+        },
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),
@@ -4000,6 +4047,97 @@ fn sidecar_less_wire_payload(session: &host::VerterHost, canonical: &str) -> Ffi
     super::component_meta_output_to_ffi(output.expect("component resolves"))
 }
 
+#[test]
+fn component_meta_exposed_domain_preserves_open_and_unavailable_claims() {
+    let session = completeness_host();
+    for (canonical, source, open) in [
+        ("/OpenExpose.vue", "<script setup lang=\"ts\">defineExpose<{ known: string; [key: string]: unknown }>()</script>", Some(true)),
+        ("/LiteralExpose.vue", "<script setup lang=\"ts\">defineExpose({ known: 1 })</script>", Some(false)),
+        ("/MissingExpose.vue", "<script setup lang=\"ts\">import type { Missing } from './missing'; defineExpose<Missing>()</script>", None),
+    ] {
+        let _ = session.upsert(host::UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: Arc::from(source),
+            file_language: host::FileLanguage::vue(),
+            aliases: Vec::new(),
+        }).unwrap();
+        let ffi = wire_payload(&session, canonical);
+        let facts = ffi.facts();
+        if let Some(open) = open {
+            assert_eq!(facts.exposed.kind(), 1);
+            assert_eq!(facts.exposed.open(), open);
+        } else {
+            assert_ne!(facts.exposed.kind(), 1, "an unresolved expose root cannot prove its domain");
+        }
+    }
+}
+
+#[test]
+fn component_meta_producer_guarantees_survive_warm_analysis_and_output() {
+    let session = completeness_host();
+    let canonical = "/WarmGuarantees.vue";
+    let _ = session.upsert(host::UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from("<script setup lang=\"ts\">defineModel<string>(); defineExpose<{ known: string; [key: string]: unknown }>()</script><template><div/></template>"),
+        file_language: host::FileLanguage::vue(),
+        aliases: Vec::new(),
+    }).unwrap();
+    let cold = session.get_component_meta(canonical).unwrap();
+    let warm = session.get_component_meta(canonical).unwrap();
+    assert!(
+        std::ptr::eq(cold.analysis(), warm.analysis()),
+        "the second delivery reuses the cached analysis"
+    );
+    let claims = &warm.domain_guarantees;
+    assert_eq!(claims.models.kind, 1);
+    assert!(!claims.models.open);
+    assert_eq!(claims.exposed.kind, 1);
+    assert!(claims.exposed.open);
+    assert_eq!(
+        claims.accepted,
+        warm.accepted_surface_completeness.guarantee()
+    );
+    assert_eq!(
+        claims.public_instance,
+        warm.public_instance
+            .as_ref()
+            .unwrap()
+            .completeness
+            .guarantee()
+    );
+    let first = wire_payload(&session, canonical);
+    let second = wire_payload(&session, canonical);
+    let a = first.facts();
+    let b = second.facts();
+    assert_eq!((a.models.kind(), a.models.open()), (1, false));
+    assert_eq!((b.models.kind(), b.models.open()), (1, false));
+    assert_eq!((a.exposed.kind(), a.exposed.open()), (1, true));
+    assert_eq!((b.exposed.kind(), b.exposed.open()), (1, true));
+    assert_eq!(a.accepted_props.kind(), b.accepted_props.kind());
+    assert_eq!(a.public_instance.causes(), &[103]);
+    assert_eq!(b.public_instance.causes(), &[103]);
+    assert_eq!(a.type_registry.kind(), 1);
+    assert_eq!(b.type_registry.kind(), 1);
+}
+
+#[test]
+fn component_meta_models_domain_proves_names_despite_unresolved_value() {
+    let session = completeness_host();
+    let canonical = "/MissingModel.vue";
+    let _ = session.upsert(host::UpsertRequest {
+        canonical_id: Some(canonical.to_string()),
+        input_id: canonical.to_string(),
+        source: Arc::from("<script setup lang=\"ts\">import type { Missing } from './missing'; defineModel<Missing>()</script>"),
+        file_language: host::FileLanguage::vue(),
+        aliases: Vec::new(),
+    }).unwrap();
+    let ffi = wire_payload(&session, canonical);
+    assert_eq!(ffi.facts().models.kind(), 1);
+    assert!(!ffi.facts().models.open());
+}
+
 /// The proto lane's completeness position for a wire payload: the `(kind,
 /// reasons)` pair a NAPI consumer decodes.
 fn proto_completeness(meta: &FfiComponentMeta) -> (i32, Vec<i32>) {
@@ -4027,6 +4165,18 @@ fn ffi_component_meta_distinguishes_partial_from_exact_empty() {
 
     let degrading = wire_payload(&session, "/Degrading.vue");
     let propsless = wire_payload(&session, "/Propsless.vue");
+
+    let degrading_facts = degrading.facts();
+    for fact in [
+        degrading_facts.accepted_props.causes(),
+        degrading_facts.accepted_events.causes(),
+        degrading_facts.fallthrough_surface.causes(),
+    ] {
+        assert!(
+            fact.contains(&16),
+            "accepted lower bounds preserve the compute's flow-return-unverified cause: {fact:?}"
+        );
+    }
 
     // Fixture premises: the degraded surface still publishes its prop (a
     // degraded success is a usable value), and the props-less component
@@ -4424,8 +4574,8 @@ fn fanout_reason_survives_native_and_wire_publication() {
         assert_eq!(body.facts.unwrap().delivery.unwrap().causes, [21]);
         assert_eq!(
             body.result_completeness.unwrap().partial_reasons,
-            [7, 21],
-            "fanout stays distinct beside the independent lower-bound fact summary"
+            [21, 7],
+            "accepted compute causes precede the independent lower-bound fact summary"
         );
     }
 }
@@ -4715,6 +4865,12 @@ fn native_member_domains_preserve_producer_guarantees() {
         let bytes = session
             .get_component_meta_payload(canonical, |output| {
                 let ffi = super::component_meta_output_to_ffi(output);
+                if kind != 1 {
+                    assert!(
+                        ffi.facts().props.causes().contains(&14),
+                        "missing imported domain retains its machine cause"
+                    );
+                }
                 let json = serde_json::to_value(&ffi).unwrap();
                 assert_eq!(
                     json["facts"]["props"]["kind"],

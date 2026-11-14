@@ -55,3 +55,23 @@ Constrained `infer` nodes retain both name and constraint through graph
 interning, persisted graph validation, protobuf and TypeScript rendering.
 Optional capture still contributes no origin graph by default. No new counters,
 histories, timers or optional observation stores are introduced.
+
+Every variable component domain retains its producer claim on
+`ComponentDomainGuarantees`: props, events, slots, models, exposed, accepted,
+public instance, and type registry. Model membership proves the syntactic
+names; an unresolved model value is independently unavailable. Type-based
+expose preserves the bundle's openness and availability; object-literal
+expose states its analyzer-owned complete closed names. Accepted props, events
+and fallthrough share the resolver claim and absorb surrounding partial-compute
+causes. Public-instance completeness stays typed through the wire DTO.
+
+A seeded registry carries the resolution policy's completeness; an unseeded
+registry retains its complete closed claim. The output sink finalizes the
+registry and emits aligned declaration positions, including absent declarations.
+The converter zips these positions and copies rawType from that same declaration.
+The cause-code vocabulary is defined once by
+`metadata_partial_reason_causes!` in `verter_session_query`; the session's
+forward projection and protocol's forward/reverse projections expand that table.
+The compatibility summary remains derived from independent facts and failed
+publications: measured completeness alone does not yet cover every failed
+publication. This summary never authorizes a domain.

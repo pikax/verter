@@ -870,9 +870,11 @@ fn extract_component_meta_from_resolved_with_evaluated<M: verter_audit::observe:
             meta.accepted_props = resolution.accepted_props;
             meta.accepted_events = resolution.accepted_events;
             meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
+            meta.domain_guarantees.accepted = resolution.accepted_surface_completeness.guarantee();
             meta.fallthrough_surface = resolution.fallthrough_surface;
         } else {
             meta.accepted_surface_completeness = AcceptedSurfaceCompleteness::LowerBound;
+            meta.domain_guarantees.accepted = AcceptedSurfaceCompleteness::LowerBound.guarantee();
             meta.root_reachability = RootReachability::NoFallthrough {
                 reason:
                     verter_session_query::analysis::component_meta::NoFallthroughReason::NoTemplate,
@@ -890,6 +892,14 @@ fn extract_component_meta_from_resolved_with_evaluated<M: verter_audit::observe:
     // members.
     if resolved.completeness.is_partial() {
         meta.accepted_surface_completeness = AcceptedSurfaceCompleteness::LowerBound;
+        meta.domain_guarantees.accepted.absorb(
+            &crate::typeinfo::surface_resolution::metadata_guarantee(
+                verter_type_engine::semantic_query::FactStatus::approximate(
+                    resolved.completeness.reasons(),
+                ),
+                true,
+            ),
+        );
     }
     crate::host_manage::populate_public_instance_sidecar(&mut meta);
     crate::host_resolve::populate_ordered_sfc_structure(host, canonical_id, &mut meta);

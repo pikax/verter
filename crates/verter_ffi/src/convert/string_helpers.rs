@@ -625,19 +625,6 @@ pub(super) fn resolved_declaration_kind_to_string(
     }
 }
 
-pub(super) fn public_instance_completeness_to_string(
-    completeness: verter_session_query::analysis::component_meta::PublicInstanceCompleteness,
-) -> String {
-    match completeness {
-        verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Exact => {
-            "exact".to_string()
-        }
-        verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Partial => {
-            "partial".to_string()
-        }
-    }
-}
-
 pub(super) fn public_instance_member_kind_to_string(
     kind: verter_session_query::analysis::component_meta::PublicInstanceMemberKind,
 ) -> String {

@@ -89,14 +89,6 @@ fn unavailable<T>(cause: u32) -> FfiFact<T> {
 fn complete<T>(value: T) -> FfiFact<T> {
     FfiFact::Complete { value, open: false }
 }
-fn lower_bound<T>(value: T) -> FfiFact<T> {
-    FfiFact::Approximate {
-        value,
-        causes: FactCauses(vec![103]),
-        open: true,
-    }
-}
-
 /// Borrowed terminal projection: no parallel member arrays or retained IR copies.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -117,44 +109,33 @@ pub struct FfiComponentFacts<'a> {
 }
 impl FfiComponentMeta {
     pub fn facts(&self) -> FfiComponentFacts<'_> {
-        let accepted_exact = matches!(
-            self.accepted_surface_completeness,
-            FfiAcceptedSurfaceCompleteness::Exact
-        );
         FfiComponentFacts {
             props: domain(&self.props, &self.domain_guarantees.props),
             events: domain(&self.events, &self.domain_guarantees.events),
             slots: domain(&self.slots, &self.domain_guarantees.slots),
-            models: complete(&self.models),
-            exposed: complete(&self.exposed),
-            accepted_props: if accepted_exact {
-                complete(&self.accepted_props)
-            } else {
-                lower_bound(&self.accepted_props)
-            },
-            accepted_events: if accepted_exact {
-                complete(&self.accepted_events)
-            } else {
-                lower_bound(&self.accepted_events)
-            },
+            models: domain(&self.models, &self.domain_guarantees.models),
+            exposed: domain(&self.exposed, &self.domain_guarantees.exposed),
+            accepted_props: domain(&self.accepted_props, &self.domain_guarantees.accepted),
+            accepted_events: domain(&self.accepted_events, &self.domain_guarantees.accepted),
             root_reachability: complete(&self.root_reachability),
-            fallthrough_surface: if accepted_exact {
-                complete(&self.fallthrough_surface)
-            } else {
-                lower_bound(&self.fallthrough_surface)
-            },
-            public_instance: match self.public_instance.as_ref() {
-                Some(instance) if instance.completeness == "partial" => {
-                    lower_bound(&self.public_instance)
-                }
-                _ => complete(&self.public_instance),
-            },
+            fallthrough_surface: domain(
+                &self.fallthrough_surface,
+                &self.domain_guarantees.accepted,
+            ),
+            public_instance: domain(
+                &self.public_instance,
+                &self.domain_guarantees.public_instance,
+            ),
             component_public_contract: match &self.component_public_contract {
                 FfiComponentContractAvailability::Supported { contract } => {
                     if matches!(contract.exactness, FfiContractExactness::Exact) {
                         complete(contract)
                     } else {
-                        lower_bound(contract)
+                        FfiFact::Approximate {
+                            value: contract,
+                            causes: FactCauses(vec![103]),
+                            open: true,
+                        }
                     }
                 }
                 FfiComponentContractAvailability::Unsupported { unsupported } => {
@@ -163,23 +144,14 @@ impl FfiComponentMeta {
                     }
                 }
             },
-            type_registry: complete(&self.type_registry),
+            type_registry: domain(&self.type_registry, &self.domain_guarantees.type_registry),
             delivery: match &self.result_completeness {
                 FfiResultCompleteness::Complete => complete(()),
                 FfiResultCompleteness::Partial { reasons } => FfiFact::Unavailable {
                     causes: FactCauses::new(
                         reasons
                             .iter()
-                            .map(|reason| match reason {
-                                FfiSurfacePartialReason::UndecidedConditional => 18,
-                                FfiSurfacePartialReason::ConnectedMemoryLimit => 19,
-                                FfiSurfacePartialReason::OperationBudget => 20,
-                                FfiSurfacePartialReason::FanoutLimit => 21,
-                                _ => {
-                                    crate::component_meta::surface_partial_reason_to_proto(*reason)
-                                        as u32
-                                }
-                            })
+                            .map(|reason| surface_partial_reason_cause(*reason))
                             .collect(),
                     )
                     .unwrap_or(FactCauses(vec![104])),
@@ -494,30 +466,8 @@ impl FfiComponentMeta {
         }
         let mut reasons = Vec::new();
         for code in causes {
-            let reason = match code {
-                1 => FfiSurfacePartialReason::BudgetExceeded,
-                2 => FfiSurfacePartialReason::Cancelled,
-                3 => FfiSurfacePartialReason::SupersededGeneration,
-                4 => FfiSurfacePartialReason::UnstableState,
-                5 => FfiSurfacePartialReason::SamePathRecursion,
-                6 => FfiSurfacePartialReason::WalkerFatal,
-                7 => FfiSurfacePartialReason::Propagated,
-                8 => FfiSurfacePartialReason::DeferredEvaluationLimit,
-                9 => FfiSurfacePartialReason::StructuralFactDemandLimit,
-                10 => FfiSurfacePartialReason::SemanticQueryFault,
-                11 => FfiSurfacePartialReason::MissingSemanticNodeData,
-                12 => FfiSurfacePartialReason::ProjectionWorkLimit,
-                13 => FfiSurfacePartialReason::ConnectedQueryDepthLimit,
-                14 => FfiSurfacePartialReason::MissingDependency,
-                15 => FfiSurfacePartialReason::FlowReturnUninferred,
-                16 => FfiSurfacePartialReason::FlowReturnUnverified,
-                17 => FfiSurfacePartialReason::FlowReturnNoSurface,
-                18 => FfiSurfacePartialReason::UndecidedConditional,
-                19 => FfiSurfacePartialReason::ConnectedMemoryLimit,
-                20 => FfiSurfacePartialReason::OperationBudget,
-                21 => FfiSurfacePartialReason::FanoutLimit,
-                _ => FfiSurfacePartialReason::Propagated,
-            };
+            let reason =
+                partial_reason_from_cause(code).unwrap_or(FfiSurfacePartialReason::Propagated);
             if !reasons.contains(&reason) {
                 reasons.push(reason);
             }
@@ -560,3 +510,15 @@ fn contract_causes(reason: &FfiComponentContractUnsupportedReason) -> FactCauses
     };
     FactCauses(codes)
 }
+
+macro_rules! define_partial_reason_causes {
+    ($($reason:ident => $code:literal,)*) => {
+        fn surface_partial_reason_cause(reason: FfiSurfacePartialReason) -> u32 {
+            match reason { $(FfiSurfacePartialReason::$reason => $code,)* }
+        }
+        fn partial_reason_from_cause(code: u32) -> Option<FfiSurfacePartialReason> {
+            match code { $($code => Some(FfiSurfacePartialReason::$reason),)* _ => None }
+        }
+    };
+}
+verter_session_query::metadata_partial_reason_causes!(define_partial_reason_causes);

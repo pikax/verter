@@ -20,11 +20,10 @@ use super::string_helpers::{
     expansion_execution_status_to_string, expansion_metadata_to_ffi,
     expansion_stop_reason_to_string, jsdoc_to_ffi, macro_expansion_kind_to_string,
     macro_kind_to_string, materialized_publication_to_ffi, member_visibility_to_string,
-    projection_mode_to_string, public_instance_completeness_to_string,
-    public_instance_member_kind_to_string, reactive_wrapper_role_to_string,
-    reactive_wrapper_unresolved_reason_to_string, reactivity_kind_to_string,
-    resolved_declaration_kind_to_string, resolved_jsdoc_tag_to_ffi, style_lang_to_string,
-    vue_api_to_string,
+    projection_mode_to_string, public_instance_member_kind_to_string,
+    reactive_wrapper_role_to_string, reactive_wrapper_unresolved_reason_to_string,
+    reactivity_kind_to_string, resolved_declaration_kind_to_string, resolved_jsdoc_tag_to_ffi,
+    style_lang_to_string, vue_api_to_string,
 };
 
 /// Convert the session-owned output envelope to the FFI boundary DTO.
@@ -532,6 +531,11 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
         analysis.accepted_events.len(),
         lanes.accepted_event_payloads.len(),
     );
+    require_lane_aligned(
+        "type-registry-declarations",
+        analysis.type_registry.len(),
+        lanes.type_registry_declarations.len(),
+    );
     FfiComponentMeta {
         domain_guarantees: analysis.domain_guarantees,
         component_public_contract: component_contract_to_ffi(contract),
@@ -651,7 +655,7 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
         public_instance: analysis
             .public_instance
             .map(|public_instance| FfiPublicInstanceMeta {
-                completeness: public_instance_completeness_to_string(public_instance.completeness),
+                completeness: public_instance.completeness,
                 members: public_instance
                     .members
                     .into_iter()
@@ -668,32 +672,21 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
                     .collect(),
             }),
         ordered_sfc_structure,
-        // `analysis.type_registry` already carries the SESSION-owned
-        // resolved-registry name-overlay finalize (applied before
-        // materialization when the envelope carries a resolution); the lane
-        // aligns with the merged registry. The per-name declaration sidecar
-        // reads the narrowed resolution output.
+        // The session finalized registry identity and declaration positions.
         type_registry: analysis
             .type_registry
             .into_iter()
             .zip(lanes.type_registry_entries)
-            .map(|(entry, r#type)| {
-                let declaration = resolution
-                    .as_ref()
-                    .and_then(|resolution| {
-                        resolution
-                            .resolved_type_registry_meta
-                            .iter()
-                            .find(|meta| meta.name == entry.name)
-                    })
-                    .map(|meta| FfiResolvedTypeDeclaration {
-                        requested_name: meta.declaration.requested_name.clone(),
-                        resolved_name: meta.declaration.resolved_name.clone(),
-                        canonical_source: meta.declaration.canonical_source.clone(),
-                        span: TaggedSpan::utf8(meta.declaration.span).ok(),
-                        kind: resolved_declaration_kind_to_string(meta.declaration.kind),
-                        text: meta.declaration.text.clone(),
-                    });
+            .zip(lanes.type_registry_declarations)
+            .map(|((entry, r#type), declaration)| {
+                let declaration = declaration.map(|declaration| FfiResolvedTypeDeclaration {
+                    requested_name: declaration.requested_name,
+                    resolved_name: declaration.resolved_name,
+                    canonical_source: declaration.canonical_source,
+                    span: TaggedSpan::utf8(declaration.span).ok(),
+                    kind: resolved_declaration_kind_to_string(declaration.kind),
+                    text: declaration.text,
+                });
 
                 FfiResolvedTypeMeta {
                     name: entry.name,

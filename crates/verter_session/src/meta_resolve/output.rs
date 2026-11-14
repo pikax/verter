@@ -355,6 +355,9 @@ pub struct MaterializedComponentMetaTypeLanes {
     /// `typeRegistry[i].type` — aligned with the (overlay-finalized)
     /// `ComponentMetaAnalysis::type_registry`.
     pub type_registry_entries: Vec<TypeExpr>,
+    /// Declaration rows aligned with the finalized registry, including absence.
+    pub type_registry_declarations:
+        Vec<Option<verter_session_query::declarations::metadata::ResolvedTypeDeclaration>>,
     /// `acceptedProps[i].type` — aligned with
     /// `ComponentMetaAnalysis::accepted_props`.
     pub accepted_props: Vec<MaterializedTypePublication>,
@@ -395,8 +398,8 @@ pub struct ComponentMetaResolutionOutput {
     /// Resolved per-macro metadata (declaration identity, native-props
     /// visibility surface, JSDoc).
     pub resolved_macros: Vec<crate::meta_resolve::ResolvedMacroMeta>,
-    /// Native declaration metadata for each resolved type-registry entry
-    /// (the wire converter's per-name declaration sidecar).
+    /// Native declaration metadata consumed by the session output sink to
+    /// produce the positional declaration lane.
     pub resolved_type_registry_meta: Vec<crate::meta_resolve::ResolvedTypeRegistryMeta>,
     /// Origin subgraph for semantic results (`Expanded` mode only).
     pub origin_graph: Option<verter_protocol::types::OriginGraphDto>,
@@ -409,6 +412,8 @@ pub struct ComponentMetaResolutionOutput {
 /// dropped — they never reach the wire converter separately).
 #[derive(Debug)]
 pub(crate) struct ComponentMetaResolutionSeed {
+    /// The resolution policy's own completeness, retained on warm replay.
+    pub(crate) completeness: verter_type_engine::semantic_query::ResultCompleteness,
     /// Resolved type-registry overlay entries (merged into the analysis'
     /// registry by name: replace-in-place or append).
     pub(crate) resolved_type_registry: Vec<ResolvedTypeAnalysis>,
@@ -422,6 +427,7 @@ impl ComponentMetaResolutionSeed {
         resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     ) -> Self {
         Self {
+            completeness: resolved.completeness,
             resolved_type_registry: resolved.resolved_type_registry.clone(),
             output: ComponentMetaResolutionOutput {
                 mode: resolved.mode,
@@ -438,6 +444,7 @@ impl ComponentMetaResolutionSeed {
         template: &crate::component_meta_cached_result::ResolutionTemplate,
     ) -> Self {
         Self {
+            completeness: template.completeness,
             resolved_type_registry: template.resolved_type_registry.clone(),
             output: ComponentMetaResolutionOutput {
                 mode: template.mode,
