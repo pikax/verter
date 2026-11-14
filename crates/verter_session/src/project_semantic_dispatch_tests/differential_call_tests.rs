@@ -163,13 +163,15 @@ fn pipe_declaration(stages: usize, name: &str) -> String {
     format!("declare function {name}<{binders}>(a: T0, {callbacks}): T{stages};\n")
 }
 
-#[test]
-fn overloaded_contextual_chains_infer_each_stage_from_the_previous_return() {
+/// Twenty `pipe` overloads and, per entry of `stages`, a function returning
+/// the chain of that many callbacks (each `(x) => ({ vI: x })`) and a constant
+/// holding the same call, with the checker's print of each chain's answer.
+fn overloaded_chains(stages: &[usize]) -> (String, Vec<(String, String)>) {
     let mut source = (1..=20)
         .map(|stages| pipe_declaration(stages, "pipe"))
         .collect::<String>();
     let mut expected = Vec::new();
-    for stages in [5, 12, 20] {
+    for &stages in stages {
         let callbacks = (0..stages)
             .map(|i| format!("(x) => ({{ v{i}: x }})"))
             .collect::<Vec<_>>()
@@ -183,6 +185,11 @@ fn overloaded_contextual_chains_infer_each_stage_from_the_previous_return() {
             (0..stages).fold("0".to_owned(), |nested, i| format!("{{ v{i}: {nested}; }}")),
         ));
     }
+    (source, expected)
+}
+
+fn assert_overloaded_chains_infer_each_stage(stages: &[usize]) {
+    let (source, expected) = overloaded_chains(stages);
     let rows = expected
         .iter()
         .map(|(name, answer)| (name.as_str(), answer.as_str()))
@@ -220,6 +227,58 @@ fn overloaded_contextual_chains_infer_each_stage_from_the_previous_return() {
         &rows.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
     ));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The gate version of
+/// [`nightly_scale::overloaded_contextual_chains_infer_each_stage_from_the_previous_return`]:
+/// all twenty overloads, with chains of 3 and 8 callbacks, each stage
+/// inferred from the previous return, in every setting.
+#[test]
+fn overloaded_contextual_chains_infer_each_stage_from_the_previous_return_to_8_stages() {
+    assert_overloaded_chains_infer_each_stage(&[3, 8]);
+}
+
+/// The chains of 4, 8, 12 and 16 callbacks over the twenty overloads: the
+/// relation checks, cold builds, connected work and charged operations of
+/// resolving each grow by the same amount per four stages, so they are affine
+/// in the stage count and no stage repeats the work of the stages before it.
+/// Each stage's pass reads every argument position and every binding of the
+/// stages before it, so the argument and binding work are quadratic: each
+/// step adds the same amount to the step before, and no term grows faster.
+#[test]
+fn overloaded_contextual_chain_work_is_affine_in_the_stages() {
+    let sizes = [4, 8, 12, 16];
+    let (source, _) = overloaded_chains(&sizes);
+    let matrix = Matrix::new(&source).settings(&super::differential_harness_tests::ALL[..1]);
+    let work: Vec<_> = sizes
+        .iter()
+        .map(|stages| matrix.return_work_counters(&format!("chain{stages}")))
+        .collect();
+    let (per_pass, per_stage): (Vec<_>, Vec<_>) = crate::scale_gate::counters(&work)
+        .into_iter()
+        .partition(|counter| matches!(counter.name, "argument work" | "binding work"));
+    let window = |counters: &[crate::scale_gate::Counter<'static>], from: usize| -> Vec<_> {
+        counters
+            .iter()
+            .map(|counter| crate::scale_gate::Counter {
+                name: counter.name,
+                values: counter.values[from..from + 3].to_vec(),
+            })
+            .collect()
+    };
+    let first_three = window(&per_stage, 0);
+    let last_three = window(&per_stage, 1);
+    crate::scale_gate::affine(
+        "overloaded contextual chains",
+        [sizes[0], sizes[1], sizes[2]],
+        first_three,
+    );
+    crate::scale_gate::affine(
+        "overloaded contextual chains, larger window",
+        [sizes[1], sizes[2], sizes[3]],
+        last_three,
+    );
+    crate::scale_gate::quadratic("overloaded contextual chain passes", sizes, per_pass);
 }
 
 #[test]
@@ -1887,6 +1946,14 @@ fn function_bind_and_generic_calls_close_with_their_proof() {
 /// Each has a gate version outside this module.
 mod nightly_scale {
     use super::*;
+
+    /// All twenty `pipe` overloads, with chains of 5, 12 and 20 callbacks, each
+    /// stage inferred from the previous return, in every setting. Gate
+    /// version: [`super::overloaded_contextual_chains_infer_each_stage_from_the_previous_return_to_8_stages`].
+    #[test]
+    fn overloaded_contextual_chains_infer_each_stage_from_the_previous_return() {
+        assert_overloaded_chains_infer_each_stage(&[5, 12, 20]);
+    }
 
     #[test]
     fn repeated_contravariant_callbacks_charge_linear_work() {

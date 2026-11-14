@@ -835,14 +835,66 @@ fn assert_rtk_slice_actions_grow_linearly(arrow: bool) {
     assert_linear_growth(label, work[1], work[2]);
 }
 
-#[test]
-fn rtk_slice_method_reducer_actions_answer_completely_and_grow_linearly() {
-    assert_rtk_slice_actions_grow_linearly(false);
+/// The gate version of [`assert_rtk_slice_actions_grow_linearly`]: the same
+/// demand at 2, 4 and 6 reducers (even steps keep both payload kinds in every
+/// slice), each answering the complete action union, with every work counter
+/// growing by the same amount per step, so the work is affine in the size
+/// (see [`crate::scale_gate`]). The affine work gives the counts at 6 and 12
+/// reducers, held to the full-size test's own growth bound. The fixed part
+/// of the work no longer hides a small quadratic term from the bound.
+fn assert_rtk_slice_actions_are_affine(arrow: bool) {
+    let label = if arrow {
+        "arrow reducers"
+    } else {
+        "method reducers"
+    };
+    let sizes = [2, 4, 6];
+    let measured = sizes.map(|count| {
+        let answer = named_answer_with_library(
+            &rtk_slice(count, arrow),
+            "ReturnType<Actions[keyof Actions]>",
+            None,
+            true,
+        );
+        let TypeExpr::Union(members) = &answer.answer else {
+            panic!(
+                "{label} {count}: `{}` is not a union",
+                short(&answer.answer)
+            );
+        };
+        let got: std::collections::BTreeSet<String> = members.iter().map(display).collect();
+        assert_eq!(got, rtk_actions(count), "{label} {count}");
+        [
+            answer.work[0],
+            answer.work[1],
+            answer.work[2],
+            ("flow obligations", answer.flow_obligations),
+        ]
+    });
+    let counters = (0..measured[0].len())
+        .map(|index| crate::scale_gate::Counter {
+            name: measured[0][index].0,
+            values: measured.iter().map(|work| work[index].1).collect(),
+        })
+        .collect();
+    let work = crate::scale_gate::affine(label, sizes, counters);
+    let at_size = |size: usize| -> (usize, Work<4>) {
+        let counts = work.all_at(size);
+        let mut full = [("", 0); 4];
+        full.copy_from_slice(&counts);
+        (size, full)
+    };
+    assert_linear_growth(label, at_size(6), at_size(12));
 }
 
 #[test]
-fn rtk_slice_arrow_reducer_actions_answer_completely_and_grow_linearly() {
-    assert_rtk_slice_actions_grow_linearly(true);
+fn rtk_slice_method_reducer_actions_answer_completely_and_grow_affinely() {
+    assert_rtk_slice_actions_are_affine(false);
+}
+
+#[test]
+fn rtk_slice_arrow_reducer_actions_answer_completely_and_grow_affinely() {
+    assert_rtk_slice_actions_are_affine(true);
 }
 
 /// The action union of a three-reducer slice differs from the checker's
@@ -857,6 +909,20 @@ fn rtk_slice_actions_differ_from_the_checker_only_in_union_order() {
 
 mod nightly_scale {
     use super::*;
+
+    /// The full-size growth tests of the Redux Toolkit slice's actions, at 3,
+    /// 6 and 12 reducers; their gate versions are
+    /// [`super::rtk_slice_method_reducer_actions_answer_completely_and_grow_affinely`]
+    /// and its arrow twin.
+    #[test]
+    fn rtk_slice_method_reducer_actions_answer_completely_and_grow_linearly() {
+        assert_rtk_slice_actions_grow_linearly(false);
+    }
+
+    #[test]
+    fn rtk_slice_arrow_reducer_actions_answer_completely_and_grow_linearly() {
+        assert_rtk_slice_actions_grow_linearly(true);
+    }
 
     /// The action union of a ten-reducer slice differs from the checker's
     /// only in its member order (the semantic-difference ledger's Redux Toolkit slice row,
