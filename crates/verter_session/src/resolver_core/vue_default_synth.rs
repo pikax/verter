@@ -156,7 +156,7 @@ pub fn synthesise_vue_default_value_symbol(macros: &[AnalyzedMacro]) -> Option<L
 
 /// URI prefix typeinfo scratch files use. A scratch that inlines a
 /// `.vue` scope's eval-source (see
-/// [`super::super::typeinfo::evaluate_type_expression`]) carries the
+/// `typeinfo::evaluate_type_expression`) carries the
 /// inlined macros, so the synthesizing framework's leg fabricates the
 /// `default` from them — even though the scratch classifies by its own
 /// `.ts` suffix.

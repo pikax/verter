@@ -13,22 +13,6 @@ import "verter/v1/compiler_intrinsics.proto";
 // file cover the structured-projection surface.
 // ---------------------------------------------------------------------------
 
-// EvaluateTypeExpressionRequestDto — wire-form mirror of
-// `verter_session::typeinfo::types::EvaluateTypeExpressionRequest`.
-//
-// Field numbers and names are stable; do not renumber.
-message EvaluateTypeExpressionRequestDto {
-  string scope_canonical = 1;
-  string expression = 2;
-  repeated ImportSpecDto extra_imports = 3;
-  // Stringly-tagged projection mode for forwards compatibility —
-  // adding a new mode does not require renumbering. Producers and
-  // consumers compare against the canonical enum values:
-  // "identity", "navigate", "shallow", "expanded", "skeleton".
-  string mode = 4;
-  bool cacheable = 5;
-}
-
 // ImportSpecDto — wire-form mirror of
 // `verter_session::typeinfo::types::ImportSpec`.
 message ImportSpecDto {

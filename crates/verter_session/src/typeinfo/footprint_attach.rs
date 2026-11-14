@@ -1,7 +1,7 @@
 //! Typeinfo request-footprint attachment.
 //!
 //! The audited typeinfo entry-points ([`crate::VerterHost::resolve_named_symbol_with_audit`],
-//! [`crate::VerterHost::evaluate_type_expression_with_audit`],
+//! `evaluate_type_expression_with_audit`,
 //! [`crate::VerterHost::resolve_type_with_audit`]) attach a mined
 //! [`verter_audit::RequestFootprintAudit`] to their records through the SAME
 //! passive-observer pipeline the component-meta entry uses

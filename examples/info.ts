@@ -6,7 +6,7 @@
  *   pnpm --filter examples exec tsx info.ts        # if tsx is available
  *   node --experimental-strip-types examples/info.ts   # Node 22+
  *
- * Edit SCRATCH_SRC, the resolveSymbol / evaluateTypeExpression calls,
+ * Edit SCRATCH_SRC, the resolveSymbol calls,
  * or the printer to inspect whatever you're poking at.
  */
 
@@ -18,7 +18,6 @@ import {
   TypeInfoSession,
   type ProjectionMode,
   type ResolveSymbolResult,
-  type EvaluateTypeExpressionResult,
   type TypeDescriptor,
 } from "@verter/typeinfo";
 
@@ -90,7 +89,7 @@ function describe(descriptor: TypeDescriptor | undefined): string {
   return descriptor.kind;
 }
 
-function summariseAudit(result: ResolveSymbolResult | EvaluateTypeExpressionResult) {
+function summariseAudit(result: ResolveSymbolResult) {
   if (!result.auditRecord) return "(no audit)";
   const a = result.auditRecord;
   return `kind=${a.kind} fromCache=${a.from_cache ?? "?"} totalMs=${a.timings?.total_ms ?? "?"}`;
@@ -133,23 +132,6 @@ function play(): void {
     tryResolve(session, SCRATCH_ID, "MyType", "expanded");
     tryResolve(session, SCRATCH_ID, "CircularA", "expanded");
     tryResolve(session, SCRATCH_ID, "Foo", "expanded");
-
-    // --- evaluateTypeExpression ---
-    console.log("\n=== evaluateTypeExpression(scratch scope) ===");
-    const cases = [
-      `Pick<User, "id" | "name">`,
-      `Box<string>["value"]`,
-      `User["id"] | User["name"]`,
-    ];
-    for (const expression of cases) {
-      const result = session.evaluateTypeExpression({
-        scope: SCRATCH_ID,
-        expression,
-        mode: "expanded",
-      });
-      console.log(`  ${expression.padEnd(34)} -> ${describe(result.type)}`);
-      console.log(`  ${"".padEnd(34)}    audit: ${summariseAudit(result)}`);
-    }
 
     // --- a real file from examples/src/ ---
     console.log("\n=== real file: src/props/types.ts ===");

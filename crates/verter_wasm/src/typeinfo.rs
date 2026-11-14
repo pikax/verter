@@ -13,16 +13,14 @@ use verter_protocol::typeinfo::graph::{
     TypeInfoCapabilityHandshakeRequest, TypeInfoCapabilityHandshakeResponse, TypeInfoGraphRequest,
     TypeInfoGraphResponse,
 };
-use verter_protocol::typeinfo::FfiEvaluateTypeExpressionRequest;
 use verter_session::host_resolve_type_audit::TypeResolutionRequestError;
 use verter_type_engine::semantic_query::ProjectionMode;
 use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
 use verter_type_expr::TypeExpr;
 use wasm_bindgen::prelude::*;
 
-/// Combined response shape for `resolveSymbolWithAudit` /
-/// `evaluateTypeExpressionWithAudit`. All fields are JSON strings;
-/// the consumer parses whichever it needs.
+/// Response shape for `resolveSymbolWithAudit`: all fields are JSON
+/// strings.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WasmTypeInfoResolveResult {
@@ -105,16 +103,6 @@ pub(crate) fn decode_type_expr_list(json: Option<String>) -> Result<Vec<TypeExpr
     }
     serde_json::from_str(&s)
         .map_err(|e| JsValue::from_str(&format!("type-expr list decode error: {e}")))
-}
-
-/// Decode an `EvaluateTypeExpressionRequest` JSON string.
-pub(crate) fn decode_evaluate_request(
-    json: &str,
-) -> Result<verter_session::typeinfo::types::EvaluateTypeExpressionRequest, JsValue> {
-    let ffi: FfiEvaluateTypeExpressionRequest = serde_json::from_str(json)
-        .map_err(|e| JsValue::from_str(&format!("evaluate-request decode error: {e}")))?;
-    verter_ffi::convert::ffi_to_host_evaluate_request(ffi)
-        .map_err(|e| JsValue::from_str(&format!("evaluate-request lowering error: {e}")))
 }
 
 /// Convert the FFI mode tag to the host enum, with `None` selecting the

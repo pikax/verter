@@ -29,8 +29,6 @@ pub enum FfiConversionError {
     InvalidTarget(String),
     /// Invalid projection-mode tag.
     InvalidProjectionMode(String),
-    /// Invalid named-import variant tag.
-    InvalidNamedImportKind(String),
     /// Invalid `requestedMode` compile-cache-mode string.
     InvalidCompileCacheMode(String),
     /// Invalid `getPublicApi` mode string.
@@ -91,10 +89,6 @@ impl std::fmt::Display for FfiConversionError {
                 f,
                 "invalid projection mode '{v}' (expected 'identity', 'navigate', 'shallow', \
                  'expanded', or 'skeleton')"
-            ),
-            Self::InvalidNamedImportKind(v) => write!(
-                f,
-                "invalid named-import kind '{v}' (expected 'default', 'named', or 'namespace')"
             ),
             Self::InvalidCompileCacheMode(v) => write!(
                 f,

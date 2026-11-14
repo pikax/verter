@@ -1367,7 +1367,6 @@ describe("VerterHost type declarations in sync with native binary", () => {
       "compileWithAudit",
       "configureProjects",
       "ensureIdeCompiled",
-      "evaluateTypeExpressionWithAudit",
       "evaluateTypes",
       "getAnalysis",
       "getAuditRecords",

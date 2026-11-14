@@ -90,14 +90,6 @@ export interface HostConfig {
    */
   footprintCapture?: boolean;
   /**
-   * Capacity of the host-owned typeinfo scratch cache used by
-   * `evaluateTypeExpressionWithAudit`. `undefined` (default) selects
-   * 64 entries; `0` disables the cache; other values cap the LRU at
-   * the chosen size — used by the `@verter/typeinfo` LRU eviction
-   * tests.
-   */
-  typeinfoScratchCacheCapacity?: number;
-  /**
    * Worker count for the host-owned CPU pool used by `compileMany`'s
    * outer coordinator. `undefined` (default) resolves to the platform's
    * available parallelism at host-construction time; `0` is treated as

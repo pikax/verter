@@ -1074,27 +1074,6 @@ export declare class VerterHost {
   ): { typeExpr: Buffer | null; auditRecord: Buffer | null; error?: string | null };
 
   /**
-   * Evaluate a synthetic type expression in a file scope and return
-   * the raised `TypeExpr` plus the per-request audit record.
-   *
-   * `request` is a JSON Buffer carrying a
-   * `verter_protocol::typeinfo::FfiEvaluateTypeExpressionRequest`.
-   *
-   * `typeExpr` is `null` when the expression could not be resolved.
-   * `auditRecord` is `null` when audit is disabled (and is preserved
-   * on the fault path — the audit envelope rides both the success and
-   * the `error` outcome). `error` carries a human-readable description
-   * of a genuine dispatch fault (`BudgetExceeded` / `UnstableState` /
-   * `AliasCycle` / `UnsupportedIntrinsic` / `Other`); `null` / absent
-   * means "no fault".
-   */
-  evaluateTypeExpressionWithAudit(request: Buffer): {
-    typeExpr: Buffer | null;
-    auditRecord: Buffer | null;
-    error?: string | null;
-  };
-
-  /**
    * Answer a typeinfo graph operation (resolve-symbol, expand-around or
    * framework surfaces) and return the wire `TypeInfoGraphResponse` plus
    * the per-request audit record.

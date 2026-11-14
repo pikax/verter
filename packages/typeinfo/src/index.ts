@@ -49,10 +49,6 @@ export type {
 
 export type {
   AuditRecord,
-  EvaluateTypeExpressionRequest,
-  EvaluateTypeExpressionResult,
-  ImportSpec,
-  NamedImport,
   ProjectionMode,
   ResolveSymbolOpts,
   ResolveSymbolResult,

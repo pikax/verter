@@ -76,29 +76,6 @@ describe.runIf(captured)("typeinfo audit record emission (capture available)", (
     session.host.close();
   });
 
-  it("emits exactly one RequestAuditRecord per evaluateTypeExpression call", () => {
-    const session = new TypeInfoSession({ root: "/fixtures" });
-    session.host.upsert({
-      inputId: "/fixtures/types.ts",
-      source: `export type Foo = number;\n`,
-    });
-
-    const before = countAuditRecords(session);
-
-    const r = session.evaluateTypeExpression({
-      scope: "/fixtures/types.ts",
-      expression: "Foo",
-      mode: "expanded",
-      cacheable: false,
-    });
-    expect(r.auditRecord).toBeDefined();
-
-    const after = countAuditRecords(session);
-    expect(after).toBe(before + 1);
-
-    session.host.close();
-  });
-
   it("each call carries a distinct request_id even on identical inputs", () => {
     // Sanity guard against a memoised audit record bypass: even when
     // the resolver returns a cached node, the per-request audit must
@@ -124,7 +101,7 @@ describe.runIf(captured)("typeinfo audit record emission (capture available)", (
 });
 
 describe.runIf(!captured)("typeinfo audit record emission (capture unavailable)", () => {
-  it("resolves and evaluates without a record, and the record store reports unavailable capture", () => {
+  it("resolves without a record, and the record store reports unavailable capture", () => {
     const session = new TypeInfoSession({ root: "/fixtures" });
     session.host.upsert({
       inputId: "/fixtures/types.ts",
@@ -134,15 +111,6 @@ describe.runIf(!captured)("typeinfo audit record emission (capture unavailable)"
     const resolved = session.resolveSymbol("/fixtures/types.ts", "Foo", { mode: "expanded" });
     expect(resolved.type?.kind).toBe("object");
     expect(resolved.auditRecord).toBeUndefined();
-
-    const evaluated = session.evaluateTypeExpression({
-      scope: "/fixtures/types.ts",
-      expression: "Foo",
-      mode: "expanded",
-      cacheable: false,
-    });
-    expect(evaluated.type?.kind).toBe("object");
-    expect(evaluated.auditRecord).toBeUndefined();
 
     expect(() => session.host.getAuditRecords()).toThrow(/audit capture is unavailable/);
 

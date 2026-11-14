@@ -54,8 +54,7 @@ function decodeAuditRecord(buffer: Buffer | null): AuditRecord | undefined {
 }
 
 /**
- * Decode a native `resolveSymbolWithAudit` /
- * `evaluateTypeExpressionWithAudit` result into the public
+ * Decode a native `resolveSymbolWithAudit` result into the public
  * {@link ResolveSymbolResult}.
  *
  * A genuine dispatch fault (`BudgetExceeded` / `UnstableState` /
