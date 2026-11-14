@@ -1800,7 +1800,7 @@ pub struct FfiExposedMeta {
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct FfiPublicInstanceMeta {
-    pub completeness: String,
+    pub completeness: verter_session_query::analysis::component_meta::PublicInstanceCompleteness,
     pub members: Vec<FfiPublicInstanceMemberMeta>,
 }
 

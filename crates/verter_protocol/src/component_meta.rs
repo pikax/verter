@@ -143,7 +143,7 @@ fn component_meta_body_to_proto(
             } else {
                 None
             },
-            absent: native_facts.root_reachability.value().is_some() && false,
+            absent: false,
         }),
         fallthrough_surface: Some(proto::FallthroughSurfaceFact {
             guarantee: Some(fact_guarantee(&native_facts.fallthrough_surface)),
@@ -152,7 +152,7 @@ fn component_meta_body_to_proto(
             } else {
                 None
             },
-            absent: native_facts.fallthrough_surface.value().is_some() && false,
+            absent: false,
         }),
         public_instance: Some(proto::PublicInstanceFact {
             guarantee: Some(fact_guarantee(&native_facts.public_instance)),
@@ -174,7 +174,7 @@ fn component_meta_body_to_proto(
                     _ => None,
                 }
             }),
-            absent: native_facts.component_public_contract.value().is_some() && false,
+            absent: false,
         }),
         type_registry: Some(proto::TypeRegistryFact {
             guarantee: Some(fact_guarantee(&native_facts.type_registry)),
@@ -1236,9 +1236,13 @@ fn public_instance_to_proto(
     public_instance: &FfiPublicInstanceMeta,
 ) -> PublicInstanceMeta {
     PublicInstanceMeta {
-        completeness: match public_instance.completeness.as_str() {
-            "exact" => proto::PublicInstanceCompleteness::Exact,
-            _ => proto::PublicInstanceCompleteness::Partial,
+        completeness: match public_instance.completeness {
+            verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Exact => {
+                proto::PublicInstanceCompleteness::Exact
+            }
+            verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Partial => {
+                proto::PublicInstanceCompleteness::Partial
+            }
         } as i32,
         members: public_instance
             .members
@@ -2898,6 +2902,11 @@ fn build_test_meta() -> FfiComponentMeta {
                     verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(
                         false,
                     ),
+                models: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+                exposed: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+                accepted: verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::Exact.guarantee(),
+                public_instance: verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Exact.guarantee(),
+                type_registry: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
             },
         result_completeness: FfiResultCompleteness::Complete,
         component_public_contract: FfiComponentContractAvailability::Supported {
@@ -3146,10 +3155,18 @@ mod tests {
 
         let mut meta = super::build_test_meta();
         meta.public_instance = Some(FfiPublicInstanceMeta {
-            completeness: "partial".to_string(),
+            completeness:
+                verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Partial,
             members: Vec::new(),
         });
+        meta.domain_guarantees.public_instance = meta
+            .public_instance
+            .as_ref()
+            .unwrap()
+            .completeness
+            .guarantee();
         let json = serde_json::to_value(&meta).expect("json");
+        assert_eq!(json["publicInstance"]["completeness"], "partial");
         assert_eq!(json["facts"]["publicInstance"]["kind"], "approximate");
         assert_eq!(json["facts"]["publicInstance"]["open"], true);
         assert_eq!(
@@ -3174,7 +3191,18 @@ mod tests {
         meta.public_instance
             .as_mut()
             .expect("instance")
-            .completeness = "exact".to_string();
+            .completeness =
+            verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Exact;
+        meta.domain_guarantees.public_instance = meta
+            .public_instance
+            .as_ref()
+            .unwrap()
+            .completeness
+            .guarantee();
+        assert_eq!(
+            serde_json::to_value(&meta).unwrap()["publicInstance"]["completeness"],
+            "exact"
+        );
         let exact = meta.facts().public_instance;
         assert_eq!(exact.kind(), 1);
         assert!(!exact.open());
@@ -3330,6 +3358,15 @@ mod tests {
                          — the FFI JSON lane and the proto lane must not diverge"
                     )
                 });
+            let mut meta = super::build_test_meta();
+            meta.result_completeness = crate::types::FfiResultCompleteness::Partial {
+                reasons: vec![*reason],
+            };
+            assert_eq!(
+                meta.facts().delivery.causes(),
+                &[own.0 as u32],
+                "delivery retains the producer's distinct machine cause for {reason:?}"
+            );
             // Fanout is distinct from propagation and every operation refusal.
             // Other refinements retain their schema-12 compatibility mapping.
             let wire = super::surface_partial_reason_to_proto(*reason) as i32;

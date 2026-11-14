@@ -72,42 +72,14 @@ pub(crate) fn metadata_guarantee(
     status: verter_type_engine::semantic_query::FactStatus,
     open: bool,
 ) -> verter_session_query::analysis::component_meta::MetadataFactGuarantee {
-    use verter_type_engine::semantic_query::{FactStatus, PartialReason};
+    use verter_type_engine::semantic_query::FactStatus;
     let (kind, reasons) = match status {
         FactStatus::Complete => (1, None),
         FactStatus::Approximate(causes, _) => (2, Some(causes)),
         FactStatus::Unavailable(causes) => (3, Some(causes)),
     };
     let causes = reasons
-        .map(|reasons| {
-            reasons
-                .get()
-                .iter()
-                .map(|reason| match reason {
-                    PartialReason::BudgetExceeded => 1,
-                    PartialReason::Cancelled => 2,
-                    PartialReason::SupersededGeneration => 3,
-                    PartialReason::UnstableState => 4,
-                    PartialReason::SamePathRecursion => 5,
-                    PartialReason::WalkerFatal => 6,
-                    PartialReason::Propagated => 7,
-                    PartialReason::DeferredEvaluationLimit => 8,
-                    PartialReason::StructuralFactDemandLimit => 9,
-                    PartialReason::SemanticQueryFault => 10,
-                    PartialReason::MissingSemanticNodeData => 11,
-                    PartialReason::ProjectionWorkLimit => 12,
-                    PartialReason::ConnectedQueryDepthLimit => 13,
-                    PartialReason::MissingDependency => 14,
-                    PartialReason::FlowReturnUninferred => 15,
-                    PartialReason::FlowReturnUnverified => 16,
-                    PartialReason::FlowReturnNoSurface => 17,
-                    PartialReason::UndecidedConditional => 18,
-                    PartialReason::ConnectedMemoryLimit => 19,
-                    PartialReason::OperationBudget => 20,
-                    PartialReason::FanoutLimit => 21,
-                })
-                .collect()
-        })
+        .map(|reasons| reasons.get().iter().map(partial_reason_cause).collect())
         .unwrap_or_default();
     verter_session_query::analysis::component_meta::MetadataFactGuarantee { kind, causes, open }
 }
@@ -127,3 +99,12 @@ pub(crate) fn unavailable_query_fault_guarantee(
         true,
     )
 }
+
+macro_rules! define_partial_reason_cause {
+    ($($reason:ident => $code:literal,)*) => {
+        pub(crate) fn partial_reason_cause(reason: verter_type_engine::semantic_query::PartialReason) -> u32 {
+            match reason { $(verter_type_engine::semantic_query::PartialReason::$reason => $code,)* }
+        }
+    };
+}
+verter_session_query::metadata_partial_reason_causes!(define_partial_reason_cause);

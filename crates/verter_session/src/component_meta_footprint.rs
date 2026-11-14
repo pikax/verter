@@ -872,8 +872,20 @@ impl PayloadHeap for cm::ComponentDomainGuarantees {
             props,
             events,
             slots,
+            models,
+            exposed,
+            accepted,
+            public_instance,
+            type_registry,
         } = self;
-        props.heap(m) + events.heap(m) + slots.heap(m)
+        props.heap(m)
+            + events.heap(m)
+            + slots.heap(m)
+            + models.heap(m)
+            + exposed.heap(m)
+            + accepted.heap(m)
+            + public_instance.heap(m)
+            + type_registry.heap(m)
     }
 }
 
