@@ -20,7 +20,7 @@ producer, returns before an incomplete nested dependency settles.
 | Store-view and per-attempt snapshot capture, owner indexing and overlay indexing suspend through their existing handoffs | Metadata computation, extraction/fallthrough and output materialization still call synchronous dependency paths |
 | Cache admission, scheduler completion, resolver flights, carrier publication/stable parse, store-view capture, lowering and workspace resolution offer task-owned handoffs with independent cancellation | Higher callers must consume these owned APIs throughout their traversal instead of driving compatibility entries inside a poll |
 | Root state and converted scopes move between polling threads | Nested semantic dispatch still drives tasks or waits on subscriptions synchronously; complete-root no-replay is not proved |
-| Compile roots hand out one macro producer and retain followers; their blocker routes, blocker loads and dependency-verdict walk suspend through the owned resolution and load handoffs | That producer runs a synchronous traversal; taking a route can still ingest configured programs inside the poll for an importer no configured project lists |
+| Compile roots hand out one macro producer and retain followers, which take its bundle only when the producer's observations hold in their own view and otherwise produce their own; their blocker routes, blocker loads and dependency-verdict walk suspend through the owned resolution and load handoffs, and a stopped load or request answers its typed stop | That producer runs a synchronous traversal; taking a route can still ingest configured programs inside the poll for an importer no configured project lists |
 | An external consumer fixture and a queued-wake driver exercise multiple roots | The driver does not yet prove progress across every nested family with admission closed and no retained synchronous stack |
 
 The parse-once, zero eager-body and one shallow-walk assertions cover overlay
@@ -117,7 +117,9 @@ re-exported from the crate root with `RootWork`.
   end on the calling thread. Today's producer body has no wait of its own,
   so its first poll runs it and answers `Ready(true)`; polling work after
   it answered panics. Dropping a transferred producer abandons
-  its dependency, and the next poll answers that abandonment. Dropping a
+  its dependency, and the next poll answers that abandonment. Roots that
+  followed the dropped producer are not failed by it (see the compile
+  request below). Dropping a
   dispatch opportunity leaves the admitted dependency live; a later poll may
   offer another dispatch step or producer, or remain pending. Dropping the
   root withdraws its subscription and request ownership.
@@ -162,6 +164,25 @@ What each root suspends on today:
   inside the handed-out producer runs synchronously wherever the driver
   runs it; its own dependency waits are the semantic engine's.
 
+  A root that followed another caller's producer does not take its bundle
+  unchecked (`delivery_of` in `typeinfo/vue_macro_codegen.rs`, shared with
+  the synchronous macro bundle entry). It takes the bundle when every
+  observation the producer recorded holds in the root's own view, with the
+  owner as its strict self-root (`MacroFactFootprint::holds_under`, the
+  validator a warm semantic-memo hit uses); a footprint that recorded
+  nothing vouches for nothing. An absence is not a recorded fact, so a
+  bundle that reports a dependency failure is not taken on its first
+  delivery. In either case the root begins the scoped node again over its
+  own seed and overlay: the settled flight is gone, so the roots that begin
+  it again share one new flight and elect one producer among themselves.
+  A root whose own driver dropped its producer answers
+  `Host(HostError::Cancelled)`, the abandonment above; a root that followed
+  that producer and whose own request is live begins the node again and
+  completes. A producer's supersession still reaches its followers as
+  `Superseded`: they share its lane, whose pin folds every external
+  dimension the supersession could have moved, so a follower that produced
+  again would abort the same way.
+
   Before it captures its input, the compile root hydrates its blockers
   (`host_resolve/compile_blocker_hydration.rs`): it resolves each external
   block source and macro type import, records the owner's dependency edges
@@ -179,8 +200,21 @@ What each root suspends on today:
   protocol answers in place. Taking the route can still ingest configured
   programs inside the poll for an importer no configured project lists.
   Hydration's outcome is typed
-  (`BlockerHydration`): a refused route or a load that does not integrate
-  is recorded as a gap and the remaining blockers still load. The capture
+  (`BlockerHydration`): a refused route or a load that failed is a gap and
+  the remaining blockers still load. A load stopped by cancellation,
+  supersession or shutdown ends hydration with that abort before the
+  capture, and the request answers it as
+  `CompileRequestFailure::Host(Cancelled | Superseded | Shutdown)`: nothing
+  is captured or compiled, no blocker source is integrated after the stop,
+  and no flight is left. The dependency edges and resolution witnesses
+  recorded for routes that resolved before the stop stay, as any later
+  request would record them again. The request's cancellation reaches a
+  resolving route or loading blocker through a subscription on the
+  request's own token, which the computation polls beside each handoff, so
+  the cancellation itself wakes the root; the load keeps the host-wide
+  token as its own stop. A root begun outside a request has no request
+  token and stops only on shutdown, reset, the host-wide token or being
+  dropped. The capture
   (`capture_compile_input`) takes that outcome by value, so it cannot run
   before hydration. Input preparation (`prepare_execution_inputs_pollable`
   in `host_resolve/compile_inputs.rs`) then produces the macro bundle and
@@ -229,7 +263,18 @@ other waits, a follower's wake arrives while the driver runs that work and
 only queues a later poll, and every answer is the synchronous entry's.
 Cancelling a suspended follower root's request wakes it to its
 cancellation while the producing root completes, and a scheduler reset
-wakes it to the shutdown. Planted controls fail the same checks: the
+wakes it to the shutdown. Three followers of a producer held on a host
+nothing compiled yet hand out no producer however often they are polled,
+and once it runs all four roots answer a fresh host's answer with no
+second production (making a follower whose footprint holds produce again
+fails it). Dropping handed-out producer work wakes its follower; the
+dropping root answers `Cancelled`, and the follower produces the bundle
+once and answers the synchronous entry's answer (leaving the dropped
+producer's node admitted, or failing the live follower with the
+cancellation, fails it). Cancelling one of two followers answers only
+that follower; the other produces nothing and completes with the
+producing root (delivering the cancellation to the node fails it).
+Planted controls fail the same checks: the
 synchronous capture behind a held build is refused, and running the macro
 producer inside the compile root's poll fails the compile cases. A driver
 that polls the handed-out producer instead of running it gets the
@@ -252,7 +297,19 @@ synchronous answer and a cold host's generated code; a refused
 blocker route leaves the other blockers loading; a block source hydration
 loads is in the captured input; an unsupplied re-export target answers
 the incomplete failure naming the barrel's route, and supplying exactly
-the named gaps compiles to a fresh host's answer. The
+the named gaps compiles to a fresh host's answer. A root that followed a
+producer whose payload lookup ended early produces the bundle itself,
+once, and answers a lone request's answer while the producing root
+answers the incomplete failure (taking every delivered bundle fails it);
+in `typeinfo_tests`, a producer's footprint holds over the files it read,
+not once one changes, and a factless footprint holds nowhere (a footprint
+that always holds fails it). A scheduler reset while a blocker's read is
+held answers `Host(Shutdown)` with no capture, one owned load and the
+blocker never integrated (treating the stopped load as a gap fails it);
+cancelling the request there wakes the root to `Host(Cancelled)` with no
+capture, and the next request compiles (without the request subscription
+the wake never arrives); and every load error but a stop is a gap, every
+stop its abort (moving a stop to a gap fails it). The
 compile contracts `root_external_consumer_positive` (a plain external
 consumer drives both roots, with no support feature) and
 `root_poll_no_blocking_driver` (the boundary driver is unreachable from a
@@ -797,8 +854,11 @@ producer on the existing CPU pool.
   bundle entry and the Vue API projector still use
   `execute_scoped_cache_node`. Both drivers share one request, one producer
   body and one delivery (`vue_macro_codegen_request`,
-  `build_vue_macro_codegen`, `finish_vue_macro_codegen`), and both place
-  producers through `Scheduler::run_transferred_producer`.
+  `build_vue_macro_codegen`, `delivery_of`, `finish_vue_macro_codegen`),
+  and both place producers through `Scheduler::run_transferred_producer`.
+  The scheduler contract is unchanged: followers of a dropped producer
+  settle `Cancelled` and the scheduler starts nothing. The macro bundle's
+  callers decide whether to take a delivered value or begin the node again.
 
 ### Store-view reads
 

@@ -231,7 +231,15 @@ The producer records one fact footprint, returns typed
 completeness/cacheability, and reports the sorted transitive canonicals observed
 by that request. Cancellation returns only typed `Partial(Cancelled)` entries,
 marks the result non-cacheable, and never publishes the cancelled aggregate; a
-live dedup sibling may still complete and publish to that sibling. Compile entry
+live dedup sibling may still complete and publish to that sibling. A caller
+that joined another caller's production takes the bundle only when the
+producer's fact footprint validates in its own view, and not on first delivery
+when the bundle reports a dependency failure; otherwise, or when the producer
+was dropped while its own request is live, it begins the scoped node again
+(`delivery_of`). Compile-blocker hydration (`compile_blocker_hydration.rs`)
+records a refused route or a failed load as a gap, but a load stopped by
+cancellation, supersession or shutdown, or the request's own cancellation,
+ends the request route with that typed stop before the capture. Compile entry
 points call the producer once per SFC/request for the target's combined demand,
 pass `output.compiler_input()` to the compiler, and unconditionally replace the
 semantic transitive-dependency axis with the returned canonical set. Public-API

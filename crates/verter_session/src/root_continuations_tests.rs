@@ -186,12 +186,12 @@ fn compile_owner(host: &VerterHost) -> Vec<String> {
 
 /// What the work a compile root handed its driver reached, by kind.
 #[derive(Default)]
-struct HandedOut {
+pub(crate) struct HandedOut {
     /// Macro bundle producers.
-    producers: usize,
+    pub(crate) producers: usize,
     /// Blocker route resolution producers.
-    route_producers: usize,
-    dispatch_steps: usize,
+    pub(crate) route_producers: usize,
+    pub(crate) dispatch_steps: usize,
 }
 
 /// How many resolution producers `host`'s compile roots have handed out.
@@ -206,7 +206,10 @@ fn resolutions_handed_out(host: &VerterHost) -> usize {
 /// Poll `root` on this thread, running the resolution producers its
 /// blocker routes hand out, until it waits on something other than a route.
 /// Every poll is `Pending` and enters no wait.
-fn poll_past_route_resolutions(host: &VerterHost, root: &mut crate::CompileRequestRoot<'_>) {
+pub(crate) fn poll_past_route_resolutions(
+    host: &VerterHost,
+    root: &mut crate::CompileRequestRoot<'_>,
+) {
     let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
     loop {
         let before = resolutions_handed_out(host);
@@ -225,6 +228,30 @@ fn poll_past_route_resolutions(host: &VerterHost, root: &mut crate::CompileReque
     }
 }
 
+/// Poll `root` until it hands out its macro bundle's producer, running
+/// every other piece of work it hands out first (its blocker routes'
+/// resolution producers and its dispatch steps), and return that producer
+/// undriven: the hold under which other roots of the same request follow.
+pub(crate) fn hold_producer<'h>(
+    host: &VerterHost,
+    root: &mut crate::CompileRequestRoot<'h>,
+    waker: &Waker,
+) -> crate::RootWork<'h> {
+    loop {
+        let before = resolutions_handed_out(host);
+        assert!(root.poll(waker).is_pending());
+        match root.take_work() {
+            Some(work) if work.is_producer() && resolutions_handed_out(host) == before => {
+                return work
+            }
+            Some(other) => {
+                let _ = other.run();
+            }
+            None => std::thread::park(),
+        }
+    }
+}
+
 /// Drive the owner's compile root on this thread: every poll runs under
 /// `probe`, and the work it hands out runs outside it — a producer on a
 /// thread of its own, a dispatch step here.
@@ -232,7 +259,18 @@ fn compile_owner_through_root(
     host: &VerterHost,
     probe: fn() -> WaitProbe,
 ) -> (Vec<String>, HandedOut) {
-    let mut root = host.begin_compile_request(OWNER, owner_compile_request());
+    let root = host.begin_compile_request(OWNER, owner_compile_request());
+    let (answer, handed) = drive_root_counting(host, root, probe);
+    (compiled_texts(answer.expect("the owner compiles")), handed)
+}
+
+/// Drive `root` to its answer on this thread, as
+/// [`compile_owner_through_root`] does, counting the work it hands out.
+pub(crate) fn drive_root_counting(
+    host: &VerterHost,
+    mut root: crate::CompileRequestRoot<'_>,
+    probe: fn() -> WaitProbe,
+) -> (crate::CompileRequestAnswer, HandedOut) {
     let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
     let mut handed = HandedOut::default();
     loop {
@@ -242,7 +280,7 @@ fn compile_owner_through_root(
             root.poll(&waker)
         };
         if let Poll::Ready(answer) = polled {
-            return (compiled_texts(answer.expect("the owner compiles")), handed);
+            return (answer, handed);
         }
         match root.take_work() {
             Some(work) if work.is_producer() => {
@@ -504,19 +542,7 @@ fn root_continuations_compile_root_suspends_on_another_roots_producer() {
     let expected = compile_owner(&host);
     let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
     let mut producing = host.begin_compile_request(OWNER, owner_compile_request());
-    let producer = loop {
-        let before = resolutions_handed_out(&host);
-        assert!(producing.poll(&waker).is_pending());
-        match producing.take_work() {
-            Some(work) if work.is_producer() && resolutions_handed_out(&host) == before => {
-                break work
-            }
-            Some(other) => {
-                let _ = other.run();
-            }
-            None => std::thread::park(),
-        }
-    };
+    let producer = hold_producer(&host, &mut producing, &waker);
     let mut following = host.begin_compile_request(OWNER, owner_compile_request());
     poll_past_route_resolutions(&host, &mut following);
     let answer = pending_before_release(
@@ -559,19 +585,7 @@ fn root_continuations_cancelling_a_suspended_follower_spares_its_producer() {
         let _request = verter_type_engine::request_context::install_test_request_for(OWNER);
         host.begin_compile_request(OWNER, owner_compile_request())
     };
-    let producer = loop {
-        let before = resolutions_handed_out(&host);
-        assert!(producing.poll(&unpark).is_pending());
-        match producing.take_work() {
-            Some(work) if work.is_producer() && resolutions_handed_out(&host) == before => {
-                break work
-            }
-            Some(other) => {
-                let _ = other.run();
-            }
-            None => std::thread::park(),
-        }
-    };
+    let producer = hold_producer(&host, &mut producing, &unpark);
     let (mut following, cancel) = {
         let _request = verter_type_engine::request_context::install_test_request_for(OWNER);
         let cancel = verter_type_engine::request_context::current_request_context()
@@ -636,19 +650,7 @@ fn root_continuations_a_reset_answers_a_suspended_follower_root() {
     let host = host();
     let unpark = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
     let mut producing = host.begin_compile_request(OWNER, owner_compile_request());
-    let producer = loop {
-        let before = resolutions_handed_out(&host);
-        assert!(producing.poll(&unpark).is_pending());
-        match producing.take_work() {
-            Some(work) if work.is_producer() && resolutions_handed_out(&host) == before => {
-                break work
-            }
-            Some(other) => {
-                let _ = other.run();
-            }
-            None => std::thread::park(),
-        }
-    };
+    let producer = hold_producer(&host, &mut producing, &unpark);
     let mut following = host.begin_compile_request(OWNER, owner_compile_request());
     poll_past_route_resolutions(&host, &mut following);
     let (wake_tx, wake_rx) = mpsc::channel::<()>();
@@ -691,6 +693,197 @@ fn root_continuations_a_reset_answers_a_suspended_follower_root() {
         ),
         "the producing root answers the shutdown too: {produced:?}",
     );
+}
+
+/// A channel waker and the receiver its wakes arrive on.
+pub(crate) fn channel_waker() -> (Waker, mpsc::Receiver<()>) {
+    let (wake_tx, wake_rx) = mpsc::channel::<()>();
+    (
+        Waker::from(Arc::new(ChannelWaker(parking_lot::Mutex::new(wake_tx)))),
+        wake_rx,
+    )
+}
+
+/// Three compile roots of one request, begun while a fourth holds the
+/// macro bundle's producer undriven on a host nothing has compiled yet,
+/// each suspend on that producer and hand out no producer of their own,
+/// however often they are polled. Once it runs, every root answers what a
+/// fresh host answers and none of them produces the bundle again: a
+/// follower takes the bundle when the producer's observations hold in its
+/// own view, even though the producer indexed and published after the
+/// follower took its view.
+#[test]
+fn several_followers_of_one_held_producer_get_one_producer_run_and_equal_answers() {
+    let expected = compile_owner(&host());
+    let host = caller_driven_host();
+    let unpark = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let mut producing = host.begin_compile_request(OWNER, owner_compile_request());
+    let producer = hold_producer(&host, &mut producing, &unpark);
+    let mut followers: Vec<_> = (0..3)
+        .map(|_| host.begin_compile_request(OWNER, owner_compile_request()))
+        .collect();
+    for following in &mut followers {
+        poll_past_route_resolutions(&host, following);
+        let step = following.take_work();
+        assert!(
+            step.as_ref().is_none_or(|work| !work.is_producer()),
+            "a follower hands out no producer while the bundle is held"
+        );
+        drop(step);
+        let again = {
+            let _forbid = WaitProbe::forbid();
+            following.poll(&unpark)
+        };
+        assert!(
+            again.is_pending(),
+            "the follower still waits on the held producer"
+        );
+        assert!(
+            following.take_work().is_none_or(|work| !work.is_producer()),
+            "polling a follower again hands out no producer"
+        );
+    }
+
+    assert!(producer.run());
+    let mut producers = 0;
+    for root in std::iter::once(producing).chain(followers) {
+        let (answer, handed) = drive_root_counting(&host, root, WaitProbe::forbid);
+        producers += handed.producers;
+        assert_eq!(
+            compiled_texts(answer.expect("every root compiles")),
+            expected
+        );
+    }
+    assert_eq!(producers, 0, "no root produces the bundle again");
+}
+
+/// Dropping the producer work a compile root handed out wakes a root that
+/// follows it. The dropping root answers its cancellation: its driver
+/// discarded the work it was asked to run. The follower, whose request
+/// nobody cancelled, produces the bundle itself and answers what the
+/// synchronous entry answers, and a new request afterwards compiles too.
+#[test]
+fn dropping_handed_out_producer_work_cancels_its_root_and_lets_a_follower_and_a_new_request_complete(
+) {
+    let host = host();
+    let expected = compile_owner(&host);
+    let unpark = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let mut producing = host.begin_compile_request(OWNER, owner_compile_request());
+    let producer = hold_producer(&host, &mut producing, &unpark);
+    let mut following = host.begin_compile_request(OWNER, owner_compile_request());
+    poll_past_route_resolutions(&host, &mut following);
+    let (follower, wake_rx) = channel_waker();
+    assert!(
+        following.poll(&follower).is_pending(),
+        "the follower waits on the held producer"
+    );
+    drop(following.take_work());
+    while wake_rx.try_recv().is_ok() {}
+
+    drop(producer);
+    wake_rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("dropping the producer wakes the follower");
+    let abandoned = {
+        let _forbid = WaitProbe::forbid();
+        producing.poll(&unpark)
+    };
+    assert!(
+        matches!(
+            abandoned,
+            Poll::Ready(Err(crate::types::CompileRequestFailure::Host(
+                crate::types::HostError::Cancelled
+            )))
+        ),
+        "the dropping root answers its cancellation: {abandoned:?}",
+    );
+
+    let (answer, handed) = drive_root_counting(&host, following, WaitProbe::forbid);
+    let answer = answer.unwrap_or_else(|failure| {
+        panic!("the follower produces the bundle itself and compiles: {failure:?}")
+    });
+    assert_eq!(handed.producers, 1, "the follower produces the bundle once");
+    assert_eq!(compiled_texts(answer), expected);
+    assert_eq!(compile_owner(&host), expected);
+}
+
+/// Cancelling one of two followers of a held producer answers that
+/// follower's cancellation and nothing else: the other follower is still
+/// waiting, and once the producer runs, it and the producing root answer
+/// what the synchronous entry answers, the follower producing nothing.
+#[test]
+fn cancelling_one_follower_leaves_its_siblings_answered() {
+    let host = host();
+    let expected = compile_owner(&host);
+    let unpark = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let mut producing = {
+        let _request = verter_type_engine::request_context::install_test_request_for(OWNER);
+        host.begin_compile_request(OWNER, owner_compile_request())
+    };
+    let producer = hold_producer(&host, &mut producing, &unpark);
+    let begin_follower = || {
+        let _request = verter_type_engine::request_context::install_test_request_for(OWNER);
+        let cancel = verter_type_engine::request_context::current_request_context()
+            .expect("the follower's request is installed")
+            .cancellation_token();
+        (
+            host.begin_compile_request(OWNER, owner_compile_request()),
+            cancel,
+        )
+    };
+    let (mut cancelled, cancel) = begin_follower();
+    let (mut sibling, _sibling_cancel) = begin_follower();
+    let (cancelled_waker, cancelled_wakes) = channel_waker();
+    let (sibling_waker, sibling_wakes) = channel_waker();
+    for (root, waker, wakes) in [
+        (&mut cancelled, &cancelled_waker, &cancelled_wakes),
+        (&mut sibling, &sibling_waker, &sibling_wakes),
+    ] {
+        poll_past_route_resolutions(&host, root);
+        assert!(root.poll(waker).is_pending(), "the follower waits");
+        drop(root.take_work());
+        while wakes.try_recv().is_ok() {}
+    }
+
+    cancel.cancel();
+    cancelled_wakes
+        .recv_timeout(POLL_DEADLINE)
+        .expect("cancelling the follower's request wakes it");
+    let answer = {
+        let _forbid = WaitProbe::forbid();
+        cancelled.poll(&cancelled_waker)
+    };
+    assert!(
+        matches!(
+            answer,
+            Poll::Ready(Err(crate::types::CompileRequestFailure::Host(
+                crate::types::HostError::Cancelled
+            )))
+        ),
+        "the cancelled follower answers its cancellation: {answer:?}",
+    );
+    let still = {
+        let _forbid = WaitProbe::forbid();
+        sibling.poll(&sibling_waker)
+    };
+    assert!(
+        still.is_pending(),
+        "the cancellation did not settle the node"
+    );
+    drop(sibling.take_work());
+
+    assert!(producer.run());
+    let (produced, _) = drive_root_counting(&host, producing, WaitProbe::forbid);
+    assert_eq!(
+        compiled_texts(produced.expect("the producing root compiles")),
+        expected
+    );
+    let (followed, handed) = drive_root_counting(&host, sibling, WaitProbe::forbid);
+    assert_eq!(
+        compiled_texts(followed.expect("the sibling follower compiles")),
+        expected
+    );
+    assert_eq!(handed.producers, 0, "the sibling follower produces nothing");
 }
 
 /// The synchronous compile entry drives the same root at its boundary: it
