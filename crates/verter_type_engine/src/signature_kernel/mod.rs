@@ -10,6 +10,7 @@
 
 mod discovery;
 mod lifetime;
+mod matching;
 mod positional;
 mod provenance;
 mod read_view;
@@ -21,14 +22,17 @@ mod substitution;
 
 #[allow(unused_imports)]
 pub use discovery::{
-    append_signatures, heritage_signatures, intersection_signatures, merged_declaration_signatures,
-    publish_signature, resolution_order, set_from_candidates, signatures_identical,
-    union_signatures, BinderInput, DiscoveryError, DiscoveryTypes, ForcedResult, MatchOptions,
-    ParamInput, RestInput, ResultInput, SignatureInput,
+    heritage_signatures, merged_declaration_signatures, publish_signature, resolution_order,
+    set_from_candidates, BinderInput, DiscoveryError, DiscoveryTypes, MatchOptions, ParamInput,
+    RestInput, ResultInput, SignatureInput,
 };
 #[allow(unused_imports)]
 pub use lifetime::{
     EpochBinding, SignatureEpochLease, SignatureStore, StoreError, EPOCH_RECORD_CAP,
+};
+#[allow(unused_imports)]
+pub use matching::{
+    ForcedResult, KernelStep, SignatureComparison, SignatureComposition, TypeAnswer, TypeRequest,
 };
 #[allow(unused_imports)]
 pub use positional::{
@@ -75,6 +79,8 @@ mod discovery_tests;
 #[cfg(test)]
 mod lifetime_tests;
 #[cfg(test)]
+mod matching_tests;
+#[cfg(test)]
 mod positional_tests;
 #[cfg(test)]
 mod provenance_tests;
@@ -95,3 +101,16 @@ mod substitution_tests;
 static_assertions::assert_impl_all!(EpochBinding: Send);
 static_assertions::assert_not_impl_any!(EpochBinding: Clone, Copy);
 static_assertions::assert_not_impl_any!(EpochRebind<'static>: Clone, Copy);
+
+// A matching machine is moved with the continuation that holds it, never
+// shared by copy.
+static_assertions::assert_impl_all!(SignatureComposition: Send);
+static_assertions::assert_not_impl_any!(SignatureComposition: Clone, Copy);
+static_assertions::assert_impl_all!(SignatureComparison: Send);
+static_assertions::assert_not_impl_any!(SignatureComparison: Clone, Copy);
+// What a step hands across the kernel boundary, on the native stack.
+const _: () = assert!(std::mem::size_of::<TypeRequest>() <= 24);
+const _: () = assert!(std::mem::size_of::<TypeAnswer>() <= 56);
+const _: () = assert!(std::mem::size_of::<KernelStep<Vec<SignatureCandidate>>>() <= 32);
+// The relation authority holds one comparison on its native stack.
+const _: () = assert!(std::mem::size_of::<SignatureComparison>() <= 200);

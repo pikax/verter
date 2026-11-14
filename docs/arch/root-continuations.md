@@ -1215,16 +1215,42 @@ wrapper as the path walk does: the global declaration lookup
 (`GlobalLookup`, begun in the demand site the stage stands in) is stepped
 as the build's ports, loads and indexes, and the instantiation of the
 declaration it finds (`global_wrapper_answered`) is the build's need,
-whose surface the walk enters under the subject's level. The
+whose surface the walk enters under the subject's level. A union's arms
+and an intersection type's members are combined by a kernel machine
+(`SignatureComposition`, `signature_kernel/matching.rs`) the walk carries
+as its own level (`DiscoveryFrame::Composing`): a step answers what the
+graph tells at rest and asks its holder the rest. An identity question
+under a binder correspondence that moves a binder is answered where the
+stage stands (`identity_in_place`, through `substitute_canonical`; a
+correspondence pairs binders with binders, so the closure names no
+template reduction). A result a comparison includes is the
+`ReadSignatureResult` read of the candidate under the identity call
+substitution, the build's need: memoized, so each candidate is forced
+once however many comparisons read it, read where it was published
+through its own lease, and — named in an epoch a replacement retired
+while it waited — not made (in place) or dropped unread (on a frame),
+then named again by one `EpochRebind` pass of the candidate's descriptor
+into the current epoch (`FamilyBuild::awaits_retired_read`). The
 walk counts its own work (`discovery_nodes_walked` per node entered,
-`discovery_signatures_published` per signature published) and moves no
-stage counter. A frame drives it when a frame needs the list (an overload
+`discovery_signatures_published` per signature published), the kernel
+its matching (`signature_comparisons_decided` per pair decided,
+`signature_positions_compared` per identity it asks), and moves no stage
+counter. A frame drives it when a frame needs the list (an overload
 set's, an apparent type's, a call's); read synchronously, or polled as a
 root, `SignaturesOfType` is built in place by the same stages through
 `drive_family_value_in_place`, each read made where the walk stands. A
 walk released while it stands in a settlement's evaluation abandons that
 evaluation's recordings (`FamilyBuild::release_retained_accounting`); one
-standing at its wrapper holds nothing on the dispatcher.
+standing at its wrapper or at a composition's result holds nothing on the
+dispatcher.
+`a_signature_list_waiting_on_a_later_comparisons_result_resumes_without_comparing_again`
+holds the result of a three-member intersection's last signature and
+requires the list to yield there with its first pair decided and, resumed
+elsewhere, to decide no pair and compare no position again;
+`a_generic_union_waiting_on_a_later_overloads_result_keeps_its_earlier_common_match`
+holds a union's later overload's result after its generic common match;
+`a_matching_result_named_in_an_epoch_that_retired_is_named_again_and_nothing_is_compared_twice`
+replaces the kernel epoch while a compared result is held.
 `a_signature_list_waiting_on_a_primitive_arms_wrapper_resumes_without_walking_again`
 holds the later arm's wrapper instantiation of an overload set over
 `string | number`, read under a request on the declaring file, and
@@ -2276,9 +2302,17 @@ conversion:
   walk's mapped source;
 - `SignaturesOfType` read synchronously or polled as a root: built in place
   through the same stages, its reads made where the walk stands;
-- the kernel callbacks that reach the dispatch from inside matching and
-  union composition (`identical`, `intersect`, `map_binders`,
-  `forced_result`), in the walk's epoch;
+- a union synthesis's binder mapping and parameter intersection
+  (`map_binders`, `intersect`), read through the kernel callbacks from
+  the composition's synthesis stage (`combine_union_parameters`), in the
+  walk's epoch;
+- a composition's identity question under a correspondence that moves a
+  binder, answered where the stage stands through `substitute_canonical`:
+  its closure names no template reduction;
+- the relation authority's exact signature identity
+  (`signature_types_identical`), one comparison stepped in place: its
+  identities through `relate_type_identity`, its results through the
+  result function in the comparison's own epoch;
 - a composite candidate's result forced by the in-place list readers
   (`signature_nodes_of`), including for a contextual list delivered on a
   frame: a result read in the list's own epoch, not a list read;
@@ -2296,9 +2330,9 @@ one composite-construction funnel), an index key's deferred evaluation,
 the `NoInfer` genericness test and its `Instantiate`, and a
 signature-bearing object's instantiation buckets (`SignaturesOfType` and
 composite results). Every other holder of a substitution or an explicit
-instantiation (the call walk and executor, relations, signature discovery,
-carriers, the evaluator, path walks and flow returns) drives the same
-walk in place.
+instantiation (the call walk and executor, relations, signature
+discovery's identity questions and union synthesis, carriers, the
+evaluator, path walks and flow returns) drives the same walk in place.
 
 Every other family a frame or cold build reaches still builds in one
 synchronous step: mapped types, `keyof`, template literals,

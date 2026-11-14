@@ -171,6 +171,36 @@ pub(super) fn signature_work(host: &VerterHost) -> SignatureWork {
     }
 }
 
+/// The work signature matching did, wherever it ran: signature pairs the
+/// kernel decided, type positions it compared, and result reads performed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct MatchingWork {
+    pub(super) comparisons: u64,
+    pub(super) positions: u64,
+    pub(super) forced: u64,
+}
+
+impl MatchingWork {
+    /// The work done since `before`.
+    pub(super) fn since(self, before: Self) -> Self {
+        Self {
+            comparisons: self.comparisons - before.comparisons,
+            positions: self.positions - before.positions,
+            forced: self.forced - before.forced,
+        }
+    }
+}
+
+/// `host`'s matching work so far.
+pub(super) fn matching_work(host: &VerterHost) -> MatchingWork {
+    let stats = host.project_type_store().semantic_graph().stats_snapshot();
+    MatchingWork {
+        comparisons: stats.signature_comparisons_decided,
+        positions: stats.signature_positions_compared,
+        forced: stats.signature_results_forced,
+    }
+}
+
 /// The same subjects' answers on a fresh host — every one complete.
 fn fresh_answers() -> Vec<Vec<String>> {
     let host = host();
@@ -752,6 +782,47 @@ fn signatures_of_two_epochs_compare_without_a_second_dispatch() {
             "identity comparison: {identity}"
         );
     }
+}
+
+/// The relation authority's exact identity of two callables declaring
+/// `(x: string) => number` decides the one pair once, position by
+/// position: the parameter, both results, then the returns, each asked
+/// once and none again.
+#[test]
+fn an_exact_signature_identity_decides_one_pair_position_by_position() {
+    let host = host();
+    let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
+    let [source, target] = same_shape_callables(&d);
+    let descriptor = |subject| {
+        let value = d
+            .signature_set_value(subject, SignatureKind::Call)
+            .expect("premise: each callable lists its signature");
+        match candidates(&d, &value)[..] {
+            [candidate] => candidate.signature,
+            ref other => panic!("premise: one signature each: {other:?}"),
+        }
+    };
+    assert_ne!(
+        descriptor(source),
+        descriptor(target),
+        "premise: two declarations are two descriptors, so the pair is compared"
+    );
+
+    let before = matching_work(&host);
+    assert_eq!(
+        d.signature_types_identical(source, target, SignatureKind::Call),
+        Some(true)
+    );
+    assert_eq!(
+        matching_work(&host).since(before),
+        MatchingWork {
+            comparisons: 1,
+            positions: 2,
+            forced: 2,
+        },
+        "one pair decided: its parameter and its returns compared, each result read once"
+    );
 }
 
 /// A joiner parked on a build that straddles a replacement must not take

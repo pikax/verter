@@ -234,3 +234,124 @@ pub fn opposite_order_one_call_binder_tokens() -> (SemanticNodeId, SemanticNodeI
         reverse.binder_token_for(dr, 0).expect("rev token"),
     )
 }
+
+/// The answers a kernel unit test gives the matching machines' requests,
+/// beside the graph facts its fake answers at rest.
+#[cfg(test)]
+pub(crate) trait RequestAnswers {
+    /// Whether `a` and `b` are identical under `corr`; `None`: undecided.
+    fn identical(
+        &self,
+        a: super::records::TypeToken,
+        b: super::records::TypeToken,
+        corr: &[(SemanticNodeId, SemanticNodeId)],
+    ) -> Option<bool>;
+    /// The result `candidate` denotes.
+    fn forced_result(
+        &self,
+        candidate: &SignatureCandidate,
+    ) -> Result<super::matching::ForcedResult, crate::semantic_query::IncompleteReason>;
+}
+
+/// `answers`' answer to `request`, asked under `corr`: an unanswerable
+/// question is an incomplete error.
+#[cfg(test)]
+fn answer_request(
+    answers: &dyn RequestAnswers,
+    request: super::matching::TypeRequest,
+    corr: &[(SemanticNodeId, SemanticNodeId)],
+) -> Result<super::matching::TypeAnswer, super::discovery::DiscoveryError> {
+    use super::discovery::DiscoveryError;
+    use super::matching::{TypeAnswer, TypeRequest};
+    match request {
+        TypeRequest::Identical { a, b } => answers
+            .identical(a, b, corr)
+            .map(TypeAnswer::Identical)
+            .ok_or(DiscoveryError::Incomplete(
+                crate::semantic_query::IncompleteReason::UnsettledInput,
+            )),
+        TypeRequest::ForcedResult(candidate) => answers
+            .forced_result(&candidate)
+            .map(TypeAnswer::ForcedResult)
+            .map_err(DiscoveryError::Incomplete),
+    }
+}
+
+/// `composition` stepped to its candidates in `binding`, each request
+/// answered by `types`.
+#[cfg(test)]
+pub(crate) fn settle_composition<T: super::discovery::DiscoveryTypes + RequestAnswers>(
+    binding: &super::lifetime::EpochBinding,
+    types: &T,
+    mut composition: super::matching::SignatureComposition,
+) -> Result<Vec<SignatureCandidate>, super::discovery::DiscoveryError> {
+    use super::matching::KernelStep;
+    let mut given = None;
+    loop {
+        match composition.step(binding, types, given.take())? {
+            KernelStep::Done(found) => return Ok(found),
+            KernelStep::Ask(request) => {
+                given = Some(answer_request(
+                    types,
+                    request,
+                    composition.correspondence(),
+                )?);
+            }
+        }
+    }
+}
+
+/// The union of `lists`, settled in `binding`.
+#[cfg(test)]
+pub(crate) fn settle_union<T: super::discovery::DiscoveryTypes + RequestAnswers>(
+    binding: &super::lifetime::EpochBinding,
+    types: &T,
+    lists: &[Vec<SignatureCandidate>],
+) -> Result<Vec<SignatureCandidate>, super::discovery::DiscoveryError> {
+    settle_composition(
+        binding,
+        types,
+        super::matching::SignatureComposition::union(lists.to_vec()),
+    )
+}
+
+/// The intersection of `members` for signatures of `kind`, settled in
+/// `binding`.
+#[cfg(test)]
+pub(crate) fn settle_intersection<T: super::discovery::DiscoveryTypes + RequestAnswers>(
+    binding: &super::lifetime::EpochBinding,
+    types: &T,
+    kind: SignatureKind,
+    members: &[Vec<SignatureCandidate>],
+) -> Result<Vec<SignatureCandidate>, super::discovery::DiscoveryError> {
+    let composition = super::matching::SignatureComposition::intersection(
+        binding,
+        types,
+        kind,
+        members.to_vec(),
+    )?;
+    settle_composition(binding, types, composition)
+}
+
+/// Whether `source` is identical to `target` under `options`, the
+/// comparison settled in `binding`.
+#[cfg(test)]
+pub(crate) fn settle_comparison<T: super::discovery::DiscoveryTypes + RequestAnswers>(
+    binding: &super::lifetime::EpochBinding,
+    types: &T,
+    source: SignatureCandidate,
+    target: SignatureCandidate,
+    options: super::discovery::MatchOptions,
+) -> Result<bool, super::discovery::DiscoveryError> {
+    use super::matching::KernelStep;
+    let mut comparison = super::matching::SignatureComparison::new(source, target, options);
+    let mut given = None;
+    loop {
+        match comparison.step(binding, types, given.take())? {
+            KernelStep::Done(same) => return Ok(same),
+            KernelStep::Ask(request) => {
+                given = Some(answer_request(types, request, comparison.correspondence())?);
+            }
+        }
+    }
+}

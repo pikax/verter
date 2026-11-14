@@ -13358,7 +13358,7 @@ fn merge_value_nodes_recursive<M: verter_audit::observe::ObserveExec>(
     // A contributor carrying CALL or CONSTRUCT signatures makes this a
     // CALLABLE intersection, and callable merging is the signature
     // kernel's authority — `SignaturesOfType` over an `Intersection`
-    // node routes to `signature_kernel::discovery::intersection_signatures`,
+    // node routes to the kernel's intersection composition,
     // which dedups by signature EQUIVALENCE and composes mixin
     // constructors. The local surface merge below only concatenates
     // signature NODES with identity dedup: a weaker duplicate of that
@@ -14882,7 +14882,8 @@ mod overload_carrier_exclusion_tests {
     /// composition). `docs/arch/signature-kernel.md` §15 retires that
     /// standalone callable merging: the value must stay an ordered
     /// `Intersection` carrier so `SignaturesOfType` answers it through
-    /// `signature_kernel::discovery::intersection_signatures`.
+    /// the kernel's intersection composition
+    /// (`signature_kernel::SignatureComposition::intersection`).
     #[test]
     fn bare_callable_objects_stay_a_kernel_owned_intersection_carrier() {
         let graph = SemanticGraphStore::new();

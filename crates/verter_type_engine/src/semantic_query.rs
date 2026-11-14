@@ -6701,6 +6701,12 @@ pub struct SemanticGraphStats {
     /// pair of types the kernel's identity comparison decides, counted
     /// before the pair is read. A comparison run again counts again.
     pub signature_positions_compared: u64,
+    /// Signature pairs kernel matching decided, wherever it ran: one per
+    /// comparison counted where it returns its decision, a pair that is one
+    /// descriptor and a pair refused on arity included, outside every
+    /// charge. A comparison that fails undecided or waits on its holder is
+    /// not counted; a pair decided again counts again.
+    pub signature_comparisons_decided: u64,
     /// Signature result reads performed, whichever driver made them: one
     /// per read begun, counted before its recipe is read. A result forced
     /// again counts again.
@@ -13106,7 +13112,7 @@ mod tests {
     ///   intersection_products_built, explicit_candidates_instantiated,
     ///   binder_substitutions, substitution_child_visits,
     ///   discovery_nodes_walked, discovery_signatures_published,
-    ///   signature_positions_compared,
+    ///   signature_positions_compared, signature_comparisons_decided,
     ///   signature_results_forced, signature_rebinds,
     ///   signature_descriptors_rebound.
     /// - Exceptional-path: same_path_sentinel_returns,
@@ -13161,6 +13167,7 @@ mod tests {
             "discovery_nodes_walked",
             "discovery_signatures_published",
             "signature_positions_compared",
+            "signature_comparisons_decided",
             "signature_results_forced",
             "signature_rebinds",
             "signature_descriptors_rebound",
