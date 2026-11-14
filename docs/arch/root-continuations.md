@@ -1281,11 +1281,11 @@ and an intersection type's members are combined by a kernel machine
 as its own level (`DiscoveryFrame::Composing`): a step answers what the
 graph tells at rest and asks its holder the rest. A binder closure — an
 identity question under a binder correspondence that moves a binder, and
-a union synthesis's mapping of the other arm's types into the master's
-binders (`TypeRequest::MapBinders`, asked only when its binder map moves
-a binder) — is answered where the stage stands (`closed_under_binders`,
-through `substitute_canonical`; the pairs map binders onto binders, so
-the closure names no template reduction). A union synthesis composes its
+a union synthesis's mapping of the other arm's types into the binders
+the combination declares (`TypeRequest::MapBinders`, asked only when its
+binder map moves a binder) — is answered where the stage stands
+(`closed_under_binders`, through `substitute_canonical`; the pairs map
+binders onto binders, so the closure names no template reduction). A union synthesis composes its
 parameters with a position cursor (`ParameterComposition`, cut at each
 binder mapping and each intersection): each position's intersection,
 a rest run's and the receivers' too, is the `ReduceIntersection` read of
@@ -1295,7 +1295,11 @@ reduction (or, its read failed, the ordered intersection
 `intersection_of_reduction` builds, the same fallback the dispatch funnel
 uses) is kept in the composition's level (`CompositionRead::Reduced`) and
 the walk loop advances the composition with it, so no delivery sits
-beneath its next closures. A result a comparison includes is the
+beneath its next closures. The combination declares the master's
+binders, or a non-generic master's first generic arm's
+(`left.typeParameters || right.typeParameters`); the synthesized
+signature and the mapping of its constituents are in those binders, and
+the master names it. A result a comparison includes is the
 `ReadSignatureResult` read of the candidate under the identity call
 substitution, the build's need: memoized, so each candidate is forced
 once however many comparisons read it, read where it was published
