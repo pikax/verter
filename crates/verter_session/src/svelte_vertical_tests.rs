@@ -552,7 +552,7 @@ fn partial_props_recovery_keeps_snippet_callable_role() {
 
 // ── Test 7: Deferred-surface intermediate state ─────────────────────────
 
-fn framework_envelope(
+pub(crate) fn framework_envelope(
     host: &VerterHost,
     canonical: &str,
     adapter_id: &str,
