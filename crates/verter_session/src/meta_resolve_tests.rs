@@ -5932,6 +5932,7 @@ defineEmits<Emits>()
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let resolved_macros = crate::resolver_core::component_meta_resolved_macros(
         host,
+        host,
         &fixture_dispatch_10,
         "/src/Child.vue",
         fallthrough.snapshot.macros.as_ref(),
@@ -6052,6 +6053,7 @@ defineEmits<Emits>()
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     let resolved_macros = crate::resolver_core::component_meta_resolved_macros(
         host,
+        host,
         &fixture_dispatch_12,
         "/src/Child.vue",
         fallthrough.snapshot.macros.as_ref(),
@@ -6144,6 +6146,7 @@ defineProps<Props>()
             verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         crate::resolver_core::component_meta_resolved_macros(
+            host,
             ctx,
             &fixture_dispatch_13,
             "/src/App.vue",
@@ -6203,6 +6206,7 @@ import type { Props, Slots } from './types'
 
 defineProps<Props>()
 defineSlots<Slots>()
+defineOptions({ name: 'App' })
 </script>
 <template><div /></template>"#,
         )
@@ -6220,6 +6224,7 @@ defineSlots<Slots>()
             verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
 
         crate::resolver_core::component_meta_resolved_macros(
+            host,
             ctx,
             &fixture_dispatch_14,
             "/src/App.vue",
@@ -6232,13 +6237,22 @@ defineSlots<Slots>()
             .iter()
             .map(|input| input.macro_index)
             .collect::<Vec<_>>(),
-        vec![0, 1],
+        vec![0, 1, 2],
         "snapshot order and one DTO input per macro index must be stable"
     );
     assert_eq!(inputs[0].props.len(), 1);
     assert!(inputs[0].slots.is_empty());
     assert_eq!(inputs[1].slots.len(), 1);
     assert!(inputs[1].props.is_empty());
+    // `defineOptions` contributes no props, emits, slots or exposed rows, but
+    // its index still owns an (empty) input.
+    assert!(
+        inputs[2].props.is_empty()
+            && inputs[2].emits.is_empty()
+            && inputs[2].slots.is_empty()
+            && inputs[2].exposed.is_empty(),
+        "a macro without a declared-surface bundle keeps an empty input"
+    );
 }
 
 #[test]

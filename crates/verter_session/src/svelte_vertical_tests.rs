@@ -740,6 +740,67 @@ fn svelte_runes_callback_prop_stays_props_absent_from_emits() {
     );
 }
 
+/// A component with both a `createEventDispatcher` event map and a callback
+/// prop: component meta reports exactly the events the framework surface
+/// answer reports, the dispatcher's and the callback prop's alike.
+#[test]
+fn svelte_component_meta_events_match_the_framework_surface_emits() {
+    let canonical = "/workspace/Picker.svelte";
+    let source = r#"<script lang="ts">
+import { createEventDispatcher } from 'svelte';
+let { onclose }: { onclose: (reason: string) => void } = $props();
+const dispatch = createEventDispatcher<{ select: number }>();
+void onclose; void dispatch;
+</script>
+<button>pick</button>"#;
+    let host = workspace_host_with_svelte(
+        canonical,
+        source,
+        &[
+            (
+                "/workspace/node_modules/svelte/package.json",
+                r#"{"name":"svelte","version":"5.56.10","types":"index.d.ts"}"#,
+            ),
+            (
+                "/workspace/node_modules/svelte/index.d.ts",
+                "export declare function createEventDispatcher<E>(): \
+                 (name: keyof E, detail: E[keyof E]) => void;\n",
+            ),
+        ],
+    );
+    upsert_svelte(&host, canonical, source);
+
+    let result = host.type_info_with_audit(framework_envelope(&host, canonical, "svelte"));
+    let response = result.as_result().expect("structural response");
+    let payload = match &response.kind {
+        Some(type_info_graph_response::Kind::FrameworkSurface(p)) => p,
+        other => panic!("expected the framework_surface arm, got {other:?}"),
+    };
+    let mut surface_events = kind_member_names(payload, wire::FrameworkSurfaceKind::Emits);
+    surface_events.sort();
+    assert_eq!(
+        surface_events,
+        ["close", "select"],
+        "the surface answer carries the dispatcher and the callback-prop event"
+    );
+
+    let (meta, _, _) = host
+        .get_component_meta_output(canonical)
+        .expect("component meta query succeeds")
+        .expect("component meta output")
+        .into_parts();
+    let mut meta_events: Vec<String> = meta
+        .events
+        .iter()
+        .map(|event| event.name.to_string())
+        .collect();
+    meta_events.sort();
+    assert_eq!(
+        meta_events, surface_events,
+        "component meta reports the events the surface answer reports"
+    );
+}
+
 #[test]
 fn svelte_framework_surface_warm_hit_is_value_stable() {
     // The DTO-store warm path: two identical requests resolve byte-identical

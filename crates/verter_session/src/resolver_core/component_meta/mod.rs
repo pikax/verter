@@ -325,16 +325,20 @@ pub enum ComponentMetaResolutionPurpose {
 }
 
 /// Build the [`verter_semantic::analysis::component_meta::ResolvedMacroInput`]
-/// set the `verter_semantic` component-meta extractor consumes, sourcing the
-/// props/emits/slots/exposed from the SOLE typeinfo macro-surface authority
-/// (`vue_macro_dtos`, reached through the resolver-context seam).
+/// set the `verter_semantic` component-meta extractor consumes, from the
+/// component's framework-surface resolution
+/// ([`crate::typeinfo::framework_surface::executor::resolve_requested_surfaces`]):
+/// the same plan and producer reads the framework-surface wire operation
+/// answers from, under the caller's request view.
 ///
 /// The snapshot macro inventory is the sole index/order/cardinality authority.
 /// An object-literal-only `defineExpose` with fields stays analyzer-owned and is
 /// excluded by `raw_macro_surface_is_authoritative`; every other snapshot macro
-/// contributes exactly one input in source order. Field DATA comes from
-/// `vue_macro_dtos`, keyed on `(owner, macro_index, kind)` — the same key the
-/// materialiser's `synthesize_*_from_known_surface` path already uses.
+/// contributes exactly one input in source order, built from the bundle its
+/// producer answered. A macro no requested surface reads (`withDefaults`,
+/// `defineOptions`) contributes an empty input. A component whose adapter
+/// plans source families (Svelte) contributes one more input, after the
+/// macros, built from those families' bundles.
 ///
 /// `ResolvedMacroMeta` is intentionally absent from this API. Those rows carry
 /// optional declaration identity/JSDoc enrichment for registry publication;
@@ -343,16 +347,17 @@ pub enum ComponentMetaResolutionPurpose {
 /// gate the normalized DTO field authority.
 ///
 /// Host state is reached through `&dyn ResolverContext` (the resolver-tier
-/// seal): `vue_macro_dtos_with_ctx(ctx, …)` resolves the macro surface through
-/// the ACTIVE context, so an overlay session reads its overlay content (an
-/// overlay-added prop surfaces here; it never leaks into a base-view read,
-/// which keys a distinct `whole_hash`). The DTO core validates its own cached
-/// entry against `&verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx)` and bubbles the entry's fact signature into
-/// any active outer fact tracer (so an outer component-meta cold trace inherits
-/// the DTO's cross-file carrier facts on a warm DTO hit), keeping the outer
-/// component-meta cache entry correctly keyed — all inside the single
-/// resolution engine.
+/// seal): every producer read resolves through the ACTIVE context, so an
+/// overlay session reads its overlay content (an overlay-added prop surfaces
+/// here; it never leaks into a base-view read, which keys a distinct
+/// `whole_hash`). The producers validate their own cached entries against the
+/// same view and bubble their fact signatures into any active outer fact
+/// tracer, keeping the outer component-meta cache entry correctly keyed — all
+/// inside the single resolution engine. A partial producer answer is folded
+/// into the request-result completeness, so the enclosing component-meta
+/// result is refused warm promotion (the no-poison invariant).
 pub(crate) fn component_meta_resolved_macros<M: verter_audit::observe::ObserveExec>(
+    host: &crate::VerterHost,
     ctx: &dyn crate::resolver_core::HostRequestContext<M>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
@@ -361,188 +366,214 @@ pub(crate) fn component_meta_resolved_macros<M: verter_audit::observe::ObserveEx
     owner_canonical: &str,
     snapshot_macros: &[AnalyzedMacro],
 ) -> Vec<verter_semantic::analysis::component_meta::ResolvedMacroInput> {
+    use crate::typeinfo::framework_surface::SvelteSurfaceSource;
+    use crate::typeinfo::node_refs::MemberProducer;
+
+    let reads = declared_surface_reads(host, ctx, dispatch, owner_canonical, snapshot_macros);
     let mut inputs = Vec::new();
     for (macro_index, mac) in snapshot_macros.iter().enumerate() {
         if raw_macro_surface_is_authoritative(mac) {
             continue;
         }
-        let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
-            ctx,
-            dispatch,
-            &crate::typeinfo::types::VueMacroSurfaceRequest {
-                owner_canonical: std::sync::Arc::from(owner_canonical),
-                macro_index,
-                macro_kind: mac.kind,
-                root_identity: ctx.get_whole_hash(owner_canonical).unwrap_or([0u8; 16]),
-                level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
-            },
-        )
-        .unwrap_or_else(crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read);
-        // Fold a genuine partial macro surface into the request-result
-        // completeness so the enclosing component-meta result is refused warm
-        // promotion (the no-poison invariant).
-        dtos_read.observe_partial();
-        let dtos = dtos_read.dtos;
-        // The lower-crate input rows carry the session-resolved SOURCE
-        // POSITIONS alongside the analysis fields — the normalized-surface
-        // authority the extraction publishes (the flat evaluated lanes
-        // contribute metadata only).
-        inputs.push(
-            verter_semantic::analysis::component_meta::ResolvedMacroInput {
-                macro_index,
-                props: dtos
-                    .prop_fields()
-                    .iter()
-                    .map(
-                        |row| verter_semantic::analysis::component_meta::ResolvedPropInput {
-                            field: row.analysis.clone(),
-                            authority: row.authority.clone(),
-                            authored_evidence: row.authored_evidence.clone(),
-                            callable_role: row.callable_role.clone(),
-                        },
-                    )
-                    .collect(),
-                emits: dtos
-                    .emit_fields()
-                    .iter()
-                    .map(
-                        |row| verter_semantic::analysis::component_meta::ResolvedEmitInput {
-                            id: row.id.clone(),
-                            name: row.name.clone(),
-                            span: row.span,
-                            payload_type: row.payload_type.clone(),
-                            payload: row.payload.clone(),
-                            payload_expr_scope: row.payload_expr_scope.clone(),
-                            description: row.description.clone(),
-                            tags: row.tags.clone(),
-                            payload_source: row.payload_source.clone(),
-                            payload_publication: row.payload_publication.clone(),
-                            return_publication: row.return_publication.clone(),
-                            return_publication_scope: row.return_publication_scope.clone(),
-                        },
-                    )
-                    .collect(),
-                slots: dtos.slot_fields().to_vec(),
-                slot_return_publications: dtos.slot_return_publications().to_vec(),
-                exposed: dtos
-                    .expose_fields()
-                    .iter()
-                    .map(
-                        |row| verter_semantic::analysis::component_meta::ResolvedExposeInput {
-                            field: row.analysis.clone(),
-                            type_source: row.type_source.clone(),
-                        },
-                    )
-                    .collect(),
-                default_keys: Vec::new(),
-                props_guarantee: None,
-                events_guarantee: None,
-                slots_guarantee: None,
-            },
+        let mut input = empty_macro_input(macro_index);
+        let read = reads.iter().find(|read| {
+            matches!(
+                read.producer,
+                MemberProducer::VueMacro { kind, index }
+                    if kind == mac.kind && usize::try_from(index) == Ok(macro_index)
+            )
+        });
+        if let Some(dtos) = read.and_then(|read| {
+            read.observe_partial();
+            read.dtos()
+        }) {
+            // The lower-crate input rows carry the session-resolved SOURCE
+            // POSITIONS alongside the analysis fields — the normalized-surface
+            // authority the extraction publishes (the flat evaluated lanes
+            // contribute metadata only).
+            input.props = prop_inputs(dtos);
+            input.emits = emit_inputs(dtos);
+            input.slots = dtos.slot_fields().to_vec();
+            input.slot_return_publications = dtos.slot_return_publications().to_vec();
+            input.exposed = dtos
+                .expose_fields()
+                .iter()
+                .map(
+                    |row| verter_semantic::analysis::component_meta::ResolvedExposeInput {
+                        field: row.analysis.clone(),
+                        type_source: row.type_source.clone(),
+                    },
+                )
+                .collect();
+        }
+        inputs.push(input);
+    }
+
+    let mut sources: Vec<_> = reads
+        .iter()
+        .filter_map(|read| match read.producer {
+            MemberProducer::Svelte(source) => Some((source, read)),
+            MemberProducer::VueMacro { .. } => None,
+        })
+        .collect();
+    if sources.is_empty() {
+        return inputs;
+    }
+    // Callback-prop events precede dispatcher events: the public contract
+    // groups a callback prop and a dispatcher event of one name as overloads
+    // in this order. Every other family keeps its read order; each family
+    // feeds its own lane, so only the events lane order moves.
+    sources.sort_by_key(|(source, _)| *source != SvelteSurfaceSource::CallbackPropEvents);
+    let mut native = empty_macro_input(snapshot_macros.len());
+    for (source, read) in sources {
+        read.observe_partial();
+        let Some(dtos) = read.dtos() else {
+            continue;
+        };
+        native.props.extend(prop_inputs(dtos));
+        native.default_keys.extend(
+            dtos.prop_defaults()
+                .iter()
+                .map(|default| default.key.clone()),
+        );
+        native.emits.extend(emit_inputs(dtos));
+        native.slots.extend_from_slice(dtos.slot_fields());
+        native
+            .slot_return_publications
+            .extend_from_slice(dtos.slot_return_publications());
+        let lane = match source {
+            SvelteSurfaceSource::RunesProps | SvelteSurfaceSource::LegacyExportLet => {
+                &mut native.props_guarantee
+            }
+            SvelteSurfaceSource::CallbackPropEvents | SvelteSurfaceSource::LegacyDispatcher => {
+                &mut native.events_guarantee
+            }
+            SvelteSurfaceSource::SnippetProps | SvelteSurfaceSource::LegacySlotInventory => {
+                &mut native.slots_guarantee
+            }
+            SvelteSurfaceSource::Bindable | SvelteSurfaceSource::InstanceExports => continue,
+        };
+        verter_session_query::analysis::component_meta::MetadataFactGuarantee::absorb_option(
+            lane,
+            dtos.domain_guarantee.clone(),
         );
     }
-
-    // The Svelte surface delegate runs exactly when the owner's snapshot
-    // carries the Svelte TYPED carrier — the same carrier read the delegate
-    // itself performs — never on an adapter-identity comparison.
-    let opens_svelte_carrier = ctx
-        .ensure_indexed_ready_serve(owner_canonical)
-        .and_then(|serve| ctx.framework_parse_artifact(&serve.indexed))
-        .is_some_and(|artifact| {
-            crate::typeinfo::adapters::svelte::svelte_parse(&artifact).is_some()
-        });
-    if opens_svelte_carrier {
-        use crate::typeinfo::framework_surface::SvelteSurfaceSource;
-
-        let native_index = snapshot_macros.len();
-        let mut native = verter_semantic::analysis::component_meta::ResolvedMacroInput {
-            macro_index: native_index,
-            props: Vec::new(),
-            emits: Vec::new(),
-            slots: Vec::new(),
-            slot_return_publications: Vec::new(),
-            exposed: Vec::new(),
-            default_keys: Vec::new(),
-            props_guarantee: None,
-            events_guarantee: None,
-            slots_guarantee: None,
-        };
-        for source in [
-            SvelteSurfaceSource::RunesProps,
-            SvelteSurfaceSource::LegacyExportLet,
-            SvelteSurfaceSource::CallbackPropEvents,
-            SvelteSurfaceSource::LegacyDispatcher,
-            SvelteSurfaceSource::SnippetProps,
-            SvelteSurfaceSource::LegacySlotInventory,
-        ] {
-            let outcome = crate::typeinfo::framework_surface::svelte_exec::resolve_svelte_surface(
-                ctx,
-                dispatch,
-                owner_canonical,
-                source,
-            );
-            if matches!(
-                outcome,
-                crate::typeinfo::framework_surface::ResolvedOutcome::Partial { .. }
-            ) {
-                verter_type_engine::request_context::mark_request_result_partial();
-            }
-            let Some(dtos) = outcome.value() else {
-                continue;
-            };
-            native.props.extend(dtos.prop_fields().iter().map(|row| {
-                verter_semantic::analysis::component_meta::ResolvedPropInput {
-                    field: row.analysis.clone(),
-                    authority: row.authority.clone(),
-                    authored_evidence: row.authored_evidence.clone(),
-                    callable_role: row.callable_role.clone(),
-                }
-            }));
-            native.default_keys.extend(
-                dtos.prop_defaults()
-                    .iter()
-                    .map(|default| default.key.clone()),
-            );
-            native.emits.extend(dtos.emit_fields().iter().map(|row| {
-                verter_semantic::analysis::component_meta::ResolvedEmitInput {
-                    id: row.id.clone(),
-                    name: row.name.clone(),
-                    span: row.span,
-                    payload_type: row.payload_type.clone(),
-                    payload: row.payload.clone(),
-                    payload_expr_scope: row.payload_expr_scope.clone(),
-                    description: row.description.clone(),
-                    tags: row.tags.clone(),
-                    payload_source: row.payload_source.clone(),
-                    payload_publication: row.payload_publication.clone(),
-                    return_publication: row.return_publication.clone(),
-                    return_publication_scope: row.return_publication_scope.clone(),
-                }
-            }));
-            native.slots.extend_from_slice(dtos.slot_fields());
-            native
-                .slot_return_publications
-                .extend_from_slice(dtos.slot_return_publications());
-            let lane = match source {
-                SvelteSurfaceSource::RunesProps | SvelteSurfaceSource::LegacyExportLet => {
-                    &mut native.props_guarantee
-                }
-                SvelteSurfaceSource::CallbackPropEvents | SvelteSurfaceSource::LegacyDispatcher => {
-                    &mut native.events_guarantee
-                }
-                SvelteSurfaceSource::SnippetProps | SvelteSurfaceSource::LegacySlotInventory => {
-                    &mut native.slots_guarantee
-                }
-                SvelteSurfaceSource::Bindable | SvelteSurfaceSource::InstanceExports => continue,
-            };
-            verter_session_query::analysis::component_meta::MetadataFactGuarantee::absorb_option(
-                lane,
-                dtos.domain_guarantee.clone(),
-            );
-        }
-        inputs.push(native);
-    }
+    inputs.push(native);
     inputs
+}
+
+/// The producer reads of the owner's declared surface: props, emits and
+/// slots, plus expose when a snapshot `defineExpose` is not analyzer-owned.
+/// Empty when the owner is not a registered adapter's component carrier
+/// (a plain script, a template, an adapter module) or the adapter resolves
+/// no surfaces.
+fn declared_surface_reads<M: verter_audit::observe::ObserveExec>(
+    host: &crate::VerterHost,
+    ctx: &dyn crate::resolver_core::HostRequestContext<M>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities<M>,
+    >,
+    owner_canonical: &str,
+    snapshot_macros: &[AnalyzedMacro],
+) -> Vec<crate::typeinfo::framework_surface::executor::ProducerRead> {
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
+
+    let Some(serve) = ctx.ensure_indexed_ready_serve(owner_canonical) else {
+        return Vec::new();
+    };
+    let Some(admitted) = host
+        .framework_registry()
+        .component_carrier_profile(&serve.indexed.file_language)
+    else {
+        return Vec::new();
+    };
+    let registration = admitted.registration.as_ref();
+    let crate::framework::registry::SurfaceRegistration::Adapter(adapter) = &registration.surface
+    else {
+        return Vec::new();
+    };
+    let mut requested = vec![
+        FrameworkSurfaceKind::Props,
+        FrameworkSurfaceKind::Emits,
+        FrameworkSurfaceKind::Slots,
+    ];
+    if snapshot_macros.iter().any(|mac| {
+        mac.kind == AnalyzedMacroKind::DefineExpose && !raw_macro_surface_is_authoritative(mac)
+    }) {
+        requested.push(FrameworkSurfaceKind::Expose);
+    }
+    let selector = crate::typeinfo::framework_surface::ResolvedComponentSelector {
+        canonical: std::sync::Arc::from(owner_canonical),
+        export: crate::typeinfo::framework_surface::ComponentExport::Default,
+        framework_profile: admitted.profile.clone(),
+    };
+    crate::typeinfo::framework_surface::executor::resolve_requested_surfaces(
+        adapter.as_ref(),
+        &crate::framework::ctx::FrameworkAdapterCtx::new(registration, host),
+        &selector,
+        &requested,
+        ctx,
+        dispatch,
+    )
+    .reads
+}
+
+fn empty_macro_input(
+    macro_index: usize,
+) -> verter_semantic::analysis::component_meta::ResolvedMacroInput {
+    verter_semantic::analysis::component_meta::ResolvedMacroInput {
+        macro_index,
+        props: Vec::new(),
+        emits: Vec::new(),
+        slots: Vec::new(),
+        slot_return_publications: Vec::new(),
+        exposed: Vec::new(),
+        default_keys: Vec::new(),
+        props_guarantee: None,
+        events_guarantee: None,
+        slots_guarantee: None,
+    }
+}
+
+fn prop_inputs(
+    dtos: &crate::typeinfo::framework_surface::MacroSurfaceDtos,
+) -> Vec<verter_semantic::analysis::component_meta::ResolvedPropInput> {
+    dtos.prop_fields()
+        .iter()
+        .map(
+            |row| verter_semantic::analysis::component_meta::ResolvedPropInput {
+                field: row.analysis.clone(),
+                authority: row.authority.clone(),
+                authored_evidence: row.authored_evidence.clone(),
+                callable_role: row.callable_role.clone(),
+            },
+        )
+        .collect()
+}
+
+fn emit_inputs(
+    dtos: &crate::typeinfo::framework_surface::MacroSurfaceDtos,
+) -> Vec<verter_semantic::analysis::component_meta::ResolvedEmitInput> {
+    dtos.emit_fields()
+        .iter()
+        .map(
+            |row| verter_semantic::analysis::component_meta::ResolvedEmitInput {
+                id: row.id.clone(),
+                name: row.name.clone(),
+                span: row.span,
+                payload_type: row.payload_type.clone(),
+                payload: row.payload.clone(),
+                payload_expr_scope: row.payload_expr_scope.clone(),
+                description: row.description.clone(),
+                tags: row.tags.clone(),
+                payload_source: row.payload_source.clone(),
+                payload_publication: row.payload_publication.clone(),
+                return_publication: row.return_publication.clone(),
+                return_publication_scope: row.return_publication_scope.clone(),
+            },
+        )
+        .collect()
 }
 
 pub fn component_meta_type_registry(

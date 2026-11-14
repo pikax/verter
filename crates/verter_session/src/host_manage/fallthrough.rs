@@ -571,6 +571,7 @@ impl VerterHost {
         // Macro-DTO surface reads through the request-bound `ctx`, preserving
         // the exact base or session store view selected at request entry.
         let resolved_macros = resolver_component_meta_resolved_macros(
+            self,
             ctx,
             dispatch,
             canonical_id,

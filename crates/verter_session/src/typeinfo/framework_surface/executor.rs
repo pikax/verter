@@ -251,7 +251,6 @@ impl VerterHost {
             SurfaceRegistration::Deferred => NormalizedSurfaces::default(),
             SurfaceRegistration::Adapter(adapter) => {
                 let ctx = FrameworkAdapterCtx::new(registration, self);
-                let plan = adapter.plan_surfaces(&ctx, &resolved_selector, requested);
                 // Capture ONE proven-current request view AFTER validation and
                 // thread it through EVERY demand resolver — so all of a single
                 // response's props / emits / slots / model resolve against ONE
@@ -286,17 +285,19 @@ impl VerterHost {
                                 verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
                                     &host_ctx,
                                 );
-                            let resolve_ctx = ExecutorResolveCtx {
-                                ctx: &host_ctx,
-                                dispatch: &dispatch,
-                                members: std::cell::RefCell::new(Vec::new()),
-                            };
-                            let (normalized, trace) = crate::typeinfo::native_basis::trace_native_fact(
+                            let ((normalized, reads), trace) = crate::typeinfo::native_basis::trace_native_fact(
                                 &host_ctx,
                                 &[resolved_selector.canonical.as_ref()],
                                 || {
-                                    let resolved = resolve_ctx.resolve_plan(&resolved_selector, plan);
-                                    adapter.normalize(&ctx, resolved)
+                                    let surfaces = resolve_requested_surfaces(
+                                        adapter.as_ref(),
+                                        &ctx,
+                                        &resolved_selector,
+                                        requested,
+                                        &host_ctx,
+                                        &dispatch,
+                                    );
+                                    (adapter.normalize(&ctx, surfaces.resolved), surfaces.reads)
                                 },
                             );
                             let mut encoded = encode_framework_surfaces(
@@ -307,7 +308,7 @@ impl VerterHost {
                             let members = exported_framework_members(
                                 &dispatch,
                                 &resolved_selector,
-                                resolve_ctx.members.into_inner(),
+                                member_sources(&reads),
                                 &encoded.exported_members,
                             );
                             // Each issued key is published on its exported member
@@ -430,19 +431,124 @@ impl VerterHost {
 /// shared resolution.
 struct ExecutorResolveCtx<
     'a,
+    'd,
     M: verter_audit::observe::ObserveExec = verter_audit::observe::Uncaptured,
 > {
     /// The ONE proven-current request view every demand resolves against, so a
     /// single response never mixes owner versions under churn.
     ctx: &'a dyn crate::resolver_core::HostRequestContext<M>,
     dispatch: &'a verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
-        'a,
+        'd,
         crate::resolver_core::HostCapabilities<M>,
     >,
-    /// Every replayable member source a resolved macro contributed, with its
-    /// producing macro: the candidates the response's exported members are
-    /// addressed by.
-    members: std::cell::RefCell<Vec<MemberSource>>,
+    /// Every producer read the resolution made, in read order.
+    reads: std::cell::RefCell<Vec<ProducerRead>>,
+}
+
+/// The surfaces one component's adapter resolved for a requested kind set:
+/// the resolved demands the adapter normalizes, plus every producer read
+/// the resolution made.
+pub(crate) struct RequestedSurfaces {
+    /// One resolved item per planned demand.
+    pub(crate) resolved: ResolvedSurfaces,
+    /// Every producer bundle read while resolving, in read order. A producer
+    /// is read once per requested kind it contributes to.
+    pub(crate) reads: Vec<ProducerRead>,
+}
+
+/// One producer's bundle, read for one requested surface kind.
+pub(crate) struct ProducerRead {
+    /// The requested surface kind the producer was read for.
+    pub(crate) kind: FrameworkSurfaceKind,
+    /// The Vue macro or Svelte source family that produced the bundle.
+    pub(crate) producer: crate::typeinfo::node_refs::MemberProducer,
+    /// What the producer answered.
+    pub(crate) outcome: ProducerOutcome,
+}
+
+/// What one producer answered.
+pub(crate) enum ProducerOutcome {
+    /// A Vue macro's DTO bundle with the completeness of the compute that
+    /// produced it.
+    Macro(crate::typeinfo::framework_surface::MacroDtosRead),
+    /// A Svelte source family's outcome.
+    Source(ResolvedMacroPayload),
+}
+
+impl ProducerRead {
+    /// The bundle the producer answered with, partial or not; `None` when
+    /// it answered no surface.
+    pub(crate) fn dtos(&self) -> Option<&MacroSurfaceDtos> {
+        match &self.outcome {
+            ProducerOutcome::Macro(read) => Some(&*read.dtos),
+            ProducerOutcome::Source(outcome) => outcome.value().map(Arc::as_ref),
+        }
+    }
+
+    /// Fold a partial answer into the active request-result completeness,
+    /// so a result built from it is refused warm promotion. A no-op for a
+    /// complete answer.
+    pub(crate) fn observe_partial(&self) {
+        match &self.outcome {
+            ProducerOutcome::Macro(read) => read.observe_partial(),
+            ProducerOutcome::Source(ResolvedOutcome::Partial { .. }) => {
+                verter_type_engine::request_context::mark_request_result_partial();
+            }
+            ProducerOutcome::Source(_) => {}
+        }
+    }
+
+    /// The bundle whose members the wire response may address: every Vue
+    /// macro read, and a Svelte source family only when it resolved whole.
+    fn member_source_dtos(&self) -> Option<&MacroSurfaceDtos> {
+        match &self.outcome {
+            ProducerOutcome::Macro(read) => Some(&*read.dtos),
+            ProducerOutcome::Source(ResolvedOutcome::Resolved(dtos)) => Some(&**dtos),
+            ProducerOutcome::Source(_) => None,
+        }
+    }
+}
+
+/// Plan and resolve `requested` for one component through its adapter,
+/// under the caller's request view and dispatch.
+///
+/// This is the framework-surface resolution: the wire executor and
+/// in-process consumers (component meta) both read a component's declared
+/// surface through it, so there is one producer walk per surface kind.
+pub(crate) fn resolve_requested_surfaces<M: verter_audit::observe::ObserveExec>(
+    adapter: &dyn crate::typeinfo::framework_surface::FrameworkSurfaceAdapter,
+    adapter_ctx: &FrameworkAdapterCtx<'_>,
+    selector: &ResolvedComponentSelector,
+    requested: &[FrameworkSurfaceKind],
+    ctx: &dyn crate::resolver_core::HostRequestContext<M>,
+    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+        '_,
+        crate::resolver_core::HostCapabilities<M>,
+    >,
+) -> RequestedSurfaces {
+    let plan = adapter.plan_surfaces(adapter_ctx, selector, requested);
+    let resolve_ctx = ExecutorResolveCtx {
+        ctx,
+        dispatch,
+        reads: std::cell::RefCell::new(Vec::new()),
+    };
+    let resolved = resolve_ctx.resolve_plan(selector, plan);
+    RequestedSurfaces {
+        resolved,
+        reads: resolve_ctx.reads.into_inner(),
+    }
+}
+
+/// Every replayable member source the reads contributed, with its producer:
+/// the candidates the response's exported members are addressed by.
+fn member_sources(reads: &[ProducerRead]) -> Vec<MemberSource> {
+    let mut members = Vec::new();
+    for read in reads {
+        if let Some(dtos) = read.member_source_dtos() {
+            collect_member_sources(&mut members, read.kind, read.producer, dtos);
+        }
+    }
+    members
 }
 
 /// A replayable member source one producer contributed.
@@ -546,7 +652,7 @@ fn exported_framework_members<M: verter_audit::observe::ObserveExec>(
         .collect()
 }
 
-impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
+impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, '_, M> {
     /// Resolve every planned demand into a [`ResolvedSurfaces`] set.
     fn resolve_plan(
         &self,
@@ -602,13 +708,11 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
                         &owner,
                         source,
                     );
-                if let ResolvedOutcome::Resolved(dtos) = &outcome {
-                    self.collect_member_sources(
-                        requested_kind,
-                        crate::typeinfo::node_refs::MemberProducer::Svelte(source),
-                        dtos,
-                    );
-                }
+                self.reads.borrow_mut().push(ProducerRead {
+                    kind: requested_kind,
+                    producer: crate::typeinfo::node_refs::MemberProducer::Svelte(source),
+                    outcome: ProducerOutcome::Source(outcome.clone()),
+                });
                 ResolvedDemand::SvelteSurface(outcome)
             }
         };
@@ -708,17 +812,17 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
                 crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read,
             );
             any_partial |= dtos_read.is_partial();
+            fold_requested_slot(&mut aggregate, requested_kind, &dtos_read.dtos);
             if let Ok(index) = u32::try_from(macro_index) {
-                self.collect_member_sources(
-                    requested_kind,
-                    crate::typeinfo::node_refs::MemberProducer::VueMacro {
+                self.reads.borrow_mut().push(ProducerRead {
+                    kind: requested_kind,
+                    producer: crate::typeinfo::node_refs::MemberProducer::VueMacro {
                         kind: mac.kind,
                         index,
                     },
-                    &dtos_read.dtos,
-                );
+                    outcome: ProducerOutcome::Macro(dtos_read),
+                });
             }
-            fold_requested_slot(&mut aggregate, requested_kind, &dtos_read.dtos);
         }
         if !any {
             // No macro of the requested kind (nor a model contributing to props)
@@ -738,121 +842,6 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
             };
         }
         ResolvedOutcome::Resolved(Arc::new(aggregate))
-    }
-
-    /// Record every replayable member source `dtos` (one producer's bundle)
-    /// contributes to `requested_kind`: a props row's value authority, an
-    /// exposed row's value source, an options member's, a slot's or a model
-    /// binding's value source, or an emit occurrence's payload source. Closed, synthesized, failed and absent positions are not
-    /// addresses and are skipped. Each source replays under the owner its
-    /// authored anchor is written in.
-    fn collect_member_sources(
-        &self,
-        requested_kind: FrameworkSurfaceKind,
-        producer: crate::typeinfo::node_refs::MemberProducer,
-        dtos: &MacroSurfaceDtos,
-    ) {
-        use crate::typeinfo::node_refs::{is_replayable_source, source_scope_owner, MemberRole};
-        type Row<'r> = (
-            MemberRole,
-            &'r str,
-            Option<&'r verter_type_expr::facts::SemanticTypeSource>,
-        );
-        // An emit payload is keyed by its occurrence: overloads of one event
-        // name are distinct members.
-        let occurrences: Vec<Option<&verter_type_expr::facts::ResolvedEmitOccurrenceId>> =
-            match requested_kind {
-                FrameworkSurfaceKind::Emits => {
-                    dtos.emit_fields().iter().map(|row| Some(&row.id)).collect()
-                }
-                _ => Vec::new(),
-            };
-        let rows: Vec<Row<'_>> = match requested_kind {
-            FrameworkSurfaceKind::Props => dtos
-                .prop_fields()
-                .iter()
-                .map(|row| {
-                    (
-                        MemberRole::Prop,
-                        row.analysis.name.as_str(),
-                        row.authority.source(),
-                    )
-                })
-                .collect(),
-            FrameworkSurfaceKind::Expose => dtos
-                .exposed_fields
-                .iter()
-                .map(|row| {
-                    (
-                        MemberRole::Exposed,
-                        row.analysis.name.as_str(),
-                        row.type_source.present(),
-                    )
-                })
-                .collect(),
-            FrameworkSurfaceKind::Options => dtos
-                .option_sources
-                .iter()
-                .map(|row| {
-                    (
-                        MemberRole::OptionsMember,
-                        row.name.as_str(),
-                        row.source.present(),
-                    )
-                })
-                .collect(),
-            FrameworkSurfaceKind::Slots => dtos
-                .slot_sources
-                .iter()
-                .map(|row| (MemberRole::Slot, row.name.as_str(), row.source.present()))
-                .collect(),
-            FrameworkSurfaceKind::Model => dtos
-                .model
-                .as_ref()
-                .map(|surface| {
-                    surface
-                        .bindings
-                        .iter()
-                        .map(|binding| {
-                            (
-                                MemberRole::Model,
-                                binding.name.as_str(),
-                                binding.source.as_ref(),
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            FrameworkSurfaceKind::Emits => dtos
-                .emit_fields()
-                .iter()
-                .map(|row| {
-                    (
-                        MemberRole::EmitPayload,
-                        row.name.as_str(),
-                        row.payload_source.present(),
-                    )
-                })
-                .collect(),
-        };
-        let mut members = self.members.borrow_mut();
-        for (index, (role, name, source)) in rows.into_iter().enumerate() {
-            let Some(source) = source.filter(|source| is_replayable_source(source)) else {
-                continue;
-            };
-            let Some(scope_owner) = source_scope_owner(source) else {
-                continue;
-            };
-            members.push(MemberSource {
-                surface: requested_kind,
-                role,
-                name: name.to_string(),
-                occurrence: occurrences.get(index).copied().flatten().cloned(),
-                producer,
-                scope_owner,
-                source: source.clone(),
-            });
-        }
     }
 
     /// Resolve a path projection off a base node handle through the shared
@@ -958,6 +947,120 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
         node: &crate::typeinfo::framework_surface::plan::TypeNodeHandle,
     ) -> ResolvedOutcome<crate::typeinfo::surface::TypeInfoSurface> {
         self.resolve_path_projection(node, &[], ProjectionMode::Shallow)
+    }
+}
+
+/// Record every replayable member source `dtos` (one producer's bundle)
+/// contributes to `requested_kind`: a props row's value authority, an
+/// exposed row's value source, an options member's, a slot's or a model
+/// binding's value source, or an emit occurrence's payload source. Closed, synthesized, failed and absent positions are not
+/// addresses and are skipped. Each source replays under the owner its
+/// authored anchor is written in.
+fn collect_member_sources(
+    members: &mut Vec<MemberSource>,
+    requested_kind: FrameworkSurfaceKind,
+    producer: crate::typeinfo::node_refs::MemberProducer,
+    dtos: &MacroSurfaceDtos,
+) {
+    use crate::typeinfo::node_refs::{is_replayable_source, source_scope_owner, MemberRole};
+    type Row<'r> = (
+        MemberRole,
+        &'r str,
+        Option<&'r verter_type_expr::facts::SemanticTypeSource>,
+    );
+    // An emit payload is keyed by its occurrence: overloads of one event
+    // name are distinct members.
+    let occurrences: Vec<Option<&verter_type_expr::facts::ResolvedEmitOccurrenceId>> =
+        match requested_kind {
+            FrameworkSurfaceKind::Emits => {
+                dtos.emit_fields().iter().map(|row| Some(&row.id)).collect()
+            }
+            _ => Vec::new(),
+        };
+    let rows: Vec<Row<'_>> = match requested_kind {
+        FrameworkSurfaceKind::Props => dtos
+            .prop_fields()
+            .iter()
+            .map(|row| {
+                (
+                    MemberRole::Prop,
+                    row.analysis.name.as_str(),
+                    row.authority.source(),
+                )
+            })
+            .collect(),
+        FrameworkSurfaceKind::Expose => dtos
+            .exposed_fields
+            .iter()
+            .map(|row| {
+                (
+                    MemberRole::Exposed,
+                    row.analysis.name.as_str(),
+                    row.type_source.present(),
+                )
+            })
+            .collect(),
+        FrameworkSurfaceKind::Options => dtos
+            .option_sources
+            .iter()
+            .map(|row| {
+                (
+                    MemberRole::OptionsMember,
+                    row.name.as_str(),
+                    row.source.present(),
+                )
+            })
+            .collect(),
+        FrameworkSurfaceKind::Slots => dtos
+            .slot_sources
+            .iter()
+            .map(|row| (MemberRole::Slot, row.name.as_str(), row.source.present()))
+            .collect(),
+        FrameworkSurfaceKind::Model => dtos
+            .model
+            .as_ref()
+            .map(|surface| {
+                surface
+                    .bindings
+                    .iter()
+                    .map(|binding| {
+                        (
+                            MemberRole::Model,
+                            binding.name.as_str(),
+                            binding.source.as_ref(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        FrameworkSurfaceKind::Emits => dtos
+            .emit_fields()
+            .iter()
+            .map(|row| {
+                (
+                    MemberRole::EmitPayload,
+                    row.name.as_str(),
+                    row.payload_source.present(),
+                )
+            })
+            .collect(),
+    };
+    for (index, (role, name, source)) in rows.into_iter().enumerate() {
+        let Some(source) = source.filter(|source| is_replayable_source(source)) else {
+            continue;
+        };
+        let Some(scope_owner) = source_scope_owner(source) else {
+            continue;
+        };
+        members.push(MemberSource {
+            surface: requested_kind,
+            role,
+            name: name.to_string(),
+            occurrence: occurrences.get(index).copied().flatten().cloned(),
+            producer,
+            scope_owner,
+            source: source.clone(),
+        });
     }
 }
 
