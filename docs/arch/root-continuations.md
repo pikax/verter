@@ -1437,7 +1437,12 @@ and retains its position and what it computed before the read
   (`MappedResume::Admission`); a primitive key space evaluated, its
   union arms in order, to admit a selected key no structural tier decides
   (`HopSite::MappedKeySpace`, `KeySpaceAdmissionRead`), the hop resuming
-  past its tiers (`MappedResume::KeySpace`); the homomorphic mapping
+  past its tiers (`MappedResume::KeySpace`) — a `keyof` key space whose
+  read answers a carrier over a declaration, an application or a mapped
+  type settling its keys as a sub-continuation of that evaluation
+  (`DeferredEvaluationStage::AwaitKeyOfCarrier`, `KeyOfCarrierRead`): the
+  base's carrier chain, a homomorphic mapping's source keys or its
+  evaluated key space, and the keys of the surface the base settles on; the homomorphic mapping
   (`MappedHomomorphic`), an identity mapper's selected-key access
   (`MappedKey`), a computed mapper's selected value evaluated as a
   mapped member's on the shared deferred evaluator
@@ -1742,9 +1747,11 @@ against the reads the walk names on a scratch host
 `an_array_member_waiting_on_its_wrapper_resumes_without_walking_again`,
 `a_mapped_key_waiting_on_its_selected_value_resumes_without_walking_again`,
 `a_mapped_sources_carrier_chain_waiting_on_its_instantiation_resumes_there`
-(the source's first instantiation, after the mapping's),
+(either of the source's instantiations, after the mapping's),
 `a_mapped_key_space_waiting_on_its_evaluation_resumes_there`
 (the key space's `keyof`, after the source's first instantiation),
+`a_key_space_whose_keyof_carrier_waits_on_its_settled_surfaces_keys_resumes_there`
+(the `keyof` of the surface the key space's carrier settles on),
 `a_computed_mapped_value_waiting_on_its_evaluation_resumes_there`,
 `an_object_member_waiting_on_the_global_object_resumes_without_walking_again`,
 `an_intersection_join_waiting_on_its_arms_wrappers_resumes_at_the_held_read`
@@ -2320,14 +2327,9 @@ made in place inside a stage:
   another read already indexed yields its wrapper's instantiation as a need,
   and that frame's begin waits on the lowering shard. Frame entry loads
   cover a build's files, never its declaration bodies;
-- a mapped key space's evaluation, once its `keyof` read answers with a
-  carrier over a declaration, an application or a mapped type: the
-  evaluator's `keyof` step settles that carrier's keys in place
-  (`ReadThen::KeyOf` → `settled_key_of_carrier` → `key_of_through_carrier`
-  → `resolve_signature_source_carrier` under `structural_transit()`).
-  That instantiation is the one the mapped hop reads next to admit the key
-  against the source's shallow surface, so a path held there joins it
-  inside that step;
+- a `keyof` carrier settle's open-key-domain check over a mapped base
+  (`mapped_type_key_domain_is_open_or_unknown`) and its declaration-kind
+  read (`prepared_decl_kind`);
 - the deferred evaluations its other hops and its terminal drive in place
   (the deferred object of a hop's indexed access is a sub-continuation;
   above), and what the evaluator still answers in place inside a step.
