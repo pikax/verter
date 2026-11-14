@@ -1990,6 +1990,12 @@ impl SemanticGraphStore {
             .discovery_nodes_walked
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped once per signature a discovery walk publishes.
+    pub fn record_discovery_signature_published(&self) {
+        self.stats
+            .discovery_signatures_published
+            .fetch_add(1, Ordering::Relaxed);
+    }
     /// Bumped once per type position signature matching compares.
     pub fn record_signature_position_compared(&self) {
         self.stats

@@ -252,6 +252,9 @@ pub(super) enum FamilyBuild {
     ClassStaticSurface(ClassStaticSurfaceBuild),
     /// A path projection's walk, standing at the read a hop named.
     ProjectPath(Box<super::walk::ProjectPathBuild>),
+    /// A signature discovery's walk, standing at the read a settlement
+    /// named.
+    Discovery(Box<super::signature_discovery::DiscoveryWalk>),
 }
 
 impl FamilyBuild {
@@ -261,11 +264,14 @@ impl FamilyBuild {
     /// frame's need is counted at its entry. A path walk counts what its
     /// in-place reads always counted: a carrier resolution's reads but its
     /// `typeof` value's, and a callable's apparent-type probe
-    /// ([`super::walk::WalkState::counts_awaited_intent`]).
+    /// ([`super::walk::WalkState::counts_awaited_intent`]). A signature
+    /// discovery counts its settlement evaluation's carrier reads, as that
+    /// evaluation made in place always counted them.
     fn counts_need_intent(&self, key: &SemanticQueryKey) -> bool {
         match self {
             Self::ApparentType(_) => true,
             Self::ProjectPath(build) => build.walk.counts_awaited_intent(key),
+            Self::Discovery(walk) => walk.counts_awaited_intent(key),
             _ => false,
         }
     }
@@ -292,18 +298,20 @@ impl FamilyBuild {
             | Self::CycleGate(_)
             | Self::ResolveDecl(_)
             | Self::TemplateUnion(..)
-            | Self::ProjectPath(_) => false,
+            | Self::ProjectPath(_)
+            | Self::Discovery(_) => false,
         }
     }
 
     /// Record `key`, a read this build names, in the test dispatch trace
     /// as the read a synchronous build makes is recorded: a path walk's
-    /// hop reads, and the template reductions an overload set's candidate
-    /// substitutions read, are recorded wherever their driver reads them.
+    /// hop reads, a signature discovery's settlement reads, and the
+    /// template reductions an overload set's candidate substitutions read,
+    /// are recorded wherever their driver reads them.
     #[cfg(any(test, feature = "test-support"))]
     pub(super) fn trace_need(&self, key: &SemanticQueryKey) {
         let traced = match self {
-            Self::ProjectPath(_) => true,
+            Self::ProjectPath(_) | Self::Discovery(_) => true,
             Self::OverloadSet(build) => build.instantiates_candidates(),
             _ => false,
         };
@@ -325,7 +333,9 @@ impl FamilyBuild {
     /// charged before its first prefix, so the frame abandoning that
     /// recording leaves those charges its consumer's. An overload set's
     /// candidate standing in a substitution abandons the recordings its
-    /// walk's levels opened, top first.
+    /// walk's levels opened, top first. A signature discovery standing in
+    /// its settlement's deferred evaluation abandons that evaluation's
+    /// recordings.
     pub(super) fn release_retained_accounting<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
         dispatch: &ProjectSemanticDispatch<'_, C>,
@@ -333,6 +343,7 @@ impl FamilyBuild {
         match self {
             Self::ProjectPath(build) => build.walk.release(dispatch),
             Self::OverloadSet(build) => build.release(dispatch),
+            Self::Discovery(walk) => walk.release(dispatch),
             _ => {}
         }
     }
@@ -351,7 +362,8 @@ impl FamilyBuild {
             | Self::OverloadSet(_)
             | Self::ClassInstanceSurface(_)
             | Self::CycleGate(_)
-            | Self::TemplateUnion(..) => unreachable!("this family reads no resolver port"),
+            | Self::TemplateUnion(..)
+            | Self::Discovery(_) => unreachable!("this family reads no resolver port"),
         }
     }
 }
@@ -407,11 +419,18 @@ static_assertions::assert_impl_all!(SignatureListRead: Send);
 static_assertions::assert_not_impl_any!(SignatureListRead: Clone, Copy);
 
 // A frame carries its family build inline on every resume, so the build
-// stays small: a signature list keeps what it read behind one box, and no
-// variant grows the build past the ceiling.
+// stays small: a signature list keeps what it read behind one box, a
+// signature discovery its whole walk, and no variant grows the build past
+// the ceiling.
 const FAMILY_BUILD_MAX_BYTES: usize = 264;
 const _: () = assert!(std::mem::size_of::<SignatureListRead>() <= 24);
 const _: () = assert!(std::mem::size_of::<FamilyBuild>() <= FAMILY_BUILD_MAX_BYTES);
+// The in-place driver carries a build (`resume_family_need_in_place`,
+// `resume_family_build`) and a step (`complete_family_in_place_naming`)
+// by value beneath every read a family makes in place: 248 and 176 bytes on
+// a 64-bit target. A variant that grows either grows that path.
+const _: () = assert!(std::mem::size_of::<FamilyBuild>() <= 248);
+const _: () = assert!(std::mem::size_of::<FamilyStep>() <= 176);
 
 /// Whether `key`'s family builds as a continuation
 /// ([`ProjectSemanticDispatch::begin_family_build`]).
@@ -427,6 +446,7 @@ pub(super) fn builds_as_continuation(key: &SemanticQueryKey) -> bool {
             | SemanticQueryKey::ClassifyMaterializationCycleGate(_)
             | SemanticQueryKey::ResolveOverloadSet { .. }
             | SemanticQueryKey::ProjectPath { .. }
+            | SemanticQueryKey::SignaturesOfType { .. }
     )
 }
 
@@ -452,6 +472,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticQueryKey::ResolveDecl(key) => {
                 Some(self.continuation_stage().begin_resolve_decl(key))
             }
+            SemanticQueryKey::SignaturesOfType {
+                subject,
+                kind,
+                context,
+            } => Some(self.begin_discovery_family(*subject, *kind, context.clone())),
             SemanticQueryKey::ClassifyMaterializationCycleGate(key) => {
                 Some(self.continuation_stage().begin_cycle_gate(key))
             }
@@ -518,8 +543,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// `deliver` makes or delivers that read. A build consumes it as its
     /// stage begins, except a path walk whose hop stands inside a deferred
     /// evaluation, which has it delivered inside the evaluation's stage,
-    /// and an overload set whose candidate stands inside a substitution,
-    /// which has it delivered inside the level that named it.
+    /// an overload set whose candidate stands inside a substitution,
+    /// which has it delivered inside the level that named it, and a
+    /// signature discovery whose settlement stands inside its deferred
+    /// evaluation, which has it delivered inside that evaluation.
     #[inline(never)]
     pub(super) fn resume_family_build(
         &self,
@@ -527,12 +554,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         deliver: &mut dyn FnMut() -> CacheRead<QueryResult<SemanticQueryValue>>,
     ) -> FamilyStep {
         // A path walk counts its own work, hop by hop, where each hop is
-        // computed (`projection_hops_walked`). An overload set's stages
+        // computed (`projection_hops_walked`), and a signature discovery
+        // node by node (`discovery_nodes_walked`). An overload set's stages
         // instantiate candidates through the substitution walk, whose
         // in-place reads a dispatcher stage makes.
         let build = match build {
             FamilyBuild::ProjectPath(build) => {
                 return self.resume_project_path(*build, deliver);
+            }
+            FamilyBuild::Discovery(walk) => {
+                return self.resume_discovery_family(walk, deliver);
             }
             FamilyBuild::OverloadSet(build) => {
                 self.graph().record_continuation_resumed();
@@ -544,6 +575,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let read = deliver();
         match build {
             FamilyBuild::ProjectPath(_) => unreachable!("a path walk resumed above"),
+            FamilyBuild::Discovery(_) => unreachable!("a signature discovery resumed above"),
             FamilyBuild::TemplateUnion(mut output, fallback) => {
                 let read = super::narrow_value_cache_read(read);
                 output.result = QueryResult::Value(match read.value {
@@ -613,6 +645,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 unreachable!("an intersection reduction reads no file")
             }
             FamilyBuild::OverloadSet(_) => unreachable!("an overload set reads no file"),
+            FamilyBuild::Discovery(_) => unreachable!("a signature discovery reads no file"),
             FamilyBuild::ApparentType(build) => self
                 .continuation_stage()
                 .resume_apparent_global_source(build, serve),
@@ -656,7 +689,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 | FamilyBuild::OverloadSet(_)
                 | FamilyBuild::ClassInstanceSurface(_)
                 | FamilyBuild::CycleGate(_)
-                | FamilyBuild::TemplateUnion(..),
+                | FamilyBuild::TemplateUnion(..)
+                | FamilyBuild::Discovery(_),
                 _,
             ) => unreachable!("this family reads no resolver port"),
             (FamilyBuild::ProjectPath(_), _) => unreachable!("a path walk resumed above"),

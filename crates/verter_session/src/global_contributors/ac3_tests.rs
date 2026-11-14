@@ -33,9 +33,9 @@ fn lookup_path_source_has_no_known_canonicals_scan() {
         "../../../verter_type_engine/src/project_semantic_dispatch/signature_discovery.rs"
     );
     let nominal = discovery
-        .split("fn runtime_nominal(")
+        .split("fn discover_runtime_nominal(")
         .nth(1)
-        .and_then(|rest| rest.split("\n    fn apparent(").next())
+        .and_then(|rest| rest.split("\n    fn discover_apparent(").next())
         .expect("runtime_nominal body");
     assert!(
         !external.contains("known_canonicals()"),

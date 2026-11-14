@@ -42,7 +42,7 @@ Ordering and composite reduction live beside the kernel, in the dispatch crate:
 | `semantic_query/stable_key.rs` | `VerterStableV1` encoding and `StableKey::cmp`. |
 | `project_semantic_dispatch/canonical_algebra.rs` | `intern_ordered_union_charged` / `intern_ordered_intersection_charged` — the two crate-private canonical builders production constructions call, each paying a `ConstructionMeter`; `admit_cross_product`, the one cross-product admission; plus `compare_structural` and `CanonicalEvidence`. |
 | `project_semantic_dispatch/build.rs` | `build_reduce_union` / `build_reduce_intersection` — the query builders behind `SemanticQueryKey::ReduceUnion` / `ReduceIntersection`. |
-| `project_semantic_dispatch/signature_discovery.rs` | The cutover consumer: it drives discovery, positional matching and instantiation through the kernel records. |
+| `project_semantic_dispatch/signature_discovery.rs` | The cutover consumer: it drives discovery, positional matching and instantiation through the kernel records. Discovery is `DiscoveryWalk`, an owned stack of levels advanced by out-of-line stages: a frame drives it as the `FamilyBuild::Discovery` continuation, suspending at each carrier read its settlements name, and the synchronous producer drives the same stages in place (`drive_family_value_in_place`). |
 
 ---
 
@@ -267,6 +267,10 @@ enumerates the live variant set exactly (guard:
   publication, current or retired. Everything the computation interns
   lands in it, so a replacement mid-way never leaves it with handles of two
   epochs (`a_binding_publishes_into_its_own_epoch_after_a_replacement`).
+  A discovery walk's binding spans its suspensions: a walk suspended on a
+  frame while the kernel replaces its epoch finishes in its own epoch and
+  publishes its set by one copy into the current one
+  (`a_signature_list_suspended_across_a_kernel_epoch_replacement_publishes_what_it_found_in_the_current_epoch`).
   `SignatureStore`'s interning methods are the same bodies over its
   current epoch.
 * **Publication through a binding; rebinding is a copy.** Where a handle

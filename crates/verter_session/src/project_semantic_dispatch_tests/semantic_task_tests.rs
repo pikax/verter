@@ -6937,10 +6937,13 @@ mod semantic_poll_contract {
         expression_site: bool,
         before_seam: (u64, u64),
         in_all: (u64, u64),
+        /// The root's task's live frames while it waits: its own, and the
+        /// frame of each need between it and the held dependency.
+        frames: usize,
     }
 
     /// Every suspension seam of the families built as continuations.
-    const HELD_SEAMS: [HeldSeam; 13] = [
+    const HELD_SEAMS: [HeldSeam; 15] = [
         HeldSeam {
             seam: "a routed declaration's defining declaration",
             host: routed_declaration_host,
@@ -6958,6 +6961,7 @@ mod semantic_poll_contract {
             // The defining lookup begins its own build and reads its scope;
             // the route resumes once with it.
             in_all: (2, 5),
+            frames: 1,
         },
         HeldSeam {
             seam: "a macro payload's props intersection",
@@ -6969,6 +6973,7 @@ mod semantic_poll_contract {
             // The intersection begins its own build; the payload resumes
             // once with it.
             in_all: (2, 2),
+            frames: 1,
         },
         HeldSeam {
             seam: "a macro payload's emits projection",
@@ -6978,6 +6983,7 @@ mod semantic_poll_contract {
             before_seam: (1, 1),
             // The projection is no continuation: only the payload's stages.
             in_all: (1, 2),
+            frames: 1,
         },
         HeldSeam {
             seam: "an intersection's first subgroup",
@@ -6986,6 +6992,7 @@ mod semantic_poll_contract {
             expression_site: false,
             before_seam: (1, 0),
             in_all: (2, 1),
+            frames: 1,
         },
         HeldSeam {
             seam: "an intersection's later subgroup",
@@ -6995,6 +7002,7 @@ mod semantic_poll_contract {
             // The first subgroup is reduced and taken before the wait.
             before_seam: (2, 1),
             in_all: (3, 2),
+            frames: 1,
         },
         HeldSeam {
             seam: "an overload set's signature list",
@@ -7006,6 +7014,7 @@ mod semantic_poll_contract {
             expression_site: true,
             before_seam: (1, 0),
             in_all: (1, 1),
+            frames: 1,
         },
         HeldSeam {
             seam: "an overload set's composite result",
@@ -7015,6 +7024,7 @@ mod semantic_poll_contract {
             // The list is read before the set waits on its composite.
             before_seam: (1, 1),
             in_all: (1, 2),
+            frames: 1,
         },
         HeldSeam {
             seam: "a cycle classification's later declaration hop",
@@ -7023,6 +7033,7 @@ mod semantic_poll_contract {
             expression_site: true,
             before_seam: (1, 2),
             in_all: (1, 3),
+            frames: 1,
         },
         HeldSeam {
             seam: "an apparent type's anchor list",
@@ -7037,6 +7048,7 @@ mod semantic_poll_contract {
             // population read, the `Function` lookup's three index reads and
             // its contributor's load, and the interface.
             in_all: (1, 12),
+            frames: 1,
         },
         HeldSeam {
             seam: "an apparent type's construct list",
@@ -7046,6 +7058,7 @@ mod semantic_poll_contract {
             // The anchor list and the call list are read before the wait.
             before_seam: (1, 2),
             in_all: (1, 12),
+            frames: 1,
         },
         HeldSeam {
             seam: "an apparent type's interface instantiation",
@@ -7057,6 +7070,7 @@ mod semantic_poll_contract {
             // already, so the `CallableFunction` lookup loads none.
             before_seam: (1, 10),
             in_all: (1, 11),
+            frames: 1,
         },
         HeldSeam {
             seam: "a class instance surface's instantiation",
@@ -7066,6 +7080,7 @@ mod semantic_poll_contract {
             // The declaring file is read before the wait.
             before_seam: (1, 1),
             in_all: (1, 2),
+            frames: 1,
         },
         HeldSeam {
             seam: "a template product's union reduction",
@@ -7098,6 +7113,30 @@ mod semantic_poll_contract {
             expression_site: true,
             before_seam: (1, 0),
             in_all: (1, 1),
+            frames: 1,
+        },
+        HeldSeam {
+            seam: "a signature list's later union arm",
+            host: callable_host,
+            keys: callable_union_seam_keys,
+            expression_site: false,
+            // The set began; a discovery walk moves no stage counter.
+            before_seam: (1, 0),
+            // The set resumes with its list, then with its composite's
+            // result: the arms' parameters agree, so the list is one
+            // composite candidate.
+            in_all: (1, 2),
+            // The set's frame and its list's.
+            frames: 2,
+        },
+        HeldSeam {
+            seam: "a signature list's subject evaluation",
+            host: callable_host,
+            keys: callable_placeholder_seam_keys,
+            expression_site: false,
+            before_seam: (1, 0),
+            in_all: (1, 1),
+            frames: 2,
         },
     ];
 
@@ -7264,7 +7303,12 @@ mod semantic_poll_contract {
             "{}: the stages before the seam ran once and the build waits",
             seam.seam
         );
-        assert_eq!(run.frames, Some(1), "{}: the root's frame waits", seam.seam);
+        assert_eq!(
+            run.frames,
+            Some(seam.frames),
+            "{}: the root's frame and its needs' wait",
+            seam.seam
+        );
         assert_eq!(
             run.pending_elsewhere,
             Some(true),
@@ -8784,6 +8828,11 @@ mod semantic_poll_contract {
         woken: bool,
         /// Work computed over the whole polled read.
         total: Work,
+        /// What signature discovery walks did in the first poll, in the
+        /// repolls while held, and over the whole polled read.
+        discovery_at_hold: DiscoveryWork,
+        discovery_repoll: DiscoveryWork,
+        discovery_total: DiscoveryWork,
         read: ValueRead,
         /// The synchronous waits the first poll entered, recorded: a
         /// dependency joined in place instead of named as the root's need
@@ -8825,6 +8874,9 @@ mod semantic_poll_contract {
         let counter = Arc::new(CountingWaker::default());
         let waker = Waker::from(Arc::clone(&counter));
         let before = work(&host);
+        let before_discovery = discovery_work(&host);
+        let mut discovery_at_hold = DiscoveryWork::default();
+        let mut discovery_repoll = DiscoveryWork::default();
         let mut entry = dispatch.poll_query(root);
         let (first, at_hold, repolled_pending, pending_elsewhere, repoll, first_waits) =
             while_held(lease, || {
@@ -8834,6 +8886,7 @@ mod semantic_poll_contract {
                     (first, probe.reached())
                 };
                 let at_hold = work_since(&host, before);
+                discovery_at_hold = discovery_work(&host).since(before_discovery);
                 if first.is_ready() {
                     return (first, at_hold, false, None, NO_WORK, first_waits);
                 }
@@ -8852,6 +8905,9 @@ mod semantic_poll_contract {
                 });
                 let total = work_since(&host, before);
                 let repoll = total.minus(at_hold);
+                discovery_repoll = discovery_work(&host)
+                    .since(before_discovery)
+                    .since(discovery_at_hold);
                 (
                     first,
                     at_hold,
@@ -8879,6 +8935,9 @@ mod semantic_poll_contract {
             repoll,
             woken,
             total: work_since(&host, before),
+            discovery_at_hold,
+            discovery_repoll,
+            discovery_total: discovery_work(&host).since(before_discovery),
             read,
             first_waits,
         };
@@ -12361,6 +12420,7 @@ mod semantic_poll_contract {
             // The reduction begins its own build; the set resumes once with
             // it.
             in_all: (2, 2),
+            frames: 1,
         },
         HeldSeam {
             seam: "an explicit candidate's first template reduction",
@@ -12374,6 +12434,7 @@ mod semantic_poll_contract {
             // Each reduction begins its own build; the set resumes with
             // each.
             in_all: (3, 3),
+            frames: 1,
         },
         HeldSeam {
             seam: "an explicit candidate's later template reduction",
@@ -12386,6 +12447,7 @@ mod semantic_poll_contract {
             // The parameter's reduction is built and taken before the wait.
             before_seam: (2, 2),
             in_all: (3, 3),
+            frames: 1,
         },
         HeldSeam {
             seam: "a later explicit candidate's template reduction",
@@ -12399,6 +12461,7 @@ mod semantic_poll_contract {
             // wait.
             before_seam: (2, 2),
             in_all: (3, 3),
+            frames: 1,
         },
     ];
 
@@ -12621,6 +12684,686 @@ mod semantic_poll_contract {
         drop(dispatch);
         let dispatch = ProjectSemanticDispatch::new(&*host);
         assert_eq!(read_summary(&dispatch, &read), synchronous, "{label}");
+    }
+
+    /// The file whose callable declarations the signature discovery tests
+    /// read: two generic interfaces and two generic function types whose
+    /// signatures differ only in their results, and an interface read
+    /// through its declaration placeholder.
+    const CALLABLE_FILE: &str = "/semantic-task/callable-sites.ts";
+
+    const CALLABLES: &str = "interface CallA<T> { (a: T): 1 }\n\
+                             interface CallB<T> { (a: T): 2 }\n\
+                             type FnA<T> = (a: T) => 1;\n\
+                             type FnB<T> = (a: T) => 2;\n\
+                             interface CallC { (a: string): 3 }\n";
+
+    fn callable_host() -> Arc<crate::VerterHost> {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            CALLABLE_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(CALLABLES),
+            crate::FileLanguage::script_ts(),
+        );
+        host.ensure_indexed_ready(CALLABLE_FILE)
+            .expect("the callables have indexed input before a read is held");
+        host
+    }
+
+    /// `name<args>` written in the callables file.
+    fn callable_application(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+        name: &str,
+        args: &[verter_type_engine::semantic_query::SemanticNodeId],
+    ) -> verter_type_engine::semantic_query::SemanticNodeId {
+        use verter_type_engine::semantic_query::{DeclIdentity, NodeScopeId, PayloadArray};
+        dispatch.graph_arc().intern_node_with_scope(
+            SemanticNodeData::InstantiationRef {
+                base: DeclIdentity {
+                    canonical_id: CALLABLE_FILE.into(),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    whole_hash: host
+                        .shallow_file_state(CALLABLE_FILE)
+                        .expect("the callables are indexed")
+                        .whole_hash,
+                    decl_name: name.into(),
+                },
+                args: PayloadArray::from(args.to_vec()),
+            },
+            NodeScopeId::File {
+                canonical_id: CALLABLE_FILE.into(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: host
+                    .shallow_file_state(CALLABLE_FILE)
+                    .expect("the callables are indexed")
+                    .whole_hash,
+                local_scope: None,
+            },
+        )
+    }
+
+    /// `name<args>` instantiated in the callables file as a signature
+    /// source's carrier chain instantiates it.
+    fn callable_instantiation(
+        dispatch: &HostDispatch<'_>,
+        name: &str,
+        args: &[verter_type_engine::semantic_query::SemanticNodeId],
+    ) -> SemanticQueryKey {
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+            dispatch.type_slot_for(
+                CALLABLE_FILE,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                name,
+            ),
+            Arc::from(args.to_vec().into_boxed_slice()),
+            dispatch.instantiate_context_for(
+                CALLABLE_FILE,
+                ProjectionReductionContext::structural_transit(),
+            ),
+        ))
+    }
+
+    /// The literal `"x"`, every generic callable's argument.
+    fn callable_argument(
+        dispatch: &HostDispatch<'_>,
+    ) -> verter_type_engine::semantic_query::SemanticNodeId {
+        dispatch.graph_arc().intern_node(SemanticNodeData::Literal(
+            verter_type_engine::semantic_query::LiteralValue::String("x".into()),
+        ))
+    }
+
+    /// A callable subject's overload set, the signature list the set reads
+    /// first, and the reads the list's walk names, in order.
+    struct CallableKeys {
+        set: SemanticQueryKey,
+        list: SemanticQueryKey,
+        reads: Vec<SemanticQueryKey>,
+    }
+
+    type CallableFixture = fn(&crate::VerterHost, &HostDispatch<'_>) -> CallableKeys;
+
+    fn callable_keys(
+        host: &crate::VerterHost,
+        subject: verter_type_engine::semantic_query::SemanticNodeId,
+        reads: Vec<SemanticQueryKey>,
+    ) -> CallableKeys {
+        let kind = verter_type_engine::semantic_query::SignatureKind::Call;
+        CallableKeys {
+            set: SemanticQueryKey::ResolveOverloadSet {
+                callee: subject,
+                kind,
+                type_args: Arc::from(Vec::new().into_boxed_slice()),
+                context: verter_type_engine::semantic_query::OverloadSetContext {
+                    resolve_env_hash: host
+                        .host_view_env_hashes_for(CALLABLE_FILE)
+                        .resolve_env_hash,
+                    ..Default::default()
+                },
+            },
+            list: SemanticQueryKey::SignaturesOfType {
+                subject,
+                kind,
+                context: verter_type_engine::semantic_query::SemanticContextId::production(),
+            },
+            reads,
+        }
+    }
+
+    /// The names of `CallA` and `CallB` in the order a walk of
+    /// `CallA<"x"> | CallB<"x">` reads their instantiations: the union's
+    /// stable member order, which no test assumes. Read once per process on
+    /// a scratch host, its list driven in place.
+    fn callable_union_order() -> [&'static str; 2] {
+        static ORDER: std::sync::OnceLock<[&'static str; 2]> = std::sync::OnceLock::new();
+        *ORDER.get_or_init(|| {
+            let host = callable_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let _scope = dispatch.enter_construction_scope();
+            let keys = callable_union_in(&host, &dispatch, ["CallA", "CallB"]);
+            let needs = dispatch.family_needs_for_tests(&keys.list);
+            let position = |key: &SemanticQueryKey| needs.iter().position(|need| need == key);
+            match (position(&keys.reads[0]), position(&keys.reads[1])) {
+                (Some(a), Some(b)) if a < b => ["CallA", "CallB"],
+                (Some(_), Some(_)) => ["CallB", "CallA"],
+                _ => panic!(
+                    "premise: the walk reads both arms' instantiations\nnamed: {needs:#?}\nexpected: {:#?}",
+                    keys.reads
+                ),
+            }
+        })
+    }
+
+    /// `CallA<"x"> | CallB<"x">`, its arms' instantiations read in `order`.
+    fn callable_union_in(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+        order: [&str; 2],
+    ) -> CallableKeys {
+        let x = callable_argument(dispatch);
+        let a = callable_application(host, dispatch, "CallA", &[x]);
+        let b = callable_application(host, dispatch, "CallB", &[x]);
+        let subject = dispatch.graph_arc().intern_node(SemanticNodeData::Union(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                [a, b],
+            )),
+        ));
+        let reads = order
+            .iter()
+            .map(|name| callable_instantiation(dispatch, name, &[x]))
+            .collect();
+        callable_keys(host, subject, reads)
+    }
+
+    /// `CallA<"x"> | CallB<"x">`: the walk reads each arm's instantiation
+    /// in the union's member order. The arms' parameters agree, so the list
+    /// is one composite candidate.
+    fn callable_union(host: &crate::VerterHost, dispatch: &HostDispatch<'_>) -> CallableKeys {
+        callable_union_in(host, dispatch, callable_union_order())
+    }
+
+    /// `CallA<"x"> & CallB<"x">`: flattening settles each member through
+    /// its instantiation, in authored order.
+    fn callable_intersection(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> CallableKeys {
+        let x = callable_argument(dispatch);
+        let a = callable_application(host, dispatch, "CallA", &[x]);
+        let b = callable_application(host, dispatch, "CallB", &[x]);
+        let subject = dispatch
+            .graph_arc()
+            .intern_node(SemanticNodeData::Intersection(
+                verter_type_engine::semantic_query::composite::CompositeList::test_fixture(
+                    Arc::from([a, b]),
+                ),
+            ));
+        let reads = vec![
+            callable_instantiation(dispatch, "CallA", &[x]),
+            callable_instantiation(dispatch, "CallB", &[x]),
+        ];
+        callable_keys(host, subject, reads)
+    }
+
+    /// An object whose call signatures are `FnA<"x">` and `FnB<"x">`: each
+    /// entry settles through its instantiation before it is published.
+    fn callable_entries(host: &crate::VerterHost, dispatch: &HostDispatch<'_>) -> CallableKeys {
+        let x = callable_argument(dispatch);
+        let a = callable_application(host, dispatch, "FnA", &[x]);
+        let b = callable_application(host, dispatch, "FnB", &[x]);
+        let subject = dispatch.graph_arc().intern_node(SemanticNodeData::Object(
+            verter_type_engine::test_surface_view! {
+                members: Arc::from(Vec::new().into_boxed_slice()),
+                call_signatures: Arc::from(vec![a, b].into_boxed_slice()),
+                construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+                keyspace: None,
+                has_index_signature: false,
+            },
+        ));
+        let reads = vec![
+            callable_instantiation(dispatch, "FnA", &[x]),
+            callable_instantiation(dispatch, "FnB", &[x]),
+        ];
+        callable_keys(host, subject, reads)
+    }
+
+    /// `CallC`'s declaration placeholder: its settlement's deferred
+    /// evaluation reads the interface's instantiation inside the
+    /// evaluation.
+    fn callable_placeholder(host: &crate::VerterHost, dispatch: &HostDispatch<'_>) -> CallableKeys {
+        let subject = dispatch.graph_arc().intern_node(SemanticNodeData::Opaque(
+            verter_type_engine::semantic_query::QueryError::DeclPlaceholder {
+                canonical_id: CALLABLE_FILE.into(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                name: "CallC".into(),
+                whole_hash: host
+                    .shallow_file_state(CALLABLE_FILE)
+                    .expect("the callables are indexed")
+                    .whole_hash,
+            },
+        ));
+        let reads = vec![callable_instantiation(dispatch, "CallC", &[])];
+        callable_keys(host, subject, reads)
+    }
+
+    /// The signature walks' own work: subject nodes entered and
+    /// signatures published.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    struct DiscoveryWork {
+        nodes: u64,
+        published: u64,
+    }
+
+    impl DiscoveryWork {
+        /// The work done since `before`.
+        fn since(self, before: DiscoveryWork) -> DiscoveryWork {
+            DiscoveryWork {
+                nodes: self.nodes - before.nodes,
+                published: self.published - before.published,
+            }
+        }
+    }
+
+    fn discovery_work(host: &crate::VerterHost) -> DiscoveryWork {
+        let stats = host.project_type_store().semantic_graph().stats_snapshot();
+        DiscoveryWork {
+            nodes: stats.discovery_nodes_walked,
+            published: stats.discovery_signatures_published,
+        }
+    }
+
+    /// The fixture's list, its walk driven in place on a scratch host,
+    /// names the fixture's reads first: the premise every held read rests
+    /// on.
+    fn assert_list_reads(fixture: CallableFixture, label: &str) {
+        let host = callable_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let keys = fixture(&host, &dispatch);
+        let needs = dispatch.family_needs_for_tests(&keys.list);
+        assert!(
+            needs.len() >= keys.reads.len() && needs[..keys.reads.len()] == keys.reads[..],
+            "{label}: the walk names the case's reads first\nnamed: {needs:#?}\nexpected: {:#?}",
+            keys.reads
+        );
+    }
+
+    /// The fixture's overload set read through the synchronous entry on a
+    /// fresh host: its summary and the walks' work.
+    fn synchronous_list(fixture: CallableFixture) -> (ReadSummary, DiscoveryWork) {
+        let host = callable_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let keys = fixture(&host, &dispatch);
+        let before = discovery_work(&host);
+        let read = dispatch.execute_via_cold_build_helper(keys.set);
+        (
+            read_summary(&dispatch, &read),
+            discovery_work(&host).since(before),
+        )
+    }
+
+    /// The fixture's overload set polled while another task produces its
+    /// list walk's read `held`: the set's list yields there instead of
+    /// waiting the producer out, a repoll and a poll elsewhere compute
+    /// nothing, and released, it resumes on another thread to exactly what
+    /// the synchronous entry reads — answer, rails, diagnostics and receipt
+    /// tree — having entered each node and published each signature once
+    /// (absolute counts, `total`).
+    fn assert_list_suspends(
+        fixture: CallableFixture,
+        held: usize,
+        total: DiscoveryWork,
+        label: &str,
+    ) -> HeldRead {
+        let (synchronous, synchronous_discovery) = synchronous_list(fixture);
+        assert!(
+            !synchronous.3 && synchronous.5.is_some(),
+            "{label}: premise: a complete, priced answer: {synchronous:?}"
+        );
+        assert_eq!(
+            synchronous_discovery, total,
+            "{label}: the synchronous entry walks each node and publishes each signature once"
+        );
+        let (host, run) = poll_root_holding_at(
+            callable_host,
+            |host, dispatch| {
+                let keys = fixture(host, dispatch);
+                (keys.set, keys.reads[held].clone())
+            },
+            false,
+        );
+        // No dependency of the walk is joined or driven in place. Only a
+        // `DeclLowering` wait is allowed: an instantiation frame's begin
+        // lowers its declaration in place.
+        assert!(
+            run.first_waits
+                .iter()
+                .all(|family| *family == verter_execution::blocking::WaitFamily::DeclLowering),
+            "{label}: the first poll joins no dependency in place: {:?}",
+            run.first_waits
+        );
+        assert!(
+            run.yielded,
+            "{label}: the list yields at its held read {held}"
+        );
+        assert!(
+            run.repolled_pending,
+            "{label}: a repoll while held enters no wait"
+        );
+        assert_eq!(run.pending_elsewhere, Some(true), "{label}");
+        assert_eq!(
+            run.repoll, NO_WORK,
+            "{label}: a pending repoll computes nothing"
+        );
+        assert_eq!(
+            run.discovery_repoll,
+            DiscoveryWork::default(),
+            "{label}: a pending repoll walks nothing"
+        );
+        assert!(run.woken, "{label}: the producer going away wakes the set");
+        assert_eq!(
+            run.discovery_total, total,
+            "{label}: no node is entered and no signature published again across the wait"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous, "{label}");
+        run
+    }
+
+    /// An overload set over `CallA<"x"> | CallB<"x">` whose list waits on
+    /// its later arm's instantiation, produced by another task: the list
+    /// yields there with the earlier arm's signature published, and resumed
+    /// on another thread it finishes the walk without entering a node or
+    /// publishing a signature again. The union, then each arm, is entered;
+    /// each arm settles on an interface whose one signature is published.
+    #[test]
+    fn a_signature_list_waiting_on_a_later_union_arms_declaration_resumes_without_walking_again() {
+        let label = "a later union arm";
+        assert_list_reads(callable_union, label);
+        let run = assert_list_suspends(
+            callable_union,
+            1,
+            DiscoveryWork {
+                nodes: 3,
+                published: 2,
+            },
+            label,
+        );
+        assert_eq!(
+            run.discovery_at_hold,
+            DiscoveryWork {
+                nodes: 3,
+                published: 1
+            },
+            "{label}: the union and both arms entered, the earlier arm published"
+        );
+    }
+
+    /// The same for `CallA<"x"> & CallB<"x">` waiting on its later member's
+    /// instantiation while the intersection is flattened: nothing is entered
+    /// but the intersection before the wait, and the flattening resumes at
+    /// the held member. Each member is then entered, its instantiation read
+    /// warm.
+    #[test]
+    fn a_signature_list_waiting_on_a_later_intersection_members_declaration_resumes_its_flattening()
+    {
+        let label = "a later intersection member";
+        assert_list_reads(callable_intersection, label);
+        let run = assert_list_suspends(
+            callable_intersection,
+            1,
+            DiscoveryWork {
+                nodes: 3,
+                published: 2,
+            },
+            label,
+        );
+        assert_eq!(
+            run.discovery_at_hold,
+            DiscoveryWork {
+                nodes: 1,
+                published: 0
+            },
+            "{label}: only the intersection entered while its members are flattened"
+        );
+    }
+
+    /// The same for an object whose second call signature entry waits on
+    /// its instantiation: the first entry is published before the wait and
+    /// never again.
+    #[test]
+    fn a_signature_list_waiting_on_a_later_entrys_declaration_resumes_without_publishing_again() {
+        let label = "a later signature entry";
+        assert_list_reads(callable_entries, label);
+        let run = assert_list_suspends(
+            callable_entries,
+            1,
+            DiscoveryWork {
+                nodes: 1,
+                published: 2,
+            },
+            label,
+        );
+        assert_eq!(
+            run.discovery_at_hold,
+            DiscoveryWork {
+                nodes: 1,
+                published: 1
+            },
+            "{label}: the object entered and its first entry published"
+        );
+    }
+
+    /// The same for a declaration placeholder whose settlement's deferred
+    /// evaluation reads the held instantiation: the read is delivered
+    /// inside the evaluation that named it, and the walk publishes the
+    /// interface's one signature.
+    #[test]
+    fn a_signature_list_whose_subjects_evaluation_reads_a_held_declaration_resumes_inside_the_evaluation(
+    ) {
+        let label = "a subject's evaluation";
+        assert_list_reads(callable_placeholder, label);
+        let run = assert_list_suspends(
+            callable_placeholder,
+            0,
+            DiscoveryWork {
+                nodes: 1,
+                published: 1,
+            },
+            label,
+        );
+        assert_eq!(
+            run.discovery_at_hold,
+            DiscoveryWork {
+                nodes: 1,
+                published: 0
+            },
+            "{label}: the subject entered, nothing published"
+        );
+    }
+
+    /// An overload set over `CallA<"x"> | CallB<"x">` whose list waits on
+    /// its later arm while the signature kernel replaces its epoch: the
+    /// walk finishes in the epoch it began in and publishes its set by one
+    /// copy into the current epoch, walking nothing again, and the set
+    /// answers what the synchronous entry answers with no replacement. The
+    /// list is then served warm: a read of the subject's signatures enters
+    /// no node.
+    ///
+    /// A walk bound per stage would publish its arms in two epochs; one
+    /// begun again after the replacement would walk the union twice.
+    #[test]
+    fn a_signature_list_suspended_across_a_kernel_epoch_replacement_publishes_what_it_found_in_the_current_epoch(
+    ) {
+        let synchronous = {
+            let host = callable_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let _scope = dispatch.enter_construction_scope();
+            let keys = callable_union(&host, &dispatch);
+            let before = signature_work(&host);
+            let read = dispatch.execute_via_cold_build_helper(keys.set);
+            assert_eq!(
+                signature_work(&host).since(before),
+                SignatureWork {
+                    discovery: 3,
+                    positions: 2,
+                    forced: 1,
+                    rebinds: 0,
+                    descriptors: 0,
+                },
+                "premise: the union and its arms walked once, the arms' one parameter position compared each way and the composite's result forced once"
+            );
+            decision(read_summary(&dispatch, &read))
+        };
+
+        let host = callable_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let keys = callable_union(&host, &dispatch);
+        let SemanticQueryKey::SignaturesOfType { subject, kind, .. } = keys.list else {
+            unreachable!("the set reads a signature list")
+        };
+        let (tasks, leases) = hold_seam(&host, graph, keys.reads[1].clone(), false);
+        let before = signature_work(&host);
+        let before_discovery = discovery_work(&host);
+        let mut entry = dispatch.poll_query(keys.set);
+        let pending = while_held(leases, || {
+            let pending = entry.poll(Waker::noop()).is_pending();
+            graph
+                .signature_store()
+                .replace_epoch()
+                .expect("the kernel replaces its epoch");
+            pending
+        });
+        assert!(pending, "the list yields while its later arm is held");
+        let read = resume_elsewhere(&mut entry);
+        drop(entry);
+        assert_eq!(
+            discovery_work(&host).since(before_discovery),
+            DiscoveryWork {
+                nodes: 3,
+                published: 2,
+            },
+            "the union and its arms are walked once"
+        );
+        assert_eq!(
+            signature_work(&host).since(before),
+            SignatureWork {
+                discovery: 3,
+                positions: 2,
+                forced: 1,
+                rebinds: 1,
+                descriptors: 3,
+            },
+            "the found composite and its two constituents are copied once and its result forced once"
+        );
+        assert_eq!(decision(read_summary(&dispatch, &read)), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        drop(tasks);
+
+        let before = discovery_work(&host);
+        let warm = dispatch.shared_signature_nodes(subject, kind);
+        assert!(
+            matches!(
+                warm,
+                verter_type_engine::project_semantic_dispatch::signature_discovery::SharedSignatureNodes::Nodes(ref nodes)
+                    if nodes.len() == 1
+            ),
+            "the published list answers warm with its one composite"
+        );
+        assert_eq!(
+            discovery_work(&host).since(before).nodes,
+            0,
+            "the list published in the current epoch is served warm"
+        );
+    }
+
+    /// The signature nodes of `subject`, rendered so two hosts' answers
+    /// compare.
+    fn rendered_signatures(
+        dispatch: &HostDispatch<'_>,
+        subject: verter_type_engine::semantic_query::SemanticNodeId,
+    ) -> Vec<String> {
+        use verter_type_engine::project_semantic_dispatch::signature_discovery::SharedSignatureNodes;
+        match dispatch.shared_signature_nodes(
+            subject,
+            verter_type_engine::semantic_query::SignatureKind::Call,
+        ) {
+            SharedSignatureNodes::Nodes(nodes) => nodes
+                .iter()
+                .map(|node| {
+                    crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                        dispatch, *node, 0,
+                    )
+                })
+                .collect(),
+            SharedSignatureNodes::Incomplete(reason) => vec![format!("incomplete: {reason:?}")],
+        }
+    }
+
+    /// A signature list built by a frame — the list an overload set's
+    /// polled frame needs — and the same list built by the synchronous
+    /// producer publish the same candidates, each walk entering the union
+    /// and its arms once and publishing each arm's signature once. A list
+    /// a frame built is then read warm.
+    #[test]
+    fn a_frame_and_the_synchronous_build_publish_the_same_signature_list() {
+        let (synchronous, synchronous_work) = {
+            let host = callable_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let _scope = dispatch.enter_construction_scope();
+            let keys = callable_union(&host, &dispatch);
+            let SemanticQueryKey::SignaturesOfType { subject, .. } = keys.list else {
+                unreachable!("the set reads a signature list")
+            };
+            let before = discovery_work(&host);
+            let rendered = rendered_signatures(&dispatch, subject);
+            (rendered, discovery_work(&host).since(before))
+        };
+        assert!(
+            synchronous.len() == 1 && !synchronous[0].starts_with("incomplete"),
+            "premise: one composite candidate: {synchronous:?}"
+        );
+        let walked_once = DiscoveryWork {
+            nodes: 3,
+            published: 2,
+        };
+        assert_eq!(synchronous_work, walked_once, "the synchronous walk");
+
+        let host = callable_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let keys = callable_union(&host, &dispatch);
+        let SemanticQueryKey::SignaturesOfType { subject, .. } = keys.list else {
+            unreachable!("the set reads a signature list")
+        };
+        let before = discovery_work(&host);
+        let read = {
+            let mut entry = dispatch.poll_query(keys.set);
+            poll_until_ready(|waker| entry.poll(waker))
+        };
+        let summary = read_summary(&dispatch, &read);
+        assert!(
+            !summary.3 && summary.5.is_some(),
+            "premise: a complete, priced set: {summary:?}"
+        );
+        assert_eq!(
+            discovery_work(&host).since(before),
+            walked_once,
+            "the walk a frame drives"
+        );
+        let before = discovery_work(&host);
+        assert_eq!(rendered_signatures(&dispatch, subject), synchronous);
+        assert_eq!(
+            discovery_work(&host).since(before).nodes,
+            0,
+            "the list the frame published is read warm"
+        );
+    }
+
+    /// The overload set over `CallA<"x"> | CallB<"x">` and the
+    /// instantiation of its later arm.
+    fn callable_union_seam_keys(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
+        let keys = callable_union(host, dispatch);
+        (keys.set, keys.reads[1].clone())
+    }
+
+    /// The overload set over `CallC`'s placeholder and the instantiation its
+    /// settlement's evaluation reads.
+    fn callable_placeholder_seam_keys(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
+        let keys = callable_placeholder(host, dispatch);
+        (keys.set, keys.reads[0].clone())
     }
 }
 

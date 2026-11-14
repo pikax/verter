@@ -231,6 +231,8 @@ pub(crate) struct AtomicSemanticGraphStats {
     pub(super) substitution_child_visits: Tally,
     /// Subject nodes signature discovery walks entered.
     pub(super) discovery_nodes_walked: Tally,
+    /// Signatures discovery walks published.
+    pub(super) discovery_signatures_published: Tally,
     /// Type positions signature matching compared.
     pub(super) signature_positions_compared: Tally,
     /// Signature result reads performed.
@@ -327,6 +329,7 @@ impl Default for AtomicSemanticGraphStats {
             binder_substitutions: Tally::default(),
             substitution_child_visits: Tally::default(),
             discovery_nodes_walked: Tally::default(),
+            discovery_signatures_published: Tally::default(),
             signature_positions_compared: Tally::default(),
             signature_results_forced: Tally::default(),
             signature_rebinds: Tally::default(),
@@ -553,6 +556,9 @@ impl SemanticGraphStore {
             binder_substitutions: stats.binder_substitutions.load(Ordering::Relaxed),
             substitution_child_visits: stats.substitution_child_visits.load(Ordering::Relaxed),
             discovery_nodes_walked: stats.discovery_nodes_walked.load(Ordering::Relaxed),
+            discovery_signatures_published: stats
+                .discovery_signatures_published
+                .load(Ordering::Relaxed),
             signature_positions_compared: stats
                 .signature_positions_compared
                 .load(Ordering::Relaxed),
