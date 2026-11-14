@@ -709,9 +709,10 @@ describe("typeinfo proto TS bindings", () => {
           value: { operation: GraphOperation.RELATE },
         },
       },
+      { kind: { case: "unknownSource", value: { path: "/src/missing.ts" } } },
     ];
 
-    expect(variants.length).toBe(15);
+    expect(variants.length).toBe(16);
 
     for (const init of variants) {
       const err = create(TypeInfoRequestErrorSchema, init);

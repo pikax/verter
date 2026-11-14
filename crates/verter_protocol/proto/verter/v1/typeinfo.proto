@@ -1767,6 +1767,7 @@ message TypeInfoRequestError {
     TypeInfoRequestErrorStaleBasis stale_basis = 14;
     TypeInfoRequestErrorUnknownNodeRef unknown_node_ref = 15;
     TypeInfoRequestErrorUnsupportedOperation unsupported_operation = 16;
+    TypeInfoRequestErrorUnknownSource unknown_source = 17;
   }
 }
 
@@ -1793,6 +1794,14 @@ message TypeInfoRequestErrorUnknownNodeRef {
 // a different payload cannot succeed.
 message TypeInfoRequestErrorUnsupportedOperation {
   GraphOperation operation = 1;
+}
+
+// Typed error for a request whose subject names a source the host does not
+// know: no loaded or loadable file has that path. It answers before any
+// resolution, and echoes the path. A known source without the requested
+// name is not this error; it is the graph's miss answer.
+message TypeInfoRequestErrorUnknownSource {
+  string path = 1;
 }
 
 // Typed error for a well-formed `FrameworkProfileRef` (32 bytes) that

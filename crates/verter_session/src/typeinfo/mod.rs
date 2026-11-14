@@ -52,6 +52,7 @@ pub mod raise;
 pub mod request_validation;
 pub mod resolve_named_symbol;
 pub(crate) mod scratch_cache;
+pub(crate) mod selector;
 pub mod shallow_surface;
 pub mod surface;
 pub(crate) mod surface_resolution;

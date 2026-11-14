@@ -323,6 +323,9 @@ fn project_error_kind(error: &TypeInfoRequestError) -> serde_json::Value {
                 .map(|op| op.as_str_name().to_string())
                 .unwrap_or_else(|_| format!("UNKNOWN({})", p.operation)),
         }),
+        Kind::UnknownSource(p) => {
+            serde_json::json!({ "case": "unknownSource", "path": p.path })
+        }
     }
 }
 

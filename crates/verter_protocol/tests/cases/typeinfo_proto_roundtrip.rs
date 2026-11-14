@@ -280,11 +280,12 @@ fn type_info_request_error_roundtrip_covers_every_variant() {
         Kind::UnknownNodeRef(g::wire_error_unknown_node_ref(sample_node_ref())),
         // A non-default operation, so a lost field cannot decode back equal.
         Kind::UnsupportedOperation(g::wire_error_unsupported_operation(g::Operation::Relate)),
+        Kind::UnknownSource(g::wire_error_unknown_source("/src/missing.ts")),
     ];
     assert_eq!(
         variants.len(),
-        15,
-        "TypeInfoRequestError covers exactly 15 closed variants (field 11 reserved)",
+        16,
+        "TypeInfoRequestError covers exactly 16 closed variants (field 11 reserved)",
     );
 
     for (idx, kind) in variants.into_iter().enumerate() {

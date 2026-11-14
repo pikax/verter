@@ -31,6 +31,7 @@ export {
   TypeInfoRequestErrorStaleBasisSchema,
   TypeInfoRequestErrorUnknownNodeRefSchema,
   TypeInfoRequestErrorUnsupportedOperationSchema,
+  TypeInfoRequestErrorUnknownSourceSchema,
   NodeRefSchema,
   GraphProjectionRequestSchema,
   // Graph node messages (kept as the prefixed names — the schema is
@@ -160,6 +161,7 @@ export type {
   TypeInfoRequestErrorStaleBasis,
   TypeInfoRequestErrorUnknownNodeRef,
   TypeInfoRequestErrorUnsupportedOperation,
+  TypeInfoRequestErrorUnknownSource,
   GraphSpanRef,
   GraphStringTable,
   GraphProjectionRequest,
