@@ -31,10 +31,10 @@ verter_span = { path = "../verter_span" }
 verter_language = { path = "../verter_language" }
 log = "0.4"
 serde = { workspace = true }
-
-[dev-dependencies]
 verter_audit = { path = "../verter_audit" }
 prost = "0.14.4"
 serde_json = { workspace = true }
+
+[dev-dependencies]
 verter_session = { path = "../verter_session", features = ["test-util", "test-support"] }
 verter_macro_dto = { path = "../verter_macro_dto" }

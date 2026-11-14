@@ -1,5 +1,14 @@
 # Native component facts
 
+`verter_ffi::component_meta` owns the materialized-payload byte encoder and
+the shared `AuditBundle` with its JSON byte encoder. Bindings adapt these to
+their boundary types; WASM's component-meta entries still serialize the shared
+bundle directly to a JavaScript object. `verter_ffi::typeinfo` owns the shared
+typeinfo request helpers, audited execution, response encoding and stored-record
+gate. Binding error mapping preserves native argument/serialization statuses
+and WASM string errors. Response-byte attribution fires once in the shared
+encoder; its observation gate is owned by `verter_audit`.
+
 Schema 13 gives `ComponentMetaBody.facts` (field 28) ownership of semantic lanes.
 The former body arrays and contract fields are reserved, as is the former
 payload registry field. Field 27 remains a derived compatibility summary.
