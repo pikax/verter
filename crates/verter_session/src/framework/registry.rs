@@ -1050,6 +1050,19 @@ impl FrameworkAdapterRegistry {
             .map(Arc::as_ref)
     }
 
+    /// The profile of the adapter whose COMPONENT CARRIER `language` is, if
+    /// that adapter is registered. A plain script, a template row or an
+    /// adapter module (a Svelte rune module) is no component carrier and has
+    /// no profile here, so it has no component surface to resolve.
+    #[must_use]
+    pub fn component_carrier_profile(
+        &self,
+        language: &FileLanguage,
+    ) -> Option<&RegisteredFrameworkProfile> {
+        let admitted = self.profile_for_adapter(language.adapter_id()?)?;
+        is_registered_carrier_row(language, &admitted.registration.descriptor).then_some(admitted)
+    }
+
     /// The active-provider index derived from this registry's script-fact
     /// providers (the resolved-validation half's per-file lookup). The Svelte
     /// carrier contributes one carrier-language-gated provider; Vue contributes
