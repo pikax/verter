@@ -6953,7 +6953,7 @@ mod semantic_poll_contract {
     }
 
     /// Every suspension seam of the families built as continuations.
-    const HELD_SEAMS: [HeldSeam; 16] = [
+    const HELD_SEAMS: [HeldSeam; 17] = [
         HeldSeam {
             seam: "a routed declaration's defining declaration",
             host: routed_declaration_host,
@@ -7158,6 +7158,20 @@ mod semantic_poll_contract {
             // The set resumes with its list: three authored candidates, no
             // composite result to read.
             in_all: (1, 1),
+            // The set's frame and its list's.
+            frames: 2,
+        },
+        HeldSeam {
+            seam: "a synthesized union signature's later parameter intersection",
+            host: callable_host,
+            keys: disjoint_union_seam_keys,
+            expression_site: false,
+            // The set began, and the first position's reduction began its
+            // own build; discovery and matching move no stage counter.
+            before_seam: (2, 0),
+            // The second position's reduction begins its own build; the set
+            // resumes with its list, then with its composite's result.
+            in_all: (3, 2),
             // The set's frame and its list's.
             frames: 2,
         },
@@ -12761,9 +12775,12 @@ mod semantic_poll_contract {
     /// The file whose callable declarations the signature discovery tests
     /// read: three generic interfaces and two generic function types whose
     /// signatures differ only in their results, an interface read through
-    /// its declaration placeholder, and two generic interfaces whose
-    /// overloads are generic signatures, the first alike in both and the
-    /// second differing only in its result.
+    /// its declaration placeholder, two generic interfaces whose overloads
+    /// are generic signatures, the first alike in both and the second
+    /// differing only in its result, two generic interfaces whose
+    /// signatures take their arguments in different positions, and two
+    /// generic interfaces whose one generic signature differs in its second
+    /// parameter and its result.
     const CALLABLE_FILE: &str = "/semantic-task/callable-sites.ts";
 
     const CALLABLES: &str = "interface CallA<T> { (a: T): 1 }\n\
@@ -12773,7 +12790,11 @@ mod semantic_poll_contract {
                              interface CallC { (a: string): 3 }\n\
                              interface CallD<T> { (a: T): 3 }\n\
                              interface GenA<X> { <T>(a: T): T; <T>(a: T, b: T): 1 }\n\
-                             interface GenB<X> { <T>(a: T): T; <T>(a: T, b: T): 2 }\n";
+                             interface GenB<X> { <T>(a: T): T; <T>(a: T, b: T): 2 }\n\
+                             interface TakesA<T, U, V> { (a: T, b: U): 1 }\n\
+                             interface TakesB<T, U, V> { (a: V, b: T): 2 }\n\
+                             interface BindsA<X> { <T>(a: T, b: 1): 1 }\n\
+                             interface BindsB<X> { <T>(a: T, b: 2): 2 }\n";
 
     fn callable_host() -> Arc<crate::VerterHost> {
         let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
@@ -12897,15 +12918,40 @@ mod semantic_poll_contract {
         }
     }
 
+    /// The arguments a union fixture applies each of its interfaces to.
+    type CallableArguments =
+        fn(&HostDispatch<'_>) -> Vec<verter_type_engine::semantic_query::SemanticNodeId>;
+
+    /// `"x"`, the one argument of most generic callables.
+    fn one_argument(
+        dispatch: &HostDispatch<'_>,
+    ) -> Vec<verter_type_engine::semantic_query::SemanticNodeId> {
+        vec![callable_argument(dispatch)]
+    }
+
+    /// The literals `"x"`, `"y"` and `"z"`, in order.
+    fn three_arguments(
+        dispatch: &HostDispatch<'_>,
+    ) -> Vec<verter_type_engine::semantic_query::SemanticNodeId> {
+        ["x", "y", "z"]
+            .iter()
+            .map(|text| {
+                dispatch.graph_arc().intern_node(SemanticNodeData::Literal(
+                    verter_type_engine::semantic_query::LiteralValue::String((*text).into()),
+                ))
+            })
+            .collect()
+    }
+
     /// The two interface names `names` in the order a walk of their union
-    /// over `"x"` reads their instantiations: the union's stable member
+    /// over `args` reads their instantiations: the union's stable member
     /// order, which no test assumes. Read on a scratch host, its list
     /// driven in place.
-    fn union_arm_order(names: [&'static str; 2]) -> [&'static str; 2] {
+    fn union_arm_order(names: [&'static str; 2], args: CallableArguments) -> [&'static str; 2] {
         let host = callable_host();
         let dispatch = ProjectSemanticDispatch::new(&*host);
         let _scope = dispatch.enter_construction_scope();
-        let keys = callable_union_in(&host, &dispatch, names, names);
+        let keys = callable_union_over(&host, &dispatch, names, names, &args(&dispatch));
         let needs = dispatch.family_needs_for_tests(&keys.list);
         let position = |key: &SemanticQueryKey| needs.iter().position(|need| need == key);
         match (position(&keys.reads[0]), position(&keys.reads[1])) {
@@ -12923,7 +12969,7 @@ mod semantic_poll_contract {
     /// process.
     fn callable_union_order() -> [&'static str; 2] {
         static ORDER: std::sync::OnceLock<[&'static str; 2]> = std::sync::OnceLock::new();
-        *ORDER.get_or_init(|| union_arm_order(["CallA", "CallB"]))
+        *ORDER.get_or_init(|| union_arm_order(["CallA", "CallB"], one_argument))
     }
 
     /// The names of `GenA` and `GenB` in the order a walk of
@@ -12931,7 +12977,23 @@ mod semantic_poll_contract {
     /// process.
     fn generic_union_order() -> [&'static str; 2] {
         static ORDER: std::sync::OnceLock<[&'static str; 2]> = std::sync::OnceLock::new();
-        *ORDER.get_or_init(|| union_arm_order(["GenA", "GenB"]))
+        *ORDER.get_or_init(|| union_arm_order(["GenA", "GenB"], one_argument))
+    }
+
+    /// The names of `TakesA` and `TakesB` in the order a walk of
+    /// `TakesA<"x", "y", "z"> | TakesB<"x", "y", "z">` reads their
+    /// instantiations, read once per process.
+    fn disjoint_union_order() -> [&'static str; 2] {
+        static ORDER: std::sync::OnceLock<[&'static str; 2]> = std::sync::OnceLock::new();
+        *ORDER.get_or_init(|| union_arm_order(["TakesA", "TakesB"], three_arguments))
+    }
+
+    /// The names of `BindsA` and `BindsB` in the order a walk of
+    /// `BindsA<"x"> | BindsB<"x">` reads their instantiations, read once per
+    /// process.
+    fn binding_union_order() -> [&'static str; 2] {
+        static ORDER: std::sync::OnceLock<[&'static str; 2]> = std::sync::OnceLock::new();
+        *ORDER.get_or_init(|| union_arm_order(["BindsA", "BindsB"], one_argument))
     }
 
     /// The union of the interfaces `names` over `"x"`, its arms'
@@ -12942,9 +13004,20 @@ mod semantic_poll_contract {
         names: [&str; 2],
         order: [&str; 2],
     ) -> CallableKeys {
-        let x = callable_argument(dispatch);
-        let a = callable_application(host, dispatch, names[0], &[x]);
-        let b = callable_application(host, dispatch, names[1], &[x]);
+        callable_union_over(host, dispatch, names, order, &one_argument(dispatch))
+    }
+
+    /// The union of the interfaces `names` over `args`, its arms'
+    /// instantiations read in `order`.
+    fn callable_union_over(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+        names: [&str; 2],
+        order: [&str; 2],
+        args: &[verter_type_engine::semantic_query::SemanticNodeId],
+    ) -> CallableKeys {
+        let a = callable_application(host, dispatch, names[0], args);
+        let b = callable_application(host, dispatch, names[1], args);
         let subject = dispatch.graph_arc().intern_node(SemanticNodeData::Union(
             verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
                 [a, b],
@@ -12952,7 +13025,7 @@ mod semantic_poll_contract {
         ));
         let reads = order
             .iter()
-            .map(|name| callable_instantiation(dispatch, name, &[x]))
+            .map(|name| callable_instantiation(dispatch, name, args))
             .collect();
         callable_keys(host, subject, reads)
     }
@@ -13023,6 +13096,43 @@ mod semantic_poll_contract {
             matching_result(dispatch, first, 1),
         ]);
         keys
+    }
+
+    /// `TakesA<"x", "y", "z"> | TakesB<"x", "y", "z">`, its arms `first` and
+    /// `second` in the walk's order: `(a: "x", b: "y")` and
+    /// `(a: "z", b: "x")` have no common match, so the union synthesizes one
+    /// signature from them position by position, `first` its master. The
+    /// walk reads the arms' instantiations, then the reduction of each
+    /// position's types, the master's first.
+    fn disjoint_union(host: &crate::VerterHost, dispatch: &HostDispatch<'_>) -> CallableKeys {
+        let order = disjoint_union_order();
+        let args = three_arguments(dispatch);
+        let mut keys = callable_union_over(host, dispatch, ["TakesA", "TakesB"], order, &args);
+        let (x, y, z) = (args[0], args[1], args[2]);
+        let parameters = |name: &str| if name == "TakesA" { [x, y] } else { [z, x] };
+        let (first, second) = (parameters(order[0]), parameters(order[1]));
+        keys.reads.extend([0, 1].map(|position| {
+            SemanticQueryKey::reduce_intersection_operands(
+                dispatch.graph_arc(),
+                Arc::from([first[position], second[position]]),
+            )
+        }));
+        keys
+    }
+
+    /// `BindsA<"x"> | BindsB<"x">`: each arm's one signature is generic,
+    /// `<T>(a: T, b: 1): 1` and `<T>(a: T, b: 2): 2`, with no common match,
+    /// so the union synthesizes one signature from them, the other arm's
+    /// parameters mapped into the master's binders. The walk reads the
+    /// arms' instantiations.
+    fn binding_union(host: &crate::VerterHost, dispatch: &HostDispatch<'_>) -> CallableKeys {
+        callable_union_over(
+            host,
+            dispatch,
+            ["BindsA", "BindsB"],
+            binding_union_order(),
+            &one_argument(dispatch),
+        )
     }
 
     /// `CallA<"x"> & CallB<"x">`: flattening settles each member through
@@ -13143,28 +13253,41 @@ mod semantic_poll_contract {
 
     /// The fixture's list, its walk driven in place on a scratch host, names
     /// the fixture's settlement reads — each settled member read again as it
-    /// is entered — and then exactly the fixture's result reads, in order:
-    /// the premise every held matching result rests on.
+    /// is entered — and then exactly the fixture's composition reads (the
+    /// results its matching compares, the parameter intersections its
+    /// synthesis composes), in order: the premise every held composition
+    /// read rests on.
     fn assert_matching_reads(fixture: CallableFixture, label: &str) {
         let host = callable_host();
         let dispatch = ProjectSemanticDispatch::new(&*host);
         let _scope = dispatch.enter_construction_scope();
         let keys = fixture(&host, &dispatch);
         let needs = dispatch.family_needs_for_tests(&keys.list);
-        let is_result =
-            |key: &SemanticQueryKey| matches!(key, SemanticQueryKey::ReadSignatureResult(_));
-        let first_result = needs.iter().position(is_result).unwrap_or(needs.len());
+        let is_composition_read = |key: &SemanticQueryKey| {
+            matches!(
+                key,
+                SemanticQueryKey::ReadSignatureResult(_)
+                    | SemanticQueryKey::ReduceIntersection { .. }
+            )
+        };
+        let first_composition = needs
+            .iter()
+            .position(is_composition_read)
+            .unwrap_or(needs.len());
         let mut settled: Vec<SemanticQueryKey> = Vec::new();
-        for need in &needs[..first_result] {
+        for need in &needs[..first_composition] {
             if !settled.contains(need) {
                 settled.push(need.clone());
             }
         }
-        let (expected_settled, expected_results): (Vec<_>, Vec<_>) =
-            keys.reads.iter().cloned().partition(|key| !is_result(key));
+        let (expected_settled, expected_composition): (Vec<_>, Vec<_>) = keys
+            .reads
+            .iter()
+            .cloned()
+            .partition(|key| !is_composition_read(key));
         assert!(
-            settled == expected_settled && needs[first_result..] == expected_results[..],
-            "{label}: the walk settles the case's members, then names its result reads\nnamed: {needs:#?}\nexpected: {:#?}",
+            settled == expected_settled && needs[first_composition..] == expected_composition[..],
+            "{label}: the walk settles the case's members, then names its composition reads\nnamed: {needs:#?}\nexpected: {:#?}",
             keys.reads
         );
     }
@@ -13326,6 +13449,7 @@ mod semantic_poll_contract {
                 comparisons: 2,
                 positions: 2,
                 forced: 1,
+                composed: 0,
             },
             label,
         );
@@ -13360,6 +13484,7 @@ mod semantic_poll_contract {
                 comparisons: 1,
                 positions: 2,
                 forced: 2,
+                composed: 0,
             },
             label,
         );
@@ -13452,6 +13577,7 @@ mod semantic_poll_contract {
                 comparisons: 3,
                 positions: 6,
                 forced: 3,
+                composed: 0,
             },
             label,
         );
@@ -13461,6 +13587,7 @@ mod semantic_poll_contract {
                 comparisons: 1,
                 positions: 3,
                 forced: 2,
+                composed: 0,
             },
             "{label}: the first pair decided, the second's parameter compared and its kept signature's result read warm"
         );
@@ -13495,6 +13622,7 @@ mod semantic_poll_contract {
                 comparisons: 6,
                 positions: 6,
                 forced: 5,
+                composed: 0,
             },
             label,
         );
@@ -13504,6 +13632,7 @@ mod semantic_poll_contract {
                 comparisons: 3,
                 positions: 4,
                 forced: 2,
+                composed: 0,
             },
             "{label}: the common match made and two arity refusals decided, the second overloads' parameters compared"
         );
@@ -13514,6 +13643,54 @@ mod semantic_poll_contract {
                 published: 4
             },
             "{label}: the union and its arms entered, every signature published"
+        );
+    }
+
+    /// An overload set over `TakesA<"x", "y", "z"> | TakesB<"x", "y", "z">`
+    /// whose list waits on the intersection of its synthesized signature's
+    /// second parameters, produced by another task: the list yields there
+    /// with the first position composed, and resumed on another thread it
+    /// composes no position, decides no pair and compares no position
+    /// again. Each arm's signature is compared with the other's exactly and
+    /// partially, both ways; the synthesis composes two positions; the
+    /// overload set forces the one composite's result.
+    #[test]
+    fn a_union_synthesis_waiting_on_a_later_positions_intersection_resumes_without_composing_again()
+    {
+        let label = "a later parameter intersection";
+        assert_matching_reads(disjoint_union, label);
+        let run = assert_list_suspends(
+            disjoint_union,
+            3,
+            DiscoveryWork {
+                nodes: 3,
+                published: 2,
+            },
+            MatchingWork {
+                comparisons: 4,
+                positions: 4,
+                forced: 1,
+                composed: 2,
+            },
+            label,
+        );
+        assert_eq!(
+            run.matching_at_hold,
+            MatchingWork {
+                comparisons: 4,
+                positions: 4,
+                forced: 0,
+                composed: 1,
+            },
+            "{label}: every comparison decided and the first position composed before the wait"
+        );
+        assert_eq!(
+            run.discovery_at_hold,
+            DiscoveryWork {
+                nodes: 3,
+                published: 2
+            },
+            "{label}: the union and its arms entered, both signatures published"
         );
     }
 
@@ -13631,6 +13808,7 @@ mod semantic_poll_contract {
             comparisons: 1,
             positions: 2,
             forced: 2,
+            composed: 0,
         };
         let synchronous = {
             let host = callable_host();
@@ -13724,6 +13902,127 @@ mod semantic_poll_contract {
                     if nodes.len() == 2
             ),
             "the published list answers warm with both signatures"
+        );
+        assert_eq!(
+            discovery_work(&host).since(before).nodes,
+            0,
+            "the list published in the current epoch is served warm"
+        );
+    }
+
+    /// An overload set over `TakesA<"x", "y", "z"> | TakesB<"x", "y", "z">`
+    /// whose list waits on its synthesized signature's second parameter
+    /// intersection while the signature kernel replaces its epoch: the
+    /// delivered intersection is composed in the walk's own epoch, beside
+    /// the position composed before the wait, and the set found there is
+    /// published by one copy into the current epoch. Nothing is walked,
+    /// compared or composed twice, and the set answers what the synchronous
+    /// entry answers with no replacement. The list is then served warm.
+    ///
+    /// A synthesis bound again per step would intern its earlier slots and
+    /// its layout in two epochs; one begun again after the delivery would
+    /// compose its first position twice.
+    #[test]
+    fn a_parameter_intersection_delivered_after_the_walks_epoch_retired_is_composed_in_that_epoch()
+    {
+        let synthesized_once = MatchingWork {
+            comparisons: 4,
+            positions: 4,
+            forced: 1,
+            composed: 2,
+        };
+        let synchronous = {
+            let host = callable_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let _scope = dispatch.enter_construction_scope();
+            let keys = disjoint_union(&host, &dispatch);
+            let before = signature_work(&host);
+            let before_matching = matching_work(&host);
+            let read = dispatch.execute_via_cold_build_helper(keys.set);
+            assert_eq!(
+                matching_work(&host).since(before_matching),
+                synthesized_once,
+                "premise: each pair decided once, both positions composed once and the composite's result forced once"
+            );
+            assert_eq!(
+                signature_work(&host).since(before),
+                SignatureWork {
+                    discovery: 3,
+                    positions: 4,
+                    forced: 1,
+                    rebinds: 0,
+                    descriptors: 0,
+                },
+                "premise: the union and its arms walked once, nothing copied"
+            );
+            decision(read_summary(&dispatch, &read))
+        };
+
+        let host = callable_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let keys = disjoint_union(&host, &dispatch);
+        let SemanticQueryKey::SignaturesOfType { subject, kind, .. } = keys.list else {
+            unreachable!("the set reads a signature list")
+        };
+        let (tasks, leases) = hold_seam(&host, graph, keys.reads[3].clone(), false);
+        let before = signature_work(&host);
+        let before_matching = matching_work(&host);
+        let before_discovery = discovery_work(&host);
+        let mut entry = dispatch.poll_query(keys.set);
+        let pending = while_held(leases, || {
+            let pending = entry.poll(Waker::noop()).is_pending();
+            graph
+                .signature_store()
+                .replace_epoch()
+                .expect("the kernel replaces its epoch");
+            pending
+        });
+        assert!(
+            pending,
+            "the list yields while its second parameter intersection is held"
+        );
+        let read = resume_elsewhere(&mut entry);
+        drop(entry);
+        assert_eq!(
+            discovery_work(&host).since(before_discovery),
+            DiscoveryWork {
+                nodes: 3,
+                published: 2,
+            },
+            "the union and its arms are walked once"
+        );
+        assert_eq!(
+            matching_work(&host).since(before_matching),
+            synthesized_once,
+            "each pair is decided once and each position composed once"
+        );
+        assert_eq!(
+            signature_work(&host).since(before),
+            SignatureWork {
+                discovery: 3,
+                positions: 4,
+                forced: 1,
+                rebinds: 1,
+                descriptors: 3,
+            },
+            "the found composite and its two constituents are copied once and its result forced once"
+        );
+        assert_eq!(decision(read_summary(&dispatch, &read)), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        drop(tasks);
+
+        let before = discovery_work(&host);
+        let warm = dispatch.shared_signature_nodes(subject, kind);
+        assert!(
+            matches!(
+                warm,
+                verter_type_engine::project_semantic_dispatch::signature_discovery::SharedSignatureNodes::Nodes(ref nodes)
+                    if nodes.len() == 1
+            ),
+            "the published list answers warm with its one synthesized signature"
         );
         assert_eq!(
             discovery_work(&host).since(before).nodes,
@@ -13832,6 +14131,7 @@ mod semantic_poll_contract {
             comparisons: 3,
             positions: 6,
             forced: 3,
+            composed: 0,
         };
         let synchronous = {
             let host = callable_host();
@@ -13898,6 +14198,101 @@ mod semantic_poll_contract {
         );
     }
 
+    /// A union of two generic signatures with no common match,
+    /// `BindsA<"x"> | BindsB<"x">`, synthesized by the synchronous producer
+    /// and by a frame — the list an overload set's polled frame needs —
+    /// publishes the same one signature with the same physical work: the
+    /// other arm's parameters are mapped into the master's binders where
+    /// the stage stands, each of the two positions is composed once, and
+    /// the one exact comparison before it decides once. A list a frame
+    /// built is then read warm, walking, comparing and composing nothing;
+    /// only the node form's unmemoized result read runs again.
+    #[test]
+    fn a_generic_union_synthesis_composes_the_other_arms_parameters_in_the_masters_binders() {
+        let walked_once = DiscoveryWork {
+            nodes: 3,
+            published: 2,
+        };
+        let synthesized_once = MatchingWork {
+            comparisons: 1,
+            positions: 2,
+            forced: 1,
+            composed: 2,
+        };
+        let synchronous = {
+            let host = callable_host();
+            let dispatch = ProjectSemanticDispatch::new(&*host);
+            let _scope = dispatch.enter_construction_scope();
+            let keys = binding_union(&host, &dispatch);
+            let SemanticQueryKey::SignaturesOfType { subject, .. } = keys.list else {
+                unreachable!("the set reads a signature list")
+            };
+            let before = discovery_work(&host);
+            let before_matching = matching_work(&host);
+            let rendered = rendered_signatures(&dispatch, subject);
+            assert_eq!(
+                (
+                    discovery_work(&host).since(before),
+                    matching_work(&host).since(before_matching)
+                ),
+                (walked_once, synthesized_once),
+                "the synchronous walk"
+            );
+            rendered
+        };
+        assert!(
+            synchronous.len() == 1 && !synchronous[0].starts_with("incomplete"),
+            "premise: one synthesized signature: {synchronous:?}"
+        );
+
+        let host = callable_host();
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let keys = binding_union(&host, &dispatch);
+        let SemanticQueryKey::SignaturesOfType { subject, .. } = keys.list else {
+            unreachable!("the set reads a signature list")
+        };
+        let before = discovery_work(&host);
+        let before_matching = matching_work(&host);
+        let read = {
+            let mut entry = dispatch.poll_query(keys.set);
+            poll_until_ready(|waker| entry.poll(waker))
+        };
+        let summary = read_summary(&dispatch, &read);
+        assert!(
+            !summary.3 && summary.5.is_some(),
+            "premise: a complete, priced set: {summary:?}"
+        );
+        assert_eq!(
+            (
+                discovery_work(&host).since(before),
+                matching_work(&host).since(before_matching)
+            ),
+            (walked_once, synthesized_once),
+            "the walk a frame drives"
+        );
+        let before = discovery_work(&host);
+        let before_matching = matching_work(&host);
+        assert_eq!(rendered_signatures(&dispatch, subject), synchronous);
+        // The node form reads each composite's result through the result
+        // function, which is not memoized, so the one composite's result is
+        // built again; the list itself is not walked, compared or composed.
+        assert_eq!(
+            (
+                discovery_work(&host).since(before).nodes,
+                matching_work(&host).since(before_matching)
+            ),
+            (
+                0,
+                MatchingWork {
+                    forced: 1,
+                    ..MatchingWork::default()
+                }
+            ),
+            "the list the frame published is read warm"
+        );
+    }
+
     /// The overload set over `CallA<"x"> & CallB<"x"> & CallD<"x">` and the
     /// result of `CallD`'s signature its list first reads.
     fn callable_triple_seam_keys(
@@ -13906,6 +14301,16 @@ mod semantic_poll_contract {
     ) -> (SemanticQueryKey, SemanticQueryKey) {
         let keys = callable_triple(host, dispatch);
         (keys.set, keys.reads[6].clone())
+    }
+
+    /// The overload set over `TakesA<"x", "y", "z"> | TakesB<"x", "y", "z">`
+    /// and the reduction of its synthesized signature's second parameters.
+    fn disjoint_union_seam_keys(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
+        let keys = disjoint_union(host, dispatch);
+        (keys.set, keys.reads[3].clone())
     }
 
     /// The overload set over `CallA<"x"> | CallB<"x">` and the

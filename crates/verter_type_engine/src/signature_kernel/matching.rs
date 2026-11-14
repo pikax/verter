@@ -1,7 +1,8 @@
 //! Record-level signature matching as owned machines: one signature
 //! comparison (the checker's `compareSignaturesIdentical`), the ordered scan
-//! of a list for the first candidate identical to a signature, and the
-//! composition of a union's or an intersection's candidate lists.
+//! of a list for the first candidate identical to a signature, the
+//! composition of a union's or an intersection's candidate lists, and a
+//! union signature's parameter composition.
 //!
 //! A machine never calls its holder. A step answers every question the
 //! graph can tell at rest ([`DiscoveryTypes::identical_at_rest`]) and
@@ -18,13 +19,15 @@
 use crate::semantic_query::{IncompleteReason, SemanticNodeId};
 
 use super::discovery::{
-    combine_union_parameters, composite_candidate, edges_for, is_mixin_constructor, load,
-    source_token, undecided, DiscoveryError, DiscoveryTypes, Loaded, MatchOptions, Res,
+    composite_candidate, edges_for, is_mixin_constructor, load, source_token, undecided,
+    DiscoveryError, DiscoveryTypes, Loaded, MatchOptions, NoFacts, Res,
 };
 use super::lifetime::EpochBinding;
-use super::positional::{PositionalMode, TypeAt};
+use super::positional::{PositionalMode, PositionalShape, TypeAt};
 use super::records::{
-    PredicateEffect, SignatureCandidate, SignatureKind, SignatureResultRecipe, TypeToken,
+    ParameterLayout, ParameterOptionality, ParameterSlot, PredicateEffect, RestKind, RestSlot,
+    SignatureCandidate, SignatureDescriptor, SignatureInputShape, SignatureKind,
+    SignatureResultRecipe, SignatureTemplate, TypeToken,
 };
 
 /// The result a candidate's recipe denotes: its return type and its
@@ -46,6 +49,12 @@ pub enum TypeRequest {
     /// recipe; matching asks for it only where its comparison includes
     /// results.
     ForcedResult(SignatureCandidate),
+    /// `ty` with the binders of the composition's binder map rewritten
+    /// ([`SignatureComposition::binder_map`]).
+    MapBinders { ty: TypeToken },
+    /// The intersection of the types the composition stands at, in order
+    /// ([`SignatureComposition::operands`]).
+    Intersect,
 }
 
 /// The holder's answer to the request the previous step returned.
@@ -53,6 +62,8 @@ pub enum TypeRequest {
 pub enum TypeAnswer {
     Identical(bool),
     ForcedResult(ForcedResult),
+    /// The type a `MapBinders` or an `Intersect` request denotes.
+    Type(TypeToken),
 }
 
 /// Where a matching machine stands after a step: its output, or the
@@ -74,10 +85,22 @@ fn identity(
 ) -> Option<bool> {
     match answer.take() {
         Some(TypeAnswer::Identical(same)) => Some(same),
-        Some(TypeAnswer::ForcedResult(_)) => {
+        Some(TypeAnswer::ForcedResult(_) | TypeAnswer::Type(_)) => {
             unreachable!("an identity question is answered with an identity")
         }
         None => types.identical_at_rest(a, b, corr),
+    }
+}
+
+/// The type this step was answered with; `None` is a question for the
+/// holder.
+fn answered_type(answer: &mut Option<TypeAnswer>) -> Option<TypeToken> {
+    match answer.take() {
+        Some(TypeAnswer::Type(ty)) => Some(ty),
+        Some(TypeAnswer::Identical(_) | TypeAnswer::ForcedResult(_)) => {
+            unreachable!("a type question is answered with a type")
+        }
+        None => None,
     }
 }
 
@@ -441,7 +464,7 @@ impl SignatureComparison {
                         self.source_result = Some(result);
                         self.at = ComparisonAt::TargetResult;
                     }
-                    Some(TypeAnswer::Identical(_)) => {
+                    Some(TypeAnswer::Identical(_) | TypeAnswer::Type(_)) => {
                         unreachable!("a result question is answered with a result")
                     }
                     None => return Ok(KernelStep::Ask(TypeRequest::ForcedResult(self.source))),
@@ -451,7 +474,7 @@ impl SignatureComparison {
                         self.target_result = Some(result);
                         self.at = ComparisonAt::Results;
                     }
-                    Some(TypeAnswer::Identical(_)) => {
+                    Some(TypeAnswer::Identical(_) | TypeAnswer::Type(_)) => {
                         unreachable!("a result question is answered with a result")
                     }
                     None => return Ok(KernelStep::Ask(TypeRequest::ForcedResult(self.target))),
@@ -644,6 +667,8 @@ struct UnionSynthesis {
     out: Vec<SignatureCandidate>,
     /// Two generic signatures' binder spaces, matched before they combine.
     binders: BinderMatch,
+    /// The parameters of the combination being composed.
+    parameters: ParameterComposition,
 }
 
 impl UnionComposition {
@@ -716,6 +741,7 @@ impl UnionComposition {
                             constituents: Vec::new(),
                             out: Vec::new(),
                             binders: BinderMatch::default(),
+                            parameters: ParameterComposition::default(),
                         }));
                         continue;
                     }
@@ -870,9 +896,9 @@ impl UnionComposition {
             let view = binding.view();
             let l = load(view, acc)?;
             let r = load(view, right)?;
-            // Both generic: the binder spaces must be identical, and the
-            // right side's binders map onto the left's.
-            let map_right: Vec<(SemanticNodeId, SemanticNodeId)> =
+            if synthesis.parameters.at == ParameterAt::Binders {
+                // Both generic: the binder spaces must be identical, and the
+                // right side's binders map onto the left's.
                 if !l.space.binders.is_empty() && !r.space.binders.is_empty() {
                     match synthesis.binders.step(types, &l, &r, &mut answer)? {
                         KernelStep::Ask(request) => return Ok(KernelStep::Ask(request)),
@@ -880,21 +906,31 @@ impl UnionComposition {
                             synthesis.next_master();
                             continue;
                         }
-                        KernelStep::Done(true) => synthesis
-                            .binders
-                            .corr
-                            .iter()
-                            .map(|(a, b)| (*b, *a))
-                            .collect(),
+                        KernelStep::Done(true) => {
+                            let UnionSynthesis {
+                                parameters,
+                                binders,
+                                ..
+                            } = &mut **synthesis;
+                            parameters.begin(&binders.corr);
+                        }
                     }
                 } else {
-                    Vec::new()
-                };
-            let next = combine_union_parameters(binding, types, &l, &r, acc, &map_right)?;
-            synthesis.acc = Some(next);
-            synthesis.constituents.push((other as u32, right));
-            synthesis.other += 1;
-            synthesis.binders.reset();
+                    synthesis.parameters.begin(&[]);
+                }
+            }
+            match synthesis
+                .parameters
+                .step(binding, types, &l, &r, acc, answer.take())?
+            {
+                KernelStep::Ask(request) => return Ok(KernelStep::Ask(request)),
+                KernelStep::Done(next) => {
+                    synthesis.acc = Some(next);
+                    synthesis.constituents.push((other as u32, right));
+                    synthesis.other += 1;
+                    synthesis.binders.reset();
+                }
+            }
         }
     }
 }
@@ -936,6 +972,406 @@ impl UnionSynthesis {
         self.master_at += 1;
         self.acc = None;
     }
+}
+
+/// The parameters of two union members' signatures being combined into one
+/// (`combineSignaturesOfUnionMembers`, after their binder spaces matched),
+/// between two of its questions: parameter types intersect position by
+/// position, the minimum is the larger of the two, and an extra rest
+/// element is added when only the shorter side has a rest. A right-side
+/// type under a binder map that moves a binder, and every intersection,
+/// are the holder's to answer; the composition resumes at the position it
+/// asked from, every composed position kept.
+#[derive(Debug, Default)]
+struct ParameterComposition {
+    /// The right side's binders onto the left's, `(from, to)`; empty unless
+    /// both signatures are generic.
+    binder_map: Vec<(SemanticNodeId, SemanticNodeId)>,
+    /// `binder_map` moves a binder: a right-side type is the holder's to
+    /// map.
+    moving: bool,
+    at: ParameterAt,
+    /// The types the intersection asked for is over, in order.
+    operands: Vec<TypeToken>,
+    /// The longer side's type at the position while the shorter side's is
+    /// read.
+    longest_ty: Option<TypeToken>,
+    parameters: Vec<ParameterSlot>,
+    rest: Option<RestSlot>,
+    receiver: Option<ParameterSlot>,
+}
+
+/// Where a parameter composition stands: the question it asks next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ParameterAt {
+    /// The two binder spaces are being matched: no parameter is read.
+    #[default]
+    Binders,
+    /// The spaces matched: the first position is next.
+    Start,
+    /// One side's type at `pos` (the shorter side's extra rest element
+    /// when `pos` is the longer side's count): `part` of a rest run's
+    /// parts are read, part 0 its element, `part - 1` indexing its tail.
+    Side {
+        pos: u32,
+        longest: bool,
+        part: u32,
+    },
+    /// That side's rest run, its parts read: their intersection.
+    Run {
+        pos: u32,
+        longest: bool,
+    },
+    /// Both sides of `pos`: their intersection, the position's type.
+    Pair {
+        pos: u32,
+    },
+    Receiver,
+    /// Both receivers: their intersection.
+    ReceiverPair,
+    /// Every type is composed: the layout, shape and descriptor are
+    /// interned.
+    Records,
+}
+
+impl ParameterAt {
+    /// Where position `pos` begins: the longer side's type, the shorter
+    /// side's extra rest element, else the receiver.
+    fn position(pos: usize, longest_count: usize, needs_extra_rest: bool) -> Self {
+        if pos < longest_count {
+            Self::Side {
+                pos: pos as u32,
+                longest: true,
+                part: 0,
+            }
+        } else if pos == longest_count && needs_extra_rest {
+            Self::Side {
+                pos: pos as u32,
+                longest: false,
+                part: 0,
+            }
+        } else {
+            Self::Receiver
+        }
+    }
+}
+
+impl ParameterComposition {
+    /// Begin the composition of two signatures whose binder spaces matched
+    /// under `corr`, `(left binder, right binder)` pairs (empty unless both
+    /// are generic), keeping every vector's capacity.
+    fn begin(&mut self, corr: &[(SemanticNodeId, SemanticNodeId)]) {
+        self.binder_map.clear();
+        self.binder_map
+            .extend(corr.iter().map(|(left, right)| (*right, *left)));
+        self.moving = self.binder_map.iter().any(|(from, to)| from != to);
+        self.operands.clear();
+        self.longest_ty = None;
+        self.parameters.clear();
+        self.rest = None;
+        self.receiver = None;
+        self.at = ParameterAt::Start;
+    }
+
+    /// `ty` in the left side's binders: itself unless it is the right
+    /// side's and the map moves a binder, then the holder's answer; `None`
+    /// asks for it. A map that moves no binder rewrites nothing.
+    fn mapped(
+        &self,
+        answer: &mut Option<TypeAnswer>,
+        ty: TypeToken,
+        from_right: bool,
+    ) -> Option<TypeToken> {
+        if !(from_right && self.moving) {
+            return Some(ty);
+        }
+        answered_type(answer)
+    }
+
+    /// One side's type at `pos`, `None` where that side has none, is read:
+    /// at the longer side's count it is the shorter side's extra rest
+    /// element; the longer side's is kept while the shorter side's is read,
+    /// `unknown` standing for an absent one, and the pair's intersection is
+    /// asked next.
+    fn side_read(
+        &mut self,
+        types: &dyn DiscoveryTypes,
+        pos: u32,
+        longest: bool,
+        ty: Option<TypeToken>,
+        longest_count: usize,
+    ) -> Res<()> {
+        if pos as usize == longest_count {
+            let ty = ty.ok_or(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput))?;
+            self.rest = Some(RestSlot {
+                slot: ParameterSlot::new(ty, ParameterOptionality::required()),
+                kind: RestKind::Array,
+                tail: Box::from([]),
+            });
+            types.parameter_composed();
+            self.at = ParameterAt::Receiver;
+        } else if longest {
+            self.longest_ty =
+                Some(ty.ok_or(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput))?);
+            self.at = ParameterAt::Side {
+                pos,
+                longest: false,
+                part: 0,
+            };
+        } else {
+            let shorter = ty
+                .or(types.unknown())
+                .ok_or(DiscoveryError::Incomplete(IncompleteReason::Budget))?;
+            let longest_ty = self
+                .longest_ty
+                .take()
+                .expect("the longer side's type is read before the shorter side's");
+            self.operands.clear();
+            self.operands.extend([longest_ty, shorter]);
+            self.at = ParameterAt::Pair { pos };
+        }
+        Ok(())
+    }
+
+    /// Carry the composition of `l`, the combination so far (`left`), with
+    /// `r` on from where it stands, given `answer`, the answer to the
+    /// request the previous step returned: the combined candidate, its
+    /// records interned in `binding`, or the next question for the holder.
+    fn step(
+        &mut self,
+        binding: &EpochBinding,
+        types: &dyn DiscoveryTypes,
+        l: &Loaded<'_>,
+        r: &Loaded<'_>,
+        left: SignatureCandidate,
+        mut answer: Option<TypeAnswer>,
+    ) -> Res<KernelStep<SignatureCandidate>> {
+        let lp = l.positional(types);
+        let rp = r.positional(types);
+        let right_is_longest = lp.parameter_count() < rp.parameter_count();
+        let (longest, shorter) = if right_is_longest {
+            (&rp, &lp)
+        } else {
+            (&lp, &rp)
+        };
+        let longest_count = longest.parameter_count();
+        let either_rest = lp.has_rest() || rp.has_rest();
+        let needs_extra_rest = either_rest && !longest.has_rest();
+        loop {
+            match self.at {
+                ParameterAt::Binders => {
+                    unreachable!("a synthesis begins a parameter composition before it steps it")
+                }
+                ParameterAt::Start => {
+                    self.at = ParameterAt::position(0, longest_count, needs_extra_rest);
+                }
+                ParameterAt::Side {
+                    pos,
+                    longest: on_longest,
+                    part,
+                } => {
+                    let (shape, from_right) = if on_longest {
+                        (longest, right_is_longest)
+                    } else {
+                        (shorter, !right_is_longest)
+                    };
+                    let source = match shape.type_at(pos as usize) {
+                        TypeAt::One(s) => Some(s.ty),
+                        TypeAt::GenericRest { rest, .. } => Some(rest),
+                        TypeAt::Absent => None,
+                        TypeAt::Run { element, tail } => {
+                            let index = part as usize;
+                            if index > tail.len() {
+                                self.at = ParameterAt::Run {
+                                    pos,
+                                    longest: on_longest,
+                                };
+                                continue;
+                            }
+                            let source = if index == 0 {
+                                element
+                            } else {
+                                tail[index - 1].ty
+                            };
+                            let Some(ty) = self.mapped(&mut answer, source, from_right) else {
+                                return Ok(KernelStep::Ask(TypeRequest::MapBinders { ty: source }));
+                            };
+                            self.operands.push(ty);
+                            self.at = ParameterAt::Side {
+                                pos,
+                                longest: on_longest,
+                                part: part + 1,
+                            };
+                            continue;
+                        }
+                    };
+                    let ty = match source {
+                        Some(source) => {
+                            let Some(ty) = self.mapped(&mut answer, source, from_right) else {
+                                return Ok(KernelStep::Ask(TypeRequest::MapBinders { ty: source }));
+                            };
+                            Some(ty)
+                        }
+                        None => None,
+                    };
+                    self.side_read(types, pos, on_longest, ty, longest_count)?;
+                }
+                ParameterAt::Run {
+                    pos,
+                    longest: on_longest,
+                } => {
+                    let Some(ty) = answered_type(&mut answer) else {
+                        return Ok(KernelStep::Ask(TypeRequest::Intersect));
+                    };
+                    self.operands.clear();
+                    self.side_read(types, pos, on_longest, Some(ty), longest_count)?;
+                }
+                ParameterAt::Pair { pos } => {
+                    let Some(ty) = answered_type(&mut answer) else {
+                        return Ok(KernelStep::Ask(TypeRequest::Intersect));
+                    };
+                    self.operands.clear();
+                    let pos = pos as usize;
+                    let mode = PositionalMode::Comparison;
+                    let is_rest = either_rest && !needs_extra_rest && pos + 1 == longest_count;
+                    let optional =
+                        pos >= lp.effective_minimum(mode) && pos >= rp.effective_minimum(mode);
+                    let name = match longest.type_at(pos) {
+                        TypeAt::One(s) => s.name,
+                        _ => None,
+                    };
+                    let slot = ParameterSlot {
+                        ty,
+                        optionality: ParameterOptionality {
+                            declared_optional: optional && !is_rest,
+                            includes_undefined: optional && !is_rest,
+                        },
+                        name,
+                    };
+                    if is_rest {
+                        self.rest = Some(RestSlot {
+                            slot,
+                            kind: RestKind::Array,
+                            tail: Box::from([]),
+                        });
+                    } else {
+                        self.parameters.push(slot);
+                    }
+                    types.parameter_composed();
+                    self.at = ParameterAt::position(pos + 1, longest_count, needs_extra_rest);
+                }
+                ParameterAt::Receiver => match (l.receiver, r.receiver) {
+                    (None, None) => {
+                        self.receiver = None;
+                        self.at = ParameterAt::Records;
+                    }
+                    (Some(a), None) => {
+                        self.receiver = Some(a);
+                        self.at = ParameterAt::Records;
+                    }
+                    (None, Some(b)) => {
+                        let Some(ty) = self.mapped(&mut answer, b.ty, true) else {
+                            return Ok(KernelStep::Ask(TypeRequest::MapBinders { ty: b.ty }));
+                        };
+                        self.receiver = Some(ParameterSlot { ty, ..b });
+                        self.at = ParameterAt::Records;
+                    }
+                    (Some(a), Some(b)) => {
+                        let Some(b_ty) = self.mapped(&mut answer, b.ty, true) else {
+                            return Ok(KernelStep::Ask(TypeRequest::MapBinders { ty: b.ty }));
+                        };
+                        self.operands.clear();
+                        self.operands.extend([a.ty, b_ty]);
+                        self.at = ParameterAt::ReceiverPair;
+                    }
+                },
+                ParameterAt::ReceiverPair => {
+                    let Some(ty) = answered_type(&mut answer) else {
+                        return Ok(KernelStep::Ask(TypeRequest::Intersect));
+                    };
+                    self.operands.clear();
+                    let Some(a) = l.receiver else {
+                        unreachable!("two receivers are intersected")
+                    };
+                    self.receiver = Some(ParameterSlot { ty, ..a });
+                    self.at = ParameterAt::Records;
+                }
+                ParameterAt::Records => {
+                    self.at = ParameterAt::Binders;
+                    let layout = ParameterLayout {
+                        parameters: std::mem::take(&mut self.parameters).into_boxed_slice(),
+                        rest: self.rest.take(),
+                    };
+                    return combined_candidate(binding, l, r, left, layout, self.receiver.take())
+                        .map(KernelStep::Done);
+                }
+            }
+        }
+    }
+}
+
+/// The candidate two signatures combine into, over their composed
+/// `layout_record` and `receiver`: the flags of both, the larger of the
+/// declared minimums, the left side's kind and result recipe, and the
+/// binder space and environment of the side that declares binders, named by
+/// `left`'s source and provenance.
+fn combined_candidate(
+    store: &EpochBinding,
+    l: &Loaded<'_>,
+    r: &Loaded<'_>,
+    left: SignatureCandidate,
+    layout_record: ParameterLayout,
+    receiver: Option<ParameterSlot>,
+) -> Res<SignatureCandidate> {
+    let flags = l
+        .shape
+        .signature_semantic_flags
+        .union(r.shape.signature_semantic_flags);
+    let mut declared_minimum =
+        PositionalShape::new(&layout_record, receiver, flags, &NoFacts).declared_minimum();
+    declared_minimum = declared_minimum.max(l.shape.declared_minimum.max(r.shape.declared_minimum));
+    let layout = store.intern_layout(layout_record, None)?;
+    let this_parameter = match receiver {
+        Some(rc) => Some(store.intern_slot(rc, None)?),
+        None => None,
+    };
+    let binder_space = if l.space.binders.is_empty() {
+        r.shape.binder_declarations
+    } else {
+        l.shape.binder_declarations
+    };
+    let shape = store.intern_shape(
+        SignatureInputShape {
+            kind: l.shape.kind,
+            binder_declarations: binder_space,
+            this_parameter,
+            parameter_layout: layout,
+            declared_minimum,
+            signature_semantic_flags: flags,
+        },
+        None,
+    )?;
+    let base = if l.space.binders.is_empty() { r } else { l };
+    let recipe = store.intern_recipe(*l.recipe, None)?;
+    let template = store.intern_template(
+        SignatureTemplate {
+            input_shape: shape,
+            result_recipe: recipe,
+        },
+        None,
+    )?;
+    let descriptor = store.intern_descriptor(
+        SignatureDescriptor {
+            template,
+            declaration_environment: base.descriptor.declaration_environment,
+            residual_binders: base.descriptor.residual_binders,
+        },
+        None,
+    )?;
+    if let Some(source) = store.descriptor_source(left.signature)? {
+        store.record_descriptor_source(descriptor, source)?;
+    }
+    Ok(store.candidate(descriptor, left.provenance)?)
 }
 
 /// Intersection signatures for one kind over the per-member candidate lists
@@ -1149,6 +1585,34 @@ impl SignatureComposition {
         }
     }
 
+    /// The binder map a [`TypeRequest::MapBinders`] the composition stands
+    /// at is answered under: during a union's synthesis, the right side's
+    /// binders onto the left's, `(from, to)`; empty otherwise.
+    #[must_use]
+    pub fn binder_map(&self) -> &[(SemanticNodeId, SemanticNodeId)] {
+        match &self.0 {
+            Composition::Union(UnionComposition {
+                stage: UnionStage::Synthesis(synthesis),
+                ..
+            }) => synthesis.parameters.binder_map.as_slice(),
+            _ => &[],
+        }
+    }
+
+    /// The types a [`TypeRequest::Intersect`] the composition stands at
+    /// intersects, in order: during a union's synthesis, the parameter or
+    /// receiver types it composes; empty otherwise.
+    #[must_use]
+    pub fn operands(&self) -> &[TypeToken] {
+        match &self.0 {
+            Composition::Union(UnionComposition {
+                stage: UnionStage::Synthesis(synthesis),
+                ..
+            }) => synthesis.parameters.operands.as_slice(),
+            _ => &[],
+        }
+    }
+
     /// The binder correspondence the identity question the composition
     /// stands at is asked under: the active comparison's, or during a
     /// union's synthesis the binder match's.
@@ -1163,3 +1627,6 @@ impl SignatureComposition {
         }
     }
 }
+
+// A synthesis, with its parameter composition, stays behind the stage's box.
+const _: () = assert!(std::mem::size_of::<UnionStage>() <= 16);

@@ -56,6 +56,16 @@ impl RequestAnswers for DelayedTypes<'_> {
     fn forced_result(&self, _: &SignatureCandidate) -> Result<ForcedResult, IncompleteReason> {
         Err(IncompleteReason::UnresolvedObligation)
     }
+    fn intersect(&self, members: &[TypeToken]) -> Option<TypeToken> {
+        members.first().copied()
+    }
+    fn map_binders(
+        &self,
+        ty: TypeToken,
+        _: &[(SemanticNodeId, SemanticNodeId)],
+    ) -> Option<TypeToken> {
+        Some(ty)
+    }
 }
 
 impl DiscoveryTypes for DelayedTypes<'_> {
@@ -68,16 +78,7 @@ impl DiscoveryTypes for DelayedTypes<'_> {
         self.settled_identity(a, b)
     }
     fn comparison_decided(&self) {}
-    fn intersect(&self, members: &[TypeToken]) -> Option<TypeToken> {
-        members.first().copied()
-    }
-    fn map_binders(
-        &self,
-        ty: TypeToken,
-        _: &[(SemanticNodeId, SemanticNodeId)],
-    ) -> Option<TypeToken> {
-        Some(ty)
-    }
+    fn parameter_composed(&self) {}
     fn unknown(&self) -> Option<TypeToken> {
         self.store
             .intern_type_token(SemanticNodeId(9_000), None)
@@ -331,16 +332,7 @@ impl DiscoveryTypes for DeclaredReturns<'_> {
         Some(a == b)
     }
     fn comparison_decided(&self) {}
-    fn intersect(&self, members: &[TypeToken]) -> Option<TypeToken> {
-        members.first().copied()
-    }
-    fn map_binders(
-        &self,
-        ty: TypeToken,
-        _: &[(SemanticNodeId, SemanticNodeId)],
-    ) -> Option<TypeToken> {
-        Some(ty)
-    }
+    fn parameter_composed(&self) {}
     fn unknown(&self) -> Option<TypeToken> {
         self.store
             .intern_type_token(SemanticNodeId(9_000), None)
@@ -378,6 +370,16 @@ impl RequestAnswers for DeclaredReturns<'_> {
                 effects: None,
             })
             .ok_or(IncompleteReason::UnresolvedObligation)
+    }
+    fn intersect(&self, members: &[TypeToken]) -> Option<TypeToken> {
+        members.first().copied()
+    }
+    fn map_binders(
+        &self,
+        ty: TypeToken,
+        _: &[(SemanticNodeId, SemanticNodeId)],
+    ) -> Option<TypeToken> {
+        Some(ty)
     }
 }
 
