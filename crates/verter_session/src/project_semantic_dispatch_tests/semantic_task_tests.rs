@@ -14565,6 +14565,320 @@ mod semantic_poll_contract {
         (keys.set, keys.reads[0].clone())
     }
 
+    /// The module whose global `Function` contribution declares a call signature.
+    const FUNCTION_SIGNATURE_CONTRIBUTOR: &str = "/semantic-task/function-signature-global.ts";
+    const FUNCTION_SIGNATURE: &str = "declare global { interface Function { (a: string): 1 } }\n";
+    const EDITED_FUNCTION_SIGNATURE: &str =
+        "// edited\ndeclare global { interface Function { (a: string): 1 } }\n";
+
+    /// Exactly one contributor is pending: its source changed after indexing.
+    fn edited_function_signature_host() -> Arc<crate::VerterHost> {
+        let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            FUNCTION_SIGNATURE_CONTRIBUTOR,
+            &crate::u6_flow_shape_corpus_tests::module_script(FUNCTION_SIGNATURE),
+            crate::FileLanguage::script_ts(),
+        );
+        let _ = host
+            .ensure_indexed_ready(FUNCTION_SIGNATURE_CONTRIBUTOR)
+            .expect("the signature contributor has indexed input");
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            FUNCTION_SIGNATURE_CONTRIBUTOR,
+            &crate::u6_flow_shape_corpus_tests::module_script(EDITED_FUNCTION_SIGNATURE),
+            crate::FileLanguage::script_ts(),
+        );
+        host
+    }
+
+    fn runtime_nominal(
+        dispatch: &HostDispatch<'_>,
+        name: &str,
+        args: &[verter_type_engine::semantic_query::SemanticNodeId],
+    ) -> verter_type_engine::semantic_query::SemanticNodeId {
+        let identity = verter_type_engine::semantic_query::DeclIdentity {
+            canonical_id: "__builtin__".into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: Default::default(),
+            decl_name: name.into(),
+        };
+        dispatch.graph_arc().intern_node(if args.is_empty() {
+            SemanticNodeData::DeclRef { identity }
+        } else {
+            SemanticNodeData::InstantiationRef {
+                base: identity,
+                args: Arc::<[verter_type_engine::semantic_query::SemanticNodeId]>::from(args)
+                    .into(),
+            }
+        })
+    }
+
+    fn function_nominal_set(host: &crate::VerterHost, dispatch: &HostDispatch<'_>) -> CallableKeys {
+        callable_keys_in(
+            host,
+            FUNCTION_SIGNATURE_CONTRIBUTOR,
+            runtime_nominal(dispatch, "Function", &[]),
+            Vec::new(),
+        )
+    }
+
+    fn contributors_indexed(host: &crate::VerterHost) -> u64 {
+        host.project_type_store()
+            .semantic_graph()
+            .stats_snapshot()
+            .contributors_indexed_ahead
+    }
+
+    /// The complete synchronous answer and its physical discovery/index work.
+    fn synchronous_function_nominal() -> (ReadSummary, DiscoveryWork, u64) {
+        let host = edited_function_signature_host();
+        let _request = verter_type_engine::request_context::install_test_request_for(
+            FUNCTION_SIGNATURE_CONTRIBUTOR,
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let keys = function_nominal_set(&host, &dispatch);
+        let before = discovery_work(&host);
+        let indexed = contributors_indexed(&host);
+        let read = dispatch.execute_via_cold_build_helper(keys.set);
+        let summary = read_summary(&dispatch, &read);
+        assert!(
+            !summary.3,
+            "premise: a complete contributed signature: {summary:?}"
+        );
+        (
+            summary,
+            discovery_work(&host).since(before),
+            contributors_indexed(&host) - indexed,
+        )
+    }
+
+    #[test]
+    fn a_signature_list_whose_runtime_nominals_contributor_is_indexing_yields_at_its_index_and_resumes_elsewhere(
+    ) {
+        let (synchronous, synchronous_discovery, synchronous_indexed) =
+            synchronous_function_nominal();
+        assert_eq!(
+            synchronous_discovery,
+            DiscoveryWork {
+                nodes: 2,
+                published: 1
+            },
+            "premise: the nominal and its one contributed signature surface"
+        );
+        assert_eq!(
+            synchronous_indexed, 1,
+            "premise: exactly the edited contributor is pending"
+        );
+        let host = edited_function_signature_host();
+        let _request = verter_type_engine::request_context::install_test_request_for(
+            FUNCTION_SIGNATURE_CONTRIBUTOR,
+        );
+        let mut dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let graph = host.project_type_store().semantic_graph();
+        let keys = function_nominal_set(&host, &dispatch);
+        let before = discovery_work(&host);
+        let indexed = contributors_indexed(&host);
+        let mut held = host.decl_lowering.hold_workers_for_tests();
+        let mut entry = dispatch.poll_query(keys.set);
+        let counter = CountingThreadWaker::for_current_thread();
+        let waker = Waker::from(Arc::clone(&counter));
+        {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            assert!(
+                entry.poll(&waker).is_pending(),
+                "the list yields at its contributor's index"
+            );
+        }
+        assert_eq!(
+            discovery_work(&host).since(before),
+            DiscoveryWork {
+                nodes: 1,
+                published: 0
+            }
+        );
+        assert_eq!(contributors_indexed(&host) - indexed, 1);
+        let at_hold = work(&host);
+        {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            assert!(
+                entry.poll(&waker).is_pending(),
+                "a held repoll enters no wait"
+            );
+        }
+        let task = entry.task().expect("the pending list has a task");
+        assert_send(task);
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                    assert!(
+                        task.poll(&waker).is_pending(),
+                        "the task stays pending elsewhere"
+                    );
+                })
+                .join()
+                .expect("the pending poll returns on another thread");
+        });
+        assert_eq!(work_since(&host, at_hold), NO_WORK);
+        assert_eq!(
+            discovery_work(&host).since(before),
+            DiscoveryWork {
+                nodes: 1,
+                published: 0
+            }
+        );
+        assert_eq!(contributors_indexed(&host) - indexed, 1);
+        held.release();
+        counter.wait_for_wake("the completed index wakes the waiting list");
+        let read = resume_elsewhere(&mut entry);
+        drop(entry);
+        assert_eq!(
+            discovery_work(&host).since(before),
+            DiscoveryWork {
+                nodes: 2,
+                published: 1
+            }
+        );
+        assert_eq!(
+            contributors_indexed(&host) - indexed,
+            1,
+            "the delivered index is never named again"
+        );
+        assert_eq!(read_summary(&dispatch, &read), synchronous);
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+        assert!(graph.resident_flight_keys_for_tests().is_empty());
+    }
+
+    #[test]
+    fn a_runtime_nominal_with_no_contributor_pending_names_no_index() {
+        let host = edited_function_signature_host();
+        let _request = verter_type_engine::request_context::install_test_request_for(
+            FUNCTION_SIGNATURE_CONTRIBUTOR,
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let indexed = contributors_indexed(&host);
+        let read =
+            dispatch.execute_via_cold_build_helper(function_nominal_set(&host, &dispatch).set);
+        assert!(
+            !read_summary(&dispatch, &read).3,
+            "premise: the first fold completes"
+        );
+        assert_eq!(
+            contributors_indexed(&host) - indexed,
+            1,
+            "premise: the edited contributor was indexed"
+        );
+        let keys = callable_keys_in(
+            &host,
+            FUNCTION_SIGNATURE_CONTRIBUTOR,
+            runtime_nominal(&dispatch, "Promise", &[callable_argument(&dispatch)]),
+            Vec::new(),
+        );
+        let before = discovery_work(&host);
+        let indexed = contributors_indexed(&host);
+        let read = dispatch.execute_via_cold_build_helper(keys.set);
+        let summary = read_summary(&dispatch, &read);
+        assert!(!summary.3, "a complete empty nominal list: {summary:?}");
+        assert_eq!(
+            discovery_work(&host).since(before),
+            DiscoveryWork {
+                nodes: 1,
+                published: 0
+            }
+        );
+        assert_eq!(
+            contributors_indexed(&host) - indexed,
+            0,
+            "the fold settled the pending note"
+        );
+    }
+
+    #[test]
+    fn a_signature_list_released_or_cancelled_at_a_contributors_index_leaves_nothing_open() {
+        let synchronous = synchronous_function_nominal().0;
+        for cancelled in [false, true] {
+            let host = edited_function_signature_host();
+            let request = budgeted_request_for(1, FUNCTION_SIGNATURE_CONTRIBUTOR);
+            let request_guard = verter_type_engine::request_context::RequestContextGuard::install(
+                Arc::clone(&request),
+            );
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let _scope = dispatch.enter_construction_scope();
+            let graph = host.project_type_store().semantic_graph();
+            let root = function_nominal_set(&host, &dispatch).set;
+            let readers = graph.signature_store().live_reader_count();
+            let before = discovery_work(&host);
+            let mut held = host.decl_lowering.hold_workers_for_tests();
+            let counter = Arc::new(CountingWaker::default());
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut entry = dispatch.poll_query(root.clone());
+            {
+                let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                assert!(
+                    entry.poll(&waker).is_pending(),
+                    "the list yields at its contributor's index"
+                );
+            }
+            assert_eq!(
+                discovery_work(&host).since(before),
+                DiscoveryWork {
+                    nodes: 1,
+                    published: 0
+                }
+            );
+            if cancelled {
+                let wakes = counter.0.load(std::sync::atomic::Ordering::SeqCst);
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| request.cancel())
+                        .join()
+                        .expect("cancellation completes elsewhere");
+                });
+                assert!(
+                    counter.0.load(std::sync::atomic::Ordering::SeqCst) > wakes,
+                    "cancellation wakes the root while its index is held"
+                );
+                let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                let Poll::Ready(read) = entry.poll(&waker) else {
+                    panic!("the cancelled root completes with its index held")
+                };
+                assert!(
+                    matches!(
+                        read.value(),
+                        QueryResult::Error(
+                            verter_type_engine::semantic_query::QueryError::Cancelled
+                        )
+                    ),
+                    "the root reads its cancellation: {read:?}"
+                );
+            }
+            drop(entry);
+            held.release();
+            assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+            assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+            assert!(graph.resident_flight_keys_for_tests().is_empty());
+            assert_eq!(
+                graph.signature_store().live_reader_count(),
+                readers,
+                "the released root pins no signature epoch"
+            );
+            drop(request_guard);
+            let _request = verter_type_engine::request_context::install_test_request_for(
+                FUNCTION_SIGNATURE_CONTRIBUTOR,
+            );
+            let read = dispatch.execute_via_cold_build_helper(root);
+            assert_eq!(
+                decision(read_summary(&dispatch, &read)),
+                decision(synchronous.clone())
+            );
+        }
+    }
+
     /// The overload set over `string | number`, read under the primitive
     /// union call's resolution environment, its signature list, and the
     /// instantiations of the arms' apparent wrappers its walk names: `String`

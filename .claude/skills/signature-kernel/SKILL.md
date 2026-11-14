@@ -43,9 +43,27 @@ Ordering and composite reduction live beside the kernel, in the dispatch crate:
 | `semantic_query/stable_key.rs` | `VerterStableV1` encoding and `StableKey::cmp`. |
 | `project_semantic_dispatch/canonical_algebra.rs` | `intern_ordered_union_charged` / `intern_ordered_intersection_charged` — the two crate-private canonical builders production constructions call, each paying a `ConstructionMeter`; `admit_cross_product`, the one cross-product admission; plus `compare_structural` and `CanonicalEvidence`. |
 | `project_semantic_dispatch/build.rs` | `build_reduce_union` / `build_reduce_intersection` — the query builders behind `SemanticQueryKey::ReduceUnion` / `ReduceIntersection`. |
-| `project_semantic_dispatch/signature_discovery.rs` | The cutover consumer: it drives discovery, positional matching and instantiation through the kernel records. Discovery is `DiscoveryWalk`, an owned stack of levels advanced by out-of-line stages: a frame drives it as the `FamilyBuild::Discovery` continuation, suspending at each carrier read its settlements name, at each read a leaf's rest-parameter unwrap names (a declaration's instantiation, a read inside its deferred evaluation, retained as `DiscoveryFrame::RestParameters` over `IdentityCarrierRead` before publication), at a primitive's or collection's apparent wrapper (its global lookup's ports and loads, then its instantiation), and at each result a union's or an intersection's composition compares (the candidate's `ReadSignatureResult`, a need of the walk, so each candidate is forced once), and at each parameter intersection a union synthesis composes (`ReduceIntersection`, a need of the walk, kept in the composition's level on delivery and its failure answered by the dispatch funnel's one fallback, `intersection_of_reduction`); the synchronous producer drives the same stages in place (`drive_family_value_in_place`). The composition is a level of the walk (`DiscoveryFrame::Composing`) holding the kernel's `SignatureComposition`; a binder closure (an identity question under a moving binder correspondence, a synthesis's binder mapping) is answered where the stage stands (`closed_under_binders`). The relation authority's exact identity (`signature_types_identical`) steps one `SignatureComparison` in place. |
+| `project_semantic_dispatch/signature_discovery.rs` | The cutover consumer: it drives discovery, positional matching and instantiation through the kernel records. Discovery is `DiscoveryWalk`, an owned stack of levels advanced by out-of-line stages: a frame drives it as the `FamilyBuild::Discovery` continuation, suspending at each carrier read its settlements name, at the index of each contributor pending ingestion ahead of a runtime nominal's augmentation fold, at each read a leaf's rest-parameter unwrap names (a declaration's instantiation, a read inside its deferred evaluation, retained as `DiscoveryFrame::RestParameters` over `IdentityCarrierRead` before publication), at a primitive's or collection's apparent wrapper (its global lookup's ports and loads, then its instantiation), and at each result a union's or an intersection's composition compares (the candidate's `ReadSignatureResult`, a need of the walk, so each candidate is forced once), and at each parameter intersection a union synthesis composes (`ReduceIntersection`, a need of the walk, kept in the composition's level on delivery and its failure answered by the dispatch funnel's one fallback, `intersection_of_reduction`); the synchronous producer drives the same stages in place (`drive_family_value_in_place`). The composition is a level of the walk (`DiscoveryFrame::Composing`) holding the kernel's `SignatureComposition`; a binder closure (an identity question under a moving binder correspondence, a synthesis's binder mapping) is answered where the stage stands (`closed_under_binders`). The relation authority's exact identity (`signature_types_identical`) steps one `SignatureComparison` in place. |
 
 ---
+
+### Runtime nominal contributors
+
+A runtime nominal's signature discovery stands at the index of each
+contributor pending ingestion ahead of its unchanged augmentation fold.
+`stands_at_pending_contributor` answers the file-free pending port in place;
+with nothing pending the fold runs at the same stage, with no extra level.
+Otherwise `DiscoveryFrame::IndexingContributors` boxes `NominalContributors`
+(name, arguments and `PendingContributors`, the same order cursor
+`GlobalLookup` uses). `DiscoveryRead::ContributorIndex` names an unobserved
+`WalkNeed::Index`, counted by `contributors_indexed_ahead` once where named.
+Delivery advances the cursor or returns `DiscoveryFlow::FoldContributions`
+to the walk loop, which pops the level before folding: no pending read or
+index is repeated and no fold runs under delivery. The fold's own ingestion
+settles the warmed pending notes. Known-augmenter reacquisition, library and
+program-order indexing, declaration-lowering waits and shape fetches remain
+in place; planned-body projection, including defaults, binder substitution
+and class-initializer normalization, belongs to the projection owner.
 
 ### Tuple inference plan
 

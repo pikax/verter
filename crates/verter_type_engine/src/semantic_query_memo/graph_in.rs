@@ -420,6 +420,13 @@ impl<M: ObserveExec> GraphIn<'_, M> {
     }
     /// Record optional telemetry for this execution.
     #[inline(always)]
+    pub fn record_contributor_indexed_ahead(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_contributor_indexed_ahead();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
     pub fn record_signature_result_forced(self) {
         if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
             self.store.record_signature_result_forced();

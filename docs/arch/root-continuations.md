@@ -1261,7 +1261,8 @@ interface lookup with its `Function` fallback — itself a continuation,
 `GlobalLookup`: the library's symbol index as a port, the declaring
 library file as a load, the contributors still pending ingestion as a port
 and each indexed, unobserved, as its own transition (what the population read would otherwise make
-IndexedReady in place), the program's contributor population as a port
+IndexedReady in place; `PendingContributors` holds the pending port's order,
+shared with runtime-nominal signature discovery), the program's contributor population as a port
 and a `declare global` contributor's module as a load — then the interface's
 `Instantiate`) and class instance surfaces (`ResolveClassSurface` on its
 `Instance` side: the declaring file's indexed input, which the surface roots
@@ -1301,6 +1302,24 @@ pins one step and two publications, with one publication before the wait;
 the deferred rest-access regression holds a conditional read inside the
 evaluation, pins its five steps (two before the wait), and proves delivery
 resumes there. Both seams cover release and cancellation with nothing open.
+A runtime nominal asks the pending-contributor port where its stage stands
+(`stands_at_pending_contributor`): the port reads no file and waits on
+nothing. With nothing pending it allocates no level and runs the augmentation
+fold beneath the same frames. Otherwise a boxed level
+(`DiscoveryFrame::IndexingContributors`, holding `NominalContributors`)
+retains the name, arguments and shared `PendingContributors` cursor. Each
+pending contributor is an unobserved `WalkNeed::Index`, counted once by
+`contributors_indexed_ahead` where named, outside every charge. Delivery
+names the next contributor or returns `DiscoveryFlow::FoldContributions`;
+the walk loop then pops the level and runs the unchanged fold. Its ingestion
+finds those files warm and settles their pending notes. The fold never runs
+beneath index delivery, and no pending port or completed index is repeated.
+The held-index regression pins discovery at (1 node, 0 publications) while
+held and (2, 1) in all, with exactly 1 index in both synchronous and polled
+reads and no work on repoll, including a poll on another thread. The separate
+release/cancellation regression leaves no open state, flight, wait edge or
+signature epoch pin. After the first fold settles the note, a `Promise`
+nominal with no contribution pins discovery at (1, 0) and indexes 0 files.
 A primitive, literal, template, symbol, array or tuple reads its apparent
 wrapper as the path walk does: the global declaration lookup
 (`GlobalLookup`, begun in the demand site the stage stands in) is stepped
@@ -1349,8 +1368,8 @@ root, `SignaturesOfType` is built in place by the same stages through
 `drive_family_value_in_place`, each read made where the walk stands. A
 walk released while it stands in a settlement's evaluation abandons that
 evaluation's recordings (`FamilyBuild::release_retained_accounting`); one
-standing at its wrapper, at a composition's result or at a parameter
-intersection holds nothing on the dispatcher.
+standing at its wrapper, at a composition's result, at a parameter
+intersection or at a contributor's index holds nothing on the dispatcher.
 `a_signature_list_waiting_on_a_later_comparisons_result_resumes_without_comparing_again`
 holds the result of a three-member intersection's last signature and
 requires the list to yield there with its first pair decided and, resumed
@@ -2410,8 +2429,19 @@ Signature discovery and the kernel still read in place, inventoried for
 conversion:
 
 - a runtime nominal's augmentation fold (`collect_augmentation_contributions`),
-  read in place by its discovery stage; contributor loading and planned-body
-  projection remain the fold owner's work;
+  read in place by its discovery stage once the walk indexed the contributors
+  pending ingestion. The pending port is answered where the stage stands:
+  it reads no file and waits on nothing. Known-augmenter reacquisition and
+  each candidate's exact-identity serve remain inside the fold's index port;
+  no resolver port names those files ahead of that read. Library and
+  program-order indexing remain in the population and order ports, as in
+  global lookup. Prepared declarations, batched `DeclLowering` waits and
+  authored-body dereference remain admitted in place, and each planned
+  body's shape (`lower_locator`) still builds in one step. The planned
+  bodies' projection (`project_augmentation_plan`), including parameter
+  defaults, binder substitution and class-initializer normalization, belongs
+  to the projection owner. The fold's instantiation, flow, carrier-admission,
+  class and enum callers keep the same in-place behavior;
 - a class expression's or object literal's instance surface
   (`class_expression_read_surface`), from discovery and the carrier walk:
   its substitution replaces a `this` binder by the instance and a deferred

@@ -261,7 +261,8 @@ fn wrapper_flow(wrapper: super::apparent_type::GlobalWrapper) -> DiscoveryFlow {
 /// global wrapper stands at each port and file its declaration lookup
 /// reads and then at its instantiation, and a level composing a union's or
 /// an intersection's lists stands at each result its matching compares and
-/// at each parameter intersection a union synthesis composes
+/// at each parameter intersection a union synthesis composes, and a runtime
+/// nominal stands at each pending contributor's index ahead of its fold
 /// ([`DiscoveryRead`]): a frame driver suspends there and resumes the walk
 /// on whichever thread delivers the read, the in-place driver reads it
 /// where it stands. No stage that completed runs again.
@@ -280,7 +281,8 @@ pub(super) struct DiscoveryWalk {
     frames: Vec<DiscoveryFrame>,
     /// The read the walk stands at.
     standing: Option<DiscoveryRead>,
-    /// What that read names — a query, or a wrapper lookup's port or file
+    /// What that read names — a query, a wrapper lookup's port or file,
+    /// or a runtime nominal's pending contributor's index
     /// — until its driver takes it.
     need: Option<super::walk::WalkNeed>,
 }
@@ -323,7 +325,25 @@ enum DiscoveryFrame {
     Composing(Box<CompositionStage>),
     /// A leaf whose rest types settle before its publication.
     RestParameters(Box<LeafRest>),
+    /// A runtime nominal whose pending contributors are indexed before its
+    /// contributions are folded.
+    IndexingContributors(Box<NominalContributors>),
 }
+
+/// A runtime nominal between two of its pending contributors' indexes:
+/// what its fold is asked with, and the contributors left to index.
+struct NominalContributors {
+    name: verter_type_expr::OwnedStr,
+    args: Vec<SemanticNodeId>,
+    pending: super::port_continuations::PendingContributors,
+}
+
+static_assertions::assert_impl_all!(NominalContributors: Send);
+static_assertions::assert_not_impl_any!(NominalContributors: Clone, Copy);
+const _: () = assert!(
+    std::mem::size_of::<NominalContributors>()
+        <= 48 + std::mem::size_of::<verter_type_expr::OwnedStr>()
+);
 
 /// One authored signature's owned header, as publication reads it.
 struct LeafSignature {
@@ -441,6 +461,9 @@ enum DiscoveryRead {
     /// A declaration instantiation or evaluation read of the rest unwrap
     /// held by the top level, delivered inside that unwrap.
     RestCarrier,
+    /// A contributor pending ingestion that the level on top makes
+    /// IndexedReady, unread, before its nominal's contributions are folded.
+    ContributorIndex,
 }
 
 /// The read of the global wrapper `name` over `args` while its declaration
@@ -476,6 +499,9 @@ enum DiscoveryFlow {
     Compose,
     /// The top level is a leaf whose rest unwrap the walk carries on.
     Unwrap,
+    /// The top level is a runtime nominal whose pending contributors are
+    /// indexed: fold its contributions.
+    FoldContributions,
     /// The subject's candidates: no level is left.
     Complete(Vec<SignatureCandidate>),
     /// The walk stands at the read it named.
@@ -571,7 +597,8 @@ impl DiscoveryWalk {
                 DiscoveryRead::WrapperLookup(_)
                 | DiscoveryRead::Wrapper
                 | DiscoveryRead::ForcedResult
-                | DiscoveryRead::ParameterIntersection,
+                | DiscoveryRead::ParameterIntersection
+                | DiscoveryRead::ContributorIndex,
             )
             | None => false,
         }
@@ -897,6 +924,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 DiscoveryFlow::Combine => self.combine_discovery_frame(&mut walk),
                 DiscoveryFlow::Compose => self.advance_composition(&mut walk, None),
                 DiscoveryFlow::Unwrap => self.advance_leaf_rest(&mut walk),
+                DiscoveryFlow::FoldContributions => self.fold_indexed_nominal(&mut walk),
                 DiscoveryFlow::Stand => return DiscoveryStep::Read(walk),
                 DiscoveryFlow::Complete(list) => {
                     return self.finish_signature_discovery(walk, Ok(list))
@@ -941,22 +969,32 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Some(DiscoveryRead::ParameterIntersection) => {
                 self.deliver_parameter_intersection(walk, node_read)
             }
-            Some(DiscoveryRead::WrapperLookup(_) | DiscoveryRead::ForcedResult) | None => {
+            Some(
+                DiscoveryRead::WrapperLookup(_)
+                | DiscoveryRead::ForcedResult
+                | DiscoveryRead::ContributorIndex,
+            )
+            | None => {
                 unreachable!("a node delivery answers the node query the walk stands at")
             }
         }
     }
 
-    /// The walk standing in a wrapper's lookup, given `answer`, the port's
-    /// answer or the file's indexed input.
+    /// The walk standing in a wrapper's lookup or at a contributor's index,
+    /// given `answer`, the port's answer or the file's indexed input.
     #[inline(never)]
     fn deliver_discovery_lookup(
         &self,
         walk: &mut DiscoveryWalk,
         answer: super::walk::LookupAnswer,
     ) -> DiscoveryFlow {
-        let Some(DiscoveryRead::WrapperLookup(mut read)) = walk.standing.take() else {
-            unreachable!("only a wrapper's lookup reads a port or a file")
+        let mut read = match walk.standing.take() {
+            Some(DiscoveryRead::WrapperLookup(read)) => read,
+            // An index delivers nothing: the contributor is IndexedReady, unread.
+            Some(DiscoveryRead::ContributorIndex) => return self.next_contributor_index(walk),
+            _ => unreachable!(
+                "only a wrapper's lookup or a contributor's index reads a port or a file"
+            ),
         };
         let step = match answer {
             super::walk::LookupAnswer::Port(answer) => read.lookup.resume_port(answer),
@@ -1431,8 +1469,92 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// intersection / alias / overload shape is read exactly once, by the
     /// one authority. A torn contributor is served but folds the no-warm
     /// rail, exactly as the external augmentation path does.
+    /// The fold's first read would make every contributor pending ingestion
+    /// IndexedReady in place. The stage asks which are pending where it
+    /// stands (an index read that waits on nothing), and the walk stands at
+    /// each one's index first; with none pending the fold runs here.
     #[inline(never)]
     fn discover_runtime_nominal(
+        &self,
+        walk: &mut DiscoveryWalk,
+        name: &str,
+        type_arguments: &[SemanticNodeId],
+    ) -> DiscoveryFlow {
+        if self.stands_at_pending_contributor(walk, name, type_arguments) {
+            return DiscoveryFlow::Stand;
+        }
+        self.nominal_contributions(walk, name, type_arguments)
+    }
+
+    /// Whether the nominal waits on a contributor pending ingestion: push
+    /// its level and stand at the first one's index. Out of line, so the
+    /// port's answer never sits beneath the fold.
+    #[inline(never)]
+    fn stands_at_pending_contributor(
+        &self,
+        walk: &mut DiscoveryWalk,
+        name: &str,
+        type_arguments: &[SemanticNodeId],
+    ) -> bool {
+        use super::port_continuations::{PendingContributors, PortRead};
+        let pending =
+            PendingContributors::answered(self.answer_port_in_place(&PortRead::GlobalPending));
+        if pending.is_empty() {
+            return false;
+        }
+        walk.frames
+            .push(DiscoveryFrame::IndexingContributors(Box::new(
+                NominalContributors {
+                    name: verter_type_expr::OwnedStr::from(name),
+                    args: type_arguments.to_vec(),
+                    pending,
+                },
+            )));
+        let stand = self.next_contributor_index(walk);
+        verter_debug_assert!(
+            matches!(stand, DiscoveryFlow::Stand),
+            "a pending contributor is named"
+        );
+        true
+    }
+
+    /// Name the top nominal's next pending contributor to index, or have
+    /// the walk loop fold its contributions once each is indexed.
+    #[inline(never)]
+    fn next_contributor_index(&self, walk: &mut DiscoveryWalk) -> DiscoveryFlow {
+        let next = {
+            let Some(DiscoveryFrame::IndexingContributors(nominal)) = walk.frames.last_mut() else {
+                unreachable!("a contributor is indexed for the nominal on top of the walk")
+            };
+            nominal.pending.next_to_index()
+        };
+        match next {
+            Some(file) => {
+                self.graph().record_contributor_indexed_ahead();
+                walk.stand(
+                    DiscoveryRead::ContributorIndex,
+                    super::walk::WalkNeed::Index(file),
+                )
+            }
+            None => DiscoveryFlow::FoldContributions,
+        }
+    }
+
+    /// Fold the top nominal's contributions after every pending contributor
+    /// was indexed, then discover each contribution in order.
+    #[inline(never)]
+    fn fold_indexed_nominal(&self, walk: &mut DiscoveryWalk) -> DiscoveryFlow {
+        let Some(DiscoveryFrame::IndexingContributors(nominal)) = walk.frames.pop() else {
+            unreachable!("a nominal's contributions are folded on top of the walk")
+        };
+        self.nominal_contributions(walk, nominal.name.as_ref(), &nominal.args)
+    }
+
+    /// Fold the runtime nominal's contributions where the stage stands.
+    /// Inlined into its two stages even unoptimized, so the fold keeps the
+    /// same frames beneath it when no contributor is pending.
+    #[inline(always)]
+    fn nominal_contributions(
         &self,
         walk: &mut DiscoveryWalk,
         name: &str,
@@ -1597,8 +1719,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             DiscoveryFrame::Flattening(_)
             | DiscoveryFrame::Signatures { .. }
-            | DiscoveryFrame::RestParameters(_) => {
-                unreachable!("a level settling a node waits on its settlement, never on a list")
+            | DiscoveryFrame::RestParameters(_)
+            | DiscoveryFrame::IndexingContributors(_) => {
+                unreachable!(concat!(
+                    "a level settling a node or indexing a contributor ",
+                    "waits on that, never on a list"
+                ))
             }
             DiscoveryFrame::Composing(_) => {
                 unreachable!("a composition waits on an answer, never on a list")

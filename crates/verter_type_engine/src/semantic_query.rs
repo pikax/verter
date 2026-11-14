@@ -6716,6 +6716,10 @@ pub struct SemanticGraphStats {
     /// its admission checks, outside every charge. A declaration unwrapped
     /// again counts again, whichever driver runs the walk.
     pub carrier_declarations_unwrapped: u64,
+    /// Pending contributors a signature walk names to be indexed ahead of
+    /// its runtime nominal's augmentation fold, outside every charge.
+    /// A contributor named again counts again, whichever driver runs it.
+    pub contributors_indexed_ahead: u64,
     /// Signature result reads performed, whichever driver made them: one
     /// per read begun, counted before its recipe is read. A result forced
     /// again counts again.
@@ -13123,6 +13127,7 @@ mod tests {
     ///   discovery_nodes_walked, discovery_signatures_published,
     ///   signature_positions_compared, signature_comparisons_decided,
     ///   signature_parameters_composed, carrier_declarations_unwrapped,
+    ///   contributors_indexed_ahead,
     ///   signature_results_forced,
     ///   signature_rebinds, signature_descriptors_rebound.
     /// - Exceptional-path: same_path_sentinel_returns,
@@ -13180,6 +13185,7 @@ mod tests {
             "signature_comparisons_decided",
             "signature_parameters_composed",
             "carrier_declarations_unwrapped",
+            "contributors_indexed_ahead",
             "signature_results_forced",
             "signature_rebinds",
             "signature_descriptors_rebound",

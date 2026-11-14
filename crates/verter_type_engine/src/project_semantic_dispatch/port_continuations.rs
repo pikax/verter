@@ -51,8 +51,8 @@ pub(super) enum PortRead<'b> {
     /// file itself is read as a `Load` that follows.
     GlobalLib { demand: &'b str, name: &'b str },
     /// The contributors recorded at construction or upsert that the
-    /// population read would make IndexedReady in place, classified but
-    /// not materialized: the lookup reads each as a `Load` first.
+    /// population or augmentation-index read would make IndexedReady in
+    /// place, classified but not materialized: its holder indexes each first.
     GlobalPending,
     /// The program's contributors to the global type `name`, read for
     /// `demand`: the population index, observed onto the active tracer.
@@ -110,15 +110,49 @@ static_assertions::assert_impl_all!(PortAnswer: Send);
 // Global declaration lookup
 // ---------------------------------------------------------------------------
 
+/// The contributors pending ingestion that a population or augmentation
+/// index read would make IndexedReady in place
+/// ([`PortRead::GlobalPending`]): its holder indexes each in the port's order.
+#[derive(Default)]
+pub(super) struct PendingContributors {
+    /// The contributors left to index, the next one last.
+    remaining: Vec<Arc<str>>,
+}
+
+impl PendingContributors {
+    /// The contributors the pending port's `answer` names.
+    pub(super) fn answered(answer: PortAnswer) -> Self {
+        let PortAnswer::GlobalPending(mut remaining) = answer else {
+            unreachable!("the pending port answers its contributors")
+        };
+        remaining.reverse();
+        Self { remaining }
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.remaining.is_empty()
+    }
+
+    /// The next contributor to index, or `None` once each was named.
+    pub(super) fn next_to_index(&mut self) -> Option<Arc<str>> {
+        self.remaining.pop()
+    }
+}
+
+static_assertions::assert_impl_all!(PendingContributors: Send);
+// A lookup's stage holds it where it held the list: no holder grows.
+const _: () =
+    assert!(std::mem::size_of::<PendingContributors>() == std::mem::size_of::<Vec<Arc<str>>>());
+
 /// The lookup of the first declaration of a global type, as a continuation:
 /// the library's declaration (its symbol index, then the declaring library
 /// file's headers), else the program's first contributor in declaration
 /// precedence order (the population index, then — for a module's `declare
 /// global` contribution — the module's own inventory, which decides whether
-/// its module scope shadows the name). The library file, each contributor
-/// the population read would otherwise index in place, and the selected
+/// its module scope shadows the name). The library file and selected
 /// contributor are `Load` transitions of the family that holds the lookup;
-/// the index reads are ports.
+/// contributors the population would index in place are unobserved `Index`
+/// transitions, and the index reads are ports.
 pub(super) struct GlobalLookup {
     demand: Arc<str>,
     name: Arc<str>,
@@ -132,9 +166,9 @@ enum GlobalStage {
     LibSource(ResolvedRootIdentity),
     /// The contributors still pending ingestion are asked next.
     Pending,
-    /// The pending contributors are being read, `remaining` last first, so
+    /// The pending contributors are indexed in the pending port's order, so
     /// the population read that follows indexes none of them in place.
-    PendingLoads { remaining: Vec<Arc<str>> },
+    PendingLoads(PendingContributors),
     /// The program's contributor population is asked next.
     Population,
     /// The module `canonical`'s `declare global` contribution is being
@@ -188,7 +222,7 @@ impl GlobalLookup {
                 name: &self.name,
             },
             GlobalStage::LibSource(_)
-            | GlobalStage::PendingLoads { .. }
+            | GlobalStage::PendingLoads(_)
             | GlobalStage::ContributorSource { .. } => {
                 unreachable!("a global lookup reading a file stands at no port")
             }
@@ -211,9 +245,8 @@ impl GlobalLookup {
                 self.stage = GlobalStage::Pending;
                 GlobalStep::Port
             }
-            (GlobalStage::Pending, PortAnswer::GlobalPending(mut pending)) => {
-                pending.reverse();
-                self.load_pending(pending)
+            (GlobalStage::Pending, answer @ PortAnswer::GlobalPending(_)) => {
+                self.load_pending(PendingContributors::answered(answer))
             }
             (GlobalStage::Population, PortAnswer::GlobalContributors(population)) => {
                 use verter_session_query::inputs::contributors::ContributorOrigin;
@@ -245,10 +278,10 @@ impl GlobalLookup {
 
     /// Index the next pending contributor, or — none left — read the
     /// population.
-    fn load_pending(&mut self, mut remaining: Vec<Arc<str>>) -> GlobalStep {
-        match remaining.pop() {
+    fn load_pending(&mut self, mut pending: PendingContributors) -> GlobalStep {
+        match pending.next_to_index() {
             Some(file) => {
-                self.stage = GlobalStage::PendingLoads { remaining };
+                self.stage = GlobalStage::PendingLoads(pending);
                 GlobalStep::Index(file)
             }
             None => {
@@ -283,9 +316,9 @@ impl GlobalLookup {
             }
             // A pending contributor is indexed only so the population read
             // finds it so; nothing of it is read here.
-            GlobalStage::PendingLoads { remaining } => {
+            GlobalStage::PendingLoads(pending) => {
                 drop(serve);
-                self.load_pending(remaining)
+                self.load_pending(pending)
             }
             // A module's `declare global` contribution is addressed by the
             // owner's global-augmentation scope when the module also binds

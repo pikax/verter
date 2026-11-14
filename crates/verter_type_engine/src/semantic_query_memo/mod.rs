@@ -2021,6 +2021,13 @@ impl SemanticGraphStore {
             .carrier_declarations_unwrapped
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped once per pending contributor discovery names ahead of its fold.
+    #[inline(always)]
+    pub fn record_contributor_indexed_ahead(&self) {
+        self.stats
+            .contributors_indexed_ahead
+            .fetch_add(1, Ordering::Relaxed);
+    }
     /// Bumped once per signature result read begun.
     pub fn record_signature_result_forced(&self) {
         self.stats

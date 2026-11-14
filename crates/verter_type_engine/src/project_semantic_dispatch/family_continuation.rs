@@ -256,7 +256,8 @@ pub(super) enum FamilyBuild {
     /// named, in its apparent wrapper's lookup or instantiation, at a
     /// result its matching compares, at a parameter intersection its
     /// union synthesis composes, or at a rest unwrap's declaration or
-    /// deferred-evaluation read before the leaf is published.
+    /// deferred-evaluation read before the leaf is published, or at each
+    /// pending contributor's index ahead of a runtime nominal's fold.
     Discovery(Box<super::signature_discovery::DiscoveryWalk>),
 }
 
@@ -400,7 +401,7 @@ pub(super) enum FamilyStep {
     /// it computed.
     Load(Arc<str>, Box<FamilyBuild>),
     /// The build makes this file IndexedReady next without reading it — a
-    /// contributor pending ingestion, indexed ahead of the population read
+    /// contributor pending ingestion, indexed ahead of the read
     /// that would otherwise index it in place — holding everything it
     /// computed. The file's content version is not observed: the build
     /// depends on what it reads afterwards, not on the file. The build
@@ -630,7 +631,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         serve: Option<IndexedInputServe>,
     ) -> FamilyStep {
         // A path walk's and a signature discovery's file reads are their
-        // wrapper lookups'; their stages are not counted.
+        // wrapper lookups' or discovery's pending contributors' indexes;
+        // their stages are not counted.
         let build = match build {
             FamilyBuild::ProjectPath(build) => {
                 return self
