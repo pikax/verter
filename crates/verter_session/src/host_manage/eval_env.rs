@@ -120,13 +120,7 @@ impl VerterHost {
     /// API cannot choose between two lexical owners, so ambiguity is `None`.
     /// Import bindings never enter this inventory and cannot mask a local
     /// declaration owned by another SFC region.
-    ///
-    /// `pub(crate)`: the owner-agnostic named-symbol entry
-    /// (`typeinfo::resolve_named_symbol`) selects its dispatch scope owner
-    /// through this same header-inventory rule, so a `<script setup>`-local
-    /// declaration resolves under its authored Instance owner instead of
-    /// missing at the ordinary-file view.
-    pub(crate) fn unique_local_type_declaration_owner_in(
+    fn unique_local_type_declaration_owner_in(
         state: &verter_session_query::inputs::shallow::ShallowInputAssembly,
         resolved_name: &str,
     ) -> Option<verter_type_expr::TopLevelOwnerId> {
@@ -146,6 +140,77 @@ impl VerterHost {
         owner
     }
 
+    /// The authored owner whose TYPE declaration of `resolved_name` the
+    /// canonical's innermost scope sees, read from the cached header
+    /// inventory.
+    ///
+    /// One declaring owner is that owner. When two owners declare the name
+    /// and one is the other's validated lexical parent, the inner (child)
+    /// owner's declaration shadows the parent's: the same parent fact the
+    /// engine's bare-name lookup walks, so a `<script setup>` or Svelte
+    /// instance declaration wins over the module one. Any other set of
+    /// declaring owners has no single visible declaration. Only type
+    /// headers are read: a value does not shadow a type of the same name.
+    pub(crate) fn visible_local_type_declaration_owner_in(
+        state: &verter_session_query::inputs::shallow::ShallowInputAssembly,
+        resolved_name: &str,
+    ) -> VisibleDeclarationOwner {
+        visible_declaring_owner(
+            state
+                .headers
+                .type_headers
+                .keys()
+                .filter(|key| key.name.as_ref() == resolved_name)
+                .map(|key| key.owner),
+            |owner| state.validated_lexical_parent_owner(owner),
+        )
+    }
+}
+
+/// Which authored owner's declaration of a name a file's innermost scope
+/// sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VisibleDeclarationOwner {
+    /// No authored owner declares the name: it is imported, ambient or
+    /// absent.
+    Undeclared,
+    /// The owner whose declaration is visible.
+    Owner(verter_type_expr::TopLevelOwnerId),
+    /// Several owners declare the name and none of them shadows the others
+    /// through the lexical parent relation: no single declaration is
+    /// visible.
+    Unrelated,
+}
+
+/// Decide the visible declaring owner over the distinct owners that
+/// declare a name and the validated lexical parent relation.
+fn visible_declaring_owner(
+    declaring: impl IntoIterator<Item = verter_type_expr::TopLevelOwnerId>,
+    lexical_parent: impl Fn(
+        verter_type_expr::TopLevelOwnerId,
+    ) -> Option<verter_type_expr::TopLevelOwnerId>,
+) -> VisibleDeclarationOwner {
+    let mut first = None;
+    let mut second = None;
+    for owner in declaring {
+        match (first, second) {
+            (None, _) => first = Some(owner),
+            (Some(seen), _) if seen == owner => {}
+            (Some(_), None) => second = Some(owner),
+            (Some(_), Some(seen)) if seen == owner => {}
+            (Some(_), Some(_)) => return VisibleDeclarationOwner::Unrelated,
+        }
+    }
+    match (first, second) {
+        (None, _) => VisibleDeclarationOwner::Undeclared,
+        (Some(only), None) => VisibleDeclarationOwner::Owner(only),
+        (Some(a), Some(b)) if lexical_parent(a) == Some(b) => VisibleDeclarationOwner::Owner(a),
+        (Some(a), Some(b)) if lexical_parent(b) == Some(a) => VisibleDeclarationOwner::Owner(b),
+        (Some(_), Some(_)) => VisibleDeclarationOwner::Unrelated,
+    }
+}
+
+impl VerterHost {
     /// Bounded, graph-native presence reader for the consumer
     /// (`local_type_declaration_id`). Routes the unique declaration-owner +
     /// local-type PRESENCE checks through `routed_shallow_state` and the

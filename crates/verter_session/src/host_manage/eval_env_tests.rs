@@ -1336,3 +1336,53 @@ fn fallthrough_env_without_required_runtime_values_shares_the_memo_env_arc() {
          whole-env Arc (zero whole-env clones on this path)"
     );
 }
+
+/// Two owners with no lexical parent relation between them (a module and a
+/// frontmatter script) both declaring a name have no visible declaration:
+/// the named-symbol entry answers that as a miss, never the first owner it
+/// read. An owner and its validated lexical parent resolve to the inner
+/// owner, in either read order.
+#[test]
+fn two_unrelated_owners_declaring_a_name_have_no_visible_declaration() {
+    use super::{visible_declaring_owner, VisibleDeclarationOwner};
+    use verter_session_query::analysis::top_level_owners::TopLevelOwnerTable;
+    use verter_type_expr::TopLevelOwnerId;
+
+    let module = TopLevelOwnerId::module(0);
+    let instance = TopLevelOwnerId::instance(0);
+    let frontmatter = TopLevelOwnerId::frontmatter(0);
+    let table_of = |owners: [TopLevelOwnerId; 2]| {
+        TopLevelOwnerTable::try_from_statement_owners(owners.len(), owners)
+            .expect("one statement per owner forms a valid table")
+    };
+
+    let unrelated = table_of([module, frontmatter]);
+    let parent = |owner| unrelated.validated_lexical_parent_owner(owner);
+    for read_order in [[module, frontmatter], [frontmatter, module]] {
+        assert_eq!(
+            visible_declaring_owner(read_order, parent),
+            VisibleDeclarationOwner::Unrelated,
+            "{read_order:?}"
+        );
+    }
+
+    let nested = table_of([module, instance]);
+    let parent = |owner| nested.validated_lexical_parent_owner(owner);
+    for read_order in [[module, instance], [instance, module]] {
+        assert_eq!(
+            visible_declaring_owner(read_order, parent),
+            VisibleDeclarationOwner::Owner(instance),
+            "{read_order:?}"
+        );
+    }
+
+    assert_eq!(
+        visible_declaring_owner([module, module], parent),
+        VisibleDeclarationOwner::Owner(module),
+        "one owner declaring a name twice is that owner"
+    );
+    assert_eq!(
+        visible_declaring_owner([], parent),
+        VisibleDeclarationOwner::Undeclared
+    );
+}
