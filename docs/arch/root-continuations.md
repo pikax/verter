@@ -20,7 +20,7 @@ producer, returns before an incomplete nested dependency settles.
 | Store-view and per-attempt snapshot capture, owner indexing and overlay indexing suspend through their existing handoffs | Metadata computation, extraction/fallthrough and output materialization still call synchronous dependency paths |
 | Cache admission, scheduler completion, resolver flights, carrier publication/stable parse, store-view capture, lowering and workspace resolution offer task-owned handoffs with independent cancellation | Higher callers must consume these owned APIs throughout their traversal instead of driving compatibility entries inside a poll |
 | Root state and converted scopes move between polling threads | Nested semantic dispatch still drives tasks or waits on subscriptions synchronously; complete-root no-replay is not proved |
-| Compile roots hand out one macro producer and retain followers, which take its bundle only when the producer's observations hold in their own view and otherwise produce their own; their blocker routes, blocker loads and dependency-verdict walk suspend through the owned resolution and load handoffs, and a stopped load or request answers its typed stop | That producer runs a synchronous traversal; taking a route can still ingest configured programs inside the poll for an importer no configured project lists |
+| Compile roots hand out one macro producer and retain followers, which take its bundle only when the producer's observations hold in their own view and otherwise produce their own; their blocker routes, blocker loads and dependency-verdict walk suspend through the owned resolution and load handoffs, and a stopped load or request answers its typed stop | That producer runs the macro traversal's pollable form to its end in place: its reads, its construction lane and builder, and the producer run's own request and task scopes still hold the thread for the drive; taking a route can still ingest configured programs inside the poll for an importer no configured project lists |
 | An external consumer fixture and a queued-wake driver exercise multiple roots | The driver does not yet prove progress across every nested family with admission closed and no retained synchronous stack |
 
 The parse-once, zero eager-body and one shallow-walk assertions cover overlay
@@ -303,7 +303,16 @@ once, and answers a lone request's answer while the producing root
 answers the incomplete failure (taking every delivered bundle fails it);
 in `typeinfo_tests`, a producer's footprint holds over the files it read,
 not once one changes, and a factless footprint holds nowhere (a footprint
-that always holds fails it). A scheduler reset while a blocker's read is
+that always holds fails it). In `typeinfo_tests`, the macro traversal
+stepped one poll at a time (it yields at each row's start, after a typed
+row's payload read and between its lanes when a test hook asks) resumes
+where it suspended and does the work of the run in place, with the same
+bundle, footprint and counters (beginning it again after a suspension
+fails it); after every poll the driving thread's validity, completeness,
+sticky and tracer depths are where they were before the first (leaving the
+rails attached at a suspension fails it); and a partial `defineProps`
+leaves the next macro's typed outcome as it is in place (one scope shared
+across the traversal fails it). A scheduler reset while a blocker's read is
 held answers `Host(Shutdown)` with no capture, one owned load and the
 blocker never integrated (treating the stopped load as a gap fails it);
 cancelling the request there wakes the root to `Host(Cancelled)` with no
@@ -372,16 +381,24 @@ one poll that runs to the end — sees the scope exactly as it was before.
 | Work attribution | the site | `attribute_polls` |
 | Parse-stack refusals | the recording | `refusals_within_pollable` |
 | Demand scope of a helper's requested read | `query_frames::DemandScope` on the frame that produces the read, inherited by the frames its needs start | `step_instantiate_frame` (each step) |
+| Macro traversal fact tracer | `OwnedStepwiseFactTracer::fanning_out` | `install_fact_tracer_pollable` |
+| Macro traversal completeness scopes (outer, per macro, per lane, local observations) | `compute_rails::ComputeRails`: completeness rails on the flow read's rail stack, opened with `enter_completeness` and closed (folding into the scope below) or discarded | the same |
 
 Each converted computation has one implementation: the pollable form. Its
 synchronous form drives it — `drive_pending` under the caller's execution
 task where it may wait, `complete_now` where every step runs in place and
-the first poll must answer. A driver takes its computation pinned where the
+the first poll must answer. The Vue macro traversal is driven by
+`complete_now`: every production drive is one poll, so its scopes attach
+once and detach once per traversal, and the fact tracer, the last on a pool
+thread, leaves the thread once (popping the last tracer drains the
+per-demand proof memos). Its construction lane and builder stay
+thread-bound for the drive; they are what keeps the traversal from moving
+between threads. A driver takes its computation pinned where the
 caller builds it, so the state is not copied into the driver's frame, and
-the cold component-meta path builds its large nested computations with
-`on_heap`, from a frame that ends before they run, so a synchronous caller
-does not hold their state on its stack while the compute recurses below
-them.
+the cold component-meta path and the macro traversal build their large
+nested computations with `on_heap`, from a frame that ends before they
+run, so a synchronous caller does not hold their state on its stack while
+the compute recurses below them.
 
 ## Interior state a suspended computation shares
 

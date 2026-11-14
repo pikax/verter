@@ -117,6 +117,9 @@ mod broad_runtime;
 pub mod build;
 pub mod canonical_algebra;
 pub mod carrier;
+// The completeness scopes of a traced compute that advances by poll, kept as
+// rails on the flow read rail stack.
+pub mod compute_rails;
 mod conditional_decision;
 mod contextual_tuple;
 // The operational budget owner: work units, query-boundary depth, and the
