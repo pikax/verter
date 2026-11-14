@@ -15,6 +15,7 @@
 //! Read the `running N tests` line, never the exit code: a libtest
 //! filter that matches nothing still exits 0.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use verter_compiler::svelte::runtime::UnsupportedSvelteRuntimeSurface;
@@ -625,6 +626,305 @@ fn the_scalar_batch_and_projection_public_api_spellings_agree_byte_for_byte() {
         projection.response.ts_labeled_code(),
         "the scalar and projection spellings diverged"
     );
+}
+
+/// The public members one answer names for a Vue component: each prop as
+/// `name -> (required, has_default)`, where `required` is the declared
+/// optionality and model props are included; the event names (overloads of
+/// one name count once); and each model as `name -> required`.
+#[derive(Debug, PartialEq, Eq)]
+struct PublicMembers {
+    props: BTreeMap<String, (bool, bool)>,
+    events: BTreeSet<String>,
+    models: BTreeMap<String, bool>,
+}
+
+impl PublicMembers {
+    fn expected(props: &[(&str, bool, bool)], events: &[&str], models: &[(&str, bool)]) -> Self {
+        Self {
+            props: props
+                .iter()
+                .map(|(name, required, has_default)| {
+                    ((*name).to_string(), (*required, *has_default))
+                })
+                .collect(),
+            events: events.iter().map(|name| (*name).to_string()).collect(),
+            models: models
+                .iter()
+                .map(|(name, required)| ((*name).to_string(), *required))
+                .collect(),
+        }
+    }
+}
+
+/// Collects `(name, value)` rows into a map, failing when a name repeats: a
+/// repeated prop or model would otherwise collapse silently.
+fn unique_by_name<V>(canonical: &str, side: &str, rows: Vec<(String, V)>) -> BTreeMap<String, V> {
+    let count = rows.len();
+    let names: Vec<String> = rows.iter().map(|(name, _)| name.clone()).collect();
+    let map: BTreeMap<String, V> = rows.into_iter().collect();
+    assert_eq!(
+        map.len(),
+        count,
+        "{canonical}: the {side} names a member twice: {names:?}"
+    );
+    map
+}
+
+/// The component's surface answer: the framework-surface operation through
+/// `type_info_with_audit`, which supplies each props, emits and model member
+/// with its declared requiredness. That surface publishes no Vue defaults, so
+/// default presence comes from component meta, which reads defaults from the
+/// authored macro syntax.
+fn component_surface_members(host: &VerterHost, canonical: &str) -> PublicMembers {
+    use verter_protocol::typeinfo::graph::FrameworkSurfaceKind;
+    use verter_protocol::verter::v1::type_info_graph_response;
+
+    let result = host.type_info_with_audit(crate::svelte_vertical_tests::framework_envelope(
+        host, canonical, "vue",
+    ));
+    let response = result
+        .as_result()
+        .unwrap_or_else(|error| panic!("{canonical}: the framework surface failed: {error:?}"));
+    let Some(type_info_graph_response::Kind::FrameworkSurface(payload)) = &response.kind else {
+        panic!(
+            "{canonical}: expected the framework-surface arm, got {:?}",
+            response.kind
+        );
+    };
+    let strings = payload
+        .graph
+        .as_ref()
+        .and_then(|graph| graph.strings.as_ref())
+        .map(|table| table.entries.as_slice())
+        .unwrap_or_default();
+    let members = |kind: FrameworkSurfaceKind| -> Vec<(String, bool)> {
+        payload
+            .surfaces
+            .iter()
+            .find(|entry| entry.kind == kind as i32)
+            .map(|entry| {
+                entry
+                    .members
+                    .iter()
+                    .map(|member| {
+                        let name = strings
+                            .get(member.name_id as usize)
+                            .unwrap_or_else(|| {
+                                panic!("{canonical}: {kind:?} member name is not interned")
+                            })
+                            .clone();
+                        (name, member.required)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let meta = host
+        .try_get_component_meta(canonical)
+        .unwrap_or_else(|abort| panic!("{canonical}: component meta aborted: {abort:?}"))
+        .unwrap_or_else(|| panic!("{canonical}: component meta answered nothing"));
+    let defaulted: BTreeSet<&str> = meta
+        .props
+        .iter()
+        .filter(|prop| prop.has_default)
+        .map(|prop| prop.name.as_str())
+        .collect();
+
+    let props = members(FrameworkSurfaceKind::Props)
+        .into_iter()
+        .map(|(name, required)| {
+            let has_default = defaulted.contains(name.as_str());
+            (name, (required, has_default))
+        })
+        .collect();
+    PublicMembers {
+        props: unique_by_name(canonical, "framework surface", props),
+        events: members(FrameworkSurfaceKind::Emits)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect(),
+        models: unique_by_name(
+            canonical,
+            "framework surface",
+            members(FrameworkSurfaceKind::Model),
+        ),
+    }
+}
+
+/// The public declaration's answer, read from the structured rows its render
+/// consumes: the macro codegen TSC bundle supplies each prop's name and
+/// optionality, each emit name and each model. A `defineModel` row is a prop
+/// and a model, as on the framework surface. The bundle has no default facet,
+/// because a default is authored syntax the compiler reads itself, so default
+/// presence comes from the structured contract the projection entry composes
+/// under the same capture as the rendered declaration.
+fn public_declaration_members(host: &VerterHost, canonical: &str) -> PublicMembers {
+    use verter_macro_dto::{MacroTscOutcome, MacroTscProjection};
+
+    let projection = host
+        .get_public_api_projection(canonical)
+        .unwrap_or_else(|error| panic!("{canonical}: public declaration failed: {error:?}"))
+        .unwrap_or_else(|| panic!("{canonical}: no public declaration rendered"));
+    let crate::framework::public_contract::ComponentContractAvailability::Supported(contract) =
+        &projection.contract
+    else {
+        panic!(
+            "{canonical}: the declaration's contract is unavailable: {:?}",
+            projection.contract
+        );
+    };
+    let defaulted: BTreeSet<&str> = contract
+        .props
+        .iter()
+        .filter(|prop| prop.has_default)
+        .map(|prop| prop.name.as_ref())
+        .collect();
+
+    let output = host
+        .produce_vue_macro_codegen(
+            canonical,
+            crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
+        )
+        .unwrap_or_else(|abort| panic!("{canonical}: declaration codegen aborted: {abort:?}"));
+    let bundle = output
+        .tsc
+        .as_ref()
+        .unwrap_or_else(|| panic!("{canonical}: the declaration codegen produced no TSC bundle"));
+    let mut props = Vec::new();
+    let mut events = BTreeSet::new();
+    let mut models = Vec::new();
+    for entry in &bundle.entries {
+        match &entry.outcome {
+            MacroTscOutcome::Complete(MacroTscProjection::Props(projection)) => {
+                props.extend(
+                    projection
+                        .testing_rows
+                        .iter()
+                        .map(|row| (row.name.clone(), !row.optional)),
+                );
+            }
+            MacroTscOutcome::Complete(MacroTscProjection::Emits(projection)) => {
+                events.extend(projection.events.iter().map(|row| row.name.clone()));
+            }
+            MacroTscOutcome::Complete(MacroTscProjection::Model(model)) => {
+                props.push((model.name.clone(), !model.optional));
+                models.push((model.name.clone(), !model.optional));
+            }
+            MacroTscOutcome::Complete(MacroTscProjection::Expose(_)) => {}
+            refused => panic!("{canonical}: the declaration codegen refused a macro: {refused:?}"),
+        }
+    }
+    let props = props
+        .into_iter()
+        .map(|(name, required)| {
+            let has_default = defaulted.contains(name.as_str());
+            (name, (required, has_default))
+        })
+        .collect();
+    PublicMembers {
+        props: unique_by_name(canonical, "declaration", props),
+        events,
+        models: unique_by_name(canonical, "declaration", models),
+    }
+}
+
+/// The public declaration and the component's framework surface are two
+/// per-kind transforms over one engine surface: the declaration's macro
+/// codegen rows and the surface normalizers. For each component they name
+/// the same props with the same declared optionality and default presence,
+/// the same events and the same models. Every row is checked before the
+/// verdict, so a disagreement reports each component that shows it.
+#[test]
+fn the_vue_public_declaration_names_the_members_the_component_surface_names() {
+    // (shape, source, props as (name, required, has_default), events,
+    // models as (name, required))
+    type Case = (
+        &'static str,
+        &'static str,
+        &'static [(&'static str, bool, bool)],
+        &'static [&'static str],
+        &'static [(&'static str, bool)],
+    );
+    const CASES: &[Case] = &[
+        (
+            "falsy destructure defaults",
+            "<script setup lang=\"ts\">\nconst { count = 0, enabled = false, label = '' } = defineProps<{ count?: number; enabled: boolean; label: string }>()\n</script>\n<template><p>{{ count }} {{ enabled }} {{ label }}</p></template>\n",
+            &[
+                ("count", false, true),
+                ("enabled", true, true),
+                ("label", true, true),
+            ],
+            &[],
+            &[],
+        ),
+        (
+            "aliased destructure default",
+            "<script setup lang=\"ts\">\nconst { size: px = 12, title: heading } = defineProps<{ size?: number; title: string }>()\n</script>\n<template><h1 :style=\"{ fontSize: px }\">{{ heading }}</h1></template>\n",
+            &[("size", false, true), ("title", true, false)],
+            &[],
+            &[],
+        ),
+        (
+            "falsy withDefaults defaults",
+            "<script setup lang=\"ts\">\nwithDefaults(defineProps<{ n?: number; flag: boolean; note?: string }>(), { n: 0, flag: false })\n</script>\n<template><div /></template>\n",
+            &[
+                ("n", false, true),
+                ("flag", true, true),
+                ("note", false, false),
+            ],
+            &[],
+            &[],
+        ),
+        (
+            "defineModel props",
+            "<script setup lang=\"ts\">\ndefineProps<{ id: string }>()\nconst model = defineModel<string>()\nconst count = defineModel<number>('count', { required: true })\n</script>\n<template><input v-model=\"model\" :data-count=\"count\" /></template>\n",
+            &[
+                ("id", true, false),
+                ("modelValue", false, false),
+                ("count", true, false),
+            ],
+            &[],
+            &[("modelValue", false), ("count", true)],
+        ),
+        (
+            "duplicate emit names",
+            "<script setup lang=\"ts\">\nconst emit = defineEmits<{ (e: 'change', value: number): void; (e: 'change', value: string): void; (e: 'close'): void }>()\n</script>\n<template><button @click=\"emit('close')\" /></template>\n",
+            &[],
+            &["change", "close"],
+            &[],
+        ),
+        (
+            "optional prop",
+            "<script setup lang=\"ts\">\ndefineProps<{ title?: string; size: number }>()\n</script>\n<template><div /></template>\n",
+            &[("title", false, false), ("size", true, false)],
+            &[],
+            &[],
+        ),
+    ];
+
+    let canonical = "/probe/Agreement.vue";
+    let mut failures = Vec::new();
+    for (shape, source, props, events, models) in CASES {
+        let host = host_with(canonical, source, verter_language::FileLanguage::vue());
+        let surface = component_surface_members(&host, canonical);
+        let declaration = public_declaration_members(&host, canonical);
+        if declaration != surface {
+            failures.push(format!(
+                "{shape}: the public declaration and the component surface disagree\n  \
+                 source: {source:?}\n  declaration: {declaration:?}\n  surface: {surface:?}"
+            ));
+        }
+        let expected = PublicMembers::expected(props, events, models);
+        if surface != expected {
+            failures.push(format!(
+                "{shape}: the component surface names other members than the component \
+                 declares\n  surface: {surface:?}\n  expected: {expected:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 // Atomic publication, both directions
