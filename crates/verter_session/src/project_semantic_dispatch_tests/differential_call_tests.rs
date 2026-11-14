@@ -641,6 +641,63 @@ fn a_call_through_a_union_of_signatures_unions_the_results() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Unions of an overloaded plain arm and a generic arm with no common match,
+/// in both arm orders.
+const OVERLOADED_PLAIN_AND_GENERIC_ARMS: &str = r##"
+interface PlainOverloads { (x: string): number; (x: string, y: number): boolean; }
+declare const overloadedThenGeneric: PlainOverloads | (<T>(x: T) => T);
+declare const genericThenOverloaded: (<T>(x: T) => T) | PlainOverloads;
+export function callOverloadedThenGeneric() { return overloadedThenGeneric("a"); }
+export function callGenericThenOverloaded() { return genericThenOverloaded("a"); }
+export function callOverloadedThenGenericTwo() { return overloadedThenGeneric("a", 1); }
+export function callGenericThenOverloadedTwo() { return genericThenOverloaded("a", 1); }
+"##;
+
+/// When exactly one arm of a union is overloaded and no signature is common,
+/// each of that arm's plain signatures combines with the generic arm's into
+/// one synthesized signature declaring the generic arm's type parameter
+/// (`combineUnionSignatures` takes `left.typeParameters ||
+/// right.typeParameters`), whichever arm the union lists first:
+/// `<T>(x: string & T) => number | T` and `<T>(x: string & T, y: number) =>
+/// boolean | T`. A call with `"a"` is accepted and returns `number | "a"`, a
+/// call with `"a", 1` returns `boolean | "a"` (TypeScript 7.0.2 under
+/// `--strict`, the one setting measured).
+#[test]
+fn an_overloaded_plain_arm_beside_a_generic_arm_synthesizes_signatures_in_the_generic_arms_binders()
+{
+    let matrix = Matrix::new(OVERLOADED_PLAIN_AND_GENERIC_ARMS)
+        .settings(&super::differential_harness_tests::ALL[..1]);
+    let rows = [
+        ("callOverloadedThenGeneric", "number | \"a\""),
+        ("callGenericThenOverloaded", "number | \"a\""),
+        ("callOverloadedThenGenericTwo", "boolean | \"a\""),
+        ("callGenericThenOverloadedTwo", "boolean | \"a\""),
+    ];
+    let reads: Vec<(Read<'_>, Vec<&str>)> = rows
+        .iter()
+        .map(|(row, answer)| (Read::Return(row), vec![*answer]))
+        .collect();
+    let verdicts = matrix.verdicts(&reads);
+    let mut failures = Vec::new();
+    for ((row, answer), verdicts) in rows.iter().zip(&verdicts) {
+        for verdict in verdicts {
+            if !verdict.matched {
+                failures.push(format!(
+                    "{} `{row}`: the checker answers `{answer}`, {}",
+                    verdict.class, verdict.lane
+                ));
+            }
+            if !verdict.diagnostics.is_empty() {
+                failures.push(format!(
+                    "`{row}`: the checker accepts the call, the lane reports {:?}",
+                    verdict.diagnostics
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Generic declarations inferring from values, arrays, objects, callbacks and
 /// defaults.
 const GENERIC_INFERENCE: &str = r##"
