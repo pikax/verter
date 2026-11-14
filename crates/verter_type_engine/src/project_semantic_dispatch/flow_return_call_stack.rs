@@ -5,14 +5,15 @@
 //! frame-lowered arguments its executor route types (`f(f(f(1)))`).
 //! [`FlowEvaluator::eval_expr`] evaluates both from its stack: a call
 //! suspends while its callee operand evaluates, and its value computation
-//! ([`FlowEvaluator::eval_call_value`]) runs with that operand's value in
-//! hand. When the computation takes the executor route over a lowered
-//! argument, it stops there ([`CallDrive::demand`]), the route
-//! ([`ResolveCallFrame`]) types the arguments one at a time and suspends
-//! for each lowered one, and the computation runs again with the route's
-//! answer in hand. Everything the computation does before its executor
-//! route reads the graph and the frame, and records nothing, so running
-//! it again reaches the route exactly as the first run did.
+//! begins with that operand's value in hand. The computation is staged
+//! around the call's executor route: its first stage
+//! ([`FlowEvaluator::begin_call_value`]) reads and selects the callee and
+//! ends at the call's value or at the route, naming the stage that takes
+//! the route's answer ([`CallSuffix`]). The route ([`ResolveCallFrame`])
+//! types the arguments one at a time and suspends for each lowered one;
+//! its answer is folded once and the computation continues
+//! ([`FlowEvaluator::continue_call_value`]) where it stopped. Nothing the
+//! first stage did runs again: a call's value is computed once.
 //!
 //! A function-value argument the route types under its parameter's
 //! contextual signature (`run(() => run(() => 1))`), and one the
@@ -42,43 +43,130 @@ use verter_session_query::flow::slice::{
     SliceCall, SliceCallArgument, SliceCallArguments, SliceCallSite, SliceExpr,
 };
 
-/// What a call's value computation reads from the stack instead of
-/// evaluating in place, and the executor route it stopped at.
-pub(super) struct CallDrive {
-    span: verter_span::Span,
-    /// The callee operand's value.
-    operand: Option<Positional<SemanticNodeId>>,
-    /// Each executor route's answer, by callee.
-    answers: Vec<(SemanticNodeId, Option<Positional<CallValue>>)>,
-    /// The callee of the executor route the computation stopped at.
-    demand: Option<SemanticNodeId>,
-    /// Each lowered argument's value, by ordinal, once a route evaluated
-    /// it: a second route over the same arguments (a callee's group asked
-    /// again after its frame-rooted route did not decide) reads them from
-    /// here instead of evaluating the nest inside them again.
-    argument_values: Vec<Option<Positional<SemanticNodeId>>>,
-}
-
 /// The evidence baseline a call's value is recorded against
-/// ([`FlowEvaluator::eval_call`]).
+/// ([`FlowEvaluator::finish_call_evidence`]).
 pub(super) struct CallEvidenceMark {
     undecided_relations: u64,
     degradation: Option<crate::semantic_query::FlowReturnDegradation>,
 }
 
-/// A call being evaluated from [`FlowEvaluator::eval_expr`]'s stack.
+/// A call being evaluated from [`FlowEvaluator::eval_expr`]'s stack. It
+/// travels boxed, so no frame moves it by value.
 pub(super) struct CallInFlight<'e> {
     call: &'e SliceCall,
     site: SliceCallSite,
     arguments: &'e SliceCallArguments,
     evidence: CallEvidenceMark,
-    drive: CallDrive,
+    /// The callee operand's value, once the stack delivered it.
+    operand: Option<Positional<SemanticNodeId>>,
+    /// Where the value computation stands.
+    stage: CallStage<'e>,
+}
+
+/// Where a call's value computation stands between its stages.
+enum CallStage<'e> {
+    /// Not begun.
+    Begin,
+    /// Its executor route for `callee` runs; `then` takes the route's answer.
+    Route {
+        callee: SemanticNodeId,
+        then: CallSuffix<'e>,
+    },
+    /// Taken by the stage that runs now.
+    Taken,
+}
+
+/// What one stage of a call's value computation concluded.
+pub(super) enum CallNext<'e> {
+    /// The call's value.
+    Value(Positional<CallValue>),
+    /// The executor route for `callee`, whose answer `then` takes.
+    Route {
+        callee: SemanticNodeId,
+        then: CallSuffix<'e>,
+    },
+}
+
+impl<'e> CallNext<'e> {
+    /// Continue after the executor route for `callee`, with `then`.
+    pub(super) fn route(callee: SemanticNodeId, then: CallSuffix<'e>) -> Self {
+        Self::Route { callee, then }
+    }
+
+    /// Continue after the executor route for `callee`, else with the
+    /// callee type's one call signature.
+    pub(super) fn of_callee(callee: SemanticNodeId) -> Self {
+        Self::route(callee, CallSuffix::CalleeNode { callee })
+    }
+}
+
+/// What a call's value computation does with its executor route's answer.
+/// An answer is the call's value, but for an optional chain; each variant
+/// names what the computation does without one.
+pub(super) enum CallSuffix<'e> {
+    /// The signature node's own return (an immediately called function
+    /// value).
+    Signature { node: SemanticNodeId },
+    /// The callee type's one call signature.
+    CalleeNode { callee: SemanticNodeId },
+    /// The typed marker.
+    Degrade,
+    /// The direct callee's rail, its executor already asked.
+    DirectRail(Box<DirectRail<'e>>),
+    /// The direct callee's flow or declared return.
+    DirectReturn(Box<DirectReturn<'e>>),
+    /// The marker when overloaded, else the binding's signature read.
+    Binding {
+        node: SemanticNodeId,
+        overloaded: bool,
+    },
+    /// The callee's group decision, its executor already asked.
+    SymbolicGroup { callee: SemanticNodeId },
+    /// The marker when overloaded, else the callee type's signature.
+    Group {
+        callee: SemanticNodeId,
+        overloaded: bool,
+    },
+    /// The links after the call, read off the answer (or off the callee
+    /// type's signature).
+    OptionalChain(Box<OptionalChainTail<'e>>),
+}
+
+/// A direct call's rail after its lone declared signature's route.
+pub(super) struct DirectRail<'e> {
+    pub(super) target: &'e verter_session_query::function_program::FunctionProgramKey,
+    pub(super) source: Option<verter_type_expr::facts::FunctionReturnSource>,
+}
+
+/// A direct call's return read after its generic callee's route.
+pub(super) struct DirectReturn<'e> {
+    pub(super) target: &'e verter_session_query::function_program::FunctionProgramKey,
+    pub(super) source: Option<verter_type_expr::facts::FunctionReturnSource>,
+    pub(super) clause: CalleeClause,
+}
+
+/// An optional chain after its call: the callee, whether a strip removed
+/// nullish arms, the `undefined` a short-circuit reads as, and the links
+/// read off the call's value.
+pub(super) struct OptionalChainTail<'e> {
+    pub(super) callee: SemanticNodeId,
+    pub(super) stripped: bool,
+    pub(super) undefined: SemanticNodeId,
+    pub(super) after: &'e [(Arc<str>, bool)],
+    pub(super) after_spans: &'e [verter_session_query::flow::frame_span::FrameSpan],
+}
+
+/// A call's callee operand value: the stack delivers it before the call's
+/// value computation begins.
+pub(super) fn delivered_operand(
+    operand: Option<Positional<SemanticNodeId>>,
+) -> Positional<SemanticNodeId> {
+    operand.expect("a call's operand is delivered before its value computes")
 }
 
 /// A call waiting on a lowered argument its executor route asked for.
 pub(super) struct CallArgumentWait<'e> {
-    flight: CallInFlight<'e>,
-    callee: SemanticNodeId,
+    flight: Box<CallInFlight<'e>>,
     route: ResolveCallFrame<'e>,
     pub(super) lowered: &'e SliceExpr,
 }
@@ -86,8 +174,7 @@ pub(super) struct CallArgumentWait<'e> {
 /// A call waiting on the signature of a function-value argument its
 /// executor route types.
 pub(super) struct CallFunctionWait<'e> {
-    flight: CallInFlight<'e>,
-    callee: SemanticNodeId,
+    flight: Box<CallInFlight<'e>>,
     route: RouteAt<'e>,
     mark: FunctionArgumentMark,
     demand: Option<NestedDemand>,
@@ -115,6 +202,12 @@ pub(super) enum CallStep<'e> {
     /// Nothing: the call's value.
     Done(Positional<SemanticNodeId>),
 }
+
+// A call's step, stage and suffix sit on the run's stack in every frame a
+// call nests through; the flight they carry stays boxed.
+static_assertions::const_assert!(std::mem::size_of::<CallStep<'static>>() <= 24);
+static_assertions::const_assert!(std::mem::size_of::<CallNext<'static>>() <= 48);
+static_assertions::const_assert!(std::mem::size_of::<CallSuffix<'static>>() <= 24);
 
 /// A call's executor route ([`FlowEvaluator::resolve_call_step`]) between
 /// its arguments: the arguments typed so far.
@@ -154,7 +247,9 @@ pub(super) struct FinishRoute {
     undecided_relations: u64,
     declared_result: Option<super::super::call_resolve::DeclaredCallResult>,
     step: Positional<ResolveCallStep>,
-    contextual: super::super::call_resolve::ContextualCallState,
+    /// The call itself: its executor answers, and its contextual
+    /// continuation between rounds.
+    call: Box<super::super::helper_continuation::CallRead>,
     retyped: bool,
     /// The argument being retyped.
     position: usize,
@@ -162,7 +257,7 @@ pub(super) struct FinishRoute {
 
 /// A call's executor route held across its flow frame's suspension: the
 /// route as it stood before the round whose callback stopped the run, its
-/// contextual continuation holding the candidate's collector.
+/// call's contextual continuation holding the candidate's collector.
 pub(in crate::project_semantic_dispatch) struct HeldContextualRoute {
     finish: Box<FinishRoute>,
 }
@@ -177,7 +272,7 @@ impl HeldContextualRoute {
     }
 
     /// Release a route no run resumes: what it observed is dropped and its
-    /// held collector returns to the transaction abandoned.
+    /// held call returns its collector to the transaction abandoned.
     pub(in crate::project_semantic_dispatch) fn release<
         C: crate::resolver_core::ResolverCapabilities,
     >(
@@ -187,22 +282,22 @@ impl HeldContextualRoute {
         let FinishRoute {
             argument_observations,
             step_observations,
-            mut contextual,
+            call,
             ..
         } = *self.finish;
         for observation in argument_observations.into_iter().flatten() {
             let _ = observation.discard();
         }
         let _ = step_observations.discard();
-        dispatch.release_contextual_collector(&mut contextual);
+        dispatch.release_call_read(*call);
     }
 
     /// The held collector's session and how many deposits it holds.
     #[cfg(any(test, feature = "test-support"))]
     pub(in crate::project_semantic_dispatch) fn held_collector_for_tests(
-        &self,
+        &mut self,
     ) -> Option<(u64, usize)> {
-        self.finish.contextual.held_collector_for_tests()
+        self.finish.call.contextual_mut().held_collector_for_tests()
     }
 }
 
@@ -278,21 +373,16 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         arguments: &'e SliceCallArguments,
     ) -> CallStep<'e> {
         self.capture_throw_point();
-        let flight = CallInFlight {
+        let flight = Box::new(CallInFlight {
             call,
             site,
             arguments,
             evidence: self.call_evidence_mark(),
-            drive: CallDrive {
-                span: site.span(),
-                operand: None,
-                answers: Vec::new(),
-                demand: None,
-                argument_values: Vec::new(),
-            },
-        };
+            operand: None,
+            stage: CallStage::Begin,
+        });
         match call_operand(call) {
-            Some(operand) => CallStep::Operand(Box::new(flight), operand),
+            Some(operand) => CallStep::Operand(flight, operand),
             None => self.drive_call(flight),
         }
     }
@@ -300,10 +390,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// Continue a call with its callee operand's value.
     pub(super) fn resume_call_operand<'e>(
         &mut self,
-        mut flight: CallInFlight<'e>,
+        mut flight: Box<CallInFlight<'e>>,
         value: Positional<SemanticNodeId>,
     ) -> CallStep<'e> {
-        flight.drive.operand = Some(value);
+        flight.operand = Some(value);
         self.drive_call(flight)
     }
 
@@ -311,44 +401,37 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// route asked for.
     pub(super) fn resume_call_argument<'e>(
         &mut self,
-        wait: CallArgumentWait<'e>,
+        wait: Box<CallArgumentWait<'e>>,
         value: Positional<SemanticNodeId>,
     ) -> CallStep<'e> {
         let CallArgumentWait {
-            mut flight,
-            callee,
+            flight,
             route,
             lowered,
-        } = wait;
-        let ordinal = route.args.len();
-        if flight.drive.argument_values.len() <= ordinal {
-            flight.drive.argument_values.resize(ordinal + 1, None);
-        }
-        flight.drive.argument_values[ordinal] = Some(value.clone());
+        } = *wait;
         let progress = self.deliver_resolve_call_argument(route, lowered, value);
-        self.continue_call_route(flight, callee, progress)
+        self.continue_call_route(flight, progress)
     }
 
     /// Continue a call with the signature of the function-value argument
     /// its executor route asked for.
     pub(super) fn resume_call_function<'e>(
         &mut self,
-        wait: CallFunctionWait<'e>,
+        wait: Box<CallFunctionWait<'e>>,
         value: Positional<SemanticNodeId>,
     ) -> CallStep<'e> {
         let CallFunctionWait {
             flight,
-            callee,
             route,
             mark,
             window,
             ..
-        } = wait;
+        } = *wait;
         if window {
             self.dispatch.close_contextual_window();
         }
         let progress = self.deliver_resolve_call_function(route, mark, value, window);
-        self.continue_call_route(flight, callee, progress)
+        self.continue_call_route(flight, progress)
     }
 
     /// Open the contextual window a function-value argument types in, when
@@ -376,165 +459,143 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 route.delivered_function = Some(typed);
                 self.advance_resolve_call(*route, None)
             }
-            RouteAt::Finishing(finish)
-                if window
+            RouteAt::Finishing(mut finish) => {
+                // A finishing route types a callback its call named, so the
+                // call lends its continuation.
+                let holds = window
                     && (self.dispatch.contextual_window_waits()
                         || typed.is_some_and(|typed| {
                             self.dispatch
-                                .contextual_delivery_waits(&finish.contextual, typed)
-                        })) =>
-            {
-                self.dispatch
-                    .hold_contextual_route(HeldContextualRoute { finish });
-                ResolveCallProgress::Done(None)
+                                .contextual_delivery_waits(finish.call.contextual_mut(), typed)
+                        }));
+                if holds {
+                    self.dispatch
+                        .hold_contextual_route(HeldContextualRoute { finish });
+                    ResolveCallProgress::Done(None)
+                } else {
+                    self.retype_resolve_call(finish, Some(typed))
+                }
             }
-            RouteAt::Finishing(finish) => self.retype_resolve_call(finish, Some(typed)),
         }
     }
 
-    /// Run a call's value computation with what the stack has delivered;
-    /// stopped at an executor route over a lowered argument, start that
-    /// route.
-    fn drive_call<'e>(&mut self, mut flight: CallInFlight<'e>) -> CallStep<'e> {
-        let enclosing = self.st.call_drive.replace(flight.drive);
+    /// Begin a call's value computation with what the stack delivered, and
+    /// take it on to its value or its executor route.
+    fn drive_call<'e>(&mut self, mut flight: Box<CallInFlight<'e>>) -> CallStep<'e> {
+        self.dispatch.graph().record_call_value_run();
+        let (call, site, arguments) = (flight.call, flight.site, flight.arguments);
+        let operand = flight.operand.take();
         let driver = self.dispatch;
-        let read = driver
-            .observe_read(|| self.eval_call_value(flight.call, flight.site, flight.arguments));
+        let read = driver.observe_read(|| self.begin_call_value(call, site, arguments, operand));
         // The call is a required value dependency, including a no-surface
         // result represented by this position's gap. Selected siblings own
         // separate value observations and need not adopt this dependency.
-        let value = driver.adopt_read(read).unwrap_or(Positional::Unmodeled);
-        flight.drive = std::mem::replace(&mut self.st.call_drive, enclosing)
-            .expect("the call's drive stays installed while its value computes");
-        if let Some(callee) = flight.drive.demand.take() {
+        let next = driver
+            .adopt_read(read)
+            .unwrap_or(CallNext::Value(Positional::Unmodeled));
+        self.advance_call(flight, next)
+    }
+
+    /// Take a call's value computation on from `next`: to its value, or
+    /// through its executor route to the stage after it.
+    fn advance_call<'e>(
+        &mut self,
+        mut flight: Box<CallInFlight<'e>>,
+        mut next: CallNext<'e>,
+    ) -> CallStep<'e> {
+        loop {
+            let (callee, then) = match next {
+                CallNext::Value(value) => {
+                    let CallInFlight { site, evidence, .. } = *flight;
+                    return self.finish_call(site, evidence, value);
+                }
+                CallNext::Route { callee, then } => (callee, then),
+            };
+            flight.stage = CallStage::Route { callee, then };
             let progress = self.start_resolve_call(callee, flight.site, flight.arguments);
-            return self.continue_call_route(flight, callee, progress);
+            match self.call_route_progress(flight, progress) {
+                Ok(step) => return step,
+                Err((back, following)) => {
+                    flight = back;
+                    next = following;
+                }
+            }
         }
-        let value = self.finish_call_evidence(flight.site, flight.evidence, value);
+    }
+
+    /// Continue a call whose executor route made `progress`.
+    fn continue_call_route<'e>(
+        &mut self,
+        flight: Box<CallInFlight<'e>>,
+        progress: ResolveCallProgress<'e>,
+    ) -> CallStep<'e> {
+        match self.call_route_progress(flight, progress) {
+            Ok(step) => step,
+            Err((flight, next)) => self.advance_call(flight, next),
+        }
+    }
+
+    /// A call's executor route's `progress`: a suspension at the argument
+    /// it asks for, or (`Err`) the call's next stage, taken with the route's
+    /// answer folded once.
+    fn call_route_progress<'e>(
+        &mut self,
+        mut flight: Box<CallInFlight<'e>>,
+        progress: ResolveCallProgress<'e>,
+    ) -> Result<CallStep<'e>, (Box<CallInFlight<'e>>, CallNext<'e>)> {
+        match progress {
+            ResolveCallProgress::Argument(route, lowered) => {
+                Ok(CallStep::Argument(Box::new(CallArgumentWait {
+                    flight,
+                    route,
+                    lowered,
+                })))
+            }
+            ResolveCallProgress::Function(function) => {
+                let RouteFunction { at, request } = *function;
+                let window = self.open_function_argument_window(&at);
+                Ok(CallStep::Function(Box::new(CallFunctionWait {
+                    flight,
+                    route: at,
+                    mark: request.mark,
+                    demand: Some(request.demand),
+                    window,
+                })))
+            }
+            ResolveCallProgress::Done(step) => {
+                let CallStage::Route { callee, then } =
+                    std::mem::replace(&mut flight.stage, CallStage::Taken)
+                else {
+                    unreachable!("a route answers the call that started it");
+                };
+                let site = flight.site;
+                let answer = self.fold_resolve_call_step(step, callee, site);
+                // The next stage runs under its own observation even when
+                // it only hands the answer back: an abort the route observed
+                // leaves the call unmodelled.
+                let driver = self.dispatch;
+                let read = driver.observe_read(|| self.continue_call_value(site, then, answer));
+                let next = driver
+                    .adopt_read(read)
+                    .unwrap_or(CallNext::Value(Positional::Unmodeled));
+                Err((flight, next))
+            }
+        }
+    }
+
+    /// Record a call's evidence and hand its value to the stack.
+    fn finish_call<'e>(
+        &mut self,
+        site: SliceCallSite,
+        evidence: CallEvidenceMark,
+        value: Positional<CallValue>,
+    ) -> CallStep<'e> {
+        let value = self.finish_call_evidence(site, evidence, value);
         CallStep::Done(match value {
             Positional::Value(value) => Positional::Value(value.into_node()),
             Positional::Hold => Positional::Hold,
             Positional::Unmodeled => Positional::Unmodeled,
         })
-    }
-
-    /// Continue a call whose executor route for `callee` made `progress`:
-    /// suspend for the argument it asks for, or run the value computation
-    /// again with its answer.
-    fn continue_call_route<'e>(
-        &mut self,
-        mut flight: CallInFlight<'e>,
-        callee: SemanticNodeId,
-        mut progress: ResolveCallProgress<'e>,
-    ) -> CallStep<'e> {
-        loop {
-            let (route, lowered) = match progress {
-                ResolveCallProgress::Argument(route, lowered) => (route, lowered),
-                ResolveCallProgress::Function(function) => {
-                    let RouteFunction { at, request } = *function;
-                    let window = self.open_function_argument_window(&at);
-                    return CallStep::Function(Box::new(CallFunctionWait {
-                        flight,
-                        callee,
-                        route: at,
-                        mark: request.mark,
-                        demand: Some(request.demand),
-                        window,
-                    }));
-                }
-                ResolveCallProgress::Done(step) => {
-                    let answer = self.fold_resolve_call_step(step, callee, flight.site);
-                    flight.drive.answers.push((callee, answer));
-                    return self.drive_call(flight);
-                }
-            };
-            let evaluated = flight
-                .drive
-                .argument_values
-                .get(route.args.len())
-                .cloned()
-                .flatten();
-            match evaluated {
-                Some(value) => {
-                    progress = self.deliver_resolve_call_argument(route, lowered, value);
-                }
-                None => {
-                    return CallStep::Argument(Box::new(CallArgumentWait {
-                        flight,
-                        callee,
-                        route,
-                        lowered,
-                    }))
-                }
-            }
-        }
-    }
-
-    /// The value of a call's callee operand: the one the stack delivered,
-    /// or evaluated in place for a call evaluated outside the stack.
-    pub(super) fn call_operand_value(
-        &mut self,
-        operand: &SliceExpr,
-        site: SliceCallSite,
-    ) -> Positional<SemanticNodeId> {
-        let delivered = self
-            .st
-            .call_drive
-            .as_ref()
-            .filter(|drive| drive.span == site.span())
-            .and_then(|drive| drive.operand.clone());
-        match delivered {
-            Some(value) => value,
-            None => self.eval_expr(operand),
-        }
-    }
-
-    /// The answer of the executor route for `callee` the stack already
-    /// took, or, for a call on the stack with lowered or function-value
-    /// arguments, a stop there: `Some` either way, which every route site returns at once.
-    /// `None` when the route runs in place.
-    pub(super) fn driven_call_route(
-        &mut self,
-        callee: SemanticNodeId,
-        site: SliceCallSite,
-        arguments: &SliceCallArguments,
-    ) -> Option<Option<Positional<CallValue>>> {
-        let drive = self
-            .st
-            .call_drive
-            .as_mut()
-            .filter(|drive| drive.span == site.span())?;
-        if let Some((_, answer)) = drive
-            .answers
-            .iter()
-            .find(|(answered, _)| *answered == callee)
-        {
-            return Some(answer.clone());
-        }
-        // The route suspends at a lowered argument or at a function-value
-        // argument; with neither it runs in place.
-        let suspends = arguments.iter().next().is_some()
-            || self
-                .st
-                .call_arguments
-                .get(&site.span())
-                .is_some_and(|frame| {
-                    frame.iter().any(|argument| {
-                        matches!(argument.value, SliceExpr::NestedFunctionValue { .. })
-                    })
-                });
-        if !suspends {
-            return None;
-        }
-        let drive = self
-            .st
-            .call_drive
-            .as_mut()
-            .filter(|drive| drive.span == site.span())?;
-        drive.demand = Some(callee);
-        // A placeholder the value computation returns at once; the stack
-        // discards it and takes the route.
-        Some(Some(Positional::Hold))
     }
 
     /// The evidence baseline of a call about to evaluate.
@@ -1049,20 +1110,20 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         if let Some(held) = self.dispatch.take_held_contextual_route(&key) {
             return Some(self.resume_held_route(held, argument_observations));
         }
-        let mut contextual = super::super::call_resolve::ContextualCallState::default();
+        let mut call = Box::new(super::super::helper_continuation::CallRead::begin(
+            key.clone(),
+            super::super::call_resolve::ContextualCallState::default(),
+        ));
         let relations_before = self.dispatch.call_undecided_relations();
-        let read = self.dispatch.observe_read(|| {
-            #[cfg(any(test, feature = "test-support"))]
-            let _stage = body_reads::enter_call_stage("execute_contextual_call");
-            self.dispatch
-                .execute_contextual_call(key.clone(), &mut contextual)
-        });
+        let driver = self.dispatch;
+        let read = driver.observe_read(|| driver.begin_call(&mut call));
         let undecided_relations = self
             .dispatch
             .call_undecided_relations()
             .saturating_sub(relations_before);
         let complete = read.observations_are_complete();
         let Ok(((step, declared_result), step_observations)) = read.split() else {
+            self.dispatch.release_call(call);
             self.adopt_argument_observations(&mut argument_observations);
             return None;
         };
@@ -1078,7 +1139,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             undecided_relations,
             declared_result: declared_result.filter(|_| complete),
             step,
-            contextual,
+            call,
             retyped: false,
             position: 0,
         }))
@@ -1147,7 +1208,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                             match self.eval_contextual_object_argument(
                                 &expr,
                                 contextual,
-                                &mut next.contextual,
+                                next.call.contextual_mut(),
                             ) {
                                 Positional::Value(node) => Some(node),
                                 Positional::Hold | Positional::Unmodeled => None,
@@ -1198,16 +1259,15 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             self.dispatch
                 .discard_call_relation_observations(finish.undecided_relations);
             let relations_before = self.dispatch.call_undecided_relations();
-            let read = self.dispatch.observe_read(|| {
-                #[cfg(any(test, feature = "test-support"))]
-                let _stage = body_reads::enter_call_stage("resume_contextual_call");
-                self.dispatch.resume_contextual_call(
-                    &mut finish.key,
-                    &finish.args,
-                    position,
-                    &mut finish.contextual,
-                )
-            });
+            // The call keeps its own key and sets its arguments on the
+            // rounds that execute it again; the route's copy takes them on
+            // every round. Only a declared result reads the copy's
+            // arguments, and only a round that executed the call again
+            // supplies one, so the two never disagree where it is read.
+            let args: Arc<[crate::semantic_query::CallArgKey]> = Arc::from(finish.args.as_slice());
+            finish.key.args = Arc::clone(&args);
+            let driver = self.dispatch;
+            let read = driver.observe_read(|| driver.resume_call(&mut finish.call, args));
             finish.undecided_relations = self
                 .dispatch
                 .call_undecided_relations()
@@ -1264,7 +1324,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         Some((position, Some(request)))
     }
 
-    /// The executor's step for a call once no argument is retyped again.
+    /// The executor's step for a call once no argument is retyped again. The
+    /// call is released first: an answered call holds nothing, and one whose
+    /// callback goes untyped returns its collector abandoned.
     fn settle_retyped_call(&mut self, finish: FinishRoute) -> Option<Positional<ResolveCallStep>> {
         let FinishRoute {
             step,
@@ -1274,8 +1336,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             undecided_relations,
             declared_result,
             key,
+            call,
             ..
         } = finish;
+        drop(call);
         self.adopt_argument_observations(&mut argument_observations);
         // A declined executor does not own the fixed declared result read by
         // the direct-call route. Its failed applicability probes are not that
