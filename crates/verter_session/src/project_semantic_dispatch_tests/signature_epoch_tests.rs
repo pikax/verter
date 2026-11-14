@@ -172,12 +172,14 @@ pub(super) fn signature_work(host: &VerterHost) -> SignatureWork {
 }
 
 /// The work signature matching did, wherever it ran: signature pairs the
-/// kernel decided, type positions it compared, and result reads performed.
+/// kernel decided, type positions it compared, result reads performed, and
+/// parameter positions union synthesis composed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct MatchingWork {
     pub(super) comparisons: u64,
     pub(super) positions: u64,
     pub(super) forced: u64,
+    pub(super) composed: u64,
 }
 
 impl MatchingWork {
@@ -187,6 +189,7 @@ impl MatchingWork {
             comparisons: self.comparisons - before.comparisons,
             positions: self.positions - before.positions,
             forced: self.forced - before.forced,
+            composed: self.composed - before.composed,
         }
     }
 }
@@ -198,6 +201,7 @@ pub(super) fn matching_work(host: &VerterHost) -> MatchingWork {
         comparisons: stats.signature_comparisons_decided,
         positions: stats.signature_positions_compared,
         forced: stats.signature_results_forced,
+        composed: stats.signature_parameters_composed,
     }
 }
 
@@ -820,6 +824,7 @@ fn an_exact_signature_identity_decides_one_pair_position_by_position() {
             comparisons: 1,
             positions: 2,
             forced: 2,
+            composed: 0,
         },
         "one pair decided: its parameter and its returns compared, each result read once"
     );

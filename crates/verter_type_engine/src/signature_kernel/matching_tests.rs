@@ -1,6 +1,6 @@
 //! Signature matching as owned machines: a step asks its holder what the
 //! graph cannot tell at rest, and resumes where it asked with every
-//! comparison it decided kept.
+//! comparison it decided and every parameter position it composed kept.
 
 use std::cell::{Cell, RefCell};
 
@@ -23,12 +23,14 @@ use super::test_support::RequestAnswers;
 
 /// Types whose identity is token equality, except under a correspondence
 /// that moves a binder: those questions are the holder's. Every question
-/// asked at rest and every decided comparison is counted, and a forced
-/// result is each candidate's declared return.
+/// asked at rest, every decided comparison and every composed parameter
+/// position is counted, and a forced result is each candidate's declared
+/// return.
 struct CountingTypes<'b> {
     binding: &'b EpochBinding,
     asked_at_rest: Cell<u64>,
     decided: Cell<u64>,
+    composed: Cell<u64>,
     returns: RefCell<Vec<(SignatureCandidate, TypeToken)>>,
 }
 
@@ -38,6 +40,7 @@ impl<'b> CountingTypes<'b> {
             binding,
             asked_at_rest: Cell::new(0),
             decided: Cell::new(0),
+            composed: Cell::new(0),
             returns: RefCell::new(Vec::new()),
         }
     }
@@ -46,6 +49,18 @@ impl<'b> CountingTypes<'b> {
     /// declared by node `binder` when given; its declared return is the
     /// result its read answers.
     fn leaf(&self, source: u64, binder: Option<u64>, param: u64, ret: u64) -> SignatureCandidate {
+        self.leaf_of(source, binder, &[param], ret)
+    }
+
+    /// `(a: params[0], b: params[1], ..) => ret`, authored as
+    /// [`Self::leaf`] is.
+    fn leaf_of(
+        &self,
+        source: u64,
+        binder: Option<u64>,
+        params: &[u64],
+        ret: u64,
+    ) -> SignatureCandidate {
         let candidate = publish_signature(
             self.binding,
             &SignatureInput {
@@ -63,12 +78,15 @@ impl<'b> CountingTypes<'b> {
                     .into_iter()
                     .collect(),
                 receiver: None,
-                params: vec![ParamInput {
-                    name: None,
-                    ty: SemanticNodeId(param),
-                    optional: false,
-                    includes_undefined: false,
-                }],
+                params: params
+                    .iter()
+                    .map(|param| ParamInput {
+                        name: None,
+                        ty: SemanticNodeId(*param),
+                        optional: false,
+                        includes_undefined: false,
+                    })
+                    .collect(),
                 rest: None,
                 flags: SignatureSemanticFlags::NONE,
                 result: ResultInput::Declared {
@@ -100,20 +118,44 @@ impl<'b> CountingTypes<'b> {
         RequestAnswers::forced_result(self, &candidate).expect("every leaf declares its return")
     }
 
-    /// The answer to `request`, asked under `corr`.
-    fn answer(
-        &self,
-        request: TypeRequest,
-        corr: &[(SemanticNodeId, SemanticNodeId)],
-    ) -> TypeAnswer {
+    /// The answer to `request`, asked where `composition` stands: under its
+    /// correspondence, its binder map and over its operands.
+    fn answer(&self, request: TypeRequest, composition: &SignatureComposition) -> TypeAnswer {
         match request {
             TypeRequest::Identical { a, b } => TypeAnswer::Identical(
-                RequestAnswers::identical(self, a, b, corr).expect("every identity is decided"),
+                RequestAnswers::identical(self, a, b, composition.correspondence())
+                    .expect("every identity is decided"),
             ),
             TypeRequest::ForcedResult(candidate) => {
                 TypeAnswer::ForcedResult(self.result_of(candidate))
             }
+            TypeRequest::MapBinders { ty } => TypeAnswer::Type(
+                RequestAnswers::map_binders(self, ty, composition.binder_map())
+                    .expect("every type maps"),
+            ),
+            TypeRequest::Intersect => TypeAnswer::Type(
+                RequestAnswers::intersect(self, composition.operands())
+                    .expect("an intersection has operands"),
+            ),
         }
+    }
+
+    /// The layout parameter types of `candidate`, read in the binding.
+    fn parameter_types(&self, candidate: SignatureCandidate) -> Vec<TypeToken> {
+        let view = self.binding.view();
+        let descriptor = view
+            .descriptor(candidate.signature)
+            .expect("the candidate's descriptor reads");
+        let template = view
+            .template(descriptor.template)
+            .expect("its template reads");
+        let shape = view.shape(template.input_shape).expect("its shape reads");
+        view.layout(shape.parameter_layout)
+            .expect("its layout reads")
+            .parameters
+            .iter()
+            .map(|slot| slot.ty)
+            .collect()
     }
 }
 
@@ -139,15 +181,8 @@ impl DiscoveryTypes for CountingTypes<'_> {
     fn comparison_decided(&self) {
         self.decided.set(self.decided.get() + 1);
     }
-    fn intersect(&self, members: &[TypeToken]) -> Option<TypeToken> {
-        members.first().copied()
-    }
-    fn map_binders(
-        &self,
-        ty: TypeToken,
-        _: &[(SemanticNodeId, SemanticNodeId)],
-    ) -> Option<TypeToken> {
-        Some(ty)
+    fn parameter_composed(&self) {
+        self.composed.set(self.composed.get() + 1);
     }
     fn unknown(&self) -> Option<TypeToken> {
         Some(self.token(9_000))
@@ -182,6 +217,16 @@ impl RequestAnswers for CountingTypes<'_> {
                 effects: None,
             })
             .ok_or(IncompleteReason::UnresolvedObligation)
+    }
+    fn intersect(&self, members: &[TypeToken]) -> Option<TypeToken> {
+        members.first().copied()
+    }
+    fn map_binders(
+        &self,
+        ty: TypeToken,
+        _: &[(SemanticNodeId, SemanticNodeId)],
+    ) -> Option<TypeToken> {
+        Some(ty)
     }
 }
 
@@ -269,7 +314,7 @@ fn an_intersection_keeps_its_decided_comparisons_while_a_later_result_is_outstan
             KernelStep::Ask(request) => {
                 requests.push(request);
                 decided_at_request.push(types.decided.get());
-                given = Some(types.answer(request, composition.correspondence()));
+                given = Some(types.answer(request, &composition));
             }
         }
     };
@@ -346,4 +391,183 @@ fn a_composition_with_nothing_to_ask_settles_in_one_step() {
         (2, 2),
         "the left signature matched in the right arm, then the right one represented"
     );
+}
+
+/// A union of two two-parameter signatures with no common match is
+/// synthesized position by position: each position's intersection is asked
+/// once, over the master's type then the other arm's, and a step given an
+/// answer resumes at the position it asked from, keeping every composed
+/// position and every decided comparison. The synthesized signature's
+/// parameters are the answered intersections.
+#[test]
+fn a_parameter_composition_asks_for_each_intersection_once_and_resumes_at_the_position_it_asked_from(
+) {
+    let store = SignatureStore::new();
+    let binding = store.bind_current();
+    let types = CountingTypes::new(&binding);
+    let left = types.leaf_of(1, None, &[100, 101], 200);
+    let right = types.leaf_of(2, None, &[110, 111], 201);
+    let mut composition = SignatureComposition::union(vec![vec![left], vec![right]]);
+
+    assert_eq!(
+        composition.step(&binding, &types, None),
+        Ok(KernelStep::Ask(TypeRequest::Intersect))
+    );
+    assert_eq!(
+        composition.operands(),
+        [types.token(100), types.token(110)],
+        "the first position, the master's type first"
+    );
+    assert_eq!(types.composed.get(), 0, "nothing composed before it");
+    assert_eq!(
+        (types.decided.get(), types.asked_at_rest.get()),
+        (4, 4),
+        "each arm's signature compared exactly, then partially, in the other arm"
+    );
+
+    assert_eq!(
+        composition.step(&binding, &types, Some(TypeAnswer::Type(types.token(300)))),
+        Ok(KernelStep::Ask(TypeRequest::Intersect))
+    );
+    assert_eq!(
+        composition.operands(),
+        [types.token(101), types.token(111)],
+        "the second position"
+    );
+    assert_eq!(types.composed.get(), 1, "the first position composed once");
+    assert_eq!(
+        (types.decided.get(), types.asked_at_rest.get()),
+        (4, 4),
+        "no comparison is made again"
+    );
+
+    let Ok(KernelStep::Done(found)) =
+        composition.step(&binding, &types, Some(TypeAnswer::Type(types.token(301))))
+    else {
+        panic!("the synthesis is done once the last position is answered");
+    };
+    assert_eq!(found.len(), 1, "one synthesized signature");
+    assert_ne!(found[0], left, "a composite over both arms");
+    assert_eq!(types.composed.get(), 2, "each position composed once");
+    assert_eq!(
+        types.parameter_types(found[0]),
+        [types.token(300), types.token(301)],
+        "the synthesized parameters are the answered intersections"
+    );
+}
+
+/// A synthesis of two generic signatures whose binder spaces match asks
+/// for the other arm's types under the map from its binders onto the
+/// master's, and intersects the master's type with the mapped one.
+#[test]
+fn a_generic_parameter_composition_asks_for_the_other_sides_types_under_its_binder_map() {
+    let store = SignatureStore::new();
+    let binding = store.bind_current();
+    let types = CountingTypes::new(&binding);
+    let (first_binder, second_binder) = (5_001, 5_002);
+    let first = types.leaf(1, Some(first_binder), first_binder, first_binder);
+    let second = types.leaf(2, Some(second_binder), second_binder, second_binder);
+    let mut composition = SignatureComposition::union(vec![vec![first], vec![second]]);
+
+    let request = composition.step(&binding, &types, None);
+    assert_eq!(
+        request,
+        Ok(KernelStep::Ask(TypeRequest::Identical {
+            a: types.token(second_binder),
+            b: types.token(first_binder),
+        })),
+        "the common match compares the parameters under the correspondence"
+    );
+    let Ok(KernelStep::Ask(request)) = request else {
+        unreachable!("asserted above")
+    };
+    let answer = types.answer(request, &composition);
+
+    assert_eq!(
+        composition.step(&binding, &types, Some(answer)),
+        Ok(KernelStep::Ask(TypeRequest::MapBinders {
+            ty: types.token(second_binder),
+        })),
+        "the other arm's parameter, in its own binders"
+    );
+    assert_eq!(
+        composition.binder_map(),
+        [(SemanticNodeId(second_binder), SemanticNodeId(first_binder))],
+        "the other arm's binder maps onto the master's"
+    );
+
+    assert_eq!(
+        composition.step(
+            &binding,
+            &types,
+            Some(TypeAnswer::Type(types.token(first_binder)))
+        ),
+        Ok(KernelStep::Ask(TypeRequest::Intersect))
+    );
+    assert_eq!(
+        composition.operands(),
+        [types.token(first_binder), types.token(first_binder)],
+        "the master's parameter and the mapped one"
+    );
+    let answer = types.answer(TypeRequest::Intersect, &composition);
+
+    let Ok(KernelStep::Done(found)) = composition.step(&binding, &types, Some(answer)) else {
+        panic!("the synthesis is done once its one position is answered");
+    };
+    assert_eq!(found.len(), 1, "one synthesized signature");
+    assert_eq!(types.composed.get(), 1, "its one position composed once");
+}
+
+/// Two generic signatures whose binder spaces are declared by the same
+/// binder node combine with no binder rewritten: no type is asked for
+/// under the binder map, and the position's intersection is the only
+/// question the synthesis asks.
+#[test]
+fn binders_that_do_not_move_are_mapped_without_a_question() {
+    let store = SignatureStore::new();
+    let binding = store.bind_current();
+    let types = CountingTypes::new(&binding);
+    let binder = 5_001;
+    let first = types.leaf(1, Some(binder), binder, 200);
+    let second = types.leaf(2, Some(binder), binder, 201);
+    let mut composition = SignatureComposition::union(vec![vec![first], vec![second]]);
+
+    let mut requests = Vec::new();
+    let mut given = None;
+    let found = loop {
+        match composition
+            .step(&binding, &types, given.take())
+            .expect("every question is answered")
+        {
+            KernelStep::Done(found) => break found,
+            KernelStep::Ask(request) => {
+                if request == TypeRequest::Intersect {
+                    assert_eq!(
+                        composition.operands(),
+                        [types.token(binder), types.token(binder)],
+                        "both parameters as written"
+                    );
+                    assert_eq!(
+                        composition.binder_map(),
+                        [(SemanticNodeId(binder), SemanticNodeId(binder))],
+                        "the map pairs the binder with itself"
+                    );
+                }
+                requests.push(request);
+                given = Some(types.answer(request, &composition));
+            }
+        }
+    };
+
+    assert_eq!(
+        requests,
+        [
+            TypeRequest::ForcedResult(second),
+            TypeRequest::ForcedResult(first),
+            TypeRequest::Intersect,
+        ],
+        "the returns differ, so there is no common match; the synthesis maps nothing"
+    );
+    assert_eq!(found.len(), 1, "one synthesized signature");
+    assert_eq!(types.composed.get(), 1, "its one position composed once");
 }

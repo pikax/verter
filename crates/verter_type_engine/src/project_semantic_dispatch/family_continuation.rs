@@ -253,8 +253,9 @@ pub(super) enum FamilyBuild {
     /// A path projection's walk, standing at the read a hop named.
     ProjectPath(Box<super::walk::ProjectPathBuild>),
     /// A signature discovery's walk, standing at the read a settlement
-    /// named, in its apparent wrapper's lookup or instantiation, or at a
-    /// result its matching compares.
+    /// named, in its apparent wrapper's lookup or instantiation, at a
+    /// result its matching compares, or at a parameter intersection its
+    /// union synthesis composes.
     Discovery(Box<super::signature_discovery::DiscoveryWalk>),
 }
 
@@ -310,9 +311,10 @@ impl FamilyBuild {
 
     /// Record `key`, a read this build names, in the test dispatch trace
     /// as the read a synchronous build makes is recorded: a path walk's
-    /// hop reads, a signature discovery's settlement and compared-result
-    /// reads, and the template reductions an overload set's candidate
-    /// substitutions read, are recorded wherever their driver reads them.
+    /// hop reads, a signature discovery's settlement, compared-result and
+    /// parameter-intersection reads, and the template reductions an
+    /// overload set's candidate substitutions read, are recorded wherever
+    /// their driver reads them.
     #[cfg(any(test, feature = "test-support"))]
     pub(super) fn trace_need(&self, key: &SemanticQueryKey) {
         let traced = match self {

@@ -251,29 +251,50 @@ pub(crate) trait RequestAnswers {
         &self,
         candidate: &SignatureCandidate,
     ) -> Result<super::matching::ForcedResult, crate::semantic_query::IncompleteReason>;
+    /// `ty` with the binders of `map` (`(from, to)` pairs) rewritten;
+    /// `None`: unreadable.
+    fn map_binders(
+        &self,
+        ty: super::records::TypeToken,
+        map: &[(SemanticNodeId, SemanticNodeId)],
+    ) -> Option<super::records::TypeToken>;
+    /// The intersection of `members`, in order; `None`: unreadable.
+    fn intersect(&self, members: &[super::records::TypeToken])
+        -> Option<super::records::TypeToken>;
 }
 
-/// `answers`' answer to `request`, asked under `corr`: an unanswerable
-/// question is an incomplete error.
+/// `answers`' answer to `request`, asked under the machine's binder
+/// correspondence `corr`, binder map `binder_map` and intersection
+/// `operands`: an unanswerable question is an incomplete error.
 #[cfg(test)]
 fn answer_request(
     answers: &dyn RequestAnswers,
     request: super::matching::TypeRequest,
     corr: &[(SemanticNodeId, SemanticNodeId)],
+    binder_map: &[(SemanticNodeId, SemanticNodeId)],
+    operands: &[super::records::TypeToken],
 ) -> Result<super::matching::TypeAnswer, super::discovery::DiscoveryError> {
     use super::discovery::DiscoveryError;
     use super::matching::{TypeAnswer, TypeRequest};
+    let unsettled =
+        DiscoveryError::Incomplete(crate::semantic_query::IncompleteReason::UnsettledInput);
     match request {
         TypeRequest::Identical { a, b } => answers
             .identical(a, b, corr)
             .map(TypeAnswer::Identical)
-            .ok_or(DiscoveryError::Incomplete(
-                crate::semantic_query::IncompleteReason::UnsettledInput,
-            )),
+            .ok_or(unsettled),
         TypeRequest::ForcedResult(candidate) => answers
             .forced_result(&candidate)
             .map(TypeAnswer::ForcedResult)
             .map_err(DiscoveryError::Incomplete),
+        TypeRequest::MapBinders { ty } => answers
+            .map_binders(ty, binder_map)
+            .map(TypeAnswer::Type)
+            .ok_or(unsettled),
+        TypeRequest::Intersect => answers
+            .intersect(operands)
+            .map(TypeAnswer::Type)
+            .ok_or(unsettled),
     }
 }
 
@@ -295,6 +316,8 @@ pub(crate) fn settle_composition<T: super::discovery::DiscoveryTypes + RequestAn
                     types,
                     request,
                     composition.correspondence(),
+                    composition.binder_map(),
+                    composition.operands(),
                 )?);
             }
         }
@@ -350,7 +373,13 @@ pub(crate) fn settle_comparison<T: super::discovery::DiscoveryTypes + RequestAns
         match comparison.step(binding, types, given.take())? {
             KernelStep::Done(same) => return Ok(same),
             KernelStep::Ask(request) => {
-                given = Some(answer_request(types, request, comparison.correspondence())?);
+                given = Some(answer_request(
+                    types,
+                    request,
+                    comparison.correspondence(),
+                    &[],
+                    &[],
+                )?);
             }
         }
     }
