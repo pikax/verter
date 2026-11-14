@@ -4,10 +4,10 @@
 use crate::semantic_query::{IncompleteReason, SemanticContextId, SemanticNodeId};
 
 use super::discovery::{
-    publish_signature, union_signatures, DiscoveryTypes, ForcedResult, ParamInput, ResultInput,
-    SignatureInput,
+    publish_signature, DiscoveryTypes, ParamInput, ResultInput, SignatureInput,
 };
 use super::lifetime::{EpochBinding, SignatureStore, StoreError};
+use super::matching::ForcedResult;
 use super::positional::SlotTypeFacts;
 use super::provenance::{
     ConstituentSequence, DeclarationGroupId, DeclarationParentId, SignatureProvenance,
@@ -21,6 +21,7 @@ use super::records::{
     SignatureSemanticFlags, SignatureTemplate, TypeToken,
 };
 use super::substitution::CallSubstitution;
+use super::test_support::{settle_union, RequestAnswers};
 
 const STRING: u64 = 100;
 const NUMBER: u64 = 101;
@@ -37,7 +38,7 @@ impl SlotTypeFacts for TokenTypes<'_> {
 }
 
 impl DiscoveryTypes for TokenTypes<'_> {
-    fn identical(
+    fn identical_at_rest(
         &self,
         a: TypeToken,
         b: TypeToken,
@@ -45,6 +46,7 @@ impl DiscoveryTypes for TokenTypes<'_> {
     ) -> Option<bool> {
         Some(a == b)
     }
+    fn comparison_decided(&self) {}
     fn intersect(&self, members: &[TypeToken]) -> Option<TypeToken> {
         members.first().copied()
     }
@@ -67,6 +69,17 @@ impl DiscoveryTypes for TokenTypes<'_> {
     }
     fn is_any(&self, _: TypeToken) -> bool {
         false
+    }
+}
+
+impl RequestAnswers for TokenTypes<'_> {
+    fn identical(
+        &self,
+        a: TypeToken,
+        b: TypeToken,
+        _: &[(SemanticNodeId, SemanticNodeId)],
+    ) -> Option<bool> {
+        Some(a == b)
     }
     fn forced_result(&self, _: &SignatureCandidate) -> Result<ForcedResult, IncompleteReason> {
         Err(IncompleteReason::UnresolvedObligation)
@@ -116,7 +129,7 @@ fn union_of_two_leaves(
 ) -> (SignatureCandidate, SignatureCandidate, SignatureCandidate) {
     let left = leaf(binding, 1, STRING, STRING);
     let right = leaf(binding, 2, STRING, NUMBER);
-    let union = union_signatures(binding, &TokenTypes { binding }, &[vec![left], vec![right]])
+    let union = settle_union(binding, &TokenTypes { binding }, &[vec![left], vec![right]])
         .expect("the union publishes");
     assert_eq!(
         union.len(),

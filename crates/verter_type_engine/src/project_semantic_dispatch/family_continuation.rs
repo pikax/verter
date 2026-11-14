@@ -253,7 +253,8 @@ pub(super) enum FamilyBuild {
     /// A path projection's walk, standing at the read a hop named.
     ProjectPath(Box<super::walk::ProjectPathBuild>),
     /// A signature discovery's walk, standing at the read a settlement
-    /// named, or in its apparent wrapper's lookup or instantiation.
+    /// named, in its apparent wrapper's lookup or instantiation, or at a
+    /// result its matching compares.
     Discovery(Box<super::signature_discovery::DiscoveryWalk>),
 }
 
@@ -278,12 +279,14 @@ impl FamilyBuild {
 
     /// Whether the read this build waits on was named from kernel handles a
     /// replacement retired while it waited — a composite candidate's result,
-    /// prepared in a signature list's epoch the replacement retired. Only a
-    /// result that was forced before the retirement answers the build: the
-    /// in-place driver does not make the read, and the frame drops any
-    /// other delivery unread, whose rails the staleness alone would taint.
-    /// Either resumes the build with [`retired_read`], and the list names
-    /// the composite's read again, rebound into the current epoch.
+    /// prepared in a signature list's epoch the replacement retired, or a
+    /// result a signature discovery's matching compares, named in an epoch
+    /// the replacement retired. Only a result that was forced before the
+    /// retirement answers the build: the in-place driver does not make the
+    /// read, and the frame drops any other delivery unread, whose rails the
+    /// staleness alone would taint. Either resumes the build with
+    /// [`retired_read`], and the build names its read again, rebound into
+    /// the current epoch.
     pub(super) fn awaits_retired_read<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         stage: &ContinuationStage<'_, '_, C>,
@@ -291,6 +294,9 @@ impl FamilyBuild {
         match self {
             Self::OverloadSet(build) => build.awaits_retired_read(stage),
             Self::ApparentType(build) => build.awaits_retired_read(stage),
+            Self::Discovery(walk) => {
+                walk.awaits_retired_result(stage.graph_store().signature_store().epoch())
+            }
             Self::MacroPayload(_)
             | Self::ReduceIntersection(_)
             | Self::ClassInstanceSurface(_)
@@ -298,16 +304,15 @@ impl FamilyBuild {
             | Self::CycleGate(_)
             | Self::ResolveDecl(_)
             | Self::TemplateUnion(..)
-            | Self::ProjectPath(_)
-            | Self::Discovery(_) => false,
+            | Self::ProjectPath(_) => false,
         }
     }
 
     /// Record `key`, a read this build names, in the test dispatch trace
     /// as the read a synchronous build makes is recorded: a path walk's
-    /// hop reads, a signature discovery's settlement reads, and the
-    /// template reductions an overload set's candidate substitutions read,
-    /// are recorded wherever their driver reads them.
+    /// hop reads, a signature discovery's settlement and compared-result
+    /// reads, and the template reductions an overload set's candidate
+    /// substitutions read, are recorded wherever their driver reads them.
     #[cfg(any(test, feature = "test-support"))]
     pub(super) fn trace_need(&self, key: &SemanticQueryKey) {
         let traced = match self {

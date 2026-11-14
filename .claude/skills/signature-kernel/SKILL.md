@@ -32,7 +32,8 @@ consumer is `project_semantic_dispatch/signature_discovery.rs`):
 | `positional.rs` | The shared positional model: `PositionalShape`, `PositionalMode`, `TypeAt`, `MinArityFlags`, `ProjectedTuple`/`ProjectedElement`, `SlotTypeFacts`. Parameter matching, rest/receiver layout and arity are computed **once** here for every consumer. It also owns the one tuple-inference plan, `tuple_inference_plan` over `TupleElementKind` (`Required`/`Optional`/`Rest`/`Variadic`) with `VariadicArityFacts` (a variadic's implied arity and fixed constraint arity), returning `TupleInferenceStep`s — see "Tuple inference plan" below. |
 | `provenance.rs` | `SignatureProvenance`, `OverloadOrder`, `ArmIdentity`, `ConstituentSequence`, `DeclarationGroupId`, `MappedConstituent`, `OriginRelation`, `SourceLocatorId` — where a candidate came from and in what authored order. |
 | `substitution.rs` | `CallSubstitution`, `SubstTerm`, `compose_canonical`, `MAX_SUBSTITUTION_CHAIN_DEPTH`. The two substitution stages (declared/outer map and frozen call-site map) compose canonically; a hand-built chain past the bound flattens rather than growing. |
-| `discovery.rs` | `publish_signature`, `set_from_candidates`, `append_signatures`, `union_signatures`, `intersection_signatures`, `heritage_signatures`, `merged_declaration_signatures`, `resolution_order`, `signatures_identical`, `DiscoveryError`. Exact identity compares binders positionally with constraint/default identity. Assignability instead instantiates generic signatures through contextual inference, including corresponding operands of deferred conditional returns. |
+| `discovery.rs` | `publish_signature`, `set_from_candidates`, `heritage_signatures`, `merged_declaration_signatures`, `resolution_order`, `DiscoveryError`, `DiscoveryTypes` (the graph facts read at rest), `MatchOptions`, the record helpers compositions build composites with, and `combine_union_parameters` (a union synthesis's parameter composition, still reading `map_binders` / `intersect` through the callbacks). |
+| `matching.rs` | Matching as owned machines: `SignatureComparison` (`compareSignaturesIdentical`: arity, binders positionally with constraint/default identity, receiver, every target position, results), the ordered match scan, and `SignatureComposition` (a union's common matches and restricted synthesis, an intersection's append with mixin composition). A `step` answers what `DiscoveryTypes::identical_at_rest` tells and returns one `TypeRequest` (`Identical` under its `correspondence()`, `ForcedResult`) for the rest, resuming at the position it asked from with every decided comparison kept; it never calls its holder. Assignability instead instantiates generic signatures through contextual inference, including corresponding operands of deferred conditional returns. |
 | `result.rs` | Demand-driven results: `ResultDemand`, `ReadSignatureResultKey`, `SignatureSetValue`, `SignatureResultValue`, `SignatureCandidateNodes`. |
 
 Ordering and composite reduction live beside the kernel, in the dispatch crate:
@@ -42,7 +43,7 @@ Ordering and composite reduction live beside the kernel, in the dispatch crate:
 | `semantic_query/stable_key.rs` | `VerterStableV1` encoding and `StableKey::cmp`. |
 | `project_semantic_dispatch/canonical_algebra.rs` | `intern_ordered_union_charged` / `intern_ordered_intersection_charged` — the two crate-private canonical builders production constructions call, each paying a `ConstructionMeter`; `admit_cross_product`, the one cross-product admission; plus `compare_structural` and `CanonicalEvidence`. |
 | `project_semantic_dispatch/build.rs` | `build_reduce_union` / `build_reduce_intersection` — the query builders behind `SemanticQueryKey::ReduceUnion` / `ReduceIntersection`. |
-| `project_semantic_dispatch/signature_discovery.rs` | The cutover consumer: it drives discovery, positional matching and instantiation through the kernel records. Discovery is `DiscoveryWalk`, an owned stack of levels advanced by out-of-line stages: a frame drives it as the `FamilyBuild::Discovery` continuation, suspending at each carrier read its settlements name and at a primitive's or collection's apparent wrapper (its global lookup's ports and loads, then its instantiation), and the synchronous producer drives the same stages in place (`drive_family_value_in_place`). |
+| `project_semantic_dispatch/signature_discovery.rs` | The cutover consumer: it drives discovery, positional matching and instantiation through the kernel records. Discovery is `DiscoveryWalk`, an owned stack of levels advanced by out-of-line stages: a frame drives it as the `FamilyBuild::Discovery` continuation, suspending at each carrier read its settlements name, at a primitive's or collection's apparent wrapper (its global lookup's ports and loads, then its instantiation), and at each result a union's or an intersection's composition compares (the candidate's `ReadSignatureResult`, a need of the walk, so each candidate is forced once); the synchronous producer drives the same stages in place (`drive_family_value_in_place`). The composition is a level of the walk (`DiscoveryFrame::Composing`) holding the kernel's `SignatureComposition`; an identity question under a moving binder correspondence is answered where the stage stands. The relation authority's exact identity (`signature_types_identical`) steps one `SignatureComparison` in place. |
 
 ---
 
@@ -177,8 +178,8 @@ node identity:
    arms in declaration order, so a commutative sort would break overload
    precedence. The classification (`value_may_contribute_call_signatures`)
    fails CLOSED on anything undecidable from the graph alone, and callable
-   merging itself belongs to `SignaturesOfType` →
-   `signature_kernel::discovery::intersection_signatures`, never to a local
+   merging itself belongs to `SignaturesOfType` → the kernel's
+   intersection composition (`SignatureComposition::intersection`), never to a local
    concatenation of signature nodes (§15).
 
 An interface/class declaration body with heritage is a third construction
@@ -287,6 +288,14 @@ enumerates the live variant set exactly (guard:
   retired. A result is read where it was published, through its own
   lease, and a `ReadSignatureResult` key of a retired epoch stays a typed
   refusal.
+* **A result matching needs is named in the current epoch and read where
+  it was published.** A walk whose epoch retired names a compared
+  candidate's result read by one copy of its descriptor; a read named in
+  an epoch that retires while it waits is not made, or dropped unread,
+  and named again; the delivered result's tokens are named again in the
+  walk's epoch through their graph nodes. Nothing is compared, walked or
+  forced twice
+  (`a_matching_result_named_in_an_epoch_that_retired_is_named_again_and_nothing_is_compared_twice`).
 
 The kernel store does **not** own the process byte budget: aggregate retention
 is `SemanticRetentionAccount` (see `/type-cache-architecture` → Aggregate
@@ -353,7 +362,7 @@ Executable homes:
 | `crates/verter_session/src/signature_corpus_tests.rs` | The corpus driver and the **flip law**: a `MatchesChecker` row fails when the live answer stops matching, and an owed/degraded row fails when the live answer STARTS matching. Both directions are proven by `signature_corpus_flip_law_fires_in_both_directions`. A verdict can only move by a deliberate re-pin. |
 | `crates/verter_session/tests/cases/g_block/semantic_determinism_matrix.rs` | The §5.9 perturbation matrix and the §5.4 stable-key table, each enumerated against its authority and consumed by replay drivers. Every comparison runs on TWO bases: the stable-text completed observation AND the generated-bytes digest. |
 | `crates/verter_session/tests/allocator_canaries.rs` | `signature_kernel_warm_positional::warm_positional_read_does_not_allocate_or_lock` — the §12 Empty/One gate, in a separate test binary because it installs a counting `#[global_allocator]`. |
-| `crates/verter_type_engine/src/signature_kernel/*_tests.rs` | Per-module unit coverage (lifetime, storage, substitution, positional, provenance, discovery, read view). |
+| `crates/verter_type_engine/src/signature_kernel/*_tests.rs` | Per-module unit coverage (lifetime, storage, substitution, positional, provenance, discovery, matching, read view). Matching machines are settled in unit tests through `test_support::settle_*`, which answer each request from the test's fake (`RequestAnswers`). |
 
 **Re-locking the contract digest.** `docs/arch/signature-kernel.md` is byte-locked
 by `manifest.json` → `contract.sha256`, checked by

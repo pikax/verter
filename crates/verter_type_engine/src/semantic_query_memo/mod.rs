@@ -2002,6 +2002,12 @@ impl SemanticGraphStore {
             .signature_positions_compared
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped once per signature pair kernel matching decides.
+    pub fn record_signature_comparison_decided(&self) {
+        self.stats
+            .signature_comparisons_decided
+            .fetch_add(1, Ordering::Relaxed);
+    }
     /// Bumped once per signature result read begun.
     pub fn record_signature_result_forced(&self) {
         self.stats
