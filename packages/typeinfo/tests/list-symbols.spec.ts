@@ -6,13 +6,13 @@
  * declaration with the right `kind` and `isExported` flag through
  * the JS API.
  *
- * REGRESSION — fails against any substrate missing the `listSymbols`
- * NAPI method.
+ * REGRESSION — fails against any substrate whose `typeInfoWithAudit`
+ * export does not serve the list-symbols operation.
  */
 
 import { describe, expect, it } from "vitest";
 
-import { TypeInfoSession } from "../src/index.js";
+import { TypeInfoRequestFailure, TypeInfoSession } from "../src/index.js";
 
 const FIXTURE = `
 export type ExportedAlias = string;
@@ -78,10 +78,20 @@ describe("TypeInfoSession.listSymbols", () => {
     session.host.close();
   });
 
-  it("returns an empty inventory for a non-existent file", () => {
+  it("refuses a non-existent file as unknownSource, never an empty inventory", () => {
     const session = new TypeInfoSession({ root: "/fixtures" });
-    const symbols = session.listSymbols("/fixtures/missing.ts");
-    expect(symbols).toEqual([]);
+    let refusal: unknown;
+    try {
+      session.listSymbols("/fixtures/missing.ts");
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(TypeInfoRequestFailure);
+    const { error } = refusal as TypeInfoRequestFailure;
+    expect(error.case).toBe("unknownSource");
+    if (error.case === "unknownSource") {
+      expect(error.value.path).toBe("/fixtures/missing.ts");
+    }
     session.host.close();
   });
 

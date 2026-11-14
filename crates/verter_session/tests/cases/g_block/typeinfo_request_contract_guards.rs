@@ -5,8 +5,8 @@
 //! `TypeInfoRequestError` union is consistent across the proto and the
 //! validator; the seven graph-payload request types carry
 //! `context + closure + displayPolicy` (with `flowNarrowing` /
-//! `contextualType` the two NAMED closure exemptions); `listSymbols` is
-//! a scalar list; `relate` carries no closure; and every closure variant
+//! `contextualType` the two NAMED closure exemptions); `relate` carries
+//! no closure; and every closure variant
 //! has a concrete resource bound.
 //!
 //! Two shapes:
@@ -507,44 +507,7 @@ fn every_typeinfo_request_carries_context_or_is_exempted_with_rationale() {
     }
 }
 
-// ───────────────── static: listSymbols scalar / relate no closure ─────────
-
-#[test]
-fn list_symbols_is_scalar() {
-    // The list-symbols surface is a flat scalar list: `SymbolEntryListDto`
-    // is `repeated SymbolEntryDto`, and each `SymbolEntryDto` is a flat
-    // record (name / kind / span / exported). It is NOT a graph request —
-    // it carries no projection context, no closure, no graph payload.
-    // Discriminating: add a `GraphClosurePolicy` to SymbolEntryDto and
-    // this fails.
-    let proto = read_proto();
-
-    let list_body = request_message_body(&proto, "SymbolEntryListDto");
-    assert!(
-        list_body.contains("repeated SymbolEntryDto entries ="),
-        "SymbolEntryListDto must be a flat `repeated SymbolEntryDto` list",
-    );
-
-    let entry_body = request_message_body(&proto, "SymbolEntryDto");
-    // A scalar symbol entry carries NO graph machinery.
-    for forbidden in [
-        "GraphClosurePolicy",
-        "GraphProjectionReductionContext",
-        "SemanticTypeGraph",
-        "GraphDisplayPolicy",
-    ] {
-        assert!(
-            !entry_body.contains(forbidden),
-            "SymbolEntryDto must be a scalar record — it must NOT carry `{forbidden}`. \
-             listSymbols is a scalar list, not a graph request.",
-        );
-    }
-    // Positive: it carries the flat scalar fields.
-    assert!(
-        entry_body.contains("string name =") && entry_body.contains("string kind ="),
-        "SymbolEntryDto must carry the flat scalar `name` / `kind` fields",
-    );
-}
+// ───────────────────────── static: relate no closure ─────────────────────────
 
 #[test]
 fn relate_has_no_closure_field() {

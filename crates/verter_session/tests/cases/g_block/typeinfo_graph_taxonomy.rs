@@ -283,9 +283,9 @@ fn type_node_taxonomy_proto_ts_parity() {
 
 #[test]
 fn type_info_graph_response_taxonomy_proto_ts_parity() {
-    // The response wrapper's closed oneof: `graph`, `error`, and the
-    // schema-3 `framework_surface` payload arm.
-    assert_proto_ts_parity("TypeInfoGraphResponse", "TypeInfoGraphResponse", "kind", 3);
+    // The response wrapper's closed oneof: `graph`, `error`, the schema-3
+    // `framework_surface` payload arm and the schema-12 `symbol_list` arm.
+    assert_proto_ts_parity("TypeInfoGraphResponse", "TypeInfoGraphResponse", "kind", 4);
 }
 
 // ---------------------------------------------------------------------------
@@ -542,7 +542,7 @@ fn type_info_request_error_taxonomy_proto_ts_parity() {
 
 #[test]
 fn type_info_graph_request_taxonomy_proto_ts_parity() {
-    assert_proto_ts_parity("TypeInfoGraphRequest", "TypeInfoGraphRequest", "payload", 7);
+    assert_proto_ts_parity("TypeInfoGraphRequest", "TypeInfoGraphRequest", "payload", 8);
 }
 
 #[test]

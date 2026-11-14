@@ -1049,15 +1049,6 @@ export declare class VerterHost {
   // ===========================================================================
 
   /**
-   * Return the top-level symbol inventory for `canonicalId`.
-   *
-   * JSON Buffer carrying a `Vec<FfiSymbolEntry>` (camelCase shape).
-   * The call is bounded by the shallow-state size and does NOT emit
-   * an audit record.
-   */
-  listSymbols(canonicalId: string): Buffer;
-
-  /**
    * Resolve `name` in `canonicalId`'s top-level scope and return the
    * raised `TypeExpr` plus the per-request audit record.
    *

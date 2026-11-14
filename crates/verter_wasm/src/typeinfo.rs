@@ -13,7 +13,7 @@ use verter_protocol::typeinfo::graph::{
     TypeInfoCapabilityHandshakeRequest, TypeInfoCapabilityHandshakeResponse, TypeInfoGraphRequest,
     TypeInfoGraphResponse,
 };
-use verter_protocol::typeinfo::{FfiEvaluateTypeExpressionRequest, FfiSymbolEntry};
+use verter_protocol::typeinfo::FfiEvaluateTypeExpressionRequest;
 use verter_session::host_resolve_type_audit::TypeResolutionRequestError;
 use verter_type_engine::semantic_query::ProjectionMode;
 use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
@@ -70,12 +70,6 @@ pub(crate) fn project_resolved_root(
             Some(format!("{:?}", TypeResolutionRequestError::from(unsettled))),
         ),
     }
-}
-
-/// Encode a list of `FfiSymbolEntry` to a JSON string.
-pub(crate) fn encode_symbol_list(entries: &[FfiSymbolEntry]) -> Result<String, JsValue> {
-    serde_json::to_string(entries)
-        .map_err(|e| JsValue::from_str(&format!("symbol list serialization error: {e}")))
 }
 
 /// Encode a record into the optional `auditRecord` DTO slot,
@@ -193,4 +187,56 @@ pub(crate) fn framework_error_response(
     TypeInfoGraphResponse {
         kind: Some(type_info_graph_response::Kind::Error(error)),
     }
+}
+
+/// The symbol inventory of `canonical`, answered by the list-symbols
+/// operation of the one typeinfo entry, as the browser host's JSON array.
+pub(crate) fn list_symbols_json(
+    host: &verter_session::VerterHost,
+    canonical: &str,
+) -> Result<String, JsValue> {
+    use verter_protocol::typeinfo::graph as wire;
+    use verter_protocol::verter::v1::{type_info_graph_request, type_info_graph_response};
+    let request = wire::TypeInfoGraphRequest {
+        schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+        operation: wire::Operation::ListSymbols as i32,
+        payload: Some(type_info_graph_request::Payload::ListSymbols(
+            wire::ListSymbolsRequest {
+                canonical_id: canonical.to_string(),
+            },
+        )),
+    };
+    let (outcome, _record) = host.type_info_with_audit(request).into_parts();
+    let entries = match outcome {
+        Ok(wire::TypeInfoGraphResponse {
+            kind: Some(type_info_graph_response::Kind::SymbolList(list)),
+        }) => list.entries,
+        Ok(other) => {
+            return Err(JsValue::from_str(&format!(
+                "listSymbols: unexpected response {other:?}"
+            )))
+        }
+        Err(error) => {
+            return Err(JsValue::from_str(&format!(
+                "listSymbols refused: {:?}",
+                error.kind
+            )))
+        }
+    };
+    let rows: Vec<serde_json::Value> = entries
+        .into_iter()
+        .map(|entry| {
+            serde_json::json!({
+                "name": entry.name,
+                "kind": entry.kind,
+                "spanEncoding": "utf8.v1",
+                "spanStart": entry.span_start,
+                "spanEnd": entry.span_end,
+                "hasSpan": entry.has_span,
+                "isExported": entry.is_exported,
+            })
+        })
+        .collect();
+    serde_json::to_string(&rows)
+        .map_err(|e| JsValue::from_str(&format!("symbol list serialization error: {e}")))
 }

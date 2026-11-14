@@ -231,11 +231,14 @@ fn type_info_graph_request_roundtrip_covers_every_payload_arm() {
         Payload::ContextualType(sample_contextual_type_request()),
         Payload::ExpandAround(sample_expand_around_request()),
         Payload::FrameworkSurface(sample_framework_surface_request()),
+        Payload::ListSymbols(g::ListSymbolsRequest {
+            canonical_id: "/src/a.ts".to_string(),
+        }),
     ];
     assert_eq!(
         arms.len(),
-        7,
-        "TypeInfoGraphRequest covers exactly 7 graph operation payload arms",
+        8,
+        "TypeInfoGraphRequest covers exactly 8 operation payload arms",
     );
 
     for (idx, payload) in arms.into_iter().enumerate() {
@@ -510,11 +513,33 @@ fn type_info_graph_response_roundtrip_covers_every_kind_arm() {
             ),
         }),
         Kind::FrameworkSurface(framework_surface),
+        // A spanned and an unspanned entry, so a lost span field cannot
+        // decode back equal.
+        Kind::SymbolList(g::SymbolEntryListDto {
+            entries: vec![
+                g::SymbolEntryDto {
+                    name: "Foo".to_string(),
+                    kind: "typeAlias".to_string(),
+                    span_start: 7,
+                    span_end: 10,
+                    has_span: true,
+                    is_exported: true,
+                },
+                g::SymbolEntryDto {
+                    name: "bar".to_string(),
+                    kind: "const".to_string(),
+                    span_start: 0,
+                    span_end: 0,
+                    has_span: false,
+                    is_exported: false,
+                },
+            ],
+        }),
     ];
     assert_eq!(
         arms.len(),
-        3,
-        "TypeInfoGraphResponse covers exactly 3 closed oneof arms",
+        4,
+        "TypeInfoGraphResponse covers exactly 4 closed oneof arms",
     );
 
     for (idx, kind) in arms.into_iter().enumerate() {
@@ -1407,6 +1432,7 @@ fn graph_operation_for_payload_index(idx: usize) -> g::Operation {
         4 => g::Operation::ContextualTypeAt,
         5 => g::Operation::ExpandAround,
         6 => g::Operation::FrameworkSurfaces,
-        _ => unreachable!("only 7 graph operation payload arms exist"),
+        7 => g::Operation::ListSymbols,
+        _ => unreachable!("only 8 operation payload arms exist"),
     }
 }

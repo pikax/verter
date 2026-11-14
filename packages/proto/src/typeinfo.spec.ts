@@ -625,9 +625,13 @@ describe("typeinfo proto TS bindings", () => {
           },
         },
       },
+      {
+        operation: GraphOperation.LIST_SYMBOLS,
+        payload: { case: "listSymbols", value: { canonicalId: "/src/a.ts" } },
+      },
     ];
 
-    expect(arms.length).toBe(7);
+    expect(arms.length).toBe(8);
 
     for (const init of arms) {
       const req = create(TypeInfoGraphRequestSchema, {
@@ -933,6 +937,30 @@ describe("typeinfo proto TS bindings", () => {
     // payload must survive identically.
     expect(decoded).toEqual(graph);
     expect(decoded.relationProofs.length).toBe(4);
+  });
+
+  it("TypeInfoGraphResponse roundtrips the symbolList arm", () => {
+    // A spanned and an unspanned entry, so a lost span field cannot decode equal.
+    const response = create(TypeInfoGraphResponseSchema, {
+      kind: {
+        case: "symbolList",
+        value: {
+          entries: [
+            {
+              name: "Foo",
+              kind: "typeAlias",
+              spanStart: 7,
+              spanEnd: 10,
+              hasSpan: true,
+              isExported: true,
+            },
+            { name: "bar", kind: "const", hasSpan: false, isExported: false },
+          ],
+        },
+      },
+    });
+    const bytes = toBinary(TypeInfoGraphResponseSchema, response);
+    expect(fromBinary(TypeInfoGraphResponseSchema, bytes)).toEqual(response);
   });
 
   it("SemanticTypeGraph carries its fact identity and skips the retired request echo", () => {

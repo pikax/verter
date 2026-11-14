@@ -260,6 +260,7 @@ impl VerterHost {
         match operation {
             ServedOperation::ResolveSymbol => self.execute_resolve_symbol(request),
             ServedOperation::FrameworkSurfaces => self.execute_framework_surface(request),
+            ServedOperation::ListSymbols => self.execute_list_symbols(request),
             ServedOperation::ExpandAround => {
                 let Some(type_info_graph_request::Payload::ExpandAround(expand)) = request.payload
                 else {
@@ -276,6 +277,60 @@ impl VerterHost {
                 self.execute_expand_around(&expand)
             }
         }
+    }
+
+    /// The list-symbols executor body, after validation: the file's own
+    /// top-level declarations from its shallow inventory. A file the host
+    /// does not know is `UnknownSource`, and a known file it could not index
+    /// is `UnstableState`: never an empty list.
+    fn execute_list_symbols(
+        &self,
+        request: TypeInfoGraphRequest,
+    ) -> (TypeInfoGraphResponse, TypeInfoGraphPayload) {
+        let Some(type_info_graph_request::Payload::ListSymbols(list)) = request.payload else {
+            // Unreachable after validation; refused rather than assumed.
+            return (
+                error_response(malformed(
+                    "list-symbols payload arm missing after validation",
+                )),
+                TypeInfoGraphPayload::from_validation_error(GraphOperationTag::ListSymbols),
+            );
+        };
+        let source = match self.decode_source(&list.canonical_id) {
+            Ok(source) => source,
+            Err(error) => {
+                return (
+                    error_response(error),
+                    TypeInfoGraphPayload::from_validation_error(GraphOperationTag::ListSymbols),
+                );
+            }
+        };
+        // A known source the host could not index has no inventory to
+        // answer: the input is unavailable, never an empty list.
+        let Some(symbols) = self.indexed_file_symbols(source.canonical()) else {
+            return (
+                error_response(TypeInfoRequestError {
+                    kind: Some(type_info_request_error::Kind::UnstableState(
+                        wire::wire_error_unstable_state(0),
+                    )),
+                }),
+                TypeInfoGraphPayload::from_unsettled_input(GraphOperationTag::ListSymbols),
+            );
+        };
+        let entries = symbols
+            .into_iter()
+            .map(crate::typeinfo::symbol_inventory::symbol_entry_dto)
+            .collect();
+        let response = TypeInfoGraphResponse {
+            kind: Some(type_info_graph_response::Kind::SymbolList(
+                wire::SymbolEntryListDto { entries },
+            )),
+        };
+        let payload = TypeInfoGraphPayload {
+            operation: GraphOperationTag::ListSymbols,
+            ..TypeInfoGraphPayload::empty()
+        };
+        (response, payload)
     }
 
     /// The resolve-symbol executor body, after validation.
@@ -682,6 +737,10 @@ fn request_target(
             r.canonical_id.clone(),
             verter_audit::RequestTargetIdentity::registered(r.canonical_id.clone()),
         ),
+        Some(type_info_graph_request::Payload::ListSymbols(r)) if !r.canonical_id.is_empty() => (
+            r.canonical_id.clone(),
+            verter_audit::RequestTargetIdentity::registered(r.canonical_id.clone()),
+        ),
         _ => (
             String::new(),
             verter_audit::RequestTargetIdentity::NotApplicable,
@@ -702,6 +761,7 @@ fn requested_operation_tag(envelope: &TypeInfoGraphRequest) -> GraphOperationTag
         Ok(wire::Operation::ExpandAround) => GraphOperationTag::ExpandAround,
         Ok(wire::Operation::FlowNarrowingAt) => GraphOperationTag::FlowNarrowingAt,
         Ok(wire::Operation::ContextualTypeAt) => GraphOperationTag::ContextualTypeAt,
+        Ok(wire::Operation::ListSymbols) => GraphOperationTag::ListSymbols,
     }
 }
 

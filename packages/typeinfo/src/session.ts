@@ -18,7 +18,15 @@
  * (LSP, MCP, bundlers).
  */
 
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { VerterHost, type AuditRecordFilter } from "@verter/native";
+import {
+  GraphOperation,
+  TYPEINFO_GRAPH_SCHEMA_VERSION,
+  TypeInfoGraphRequestSchema,
+  TypeInfoGraphResponseSchema,
+  type TypeInfoRequestError,
+} from "@verter/proto";
 import type { TypeDescriptor } from "@verter/type-ir";
 
 import { decodeResolveResult } from "./decode.js";
@@ -48,39 +56,35 @@ export class TypeInfoSession {
   }
 
   /**
-   * Return the top-level symbol inventory for `canonicalId`.
+   * Return the top-level symbol inventory for `canonicalId`, answered by
+   * the list-symbols operation of the host's one typeinfo entry. Spans are
+   * UTF-8 byte offsets (the schema-12 unit contract).
    *
-   * Pure shallow read; no audit record is emitted.
+   * Throws {@link TypeInfoRequestFailure} when the host refuses the request,
+   * for example `unknownSource` for a file it does not know.
    */
   listSymbols(canonicalId: string): SymbolEntry[] {
-    const buf = this.host.listSymbols(canonicalId);
-    if (!buf || buf.length === 0) {
-      return [];
+    const request = create(TypeInfoGraphRequestSchema, {
+      schemaVersion: TYPEINFO_GRAPH_SCHEMA_VERSION,
+      operation: GraphOperation.LIST_SYMBOLS,
+      payload: { case: "listSymbols", value: { canonicalId } },
+    });
+    const { response } = this.host.typeInfoWithAudit(
+      Buffer.from(toBinary(TypeInfoGraphRequestSchema, request)),
+    );
+    const kind = fromBinary(TypeInfoGraphResponseSchema, new Uint8Array(response)).kind;
+    if (kind.case === "error") {
+      throw new TypeInfoRequestFailure(kind.value.kind);
     }
-    const raw = JSON.parse(buf.toString("utf-8")) as Array<{
-      name: string;
-      kind: string;
-      spanEncoding: string;
-      spanStart: number;
-      spanEnd: number;
-      hasSpan: boolean;
-      isExported: boolean;
-    }>;
-    for (const r of raw) {
-      // The symbol list states its span unit; a tag from a future contract is
-      // refused rather than read as UTF-8 bytes.
-      if (r.spanEncoding !== "utf8.v1") {
-        throw new Error(
-          `listSymbols entry '${r.name}' declares span encoding '${String(r.spanEncoding)}'; expected 'utf8.v1'`,
-        );
-      }
+    if (kind.case !== "symbolList") {
+      throw new Error(`listSymbols: unexpected response arm '${String(kind.case)}'`);
     }
-    return raw.map<SymbolEntry>((r) => ({
-      name: r.name,
-      kind: r.kind as SymbolEntry["kind"],
+    return kind.value.entries.map<SymbolEntry>((entry) => ({
+      name: entry.name,
+      kind: entry.kind as SymbolEntry["kind"],
       spanEncoding: "utf8.v1" as const,
-      span: r.hasSpan ? { start: r.spanStart, end: r.spanEnd } : undefined,
-      isExported: r.isExported,
+      span: entry.hasSpan ? { start: entry.spanStart, end: entry.spanEnd } : undefined,
+      isExported: entry.isExported,
     }));
   }
 
@@ -159,3 +163,15 @@ function encodeTypeArgs(typeArgs: TypeDescriptor[] | undefined): Buffer | null {
  * `session.host.getAuditRecords(filter)`.
  */
 export type { AuditRecordFilter };
+
+/** A typed request refusal from the host's typeinfo entry. */
+export class TypeInfoRequestFailure extends Error {
+  /** The typed wire error, for example `{ case: "unknownSource", value: { path } }`. */
+  public readonly error: TypeInfoRequestError["kind"];
+
+  constructor(error: TypeInfoRequestError["kind"]) {
+    super(`typeinfo request refused: ${String(error.case)}`);
+    this.name = "TypeInfoRequestFailure";
+    this.error = error;
+  }
+}

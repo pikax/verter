@@ -16,7 +16,6 @@ use verter_protocol::typeinfo::graph::{
     TypeInfoCapabilityHandshakeRequest, TypeInfoCapabilityHandshakeResponse, TypeInfoGraphRequest,
     TypeInfoGraphResponse,
 };
-use verter_protocol::typeinfo::FfiSymbolEntry;
 use verter_session::host_resolve_type_audit::TypeResolutionRequestError;
 use verter_type_engine::semantic_query::ProjectionMode;
 use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
@@ -87,17 +86,6 @@ pub struct NapiTypeInfoResolveResult {
     /// Human-readable dispatch-fault description; `null` on success or
     /// a non-fault miss.
     pub error: Option<String>,
-}
-
-/// Encode a list of `FfiSymbolEntry` to a JSON Buffer.
-pub(crate) fn encode_symbol_list(entries: &[FfiSymbolEntry]) -> Result<Buffer> {
-    let bytes = serde_json::to_vec(entries).map_err(|e| {
-        Error::new(
-            Status::GenericFailure,
-            format!("symbol list serialization error: {e}"),
-        )
-    })?;
-    Ok(Buffer::from(bytes))
 }
 
 /// Encode a record into the optional `auditRecord` DTO slot, projecting

@@ -392,6 +392,86 @@ fn an_unknown_source_is_refused_before_any_engine_read() {
     );
 }
 
+/// A list-symbols envelope for `canonical`.
+fn list_symbols_envelope(canonical: &str) -> TypeInfoRequest {
+    TypeInfoRequest {
+        schema_version: TYPEINFO_GRAPH_SCHEMA_VERSION,
+        operation: Operation::ListSymbols as i32,
+        payload: Some(type_info_graph_request::Payload::ListSymbols(
+            wire::ListSymbolsRequest {
+                canonical_id: canonical.to_string(),
+            },
+        )),
+    }
+}
+
+/// The list-symbols operation answers the file's own top-level
+/// declarations: a type, a value and a dual-space class (once per space),
+/// sorted by name then kind, with export flags and a declared span.
+#[test]
+fn the_symbol_inventory_answers_through_the_envelope() {
+    let host = host_with_fixture();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some("/inventory.ts".to_string()),
+        input_id: "/inventory.ts".to_string(),
+        source: Arc::from(
+            "export type T = string;
+const v = 1;
+export class C {}
+",
+        ),
+        file_language: verter_session::LanguageRegistry::global()
+            .classify_static("/inventory.ts")
+            .static_resolution(),
+        aliases: Vec::new(),
+    });
+    let (response, _record) = host
+        .type_info_with_audit(list_symbols_envelope("/inventory.ts"))
+        .into_parts();
+    let response = response.expect("a known file answers its inventory");
+    let Some(type_info_graph_response::Kind::SymbolList(list)) = response.kind else {
+        panic!("list-symbols answers the symbol-list arm");
+    };
+    let entries: Vec<(&str, &str, bool)> = list
+        .entries
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.kind.as_str(), entry.is_exported))
+        .collect();
+    assert_eq!(
+        entries,
+        vec![
+            ("C", "class", true),
+            ("C", "classValue", true),
+            ("T", "typeAlias", true),
+            ("v", "const", false),
+        ]
+    );
+    let alias = &list.entries[2];
+    assert!(
+        alias.has_span && alias.span_start < alias.span_end,
+        "a declared alias carries its UTF-8 byte span"
+    );
+}
+
+/// A file the host does not know is refused as `UnknownSource`, never
+/// answered with an empty inventory.
+#[test]
+fn list_symbols_for_an_unknown_source_is_unknown_source_not_an_empty_list() {
+    let host = host_with_fixture();
+    let (response, _record) = host
+        .type_info_with_audit(list_symbols_envelope("/missing.ts"))
+        .into_parts();
+    match response
+        .expect_err("an unknown file is a typed refusal")
+        .kind
+    {
+        Some(type_info_request_error::Kind::UnknownSource(unknown)) => {
+            assert_eq!(unknown.path, "/missing.ts");
+        }
+        other => panic!("an unknown file is UnknownSource, got {other:?}"),
+    }
+}
+
 #[test]
 fn an_unresolved_symbol_is_a_typed_graph_fault_answer() {
     let host = host_with_fixture();

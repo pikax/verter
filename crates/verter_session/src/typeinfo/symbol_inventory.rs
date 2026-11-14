@@ -56,6 +56,13 @@ impl VerterHost {
     /// shallow inventory yet.
     #[must_use]
     pub fn list_file_symbols(&self, canonical_id: &str) -> Vec<SymbolEntry> {
+        self.indexed_file_symbols(canonical_id).unwrap_or_default()
+    }
+
+    /// [`Self::list_file_symbols`], or `None` when the host could not
+    /// index `canonical_id`, so a refused inventory is never read as an
+    /// empty one.
+    pub(crate) fn indexed_file_symbols(&self, canonical_id: &str) -> Option<Vec<SymbolEntry>> {
         // Ensure the canonical post-parse artifact is materialised
         // through the shared host pipeline. `ensure_indexed_ready_serve`
         // builds (or reuses) the `IndexedReady` for `canonical_id`,
@@ -66,9 +73,7 @@ impl VerterHost {
         let facts_arc = self
             .ensure_indexed_ready_serve(canonical_id)
             .map(|serve| serve.indexed);
-        let Some(facts) = facts_arc.as_ref() else {
-            return Vec::new();
-        };
+        let facts = facts_arc.as_ref()?;
         let shallow = Arc::clone(&facts.shallow_state);
 
         // Build a name → declaration-entry lookup from the analysis
@@ -158,7 +163,7 @@ impl VerterHost {
                 .cmp(&b.name)
                 .then_with(|| (a.kind as u8).cmp(&(b.kind as u8)))
         });
-        entries
+        Some(entries)
     }
 }
 
@@ -186,4 +191,40 @@ fn is_local_export_target(
     name: &str,
 ) -> bool {
     is_exported_local(shallow, name)
+}
+
+/// The wire tag of a symbol kind, as `SymbolEntryDto.kind` carries it.
+const fn symbol_kind_tag(kind: SymbolKind) -> &'static str {
+    match kind {
+        SymbolKind::TypeAlias => "typeAlias",
+        SymbolKind::Interface => "interface",
+        SymbolKind::Class => "class",
+        SymbolKind::Const => "const",
+        SymbolKind::Let => "let",
+        SymbolKind::Var => "var",
+        SymbolKind::Function => "function",
+        SymbolKind::AsyncFunction => "asyncFunction",
+        SymbolKind::ClassValue => "classValue",
+        SymbolKind::Enum => "enum",
+    }
+}
+
+/// Project one inventory entry onto its wire form. A span is published
+/// only when it is a well-formed UTF-8 byte range; otherwise `has_span` is
+/// false.
+pub(crate) fn symbol_entry_dto(
+    entry: SymbolEntry,
+) -> verter_protocol::typeinfo::graph::SymbolEntryDto {
+    let (span_start, span_end, has_span) = match entry.span {
+        Some(span) if span.start <= span.end => (span.start, span.end, true),
+        _ => (0, 0, false),
+    };
+    verter_protocol::typeinfo::graph::SymbolEntryDto {
+        name: entry.name,
+        kind: symbol_kind_tag(entry.kind).to_string(),
+        span_start,
+        span_end,
+        has_span,
+        is_exported: entry.is_exported,
+    }
 }

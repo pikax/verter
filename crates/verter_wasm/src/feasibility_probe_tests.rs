@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use verter_ffi::convert::{host_to_ffi_symbol_entry, HostResolvedCompileProfiles};
+use verter_ffi::convert::HostResolvedCompileProfiles;
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
 use verter_type_engine::semantic_query::{ResolveDeclKey, ScopeId, SemanticQueryKey};
 
@@ -88,14 +88,50 @@ fn mapping_from_compile(response: &Value) -> Vec<String> {
     maps
 }
 
-fn normalize_symbols(symbols: &[verter_protocol::typeinfo::FfiSymbolEntry]) -> Value {
-    let mut rows: Vec<Value> = symbols
-        .iter()
+/// The symbol inventory of `canonical`, answered by the list-symbols
+/// operation of the one typeinfo entry, as the browser host reads it.
+fn listed_symbols(host: &VerterHost, canonical: &str) -> Vec<Value> {
+    use verter_protocol::typeinfo::graph as wire;
+    use verter_protocol::verter::v1::{type_info_graph_request, type_info_graph_response};
+    let request = wire::TypeInfoGraphRequest {
+        schema_version: wire::TYPEINFO_GRAPH_SCHEMA_VERSION,
+        operation: wire::Operation::ListSymbols as i32,
+        payload: Some(type_info_graph_request::Payload::ListSymbols(
+            wire::ListSymbolsRequest {
+                canonical_id: canonical.to_string(),
+            },
+        )),
+    };
+    let (outcome, _record) = host.type_info_with_audit(request).into_parts();
+    let Ok(wire::TypeInfoGraphResponse {
+        kind: Some(type_info_graph_response::Kind::SymbolList(list)),
+    }) = outcome
+    else {
+        panic!("the fixture's symbol inventory answers the symbol-list arm");
+    };
+    list.entries
+        .into_iter()
         .map(|entry| {
             json!({
                 "name": entry.name,
                 "kind": entry.kind,
+                "spanStart": entry.span_start,
+                "spanEnd": entry.span_end,
+                "hasSpan": entry.has_span,
                 "isExported": entry.is_exported,
+            })
+        })
+        .collect()
+}
+
+fn normalize_symbols(symbols: &[Value]) -> Value {
+    let mut rows: Vec<Value> = symbols
+        .iter()
+        .map(|entry| {
+            json!({
+                "name": entry["name"],
+                "kind": entry["kind"],
+                "isExported": entry["isExported"],
             })
         })
         .collect();
@@ -136,11 +172,7 @@ pub(crate) fn native_feasibility_receipt() -> Value {
         .cloned()
         .unwrap_or_default();
 
-    let ffi_symbols: Vec<verter_protocol::typeinfo::FfiSymbolEntry> = host
-        .list_file_symbols(CANONICAL_TS)
-        .into_iter()
-        .map(host_to_ffi_symbol_entry)
-        .collect();
+    let listed = listed_symbols(&host, CANONICAL_TS);
 
     let (outcome, _record) = host
         .resolve_named_symbol_wire_with_audit(CANONICAL_TS, TYPEINFO_SYMBOL, &[], None)
@@ -188,13 +220,13 @@ pub(crate) fn native_feasibility_receipt() -> Value {
     json!({
         "operations": {
             "session": products,
-            "typeinfo": ffi_symbols,
+            "typeinfo": listed,
             "style": style,
             "mapping": mapping,
             "query": query,
         },
         "identities": {
-            "symbols": normalize_symbols(&ffi_symbols),
+            "symbols": normalize_symbols(&listed),
             "typeinfo": type_expr,
             "typeinfoError": typeinfo_error,
         },

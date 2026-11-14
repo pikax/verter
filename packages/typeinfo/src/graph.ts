@@ -51,6 +51,7 @@ import {
   type GraphSymbolNode,
   type GraphTypeNode,
   type SemanticTypeGraph,
+  type SymbolEntryListDto,
   type TypeInfoGraphRequest as WireTypeInfoGraphRequest,
   type TypeInfoRequestError,
   TYPEINFO_GRAPH_SCHEMA_VERSION,
@@ -235,7 +236,8 @@ export interface SemanticTypeGraphView {
 export type TypeInfoResult =
   | { kind: "graph"; graph: SemanticTypeGraphView; root: TypeDescriptor }
   | { kind: "error"; error: TypeInfoRequestError["kind"] }
-  | { kind: "frameworkSurface"; surface: FrameworkSurface | FrameworkSurfaceError };
+  | { kind: "frameworkSurface"; surface: FrameworkSurface | FrameworkSurfaceError }
+  | { kind: "symbolList"; entries: SymbolEntryListDto["entries"] };
 
 /**
  * Decode a protobuf-encoded `TypeInfoGraphResponse` into the typed
@@ -275,6 +277,9 @@ export function decodeTypeInfoResult(bytes: Uint8Array): TypeInfoResult {
   }
   if (kind.case === "frameworkSurface" && kind.value) {
     return { kind: "frameworkSurface", surface: decodeFrameworkSurfacePayload(kind.value) };
+  }
+  if (kind.case === "symbolList" && kind.value) {
+    return { kind: "symbolList", entries: kind.value.entries };
   }
   // An empty `kind` is malformed — surface a typed-unspecified error
   // variant rather than a fabricated string.

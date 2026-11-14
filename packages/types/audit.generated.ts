@@ -1186,7 +1186,7 @@ edges_truncated: number, };
  * producers map the wire operation enum to this tag at the audit
  * emission boundary.
  */
-export type GraphOperationTag = "ResolveSymbol" | "EvaluateExpression" | "ProjectPath" | "Relate" | "FrameworkSurfaces" | "ExpandAround" | "FlowNarrowingAt" | "ContextualTypeAt";
+export type GraphOperationTag = "ResolveSymbol" | "EvaluateExpression" | "ProjectPath" | "Relate" | "FrameworkSurfaces" | "ExpandAround" | "FlowNarrowingAt" | "ContextualTypeAt" | "ListSymbols";
 
 /**
  * Fresh `IndexedReady` build observed during the request.

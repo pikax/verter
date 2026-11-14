@@ -931,7 +931,6 @@ const NAPI_OUT_OF_SCOPE: &[(&str, &str)] = &[
     ("getLintRuleMetadata", "lint metadata"),
     ("getMetrics", "host metrics"),
     ("lint", "lint product"),
-    ("listSymbols", "type-resolution product"),
     ("matchCssSelectors", "CSS analysis product"),
     ("remove", "lifecycle"),
     ("resolve", "id resolution"),
@@ -1442,7 +1441,10 @@ const WASM_OUT_OF_SCOPE: &[(&str, &str)] = &[
     ("getLastAuditRecord", "audit records"),
     ("getLintRuleMetadata", "lint metadata"),
     ("lint", "lint product"),
-    ("listSymbols", "type-resolution product"),
+    (
+        "listSymbols",
+        "browser-host adapter over the list-symbols operation",
+    ),
     ("matchCssSelectors", "CSS analysis product"),
     (
         "observeInputSnapshot",

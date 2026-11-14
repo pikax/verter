@@ -25,8 +25,9 @@ use verter_session::typeinfo::request_validation::{
     validate_resolve_symbol_graph_request, validate_schema_version_for_operation,
     validate_type_info_graph_request, EXPAND_AROUND_MIN_SCHEMA_VERSION,
     FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION, FRAMEWORK_SURFACE_REQUESTED_KINDS_MIN_SCHEMA_VERSION,
-    MAX_EXPANSION_DEPTH_BUDGET, MAX_EXPANSION_NODE_BUDGET, MAX_STRUCTURED_EXPRESSION_DEPTH,
-    MIN_TYPEINFO_GRAPH_SCHEMA_VERSION, SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
+    LIST_SYMBOLS_MIN_SCHEMA_VERSION, MAX_EXPANSION_DEPTH_BUDGET, MAX_EXPANSION_NODE_BUDGET,
+    MAX_STRUCTURED_EXPRESSION_DEPTH, MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
+    SUPPORTED_TYPEINFO_GRAPH_SCHEMA_VERSIONS,
 };
 
 fn prim_string_expr() -> wire::StructuredTypeExpression {
@@ -716,6 +717,39 @@ fn expand_around_operation_requires_schema_twelve() {
     }
 }
 
+/// List-symbols' floor is schema 12: every globally supported version
+/// below it is a MalformedPayload for this operation, 12 validates, and an
+/// empty file path is a MissingProjectPath.
+#[test]
+fn list_symbols_below_its_schema_floor_is_malformed() {
+    assert_eq!(LIST_SYMBOLS_MIN_SCHEMA_VERSION, 12);
+    validate_type_info_graph_request(&legacy_envelope(
+        wire::Operation::ListSymbols,
+        LIST_SYMBOLS_MIN_SCHEMA_VERSION,
+    ))
+    .expect("a v12 list-symbols request must validate");
+    for version in [MIN_TYPEINFO_GRAPH_SCHEMA_VERSION, 11] {
+        let request = legacy_envelope(wire::Operation::ListSymbols, version);
+        let err = validate_type_info_graph_request(&request).unwrap_err();
+        assert_eq!(
+            err_variant_label(&err),
+            "MalformedPayload",
+            "a v{version} list-symbols request is a MalformedPayload"
+        );
+    }
+    let mut empty = legacy_envelope(
+        wire::Operation::ListSymbols,
+        LIST_SYMBOLS_MIN_SCHEMA_VERSION,
+    );
+    empty.payload = Some(wire_request::Payload::ListSymbols(
+        wire::ListSymbolsRequest {
+            canonical_id: String::new(),
+        },
+    ));
+    let err = validate_type_info_graph_request(&empty).unwrap_err();
+    assert_eq!(err_variant_label(&err), "MissingProjectPath");
+}
+
 /// A well-shaped profile reference: a 32-byte digest. Validation checks the
 /// shape only; admission is the registry's question.
 fn well_shaped_profile() -> Option<wire::FrameworkProfileRef> {
@@ -868,6 +902,11 @@ fn legacy_envelope(operation: wire::Operation, schema_version: u32) -> wire::Typ
         wire::Operation::ExpandAround => wire_request::Payload::ExpandAround(
             expand_around_request_with(Some(well_shaped_node_ref())),
         ),
+        wire::Operation::ListSymbols => {
+            wire_request::Payload::ListSymbols(wire::ListSymbolsRequest {
+                canonical_id: "/a.ts".to_string(),
+            })
+        }
         wire::Operation::FrameworkSurfaces => {
             panic!("framework-surface envelopes are built by framework_surface_envelope")
         }
@@ -1104,6 +1143,7 @@ fn op_minimum_gate_walks_every_operation_discriminant() {
             | wire::Operation::ContextualTypeAt => MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
             wire::Operation::ExpandAround => EXPAND_AROUND_MIN_SCHEMA_VERSION,
             wire::Operation::FrameworkSurfaces => FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION,
+            wire::Operation::ListSymbols => LIST_SYMBOLS_MIN_SCHEMA_VERSION,
         }
     }
 
@@ -1116,10 +1156,11 @@ fn op_minimum_gate_walks_every_operation_discriminant() {
         wire::Operation::ExpandAround,
         wire::Operation::FlowNarrowingAt,
         wire::Operation::ContextualTypeAt,
+        wire::Operation::ListSymbols,
     ];
     assert_eq!(
         EVERY_OPERATION.len(),
-        8,
+        9,
         "the walk must cover every operation discriminant",
     );
 

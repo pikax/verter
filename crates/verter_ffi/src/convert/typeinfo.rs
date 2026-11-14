@@ -6,12 +6,10 @@
 //! adapters use these helpers to keep boundary parsing in one place.
 
 use verter_protocol::typeinfo::{
-    FfiEvaluateTypeExpressionRequest, FfiImportSpec, FfiNamedImport, FfiSymbolEntry, MODE_EXPANDED,
-    MODE_IDENTITY, MODE_NAVIGATE, MODE_SHALLOW, MODE_SKELETON,
+    FfiEvaluateTypeExpressionRequest, FfiImportSpec, FfiNamedImport, MODE_EXPANDED, MODE_IDENTITY,
+    MODE_NAVIGATE, MODE_SHALLOW, MODE_SKELETON,
 };
-use verter_session::typeinfo::types::{
-    EvaluateTypeExpressionRequest, ImportSpec, NamedImport, SymbolEntry, SymbolKind,
-};
+use verter_session::typeinfo::types::{EvaluateTypeExpressionRequest, ImportSpec, NamedImport};
 use verter_type_engine::semantic_query::ProjectionMode;
 
 use super::error::FfiConversionError;
@@ -108,62 +106,6 @@ pub fn projection_mode_tag(mode: ProjectionMode) -> &'static str {
         ProjectionMode::Shallow => MODE_SHALLOW,
         ProjectionMode::Expanded => MODE_EXPANDED,
         ProjectionMode::Skeleton => MODE_SKELETON,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// host → FFI: SymbolEntry
-// ---------------------------------------------------------------------------
-
-/// Project a host [`SymbolEntry`] to its FFI mirror so consumers can
-/// JSON-encode the inventory at the boundary.
-pub fn host_to_ffi_symbol_entry(entry: SymbolEntry) -> FfiSymbolEntry {
-    let kind = symbol_kind_tag(entry.kind);
-    let (span_start, span_end, has_span) = match entry.span {
-        Some(span) if span.start <= span.end => (span.start, span.end, true),
-        _ => (0, 0, false),
-    };
-    FfiSymbolEntry {
-        name: entry.name,
-        kind: kind.to_string(),
-        span_encoding: verter_protocol::types::SpanEncodingTag::Utf8,
-        span_start,
-        span_end,
-        has_span,
-        is_exported: entry.is_exported,
-    }
-}
-
-/// Inverse of [`host_to_ffi_symbol_entry`] for round-trip tests and
-/// downstream decoders that want to reconstruct the host enum.
-pub fn parse_symbol_kind(tag: &str) -> Option<SymbolKind> {
-    match tag {
-        "typeAlias" => Some(SymbolKind::TypeAlias),
-        "interface" => Some(SymbolKind::Interface),
-        "class" => Some(SymbolKind::Class),
-        "const" => Some(SymbolKind::Const),
-        "let" => Some(SymbolKind::Let),
-        "var" => Some(SymbolKind::Var),
-        "function" => Some(SymbolKind::Function),
-        "asyncFunction" => Some(SymbolKind::AsyncFunction),
-        "classValue" => Some(SymbolKind::ClassValue),
-        "enum" => Some(SymbolKind::Enum),
-        _ => None,
-    }
-}
-
-fn symbol_kind_tag(kind: SymbolKind) -> &'static str {
-    match kind {
-        SymbolKind::TypeAlias => "typeAlias",
-        SymbolKind::Interface => "interface",
-        SymbolKind::Class => "class",
-        SymbolKind::Const => "const",
-        SymbolKind::Let => "let",
-        SymbolKind::Var => "var",
-        SymbolKind::Function => "function",
-        SymbolKind::AsyncFunction => "asyncFunction",
-        SymbolKind::ClassValue => "classValue",
-        SymbolKind::Enum => "enum",
     }
 }
 
@@ -274,58 +216,6 @@ mod tests {
         };
         let err = parse_named_import(ffi).unwrap_err();
         assert!(matches!(err, FfiConversionError::InvalidNamedImportKind(s) if s == "BogusKind"));
-    }
-
-    #[test]
-    fn host_to_ffi_symbol_entry_with_span() {
-        let entry = SymbolEntry {
-            name: "Foo".to_string(),
-            kind: SymbolKind::TypeAlias,
-            span: Some(verter_span::Span::new(10, 20)),
-            is_exported: true,
-        };
-        let ffi = host_to_ffi_symbol_entry(entry);
-        assert_eq!(ffi.name, "Foo");
-        assert_eq!(ffi.kind, "typeAlias");
-        assert_eq!(ffi.span_start, 10);
-        assert_eq!(ffi.span_end, 20);
-        assert!(ffi.has_span);
-        assert!(ffi.is_exported);
-    }
-
-    #[test]
-    fn host_to_ffi_symbol_entry_without_span() {
-        let entry = SymbolEntry {
-            name: "Bar".to_string(),
-            kind: SymbolKind::Function,
-            span: None,
-            is_exported: false,
-        };
-        let ffi = host_to_ffi_symbol_entry(entry);
-        assert_eq!(ffi.name, "Bar");
-        assert_eq!(ffi.kind, "function");
-        assert!(!ffi.has_span);
-        assert_eq!(ffi.span_start, 0);
-        assert_eq!(ffi.span_end, 0);
-    }
-
-    #[test]
-    fn parse_symbol_kind_round_trip() {
-        for kind in [
-            SymbolKind::TypeAlias,
-            SymbolKind::Interface,
-            SymbolKind::Class,
-            SymbolKind::Const,
-            SymbolKind::Let,
-            SymbolKind::Var,
-            SymbolKind::Function,
-            SymbolKind::AsyncFunction,
-            SymbolKind::ClassValue,
-            SymbolKind::Enum,
-        ] {
-            let tag = symbol_kind_tag(kind);
-            assert_eq!(parse_symbol_kind(tag).unwrap(), kind);
-        }
     }
 
     #[test]

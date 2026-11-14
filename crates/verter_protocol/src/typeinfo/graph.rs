@@ -68,9 +68,12 @@ pub use wire::FrameworkSurfaceOriginHop;
 pub use wire::FrameworkSurfaceOriginHopKind;
 pub use wire::FrameworkSurfacePayload;
 pub use wire::FrameworkSurfaceRequest;
+pub use wire::ListSymbolsRequest;
 pub use wire::NodeRef;
 pub use wire::ProjectPathGraphRequest;
 pub use wire::ResolveSymbolGraphRequest;
+pub use wire::SymbolEntryDto;
+pub use wire::SymbolEntryListDto;
 
 // -------------------------------------------------------------------------
 // Graph nodes — re-exported under un-prefixed names for ergonomic call sites.
@@ -375,7 +378,10 @@ pub use wire::UniqueSymbolKeyExpr;
 /// the host does not serve at every accepted version: no earlier arm states
 /// that refusal truthfully, and those operations never had an executor. It
 /// also adds the `UnknownSource` (tag 17) error arm: a request subject naming
-/// a source the host does not know, answered before any resolution.
+/// a source the host does not know, answered before any resolution. And it
+/// adds the list-symbols operation (`GRAPH_OPERATION_LIST_SYMBOLS`, the
+/// `list_symbols` payload arm 10 and the `symbol_list` response arm 4), whose
+/// floor is 12.
 pub const TYPEINFO_GRAPH_SCHEMA_VERSION: u32 = 12;
 
 /// Byte length of a [`FrameworkProfileRef::digest`]: the canonical digest

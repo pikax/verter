@@ -1353,25 +1353,25 @@ impl WasmVerterHost {
     // =========================================================================
     // Typeinfo entry-points (typeinfo public host substrate) — WASM
     //
-    // Mirror the NAPI surface (`NapiVerterHost::list_symbols`,
-    // `resolveSymbolWithAudit`, `evaluateTypeExpressionWithAudit`).
+    // Mirror the NAPI surface (`resolveSymbolWithAudit`,
+    // `evaluateTypeExpressionWithAudit`).
     // The encoding shape is JSON strings rather than `Buffer` blobs to
     // match the existing WASM convention; the wire schema is identical.
     // =========================================================================
 
-    /// Return the top-level symbol inventory for `canonical_id` as a
-    /// JSON string carrying a `Vec<FfiSymbolEntry>`.
+    /// The top-level symbol inventory of `canonical_id` as a JSON array of
+    /// `{ name, kind, spanEncoding, spanStart, spanEnd, hasSpan, isExported }`.
+    ///
+    /// An adapter over the list-symbols operation of the one typeinfo entry
+    /// (`type_info_with_audit`), kept for the browser host, which has no
+    /// protobuf codec. A refusal (for example `UnknownSource`) is thrown as
+    /// its typed error's debug text.
     #[wasm_bindgen(js_name = "listSymbols")]
     pub fn list_symbols(&self, canonical_id: &str) -> Result<String, JsValue> {
         let host = std::sync::Arc::clone(&self.inner);
         let canonical_id_owned = canonical_id.to_string();
         catch_panic(AssertUnwindSafe(move || {
-            let entries = host.list_file_symbols(&canonical_id_owned);
-            let ffi: Vec<verter_protocol::typeinfo::FfiSymbolEntry> = entries
-                .into_iter()
-                .map(verter_ffi::convert::host_to_ffi_symbol_entry)
-                .collect();
-            crate::typeinfo::encode_symbol_list(&ffi)
+            crate::typeinfo::list_symbols_json(&host, &canonical_id_owned)
         }))?
     }
 
