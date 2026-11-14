@@ -353,9 +353,12 @@ pub enum ComponentMetaResolutionPurpose {
 /// `whole_hash`). The producers validate their own cached entries against the
 /// same view and bubble their fact signatures into any active outer fact
 /// tracer, keeping the outer component-meta cache entry correctly keyed — all
-/// inside the single resolution engine. A partial producer answer is folded
-/// into the request-result completeness, so the enclosing component-meta
-/// result is refused warm promotion (the no-poison invariant).
+/// inside the single resolution engine. A partial producer answer reaches the
+/// request-result completeness, so the enclosing component-meta result is
+/// refused warm promotion (the no-poison invariant): a Vue macro's cold DTO
+/// compute marks the request and bubbles its own completeness scope into the
+/// caller's as it returns (a warm DTO hit is always complete), and a partial
+/// Svelte source family is marked here.
 pub(crate) fn component_meta_resolved_macros<M: verter_audit::observe::ObserveExec>(
     host: &crate::VerterHost,
     ctx: &dyn crate::resolver_core::HostRequestContext<M>,
@@ -383,10 +386,7 @@ pub(crate) fn component_meta_resolved_macros<M: verter_audit::observe::ObserveEx
                     if kind == mac.kind && usize::try_from(index) == Ok(macro_index)
             )
         });
-        if let Some(dtos) = read.and_then(|read| {
-            read.observe_partial();
-            read.dtos()
-        }) {
+        if let Some(dtos) = read.and_then(|read| read.dtos()) {
             // The lower-crate input rows carry the session-resolved SOURCE
             // POSITIONS alongside the analysis fields — the normalized-surface
             // authority the extraction publishes (the flat evaluated lanes
@@ -426,7 +426,14 @@ pub(crate) fn component_meta_resolved_macros<M: verter_audit::observe::ObserveEx
     sources.sort_by_key(|(source, _)| *source != SvelteSurfaceSource::CallbackPropEvents);
     let mut native = empty_macro_input(snapshot_macros.len());
     for (source, read) in sources {
-        read.observe_partial();
+        if matches!(
+            read.outcome,
+            crate::typeinfo::framework_surface::executor::ProducerOutcome::Source(
+                crate::typeinfo::framework_surface::ResolvedOutcome::Partial { .. }
+            )
+        ) {
+            verter_type_engine::request_context::mark_request_result_partial();
+        }
         let Some(dtos) = read.dtos() else {
             continue;
         };

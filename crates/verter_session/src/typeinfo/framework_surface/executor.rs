@@ -485,19 +485,6 @@ impl ProducerRead {
         }
     }
 
-    /// Fold a partial answer into the active request-result completeness,
-    /// so a result built from it is refused warm promotion. A no-op for a
-    /// complete answer.
-    pub(crate) fn observe_partial(&self) {
-        match &self.outcome {
-            ProducerOutcome::Macro(read) => read.observe_partial(),
-            ProducerOutcome::Source(ResolvedOutcome::Partial { .. }) => {
-                verter_type_engine::request_context::mark_request_result_partial();
-            }
-            ProducerOutcome::Source(_) => {}
-        }
-    }
-
     /// The bundle whose members the wire response may address: every Vue
     /// macro read, and a Svelte source family only when it resolved whole.
     fn member_source_dtos(&self) -> Option<&MacroSurfaceDtos> {
