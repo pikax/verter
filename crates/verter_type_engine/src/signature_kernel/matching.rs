@@ -699,6 +699,7 @@ impl UnionComposition {
                 binding,
                 view,
                 sig,
+                sig,
                 view.template(loaded.descriptor.template)?.input_shape,
                 SignatureResultRecipe::UnionCommon {
                     representative,
@@ -940,6 +941,11 @@ impl UnionSynthesis {
     /// when nothing combined into it, else a synthesized candidate over
     /// the combination's parameters whose constituents are the combined
     /// signatures.
+    ///
+    /// The combination declares the binders of the first generic signature
+    /// combined into it (`left.typeParameters || right.typeParameters`), so
+    /// a non-generic master's synthesized candidate, and the mapping of its
+    /// constituents, are in the combination's binders; the master names it.
     fn finish_master(&mut self, binding: &EpochBinding, m: SignatureCandidate) -> Res<()> {
         if self.constituents.len() == 1 {
             self.out.push(m);
@@ -947,11 +953,17 @@ impl UnionSynthesis {
             let acc = self.acc.expect("a master is finished with its combination");
             let view = binding.view();
             let acc_loaded = load(view, acc)?;
-            let sequence = edges_for(binding, view, m, &self.constituents)?;
+            let rep = if acc_loaded.space.binders.is_empty() {
+                m
+            } else {
+                acc
+            };
+            let sequence = edges_for(binding, view, rep, &self.constituents)?;
             let master = source_token(binding, m)?;
             let candidate = composite_candidate(
                 binding,
                 view,
+                rep,
                 m,
                 view.template(acc_loaded.descriptor.template)?.input_shape,
                 SignatureResultRecipe::UnionSynthesized {
@@ -1468,6 +1480,7 @@ impl IntersectionComposition {
             composed.push(composite_candidate(
                 binding,
                 view,
+                sig,
                 sig,
                 view.template(loaded.descriptor.template)?.input_shape,
                 SignatureResultRecipe::IntersectionConstruct {

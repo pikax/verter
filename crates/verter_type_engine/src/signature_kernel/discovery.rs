@@ -523,10 +523,15 @@ pub(super) fn edges_for(
     )?)
 }
 
+/// A composite candidate over `shape` and `recipe`: its declaration
+/// environment and residual binders are `rep`'s, the binder space its
+/// constituents are mapped into ([`edges_for`]); its source and provenance
+/// are `origin`'s, the signature it is named for.
 pub(super) fn composite_candidate(
     store: &EpochBinding,
     view: &SemanticReadView,
     rep: SignatureCandidate,
+    origin: SignatureCandidate,
     shape: super::records::SignatureInputShapeId,
     recipe: SignatureResultRecipe,
     ordinal: u32,
@@ -548,10 +553,10 @@ pub(super) fn composite_candidate(
         },
         None,
     )?;
-    if let Some(source) = store.descriptor_source(rep.signature)? {
+    if let Some(source) = store.descriptor_source(origin.signature)? {
         store.record_descriptor_source(descriptor, source)?;
     }
-    let provenance = composite_provenance(store, view, rep, ordinal)?;
+    let provenance = composite_provenance(store, view, origin, ordinal)?;
     Ok(store.candidate(descriptor, provenance)?)
 }
 
