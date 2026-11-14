@@ -6642,6 +6642,11 @@ pub struct SemanticGraphStats {
     /// round begun from its entry instead of continued over its plan —
     /// counts again.
     pub call_walks_begun: u64,
+    /// Value computations the flow evaluator began for calls, wherever
+    /// they ran: one per call evaluated. Counted where the computation
+    /// begins, outside every charge and its rollback, so a computation
+    /// begun again for the same call counts again.
+    pub call_value_runs: u64,
     /// Property pairs object comparisons related, wherever they ran: one
     /// per target property whose pair the comparison relates. Counted where
     /// the pair is related, outside every charge and its rollback, so a
@@ -13050,7 +13055,7 @@ mod tests {
     ///   evaluate_deferred_memo_misses, continuation_builds_begun,
     ///   continuation_stages_resumed, projection_hops_walked,
     ///   admission_stages_walked, deferred_steps_evaluated,
-    ///   intersection_products_built.
+    ///   intersection_products_built, call_value_runs.
     /// - Exceptional-path: same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
@@ -13093,6 +13098,7 @@ mod tests {
             "call_candidates_begun",
             "call_arguments_related",
             "call_walks_begun",
+            "call_value_runs",
             "relation_members_related",
             "admission_stages_walked",
             "deferred_steps_evaluated",

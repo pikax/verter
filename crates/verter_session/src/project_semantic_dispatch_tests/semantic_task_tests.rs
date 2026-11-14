@@ -2422,6 +2422,7 @@ fn a_contextual_call_suspends_with_its_collector_held_and_resumes_to_the_uninter
     let graph = host.project_type_store().semantic_graph();
     let counter = Arc::new(CountingWaker::default());
     let waker = Waker::from(Arc::clone(&counter));
+    let collecting = dispatch.open_request_state_for_tests().collecting_sessions;
     let (answer, held) = suspend_the_contextual_call(&host, &dispatch, &waker, |slot, held| {
         let task = slot.as_mut().expect("the task is lent");
         assert_eq!(
@@ -2466,6 +2467,11 @@ fn a_contextual_call_suspends_with_its_collector_held_and_resumes_to_the_uninter
         "the next run resumes the held route, with the collector it held"
     );
     assert_eq!(display_return(&host, &answer), uninterrupted);
+    assert_eq!(
+        dispatch.open_request_state_for_tests().collecting_sessions,
+        collecting,
+        "the answered call leaves the collecting sessions as it found them"
+    );
     assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
     assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
     assert!(graph.resident_flight_keys_for_tests().is_empty());
@@ -2484,6 +2490,7 @@ fn a_contextual_call_released_while_suspended_leaves_nothing_open() {
         let dispatch = ProjectSemanticDispatch::new(&*host);
         let graph = host.project_type_store().semantic_graph();
         let waker = Waker::from(Arc::new(CountingWaker::default()));
+        let collecting = dispatch.open_request_state_for_tests().collecting_sessions;
         let held = suspend_the_contextual_call(&host, &dispatch, &waker, |slot, held| {
             if dropped_elsewhere {
                 let task = slot.take().expect("the task is lent");
@@ -2505,6 +2512,12 @@ fn a_contextual_call_released_while_suspended_leaves_nothing_open() {
             "the held route is released with its collector (dropped elsewhere: {dropped_elsewhere})"
         );
         assert_eq!(
+            dispatch.open_request_state_for_tests().collecting_sessions,
+            collecting,
+            "the released call leaves the collecting sessions as it found them (dropped elsewhere: \
+             {dropped_elsewhere})"
+        );
+        assert_eq!(
             dispatch.open_request_state_for_tests(),
             NOTHING_OPEN,
             "the released call closes what it opened (dropped elsewhere: {dropped_elsewhere})"
@@ -2520,6 +2533,177 @@ fn a_contextual_call_released_while_suspended_leaves_nothing_open() {
             "[number, Box<3>]"
         );
     }
+}
+
+const CALL_VALUE_FILE: &str = "/semantic-task/call-value.ts";
+
+/// Bodies whose calls take the executor route: one suspended at a lowered
+/// argument (`f(g(1))`), one suspended at a function-value argument whose
+/// body calls again (`run(() => run(() => 1))`), and an overloaded callee
+/// whose route runs where it stands (`pick(1)`); and a generic call whose
+/// context-sensitive argument is a conditional of function values, which
+/// the call names for its consumer to type (`both(1, cond ? .. : ..)`).
+const CALL_VALUE: &str = "declare function g(x: number): number;\n\
+                          declare function f(x: number): string;\n\
+                          declare function run<R>(cb: () => R): R;\n\
+                          declare const pick: { (x: number): number; (x: string): string };\n\
+                          export function lowered() {\n\
+                          return f(g(1));\n\
+                          }\n\
+                          export function contextual() {\n\
+                          return run(() => run(() => 1));\n\
+                          }\n\
+                          export function overloaded() {\n\
+                          return pick(1);\n\
+                          }\n\
+                          declare function both<T, U>(seed: T, f: (x: T) => U): [T, U];\n\
+                          declare const cond: boolean;\n\
+                          export function untyped() {\n\
+                          return both(1, cond ? (x) => x : (x) => x);\n\
+                          }\n";
+
+/// Each root of [`CALL_VALUE`], the calls one evaluation of its body
+/// evaluates, and the return it answers.
+const CALL_VALUE_ROOTS: [(&str, u64, &str); 3] = [
+    ("lowered", 2, "string"),
+    ("contextual", 2, "number"),
+    ("overloaded", 1, "number"),
+];
+
+fn call_value_host() -> Arc<crate::VerterHost> {
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        CALL_VALUE_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(CALL_VALUE),
+        crate::FileLanguage::script_ts(),
+    );
+    host
+}
+
+/// The value computations the flow evaluations on `host` began for calls.
+fn call_value_runs(host: &crate::VerterHost) -> u64 {
+    let stats = host.project_type_store().semantic_graph().stats_snapshot();
+    stats.call_value_runs
+}
+
+/// `name`'s return in [`CALL_VALUE`] read on a fresh host, synchronously or
+/// polled: the call value computations the read began, the evaluations of
+/// the body it made, and what the read answered and charged.
+fn call_value_read(name: &str, polled: bool) -> (u64, u64, semantic_poll_contract::JoinedEvidence) {
+    use verter_type_engine::project_semantic_dispatch::flow_return::flow_evaluations_for_tests;
+    let host = call_value_host();
+    let mut dispatch = ProjectSemanticDispatch::new(&*host);
+    let key = root_return_key(&dispatch, CALL_VALUE_FILE, name);
+    let runs = call_value_runs(&host);
+    let evaluations = flow_evaluations_for_tests();
+    let read = if polled {
+        let mut entry = dispatch.poll_query(key);
+        let read = semantic_poll_contract::poll_until_ready(|waker| entry.poll(waker));
+        drop(entry);
+        read
+    } else {
+        dispatch.execute_via_cold_build_helper(key)
+    };
+    (
+        call_value_runs(&host) - runs,
+        (flow_evaluations_for_tests() - evaluations) as u64,
+        semantic_poll_contract::joined_evidence(&dispatch, &read, |answer| {
+            display_return(&host, answer)
+        }),
+    )
+}
+
+/// A call computes its value once each time its body is evaluated, however
+/// its executor route ran: suspended at a lowered argument, suspended at a
+/// function-value argument, or where it stands. A computation begun again
+/// for the same call once its route answered would count again.
+///
+/// A body evaluated once computes exactly its calls' values. A body its
+/// frame evaluates again after a read the frame had to produce first may
+/// stop that earlier evaluation before it reaches every call, so there the
+/// computations are bounded by the calls of every evaluation.
+#[test]
+fn a_call_computes_its_value_once() {
+    let mut observed = Vec::new();
+    for (name, calls, value) in CALL_VALUE_ROOTS {
+        for polled in [false, true] {
+            let (runs, evaluations, ((answered, ..), _)) = call_value_read(name, polled);
+            assert_eq!(
+                answered, value,
+                "{name} (polled: {polled}) answers its return"
+            );
+            observed.push((name, polled, calls, runs, evaluations));
+        }
+    }
+    assert!(
+        observed.iter().all(|&(_, _, calls, runs, evaluations)| {
+            evaluations >= 1 && runs <= calls * evaluations && (evaluations > 1 || runs == calls)
+        }),
+        "each call computes its value once per evaluation of its body \
+         (root, polled, calls, runs, evaluations): {observed:?}"
+    );
+}
+
+/// A polled read of a body whose calls take the executor route answers
+/// what the synchronous read answers: the same return, facts, rails,
+/// diagnostics and receipt footprint, and work never below it, for a
+/// call suspended at a lowered argument, one suspended at a
+/// function-value argument, and one whose route runs where it stands.
+#[test]
+fn a_polled_call_answers_what_the_synchronous_call_answers() {
+    for (name, _, value) in CALL_VALUE_ROOTS {
+        let (_, _, synchronous) = call_value_read(name, false);
+        let (_, _, polled) = call_value_read(name, true);
+        assert_eq!(synchronous.0 .0, value, "{name} answers its return");
+        semantic_poll_contract::assert_joined_matches(polled, &synchronous);
+    }
+}
+
+/// The executor work of `CONTEXTUAL`'s call read synchronously: the walks
+/// begun, the candidates whose applicability check began, and the argument
+/// relations their first pass ran, its callback round included.
+const CONTEXTUAL_ROUND_WORK: [u64; 3] = [0, 0, 0];
+
+/// A contextual call's callback round continues the candidate its first
+/// answer named, with the collector the call held: the call's executor work
+/// is its first answer's and its round's, never a call begun again over the
+/// typed arguments.
+#[test]
+fn a_contextual_calls_callback_round_continues_its_candidate() {
+    let host = contextual_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let before = call_round_work(&host);
+    let read = dispatch.execute_via_cold_build_helper(contextual_return_key(&dispatch));
+    let work = call_round_work_since(call_round_work(&host), before);
+    assert_eq!(display_return(&host, read.value()), "[number, Box<3>]");
+    assert_eq!(
+        work, CONTEXTUAL_ROUND_WORK,
+        "walks begun, candidates begun and arguments related across the callback round"
+    );
+}
+
+/// A contextual call whose executor names a callback this evaluator does not
+/// type (a conditional of function values) settles without it, and leaves no
+/// collecting session behind: the call's held collector returns to the
+/// transaction abandoned.
+#[test]
+fn a_contextual_call_whose_callback_is_not_typed_leaves_no_collecting_session() {
+    let host = call_value_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let collecting = dispatch.open_request_state_for_tests().collecting_sessions;
+    let key = root_return_key(&dispatch, CALL_VALUE_FILE, "untyped");
+    let read = dispatch.execute_via_cold_build_helper(key);
+    assert!(
+        matches!(read.value(), QueryResult::Value(_)),
+        "the body answers a return: {:?}",
+        read.value()
+    );
+    assert_eq!(
+        dispatch.open_request_state_for_tests().collecting_sessions,
+        collecting,
+        "the settled call leaves the collecting sessions as it found them"
+    );
 }
 
 /// The reads a root flow read's own body makes at its own depth are
@@ -2589,17 +2773,26 @@ fn utility_return_key(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
 ) -> SemanticQueryKey {
+    root_return_key(dispatch, UTILITY_FILE, name)
+}
+
+/// The return of `name` in `file`, evaluated as a machinery root.
+fn root_return_key(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    file: &str,
+    name: &str,
+) -> SemanticQueryKey {
     SemanticQueryKey::FlowReturn(Box::new(
         verter_type_engine::semantic_query::FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                verter_type_expr::OwnedStr::from(UTILITY_FILE),
+                verter_type_expr::OwnedStr::from(file),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 verter_type_expr::OwnedStr::from(name),
                 verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
                 0,
             ),
             normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
-            context: dispatch.flow_return_context_for(UTILITY_FILE),
+            context: dispatch.flow_return_context_for(file),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract:
@@ -3240,7 +3433,7 @@ mod semantic_poll_contract {
         drop(other);
     }
 
-    type JoinedEvidence = (
+    pub(super) type JoinedEvidence = (
         (String, String, bool, bool, Vec<String>, Option<String>),
         Option<u64>,
     );
@@ -3254,7 +3447,7 @@ mod semantic_poll_contract {
     /// work is compared on its own: never below the synchronous entry's.
     /// (Exact equality is asserted by the body-once control until the flow
     /// frame retains its evaluation.)
-    fn joined_evidence(
+    pub(super) fn joined_evidence(
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         read: &verter_type_engine::semantic_query::CacheRead<QueryResult<SemanticQueryValue>>,
         answer: impl FnOnce(&QueryResult<SemanticQueryValue>) -> String,
@@ -3285,7 +3478,7 @@ mod semantic_poll_contract {
 
     /// Assert a joined read against its synchronous read
     /// ([`joined_evidence`]).
-    fn assert_joined_matches(joined: JoinedEvidence, synchronous: &JoinedEvidence) {
+    pub(super) fn assert_joined_matches(joined: JoinedEvidence, synchronous: &JoinedEvidence) {
         assert_eq!(joined.0, synchronous.0);
         let (Some(joined), Some(synchronous)) = (joined.1, synchronous.1) else {
             panic!("both complete reads carry a receipt");
