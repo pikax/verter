@@ -503,6 +503,13 @@ enum DeferredEvaluationStage {
     /// The frame's step resolves a `BareRef` / `ImportType` carrier, its
     /// captured resolution standing at the query it reads next.
     AwaitCarrier(Box<super::carrier::CapturedCarrierRead>),
+    /// The frame's `keyof` read answered a carrier whose keys settle
+    /// through its base: the settle standing at the query it reads next,
+    /// the `keyof` read kept for the step that finishes over the keys.
+    AwaitKeyOfCarrier {
+        keys: Box<CacheRead<QueryResult<SemanticNodeId>>>,
+        settle: Box<super::build::KeyOfCarrierRead>,
+    },
 }
 
 /// What a step that named a read does with the read's answer.
@@ -587,10 +594,13 @@ impl DeferredRead {
     /// resolution's: a read the carrier's consumers count as their own
     /// dispatch intent.
     pub(super) fn reads_for_carrier(&self) -> bool {
-        matches!(
-            self.frames.last().map(|frame| &frame.stage),
-            Some(DeferredEvaluationStage::AwaitCarrier(_))
-        )
+        match self.frames.last().map(|frame| &frame.stage) {
+            Some(DeferredEvaluationStage::AwaitCarrier(_)) => true,
+            Some(DeferredEvaluationStage::AwaitKeyOfCarrier { settle, .. }) => {
+                settle.reads_for_carrier()
+            }
+            _ => false,
+        }
     }
 }
 
@@ -716,6 +726,13 @@ enum DeferredEvaluationAction {
     /// The step's carrier resolution reads this query, and resumes with
     /// its answer.
     Carrier(SemanticQueryKey, Box<super::carrier::CapturedCarrierRead>),
+    /// The step's `keyof` carrier settle reads this query, and resumes
+    /// with its answer; the `keyof` read it settles is kept.
+    KeyOfCarrier(
+        SemanticQueryKey,
+        Box<CacheRead<QueryResult<SemanticNodeId>>>,
+        Box<super::build::KeyOfCarrierRead>,
+    ),
 }
 
 fn clone_index_key(index: &IndexKey) -> IndexKey {
@@ -2630,11 +2647,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// The keys a `keyof` carrier over a declaration, an application or a
-    /// mapped type settles to under a demand that reduces operators
-    /// ([`Self::key_of_through_carrier`]); `None` when `keys` is no such
-    /// carrier or its keys stay the carrier.
-    fn settled_key_of_carrier(
+    /// The base of a `keyof` carrier over a declaration, an application or
+    /// a mapped type whose keys settle under a demand that reduces
+    /// operators ([`Self::begin_key_of_carrier`]); `None` when `keys` is no
+    /// such carrier.
+    fn key_of_carrier_base(
         &self,
         keys: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -2657,7 +2674,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ) {
             return None;
         }
-        self.key_of_through_carrier(base, context)
+        Some(base)
+    }
+
+    /// The action of a frame whose `keyof` read answered `keys`, a carrier
+    /// whose settle took `step`: the settle's next read, or — settled — the
+    /// read's answer replaced by the keys where they settled.
+    fn key_of_carrier_action(
+        &self,
+        frame: &mut DeferredEvaluationFrame,
+        mut keys: CacheRead<QueryResult<SemanticNodeId>>,
+        step: super::build::KeyOfCarrierStep,
+    ) -> DeferredEvaluationAction {
+        match step {
+            super::build::KeyOfCarrierStep::Read(key, settle) => {
+                DeferredEvaluationAction::KeyOfCarrier(key, Box::new(keys), settle)
+            }
+            super::build::KeyOfCarrierStep::Done(settled) => {
+                if let Some(settled) = settled {
+                    keys.value = QueryResult::Value(settled);
+                }
+                self.deferred_read_action(frame, keys, ReadFallback::Miss)
+            }
+        }
     }
 
     /// Entry-scoped workhorse for the deferred-shell evaluator. Returns the
@@ -3184,8 +3223,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub(super) fn abandon_deferred_read(&self, build: DeferredRead) {
         let DeferredRead { frames, .. } = build;
         for frame in frames.into_iter().rev() {
-            if let DeferredEvaluationStage::AwaitCarrier(read) = frame.stage {
-                self.abandon_captured_carrier_read(*read);
+            match frame.stage {
+                DeferredEvaluationStage::AwaitCarrier(read) => {
+                    self.abandon_captured_carrier_read(*read);
+                }
+                // The settle's recordings sit above the frame's own.
+                DeferredEvaluationStage::AwaitKeyOfCarrier { settle, .. } => {
+                    self.abandon_key_of_carrier(*settle);
+                }
+                _ => {}
             }
             if frame.recording {
                 self.connected_demand.abandon_cost_scope();
@@ -3270,6 +3316,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             let step = self.resume_captured_carrier_read(*read, deliver);
                             self.captured_carrier_action(frame, step)
                         }
+                        DeferredEvaluationStage::AwaitKeyOfCarrier { keys, settle } => {
+                            let step = self.resume_key_of_carrier(*settle, deliver);
+                            self.key_of_carrier_action(frame, *keys, step)
+                        }
                         _ => {
                             unreachable!("only a frame standing at a read is delivered its answer")
                         }
@@ -3303,6 +3353,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .last_mut()
                         .expect("a carrier is resolved by the frame on top")
                         .stage = DeferredEvaluationStage::AwaitCarrier(read);
+                    return DeferredStep::Read(key, build);
+                }
+                DeferredEvaluationAction::KeyOfCarrier(key, keys, settle) => {
+                    build
+                        .frames
+                        .last_mut()
+                        .expect("a keyof carrier is settled by the frame on top")
+                        .stage = DeferredEvaluationStage::AwaitKeyOfCarrier { keys, settle };
                     return DeferredStep::Read(key, build);
                 }
                 DeferredEvaluationAction::Push { node, context } => {
@@ -3583,7 +3641,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             DeferredEvaluationStage::EvaluateCurrent
             | DeferredEvaluationStage::AwaitRead(_)
-            | DeferredEvaluationStage::AwaitCarrier(_) => {
+            | DeferredEvaluationStage::AwaitCarrier(_)
+            | DeferredEvaluationStage::AwaitKeyOfCarrier { .. } => {
                 unreachable!("only a frame suspended on an operand can receive one")
             }
         }
@@ -3849,7 +3908,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         frame: &mut DeferredEvaluationFrame,
         then: ReadThen,
-        mut read: CacheRead<QueryResult<SemanticNodeId>>,
+        read: CacheRead<QueryResult<SemanticNodeId>>,
     ) -> DeferredEvaluationAction {
         match then {
             ReadThen::Advance(fallback) => self.deferred_read_action(frame, read, fallback),
@@ -3863,17 +3922,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // declaration, an application or a mapped type is
                 // evaluated here, at a demand for its value: its keys where
                 // they settle, as the checker prints them.
-                if matches!(
-                    frame.demand,
-                    DeferredEvaluationDemand::Shell | DeferredEvaluationDemand::MappedSource
-                ) {
-                    if let QueryResult::Value(keys) = read.value {
-                        if let Some(settled) = self.settled_key_of_carrier(keys, frame.context) {
-                            read.value = QueryResult::Value(settled);
-                        }
+                let base = match read.value {
+                    QueryResult::Value(keys)
+                        if matches!(
+                            frame.demand,
+                            DeferredEvaluationDemand::Shell
+                                | DeferredEvaluationDemand::MappedSource
+                        ) =>
+                    {
+                        self.key_of_carrier_base(keys, frame.context)
                     }
+                    _ => None,
+                };
+                match base {
+                    Some(base) => {
+                        let step = self.begin_key_of_carrier(base, frame.context);
+                        self.key_of_carrier_action(frame, read, step)
+                    }
+                    None => self.deferred_read_action(frame, read, ReadFallback::Miss),
                 }
-                self.deferred_read_action(frame, read, ReadFallback::Miss)
             }
             ReadThen::TypeOf { type_args } => {
                 frame.merge_read(&read);

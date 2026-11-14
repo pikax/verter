@@ -15590,19 +15590,48 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// D1 { p = 1 }` is `"p"`). The key set a relation reads is
     /// [`Self::key_set_of`]. `None` when the carrier does not resolve (an
     /// open operand keeps its carrier).
+    ///
+    /// The in-place driver of [`Self::begin_key_of_carrier`]: each query a
+    /// stage names read where the settle stands, inside one connected
+    /// demand.
     pub(super) fn key_of_through_carrier(
         &self,
         base: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
-        let read = |base: SemanticNodeId| self.complete_key_of(base, context);
-        let settled_keys = |keys: SemanticNodeId| {
-            (!matches!(
-                self.graph().node_data(keys).as_deref(),
-                Some(SemanticNodeData::KeyOf { .. } | SemanticNodeData::Opaque(_))
-            ))
-            .then_some(keys)
-        };
+        let (_connected_guard, _) = self.enter_connected_demand(false);
+        let mut step = self.begin_key_of_carrier(base, context);
+        loop {
+            match step {
+                KeyOfCarrierStep::Done(keys) => return keys,
+                KeyOfCarrierStep::Read(key, read) => {
+                    let mut key = Some(key);
+                    let counts = read.reads_for_carrier();
+                    let mut deliver = || {
+                        let key = key.take().expect("a read is made once");
+                        if counts {
+                            self.carrier_read_in_place(key)
+                        } else {
+                            self.execute_read(key)
+                        }
+                    };
+                    step = self.resume_key_of_carrier(*read, &mut deliver);
+                }
+            }
+        }
+    }
+
+    /// The first stage of [`Self::key_of_through_carrier`] as a
+    /// sub-continuation its consumer steps: the base's carrier chain under
+    /// structural transit, a mapped type's source keys or evaluated key
+    /// space, the base's carrier chain under the caller's context and the
+    /// keys of the surface it settles on, every read a stage names returned
+    /// with the settle retained ([`KeyOfCarrierRead`]).
+    pub(super) fn begin_key_of_carrier(
+        &self,
+        base: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> KeyOfCarrierStep {
         let named = match self.graph().node_data(base).as_deref() {
             Some(SemanticNodeData::DeclRef { identity }) => Some(identity.clone()),
             Some(SemanticNodeData::InstantiationRef { base: identity, .. })
@@ -15612,20 +15641,110 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => None,
         };
+        let read = KeyOfCarrierRead {
+            base,
+            context,
+            named,
+            stage: KeyOfCarrierStage::Begun,
+        };
         // A mapped type — written, or a declaration or application whose
         // body is one — is read before it materializes, so a homomorphic
         // one answers `keyof` its source. A declaration materializes once,
         // under the demand every other reader of it shares.
-        let transit_settled = match self.graph().node_data(base).as_deref() {
-            Some(SemanticNodeData::Mapped { .. }) => Some(base),
+        match self.graph().node_data(base).as_deref() {
+            Some(SemanticNodeData::Mapped { .. }) => self.key_of_carrier_transit(read, Some(base)),
             Some(SemanticNodeData::InstantiationRef { .. } | SemanticNodeData::DeclRef { .. }) => {
-                Some(self.resolve_signature_source_carrier(
+                let step = self.begin_source_carrier_read(
                     base,
                     crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                ))
+                );
+                self.key_of_carrier_transit_step(read, step)
             }
-            _ => None,
-        };
+            _ => self.key_of_carrier_transit(read, None),
+        }
+    }
+
+    /// The next stage of a `keyof` carrier settle standing at the read its
+    /// last stage named, given `deliver`, that read: a carrier chain's or an
+    /// evaluation's read is delivered inside it, a `keyof` read to the
+    /// settle.
+    pub(super) fn resume_key_of_carrier(
+        &self,
+        mut read: KeyOfCarrierRead,
+        deliver: &mut dyn FnMut() -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> KeyOfCarrierStep {
+        match std::mem::replace(&mut read.stage, KeyOfCarrierStage::Begun) {
+            KeyOfCarrierStage::Transit(chain) => {
+                self.abandon_source_carrier_read(*chain); // PLANTED-MUTATION
+                KeyOfCarrierStep::Done(self.key_of_through_carrier(read.base, read.context))
+            }
+            KeyOfCarrierStage::SourceKeys => {
+                let keys = self.complete_key_of_read(deliver()).and_then(|keys| {
+                    // `keyof` over the source keeps its own printed form
+                    // (`keyof Partial<Face>` prints `keyof Face`).
+                    match self.graph().node_data(keys).as_deref() {
+                        Some(SemanticNodeData::Opaque(_)) => None,
+                        _ => Some(keys),
+                    }
+                });
+                KeyOfCarrierStep::Done(keys)
+            }
+            KeyOfCarrierStage::KeySpace(evaluation) => {
+                let step = self.resume_deferred_read(evaluation, deliver);
+                self.key_of_carrier_key_space(read, step)
+            }
+            KeyOfCarrierStage::Settle { chain, mapped } => {
+                let step = self.resume_source_carrier_read(*chain, deliver);
+                self.key_of_carrier_settle_step(read, step, mapped)
+            }
+            KeyOfCarrierStage::SettledKeys { settled, mapped } => {
+                let keys = self.complete_key_of_read(deliver());
+                KeyOfCarrierStep::Done(
+                    keys.and_then(|keys| self.key_of_carrier_settled(&read, settled, mapped, keys)),
+                )
+            }
+            KeyOfCarrierStage::Begun => {
+                unreachable!("a settle is resumed only standing at a read")
+            }
+        }
+    }
+
+    /// Release a `keyof` carrier settle standing between two of its stages:
+    /// the carrier chain or evaluation it stands in abandons its recordings.
+    pub(super) fn abandon_key_of_carrier(&self, read: KeyOfCarrierRead) {
+        match read.stage {
+            KeyOfCarrierStage::Transit(chain) | KeyOfCarrierStage::Settle { chain, .. } => {
+                self.abandon_source_carrier_read(*chain);
+            }
+            KeyOfCarrierStage::KeySpace(evaluation) => self.abandon_deferred_read(*evaluation),
+            KeyOfCarrierStage::Begun
+            | KeyOfCarrierStage::SourceKeys
+            | KeyOfCarrierStage::SettledKeys { .. } => {}
+        }
+    }
+
+    /// A settle whose structural-transit carrier chain took `step`.
+    fn key_of_carrier_transit_step(
+        &self,
+        mut read: KeyOfCarrierRead,
+        step: SourceCarrierStep,
+    ) -> KeyOfCarrierStep {
+        match step {
+            SourceCarrierStep::Read(key, chain) => {
+                read.stage = KeyOfCarrierStage::Transit(chain);
+                KeyOfCarrierStep::Read(key, Box::new(read))
+            }
+            SourceCarrierStep::Done(settled) => self.key_of_carrier_transit(read, Some(settled)),
+        }
+    }
+
+    /// A settle whose base settled under structural transit on
+    /// `transit_settled` (`None` for a base no carrier chain reads).
+    fn key_of_carrier_transit(
+        &self,
+        mut read: KeyOfCarrierRead,
+        transit_settled: Option<SemanticNodeId>,
+    ) -> KeyOfCarrierStep {
         // The checker reads a mapped type's keys off its constraint
         // (`getIndexTypeForMappedType`), never as a declaration's key list:
         // they carry no `keyof` origin of their own.
@@ -15637,7 +15756,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if crate::project_semantic_dispatch::raise::mapped_type_key_domain_is_open_or_unknown(
                 self, *source, mapper,
             ) {
-                return None;
+                return KeyOfCarrierStep::Done(None);
             }
             mapped = true;
             // A key remapping's keys are the remapped names the
@@ -15646,45 +15765,108 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if mapper.name_remap.is_none() {
                 return match self.graph().node_data(mapper.key_space).as_deref() {
                     Some(SemanticNodeData::KeyOf { base: keyed }) if *keyed == *source => {
-                        read(*source).and_then(|keys| {
-                            // `keyof` over the source keeps its own printed
-                            // form (`keyof Partial<Face>` prints `keyof Face`).
-                            match self.graph().node_data(keys).as_deref() {
-                                Some(SemanticNodeData::Opaque(_)) => None,
-                                _ => Some(keys),
-                            }
-                        })
-                    }
-                    _ => settled_keys(
-                        self.evaluate_deferred_semantic_node_with_context(
-                            mapper.key_space,
-                            context,
+                        read.stage = KeyOfCarrierStage::SourceKeys;
+                        KeyOfCarrierStep::Read(
+                            SemanticQueryKey::KeyOf {
+                                base: *source,
+                                context: read.context,
+                            },
+                            Box::new(read),
                         )
-                        .into_active_query_build_node(self),
-                    ),
+                    }
+                    _ => {
+                        let step = self.begin_deferred_read(
+                            mapper.key_space,
+                            read.context,
+                            super::evaluate::DeferredEvaluationDemand::Shell,
+                        );
+                        self.key_of_carrier_key_space(read, step)
+                    }
                 };
             }
         }
         // A settled source surface already owns the member names and index
         // signatures. Reuse that key-domain demand instead of materializing
         // another declaration body at the published value's altitude.
-        let settled = transit_settled
-            .filter(|node| {
-                matches!(
-                    self.graph().node_data(*node).as_deref(),
-                    Some(SemanticNodeData::Object(_))
-                )
-            })
-            .unwrap_or_else(|| {
-                self.resolve_signature_source_carrier(
-                    base,
-                    context.with_mode(ProjectionMode::Navigate),
-                )
-            });
-        if settled == base {
-            return None;
+        if let Some(settled) = transit_settled.filter(|node| {
+            matches!(
+                self.graph().node_data(*node).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            )
+        }) {
+            return self.key_of_carrier_settled_on(read, settled, mapped);
         }
-        let keys = read(settled)?;
+        let step = self
+            .begin_source_carrier_read(read.base, read.context.with_mode(ProjectionMode::Navigate));
+        self.key_of_carrier_settle_step(read, step, mapped)
+    }
+
+    /// A settle whose mapped key space's evaluation took `step`.
+    fn key_of_carrier_key_space(
+        &self,
+        mut read: KeyOfCarrierRead,
+        step: super::evaluate::DeferredStep,
+    ) -> KeyOfCarrierStep {
+        match step {
+            super::evaluate::DeferredStep::Read(key, evaluation) => {
+                read.stage = KeyOfCarrierStage::KeySpace(evaluation);
+                KeyOfCarrierStep::Read(key, Box::new(read))
+            }
+            super::evaluate::DeferredStep::Done(outcome) => {
+                let keys = outcome.into_active_query_build_node(self);
+                KeyOfCarrierStep::Done(self.settled_key_list(keys))
+            }
+        }
+    }
+
+    /// A settle whose carrier chain under the caller's context took `step`.
+    fn key_of_carrier_settle_step(
+        &self,
+        mut read: KeyOfCarrierRead,
+        step: SourceCarrierStep,
+        mapped: bool,
+    ) -> KeyOfCarrierStep {
+        match step {
+            SourceCarrierStep::Read(key, chain) => {
+                read.stage = KeyOfCarrierStage::Settle { chain, mapped };
+                KeyOfCarrierStep::Read(key, Box::new(read))
+            }
+            SourceCarrierStep::Done(settled) => {
+                self.key_of_carrier_settled_on(read, settled, mapped)
+            }
+        }
+    }
+
+    /// A settle whose base settled on `settled`: the keys of that surface
+    /// read next, unless it settled on the base itself.
+    fn key_of_carrier_settled_on(
+        &self,
+        mut read: KeyOfCarrierRead,
+        settled: SemanticNodeId,
+        mapped: bool,
+    ) -> KeyOfCarrierStep {
+        if settled == read.base {
+            return KeyOfCarrierStep::Done(None);
+        }
+        read.stage = KeyOfCarrierStage::SettledKeys { settled, mapped };
+        KeyOfCarrierStep::Read(
+            SemanticQueryKey::KeyOf {
+                base: settled,
+                context: read.context,
+            },
+            Box::new(read),
+        )
+    }
+
+    /// The keys a `keyof` carrier answers once its base settled on
+    /// `settled`, whose own `keyof` read answered `keys`.
+    fn key_of_carrier_settled(
+        &self,
+        read: &KeyOfCarrierRead,
+        settled: SemanticNodeId,
+        mapped: bool,
+        keys: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
         // A class expression's instance is the class the checker names its
         // keys by (`keyof (Anonymous class)`), whatever alias or application
         // reaches it.
@@ -15698,14 +15880,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return Some(keys);
             }
         }
-        let keys = settled_keys(keys)?;
+        let keys = self.settled_key_list(keys)?;
         // A union's keys are those every member shares and an
         // intersection's those of any member (`getIndexType` over a union or
         // intersection), read off the members, so an alias naming one leaves
         // no `keyof` origin (`keyof U` over `type U = { k: 1 } | { k: 2 }`
         // prints `"k"`); a class or interface keeps its own even where its
         // heritage resolves to an intersection.
-        let composite = named.as_ref().is_some_and(|identity| {
+        let composite = read.named.as_ref().is_some_and(|identity| {
             self.prepared_decl_kind(identity)
                 == Some(verter_session_query::declarations::TypeDeclKind::Alias)
         }) && matches!(
@@ -15723,12 +15905,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(keys)
             }
             Some(SemanticNodeData::Union(members))
-                if named.is_some() && !mapped && !composite && members.len() > 1 =>
+                if read.named.is_some() && !mapped && !composite && members.len() > 1 =>
             {
                 None
             }
             _ => Some(keys),
         }
+    }
+
+    /// `keys` when they settled: neither a `keyof` carrier nor an opaque
+    /// answer.
+    fn settled_key_list(&self, keys: SemanticNodeId) -> Option<SemanticNodeId> {
+        (!matches!(
+            self.graph().node_data(keys).as_deref(),
+            Some(SemanticNodeData::KeyOf { .. } | SemanticNodeData::Opaque(_))
+        ))
+        .then_some(keys)
     }
 
     /// Whether `surface` declares no property and exactly one index
@@ -15758,7 +15950,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         base: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
-        let read = self.execute_read(SemanticQueryKey::KeyOf { base, context });
+        self.complete_key_of_read(self.execute_read(SemanticQueryKey::KeyOf { base, context }))
+    }
+
+    /// The answer of a `keyof` `read` when it is complete
+    /// ([`Self::complete_key_of`]).
+    fn complete_key_of_read(
+        &self,
+        read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> Option<SemanticNodeId> {
         if read.result_is_partial() {
             self.fold_local_partial_completeness(read.partial_reason_classes());
             return None;
@@ -23218,4 +23418,61 @@ enum KeySpaceEvaluated {
     Admits,
     Next,
     Read(SemanticQueryKey),
+}
+
+/// A `keyof` carrier's settle ([`ProjectSemanticDispatch::key_of_through_carrier`])
+/// between two of its stages: the carrier and the context it settles under,
+/// the declaration or user application the carrier names, and where it
+/// stands.
+pub(super) struct KeyOfCarrierRead {
+    base: SemanticNodeId,
+    context: crate::semantic_query::ProjectionReductionContext,
+    named: Option<crate::semantic_query::DeclIdentity>,
+    stage: KeyOfCarrierStage,
+}
+
+/// Where a `keyof` carrier's settle stands.
+enum KeyOfCarrierStage {
+    /// Between stages.
+    Begun,
+    /// The base's carrier chain under structural transit.
+    Transit(Box<SourceCarrierRead>),
+    /// The `keyof` of a homomorphic mapping's source.
+    SourceKeys,
+    /// A mapping's own key space, evaluated.
+    KeySpace(Box<super::evaluate::DeferredRead>),
+    /// The base's carrier chain under the caller's context at `Navigate`.
+    Settle {
+        chain: Box<SourceCarrierRead>,
+        mapped: bool,
+    },
+    /// The `keyof` of the surface the base settled on.
+    SettledKeys {
+        settled: SemanticNodeId,
+        mapped: bool,
+    },
+}
+
+impl KeyOfCarrierRead {
+    /// Whether the read the settle stands at is a carrier resolution's,
+    /// counted as its consumers count those reads.
+    pub(super) fn reads_for_carrier(&self) -> bool {
+        match &self.stage {
+            KeyOfCarrierStage::Transit(chain) | KeyOfCarrierStage::Settle { chain, .. } => {
+                chain.reads_for_carrier()
+            }
+            KeyOfCarrierStage::KeySpace(evaluation) => evaluation.reads_for_carrier(),
+            KeyOfCarrierStage::Begun
+            | KeyOfCarrierStage::SourceKeys
+            | KeyOfCarrierStage::SettledKeys { .. } => false,
+        }
+    }
+}
+
+/// Where a `keyof` carrier's settle stands after its latest stage.
+pub(super) enum KeyOfCarrierStep {
+    /// The keys the carrier settled to; `None` when they stay the carrier.
+    Done(Option<SemanticNodeId>),
+    /// The settle reads this query next, holding everything it computed.
+    Read(SemanticQueryKey, Box<KeyOfCarrierRead>),
 }

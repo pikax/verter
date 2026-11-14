@@ -11582,6 +11582,42 @@ mod semantic_poll_contract {
         )
     }
 
+    /// [`mapped_selection`] of the identity mapping `Mapped`.
+    fn mapped_identity_selection(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> (SemanticQueryKey, Vec<SemanticQueryKey>) {
+        mapped_selection(host, dispatch, "Mapped")
+    }
+
+    /// [`mapped_selection`] followed by the reads the key space's `keyof`
+    /// carrier settles through once the source's shallow instantiation
+    /// answers: the `keyof` of the source's surface, then the hop's own
+    /// admission read of that instantiation again. The surface is learned
+    /// by reading the instantiation in place, so no case of this fixture
+    /// holds it.
+    fn settled_mapped_selection(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+        alias: &str,
+    ) -> (SemanticQueryKey, Vec<SemanticQueryKey>) {
+        let (root, mut reads) = mapped_selection(host, dispatch, alias);
+        let shallow = reads[3].clone();
+        let surface = match dispatch
+            .execute_via_cold_build_helper(shallow.clone())
+            .value()
+        {
+            QueryResult::Value(SemanticQueryValue::TypeNode(node)) => *node,
+            answer => panic!("the source's shallow instantiation answers a node: {answer:?}"),
+        };
+        reads.push(SemanticQueryKey::KeyOf {
+            base: surface,
+            context: ProjectionReductionContext::published(ProjectionMode::Expanded),
+        });
+        reads.push(shallow);
+        (root, reads)
+    }
+
     /// `Mapped<Box<"deep">>["value"]` in `Navigate`: the walk instantiates
     /// the mapping, resolves its source's carrier chain, and narrows it to
     /// the selected key, whose value an identity mapper reads off its
@@ -11590,7 +11626,7 @@ mod semantic_poll_contract {
         host: &crate::VerterHost,
         dispatch: &HostDispatch<'_>,
     ) -> (SemanticQueryKey, Vec<SemanticQueryKey>) {
-        let (root, mut reads) = mapped_selection(host, dispatch, "Mapped");
+        let (root, mut reads) = settled_mapped_selection(host, dispatch, "Mapped");
         let deep = sites_literal(dispatch, "deep");
         let value = sites_literal(dispatch, "value");
         reads.push(SemanticQueryKey::IndexedAccess {
@@ -11608,7 +11644,7 @@ mod semantic_poll_contract {
         host: &crate::VerterHost,
         dispatch: &HostDispatch<'_>,
     ) -> (SemanticQueryKey, Vec<SemanticQueryKey>) {
-        let (root, mut reads) = mapped_selection(host, dispatch, "Tagged");
+        let (root, mut reads) = settled_mapped_selection(host, dispatch, "Tagged");
         let value = sites_literal(dispatch, "value");
         reads.push(sites_instantiation(
             dispatch,
@@ -11830,10 +11866,10 @@ mod semantic_poll_contract {
         // admits as its canonical path and then needs: that path is held.
         let admitted = |host: &crate::VerterHost, dispatch: &HostDispatch<'_>| {
             let (root, mut reads) = mapped_key(host, dispatch);
-            let SemanticQueryKey::IndexedAccess { base, index, mode } = reads[4].clone() else {
+            let SemanticQueryKey::IndexedAccess { base, index, mode } = reads[6].clone() else {
                 unreachable!("the selected value is an indexed access")
             };
-            reads[4] = SemanticQueryKey::ProjectPath {
+            reads[6] = SemanticQueryKey::ProjectPath {
                 base,
                 path: verter_type_expr::OwnedSlice::from(
                     vec![verter_type_engine::semantic_query::PathSegment::Index(
@@ -11845,27 +11881,42 @@ mod semantic_poll_contract {
             };
             (root, reads)
         };
-        assert_site_suspends(&admitted, 4, label);
-        assert_site_releases(&admitted, 4, label);
+        assert_site_suspends(&admitted, 6, label);
+        assert_site_releases(&admitted, 6, label);
     }
 
     /// A mapped hop resolves its source's carrier chain as a
     /// sub-continuation of its own: the source's instantiation is the
     /// path's dependency, read to decide whether the mapping maps an array
-    /// or tuple whole. Held there, after the mapping's instantiation, the
-    /// path yields holding the chain — joining nothing in place; released,
-    /// it resumes the chain at the held read, nothing before it computed
-    /// again, to exactly what the synchronous entry reads.
-    ///
-    /// The chain's second read, admitting the key against the source's
-    /// shallow surface, is not held here: the key space's evaluation, which
-    /// comes first, settles its `keyof` carrier's keys in place, reading that
-    /// instantiation.
+    /// or tuple whole, and its shallow instantiation, which the key space's
+    /// `keyof` carrier settles through before the key is admitted. Held at
+    /// either, after the mapping's instantiation, the path yields holding
+    /// what it computed — joining nothing in place; released, it resumes at
+    /// the held read, nothing before it computed again, to exactly what the
+    /// synchronous entry reads.
     #[test]
     fn a_mapped_sources_carrier_chain_waiting_on_its_instantiation_resumes_there() {
         let label = "mapped source";
-        assert_site_suspends(&mapped_key, 1, label);
-        assert_site_releases(&mapped_key, 1, label);
+        assert_site_reads(&mapped_identity_selection, label);
+        for held in [1, 3] {
+            assert_site_suspends(&mapped_identity_selection, held, label);
+            assert_site_releases(&mapped_identity_selection, held, label);
+        }
+    }
+
+    /// A key space's `keyof` carrier settles its keys as a sub-continuation
+    /// of the evaluation that reads it: the `keyof` of the surface the
+    /// carrier's base settles on is the path's dependency, the settle
+    /// retained. Held there, after the source's shallow instantiation, the
+    /// path yields; released, it resumes the settle at the held read,
+    /// nothing before it computed again, to exactly what the synchronous
+    /// entry reads.
+    #[test]
+    fn a_key_space_whose_keyof_carrier_waits_on_its_settled_surfaces_keys_resumes_there() {
+        let label = "key space keyof carrier";
+        assert_site_reads(&mapped_key, label);
+        assert_site_suspends(&mapped_key, 4, label);
+        assert_site_releases(&mapped_key, 4, label);
     }
 
     /// A mapped hop admits a selected key against a primitive key space as
@@ -11878,8 +11929,8 @@ mod semantic_poll_contract {
     #[test]
     fn a_mapped_key_space_waiting_on_its_evaluation_resumes_there() {
         let label = "mapped key space";
-        assert_site_suspends(&mapped_key, 2, label);
-        assert_site_releases(&mapped_key, 2, label);
+        assert_site_suspends(&mapped_identity_selection, 2, label);
+        assert_site_releases(&mapped_identity_selection, 2, label);
     }
 
     /// A computed mapper's selected value is evaluated as a sub-continuation
@@ -11892,8 +11943,8 @@ mod semantic_poll_contract {
     fn a_computed_mapped_value_waiting_on_its_evaluation_resumes_there() {
         let label = "computed mapped value";
         assert_site_reads(&tagged_key, label);
-        assert_site_suspends(&tagged_key, 4, label);
-        assert_site_releases(&tagged_key, 4, label);
+        assert_site_suspends(&tagged_key, 6, label);
+        assert_site_releases(&tagged_key, 6, label);
     }
 
     /// Every read the case names is among the reads its path's build,
