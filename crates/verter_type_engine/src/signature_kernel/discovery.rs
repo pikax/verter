@@ -17,7 +17,7 @@ use crate::semantic_query::{
     CanonicalTypeSubstitution, IncompleteReason, SemanticNodeId, CONTEXT_FREE_EVALUATION,
 };
 
-use super::lifetime::{SignatureStore, StoreError};
+use super::lifetime::{EpochBinding, SignatureStore, StoreError};
 use super::positional::{PositionalMode, PositionalShape, SlotTypeFacts, TypeAt};
 use super::provenance::{
     ArmIdentity, ConstituentSequence, DeclarationGroupId, DeclarationParentId, MappedConstituent,
@@ -160,7 +160,7 @@ pub struct SignatureInput {
     pub provenance: SignatureProvenance,
 }
 
-fn slot(store: &SignatureStore, p: &ParamInput) -> Res<ParameterSlot> {
+fn slot(store: &EpochBinding, p: &ParamInput) -> Res<ParameterSlot> {
     let name = match &p.name {
         Some(n) => Some(store.intern_spelling(n, None)?),
         None => None,
@@ -183,10 +183,7 @@ impl SlotTypeFacts for NoFacts {
 }
 
 /// Publish one authored signature's records and return its candidate.
-pub fn publish_signature(
-    store: &SignatureStore,
-    input: &SignatureInput,
-) -> Res<SignatureCandidate> {
+pub fn publish_signature(store: &EpochBinding, input: &SignatureInput) -> Res<SignatureCandidate> {
     let mut binders = Vec::with_capacity(input.binders.len());
     for b in &input.binders {
         binders.push(BinderDeclaration {
@@ -330,7 +327,7 @@ pub fn publish_signature(
 
 /// `Empty | One | Many` from an ordered candidate list.
 pub fn set_from_candidates(
-    store: &SignatureStore,
+    store: &EpochBinding,
     candidates: Vec<SignatureCandidate>,
 ) -> Res<SignatureSetRef> {
     Ok(match candidates.len() {
@@ -531,7 +528,7 @@ fn binders_identical(
 /// constraint/default equality under a positional binder correspondence,
 /// receiver, every target position, and (unless ignored) the result.
 pub fn signatures_identical(
-    store: &SignatureStore,
+    store: &EpochBinding,
     types: &dyn DiscoveryTypes,
     source: SignatureCandidate,
     target: SignatureCandidate,
@@ -540,9 +537,9 @@ pub fn signatures_identical(
     if source.signature == target.signature {
         return Ok(true);
     }
-    let view = SemanticReadView::pin(store);
-    let s = load(&view, source)?;
-    let t = load(&view, target)?;
+    let view = store.view();
+    let s = load(view, source)?;
+    let t = load(view, target)?;
     let sp = s.positional(types);
     let tp = t.positional(types);
     let mode = PositionalMode::Comparison;
@@ -615,7 +612,7 @@ pub fn signatures_identical(
 }
 
 fn find_matching(
-    store: &SignatureStore,
+    store: &EpochBinding,
     types: &dyn DiscoveryTypes,
     list: &[SignatureCandidate],
     sig: SignatureCandidate,
@@ -646,7 +643,7 @@ fn find_matching(
 /// Union synthesis is the opposite rule and deliberately does not use this:
 /// it matches arms by parameters and unions their results.
 pub fn append_signatures(
-    store: &SignatureStore,
+    store: &EpochBinding,
     types: &dyn DiscoveryTypes,
     existing: &mut Vec<SignatureCandidate>,
     new: &[SignatureCandidate],
@@ -659,7 +656,7 @@ pub fn append_signatures(
     Ok(())
 }
 
-fn source_token(store: &SignatureStore, c: SignatureCandidate) -> Res<TypeToken> {
+fn source_token(store: &EpochBinding, c: SignatureCandidate) -> Res<TypeToken> {
     match store.descriptor_source(c.signature)? {
         Some(token) => Ok(token),
         None => undecided(),
@@ -667,7 +664,7 @@ fn source_token(store: &SignatureStore, c: SignatureCandidate) -> Res<TypeToken>
 }
 
 fn composite_provenance(
-    store: &SignatureStore,
+    store: &EpochBinding,
     view: &SemanticReadView,
     rep: SignatureCandidate,
     ordinal: u32,
@@ -691,7 +688,7 @@ fn composite_provenance(
 
 /// Constituent `c` expressed in the representative's residual binder space.
 fn residual_of(
-    store: &SignatureStore,
+    store: &EpochBinding,
     view: &SemanticReadView,
     rep: &Loaded<'_>,
     c: &Loaded<'_>,
@@ -744,7 +741,7 @@ enum SignatureDescriptorIdOrSame {
 }
 
 fn edges_for(
-    store: &SignatureStore,
+    store: &EpochBinding,
     view: &SemanticReadView,
     rep: SignatureCandidate,
     constituents: &[(u32, SignatureCandidate)],
@@ -775,7 +772,7 @@ fn edges_for(
 }
 
 fn composite_candidate(
-    store: &SignatureStore,
+    store: &EpochBinding,
     view: &SemanticReadView,
     rep: SignatureCandidate,
     shape: super::records::SignatureInputShapeId,
@@ -817,7 +814,7 @@ fn composite_candidate(
 /// single signatures combine with each of that arm's signatures. There is
 /// never a Cartesian product of overload choices.
 pub fn union_signatures(
-    store: &SignatureStore,
+    store: &EpochBinding,
     types: &dyn DiscoveryTypes,
     lists: &[Vec<SignatureCandidate>],
 ) -> Res<Vec<SignatureCandidate>> {
@@ -833,7 +830,7 @@ pub fn union_signatures(
         .filter(|(_, l)| l.len() > 1)
         .map(|(i, _)| i)
         .collect();
-    let view = SemanticReadView::pin(store);
+    let view = store.view();
     let mut result: Vec<SignatureCandidate> = Vec::new();
     let mut representatives: Vec<SignatureCandidate> = Vec::new();
     for (list_index, list) in lists.iter().enumerate() {
@@ -849,7 +846,7 @@ pub fn union_signatures(
             {
                 continue;
             }
-            let sig_loaded = load(&view, sig)?;
+            let sig_loaded = load(view, sig)?;
             let matches = if !sig_loaded.space.binders.is_empty() {
                 // Generic signatures require an exact match, and only the
                 // first list may start one.
@@ -911,11 +908,11 @@ pub fn union_signatures(
                 result.push(sig);
                 continue;
             }
-            let sequence = edges_for(store, &view, sig, &matches)?;
+            let sequence = edges_for(store, view, sig, &matches)?;
             let rep_source = source_token(store, sig)?;
             let candidate = composite_candidate(
                 store,
-                &view,
+                view,
                 sig,
                 view.template(sig_loaded.descriptor.template)?.input_shape,
                 SignatureResultRecipe::UnionCommon {
@@ -934,7 +931,7 @@ pub fn union_signatures(
 }
 
 fn synthesize_union(
-    store: &SignatureStore,
+    store: &EpochBinding,
     types: &dyn DiscoveryTypes,
     lists: &[Vec<SignatureCandidate>],
     master_index: Option<usize>,
@@ -961,14 +958,14 @@ fn synthesize_union(
             out.push(m);
             continue;
         }
-        let view = SemanticReadView::pin(store);
-        let m_loaded = load(&view, m)?;
-        let acc_loaded = load(&view, acc)?;
-        let sequence = edges_for(store, &view, m, &constituents)?;
+        let view = store.view();
+        let m_loaded = load(view, m)?;
+        let acc_loaded = load(view, acc)?;
+        let sequence = edges_for(store, view, m, &constituents)?;
         let master_source = source_token(store, m)?;
         let candidate = composite_candidate(
             store,
-            &view,
+            view,
             m,
             view.template(acc_loaded.descriptor.template)?.input_shape,
             SignatureResultRecipe::UnionSynthesized {
@@ -987,14 +984,14 @@ fn synthesize_union(
 /// position, the minimum is the larger of the two, an extra rest element is
 /// added when only the shorter side has a rest.
 fn combine_union_signatures(
-    store: &SignatureStore,
+    store: &EpochBinding,
     types: &dyn DiscoveryTypes,
     left: SignatureCandidate,
     right: SignatureCandidate,
 ) -> Res<Option<SignatureCandidate>> {
-    let view = SemanticReadView::pin(store);
-    let l = load(&view, left)?;
-    let r = load(&view, right)?;
+    let view = store.view();
+    let l = load(view, left)?;
+    let r = load(view, right)?;
     let map_right: Vec<(SemanticNodeId, SemanticNodeId)> =
         if !l.space.binders.is_empty() && !r.space.binders.is_empty() {
             // Both generic: the binder spaces must be identical, and the
@@ -1211,10 +1208,10 @@ pub fn heritage_signatures(members: &[Vec<SignatureCandidate>]) -> Vec<Signature
 /// declaration inside it. Call resolution orders a merged symbol's
 /// candidates by those identities ([`resolution_order`]).
 pub fn merged_declaration_signatures(
-    store: &SignatureStore,
+    store: &EpochBinding,
     declarations: &[Vec<SignatureCandidate>],
 ) -> Res<Vec<SignatureCandidate>> {
-    let view = SemanticReadView::pin(store);
+    let view = store.view();
     let Some(first) = declarations.iter().flatten().next() else {
         return Ok(Vec::new());
     };
@@ -1321,16 +1318,16 @@ pub fn resolution_order(
 /// into it: `typeof CtorB & typeof MixA` constructs `B & A` from `CtorB`'s
 /// parameters, and two mixins construct from the first one's.
 pub fn intersection_signatures(
-    store: &SignatureStore,
+    store: &EpochBinding,
     types: &dyn DiscoveryTypes,
     kind: SignatureKind,
     members: &[Vec<SignatureCandidate>],
 ) -> Res<Vec<SignatureCandidate>> {
-    let view = SemanticReadView::pin(store);
+    let view = store.view();
     let mut mixin_flags = vec![false; members.len()];
     if kind == SignatureKind::Construct {
         for (i, list) in members.iter().enumerate() {
-            mixin_flags[i] = is_mixin_constructor(&view, types, list)?;
+            mixin_flags[i] = is_mixin_constructor(view, types, list)?;
         }
         let constructor_count = members.iter().filter(|list| !list.is_empty()).count();
         let mixins = mixin_flags.iter().filter(|f| **f).count();
@@ -1357,12 +1354,12 @@ pub fn intersection_signatures(
                         constituents.push((i as u32, other[0]));
                     }
                 }
-                let loaded = load(&view, sig)?;
-                let sequence = edges_for(store, &view, sig, &constituents)?;
+                let loaded = load(view, sig)?;
+                let sequence = edges_for(store, view, sig, &constituents)?;
                 let base = source_token(store, sig)?;
                 composed.push(composite_candidate(
                     store,
-                    &view,
+                    view,
                     sig,
                     view.template(loaded.descriptor.template)?.input_shape,
                     SignatureResultRecipe::IntersectionConstruct {

@@ -6688,6 +6688,23 @@ pub struct SemanticGraphStats {
     /// it, outside every charge and its rollback. A walk restarted and
     /// served by the substitution memo counts its children again.
     pub substitution_child_visits: u64,
+    /// Subject nodes signature discovery walks entered, wherever they ran:
+    /// one per node a walk enters, counted before any shortcut answers it,
+    /// outside every charge. A subject walked again counts again.
+    pub discovery_nodes_walked: u64,
+    /// Type positions signature matching compared, wherever it ran: one per
+    /// pair of types the kernel's identity comparison decides, counted
+    /// before the pair is read. A comparison run again counts again.
+    pub signature_positions_compared: u64,
+    /// Signature result reads performed, whichever driver made them: one
+    /// per read begun, counted before its recipe is read. A result forced
+    /// again counts again.
+    pub signature_results_forced: u64,
+    /// Passes that copied signature records from one kernel epoch into
+    /// another: one per pass, counted once it completed.
+    pub signature_rebinds: u64,
+    /// Signature descriptors those passes copied.
+    pub signature_descriptors_rebound: u64,
     /// Cross products of an intersection over union arms built, by any
     /// construction of it — a reduction, a distribution, a weighing: one
     /// per product whose constituents are constructed, counted where its
@@ -13082,7 +13099,10 @@ mod tests {
     ///   continuation_stages_resumed, projection_hops_walked,
     ///   admission_stages_walked, deferred_steps_evaluated,
     ///   intersection_products_built, explicit_candidates_instantiated,
-    ///   binder_substitutions, substitution_child_visits.
+    ///   binder_substitutions, substitution_child_visits,
+    ///   discovery_nodes_walked, signature_positions_compared,
+    ///   signature_results_forced, signature_rebinds,
+    ///   signature_descriptors_rebound.
     /// - Exceptional-path: same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
@@ -13132,6 +13152,11 @@ mod tests {
             "explicit_candidates_instantiated",
             "binder_substitutions",
             "substitution_child_visits",
+            "discovery_nodes_walked",
+            "signature_positions_compared",
+            "signature_results_forced",
+            "signature_rebinds",
+            "signature_descriptors_rebound",
         ];
         for field in expected_to_fire {
             assert!(

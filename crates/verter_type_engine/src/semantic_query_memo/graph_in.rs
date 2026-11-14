@@ -376,6 +376,34 @@ impl<M: ObserveExec> GraphIn<'_, M> {
             self.store.record_substitution_child_visit();
         }
     }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_discovery_node_walked(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_discovery_node_walked();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_signature_position_compared(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_signature_position_compared();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_signature_result_forced(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_signature_result_forced();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_signature_rebind(self, descriptors: u32) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_signature_rebind(descriptors);
+        }
+    }
     /// Record a path sample only for captured execution or test work accounting.
     #[inline(always)]
     pub fn record_path_length(self, length: u32) {

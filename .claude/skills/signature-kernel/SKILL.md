@@ -26,7 +26,8 @@ consumer is `project_semantic_dispatch/signature_discovery.rs`):
 |---|---|
 | `records.rs` | The record vocabulary and its handles: `SignatureDescriptor`, `SignatureCandidate`, `SignatureTemplate`, `SignatureInputShape`, `ParameterLayout`/`ParameterSlot`/`RestSlot`, `BinderSpace`/`BinderDeclaration`, `SignatureResultRecipe`, `PredicateEffect` (the effect half of a result read: a declared result's type predicate / assertion, the predicate the checker infers from a body, or a union signature's composite predicate), `AppliedResult`, `TypeToken`, `GraphEpoch`. Every id is epoch-qualified. |
 | `storage.rs` | `AppendInterner<T>` — the private append-only interner over `boxcar::Vec` with `DEDUP_SHARDS` (16) hash shards. Hash is computed outside the shard lock; equality decides collisions. A record is fully initialised before its handle is published, so `boxcar`'s `count()` is never a published-handle range. |
-| `lifetime.rs` | `SignatureStore`: interning entry points, `replace_epoch()`, `retain_result`/`drain_retained`/`retained_len`, `live_reader_count()`, `StoreError`. |
+| `lifetime.rs` | `SignatureStore`: interning entry points, `replace_epoch()`, `retain_result`/`drain_retained`/`retained_len`, `live_reader_count()`, `StoreError`; `EpochBinding`, one epoch held open for reading and publication. |
+| `rebind.rs` | `EpochRebind`: one pass copying descriptors, with everything they reach, from one epoch into another. |
 | `read_view.rs` | `SemanticReadView::pin(&SignatureStore)` — the request-pinned borrowed read. `BorrowedSet::{Empty, One, Many}`, `ReadError`, plus the `descriptor_chain_walks` / `shard_lock_acquires` probes the performance gates assert on. |
 | `positional.rs` | The shared positional model: `PositionalShape`, `PositionalMode`, `TypeAt`, `MinArityFlags`, `ProjectedTuple`/`ProjectedElement`, `SlotTypeFacts`. Parameter matching, rest/receiver layout and arity are computed **once** here for every consumer. It also owns the one tuple-inference plan, `tuple_inference_plan` over `TupleElementKind` (`Required`/`Optional`/`Rest`/`Variadic`) with `VariadicArityFacts` (a variadic's implied arity and fixed constraint arity), returning `TupleInferenceStep`s — see "Tuple inference plan" below. |
 | `provenance.rs` | `SignatureProvenance`, `OverloadOrder`, `ArmIdentity`, `ConstituentSequence`, `DeclarationGroupId`, `MappedConstituent`, `OriginRelation`, `SourceLocatorId` — where a candidate came from and in what authored order. |
@@ -259,6 +260,29 @@ enumerates the live variant set exactly (guard:
 * Interning rejects stale embedded handles across a replacement
   (`intern_rejects_stale_embedded_handles_across_epoch_replacement`), and a
   result lookup MISS never publishes (`lookup_result_does_not_publish_on_miss`).
+* **One epoch per computation.** A discovery walk, a result read, a
+  comparison and a list read each hold an `EpochBinding`
+  (`SignatureStore::bind_current` / `bind_epoch`,
+  `SignatureEpochLease::bind`): one epoch, open for reads and for
+  publication, current or retired. Everything the computation interns
+  lands in it, so a replacement mid-way never leaves it with handles of two
+  epochs (`a_binding_publishes_into_its_own_epoch_after_a_replacement`).
+  `SignatureStore`'s interning methods are the same bodies over its
+  current epoch.
+* **Publication through a binding; rebinding is a copy.** Where a handle
+  must be named in another epoch — a `ReadSignatureResult` key, the set a
+  walk publishes after its epoch retired, the foreign side of an identity
+  comparison — `EpochRebind` copies the descriptors it is given, with
+  everything they reach, once each, on an owned stack. Interning is
+  content-addressed, so the copy is the record a fresh publication interns
+  there (`a_rebound_descriptor_reads_as_the_record_a_fresh_publication_interns`),
+  and a pass whose target retires mid-way stays coherent
+  (`a_rebind_into_an_epoch_that_retires_mid_pass_stays_coherent`). A copy
+  reads no dependency and dispatches nothing; discovery, matching,
+  substitution and result forcing are never repeated because an epoch
+  retired. A result is read where it was published, through its own
+  lease, and a `ReadSignatureResult` key of a retired epoch stays a typed
+  refusal.
 
 The kernel store does **not** own the process byte budget: aggregate retention
 is `SemanticRetentionAccount` (see `/type-cache-architecture` → Aggregate
@@ -390,8 +414,9 @@ change; never weaken the test.
    `signature_kernel::discovery::merged_declaration_signatures` — every
    declaration's signatures in declaration order, identical ones included —
    which the signature utilities and conditional inference read (the LAST
-   signature). Call resolution alone reads its
-   overload set's list pinned in the kernel's
+   signature). Call resolution alone reads the list in resolution order
+   (`SignatureListRead` with its `resolution` set, pinned through
+   `pin_signature_list`), the kernel's
    `resolution_order` (TypeScript's `reorderCandidates`): a later
    declaration's group before an earlier one's, and a signature whose
    parameter is WRITTEN as a literal type (`FunctionParam::declared_literal`,

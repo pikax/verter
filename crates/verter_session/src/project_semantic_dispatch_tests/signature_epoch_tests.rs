@@ -4,9 +4,11 @@
 //! A replacement retires every kernel handle a warm memo value carries. The
 //! contract these tests pin: a value of a retired epoch is a MISS that
 //! recomputes the same answer in the current epoch — on the warm path, for
-//! a consumer whose pin lands after the replacement, for the caller and the
-//! joiners of a build that straddles it, and across a long run of unique
-//! edits — and never an incomplete answer.
+//! the joiners of a build that straddles it, and across a long run of unique
+//! edits — and never an incomplete answer. A value already handed to its
+//! consumer is read through its own epoch, and a computation a replacement
+//! lands in finishes in the epoch it began in: neither walks, dispatches nor
+//! compares again.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
@@ -16,7 +18,8 @@ use crate::types::UpsertRequest;
 use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node;
 use crate::{HostConfig, VerterHost};
 use verter_type_engine::project_semantic_dispatch::signature_discovery::{
-    SharedSignatureNodes, SignaturesOfTypeBuildPoint, SIGNATURES_OF_TYPE_BUILD_HOOK,
+    SharedSignatureNodes, SignatureComparisonPlan, SignaturesOfTypeBuildPoint,
+    SIGNATURES_OF_TYPE_BUILD_HOOK,
 };
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::semantic_query::{
@@ -128,6 +131,44 @@ fn shared(
     subject: SemanticNodeId,
 ) -> Vec<String> {
     rendered(d, d.shared_signature_nodes(subject, SignatureKind::Call))
+}
+
+/// The signature work a graph did, wherever it ran: subject nodes discovery
+/// walks entered, type positions matching compared, result reads performed,
+/// and the passes copying records between kernel epochs with the
+/// descriptors they copied.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct SignatureWork {
+    pub(super) discovery: u64,
+    pub(super) positions: u64,
+    pub(super) forced: u64,
+    pub(super) rebinds: u64,
+    pub(super) descriptors: u64,
+}
+
+impl SignatureWork {
+    /// The work done since `before`.
+    pub(super) fn since(self, before: Self) -> Self {
+        Self {
+            discovery: self.discovery - before.discovery,
+            positions: self.positions - before.positions,
+            forced: self.forced - before.forced,
+            rebinds: self.rebinds - before.rebinds,
+            descriptors: self.descriptors - before.descriptors,
+        }
+    }
+}
+
+/// `host`'s signature work so far.
+pub(super) fn signature_work(host: &VerterHost) -> SignatureWork {
+    let stats = host.project_type_store().semantic_graph().stats_snapshot();
+    SignatureWork {
+        discovery: stats.discovery_nodes_walked,
+        positions: stats.signature_positions_compared,
+        forced: stats.signature_results_forced,
+        rebinds: stats.signature_rebinds,
+        descriptors: stats.signature_descriptors_rebound,
+    }
 }
 
 /// The same subjects' answers on a fresh host — every one complete.
@@ -400,55 +441,66 @@ fn a_warm_signature_result_of_a_retired_epoch_is_never_served() {
     }
 }
 
-/// The race a replacement opens for every consumer: the memo read hands out
-/// a warm set, the replacement lands, and only then does the consumer pin
-/// its view. The pinned read meets `StaleHandle`; the consumer re-dispatches
-/// once, the memo refuses the retired value, and the answer equals a fresh
-/// host's — never `Incomplete`. Both consumer shapes (the node form, which
-/// also builds a composite through `ReadSignatureResult`, and the
-/// positional read) take the same path.
+/// A list the memo served warm, which a replacement then retires before
+/// its consumer reads it, is read through its own epoch while another task
+/// holds the list's producer: the node form — a composite's result read and
+/// published in that epoch — and the positional read answer as they did
+/// before the replacement, with no walk and no dispatch, so no wait is
+/// entered.
 ///
-/// Without the re-dispatch the pinned read's `StaleHandle` is the answer:
-/// `Incomplete(UnsettledInput)`.
+/// Dispatching the list again instead joins the held producer, a wait the
+/// probe forbids.
 #[test]
-fn a_replacement_between_the_memo_read_and_the_pin_is_a_miss_not_an_incomplete_answer() {
+fn a_list_retired_after_the_memo_served_it_is_read_without_a_dispatch() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
     let _builder = d.enter_construction_scope();
     let graph = d.graph_arc();
-    let expected = fresh_answers();
-    for (subject, expected) in subjects(&d).into_iter().zip(expected) {
-        let _cold = d.signature_set_value(subject, SignatureKind::Call).unwrap();
-        let hits = graph.stats_snapshot().hits;
-        let looked_up = d.signature_set_value(subject, SignatureKind::Call).unwrap();
-        assert!(
-            graph.stats_snapshot().hits > hits,
-            "premise: the lookup is a warm hit"
+    let positional = |value: &SignatureSetValue| {
+        d.raw_positional_reads(value, 0).map(|reads| {
+            reads
+                .iter()
+                .map(|raw| (raw.receiver, raw.argument))
+                .collect::<Vec<_>>()
+        })
+    };
+    // Per subject, the composite results its node form reads.
+    for (subject, forced) in subjects(&d).into_iter().zip([0, 1]) {
+        let value = d.signature_set_value(subject, SignatureKind::Call).unwrap();
+        let nodes_before = rendered(
+            &d,
+            d.shared_signature_nodes_from(SignatureKind::Call, Ok(value.clone())),
         );
-        let positional = |value: SignatureSetValue| {
-            d.read_signature_set(subject, SignatureKind::Call, Ok(value), |value| {
-                d.raw_positional_reads(value, 0)
-            })
-            .map(|reads| {
-                reads
-                    .iter()
-                    .map(|raw| (raw.receiver, raw.argument))
-                    .collect::<Vec<_>>()
-            })
+        let positional_before = positional(&value);
+        assert!(
+            !nodes_before[0].starts_with("incomplete") && positional_before.is_ok(),
+            "premise: both reads settle: {nodes_before:?} {positional_before:?}"
+        );
+
+        graph.compact_signature_store_over(0).expect("replaced");
+        assert!(
+            set_epoch(&value).is_some_and(|epoch| epoch != graph.signature_store().epoch()),
+            "premise: the served list is retired"
+        );
+        let (_holder, _lease) =
+            super::semantic_task_tests::hold_producer(&host, graph, set_key(subject));
+        let before = signature_work(&host);
+        let (nodes, positions) = {
+            let _forbid = verter_execution::blocking::WaitProbe::forbid();
+            (
+                d.shared_signature_nodes_from(SignatureKind::Call, Ok(value.clone())),
+                positional(&value),
+            )
         };
-        let positional_before = positional(looked_up.clone());
-        assert!(
-            positional_before.is_ok(),
-            "premise: the positional read settles: {positional_before:?}"
+        let work = signature_work(&host).since(before);
+        assert_eq!(rendered(&d, nodes), nodes_before);
+        assert_eq!(positions, positional_before);
+        assert_eq!(work.discovery, 0, "the retired list is not walked again");
+        assert_eq!(
+            work.forced, forced,
+            "each composite's result is read once, in the list's epoch"
         );
-
-        graph.compact_signature_store_over(0).expect("replaced");
-        let read =
-            d.shared_signature_nodes_from(subject, SignatureKind::Call, Ok(looked_up.clone()));
-        assert_eq!(rendered(&d, read), expected);
-
-        graph.compact_signature_store_over(0).expect("replaced");
-        assert_eq!(positional(looked_up), positional_before);
+        assert_eq!(work.rebinds, 0, "an in-place read names no key to rebind");
     }
 }
 
@@ -497,30 +549,53 @@ fn a_build_that_straddles_a_replacement_cannot_poison_later_reads() {
     assert_eq!(
         rendered(
             &d,
-            d.shared_signature_nodes_from(overloaded, SignatureKind::Call, Ok(straddled))
+            d.shared_signature_nodes_from(SignatureKind::Call, Ok(straddled))
         ),
         expected,
-        "the straddling build's own caller re-reads once and answers"
+        "the straddling build's own caller reads its value through the value's own epoch"
     );
 }
 
 /// A replacement that lands while a build's walk holds what it interned —
-/// after discovery, before the set is published — retires those records, so
-/// that walk cannot answer. The build walks once more in the current epoch:
-/// its caller gets the current answer, never `Incomplete`.
+/// after discovery, before the set is published — leaves the walk in the
+/// epoch it began in: the subject is walked once, and the candidates it
+/// found are copied into the current epoch and published there. The answer
+/// equals a fresh host's.
 ///
-/// Without the second walk the build fails (the set it publishes names
-/// retired handles) and its caller reads `Incomplete(UnsettledInput)`.
+/// Walking the subject again in the current epoch instead doubles its
+/// discovery and matching work and copies nothing.
 #[test]
-fn a_replacement_during_the_walk_is_walked_again_not_an_incomplete_answer() {
+fn a_replacement_during_the_walk_rebinds_the_discovered_set_and_walks_once() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
     let _builder = d.enter_construction_scope();
     let graph = Arc::clone(d.graph_arc());
     let expected = fresh_answers();
-    for (subject, expected) in subjects(&d).into_iter().zip(expected) {
+    // Per subject, one walk's work and the copy of its set. The overloaded
+    // callable is one object node whose two signatures are leaves; the
+    // union is its node and its two arms, whose one parameter position is
+    // compared once each way, and its set is one composite over the two
+    // arms' descriptors.
+    let walks = [
+        SignatureWork {
+            discovery: 1,
+            positions: 0,
+            forced: 0,
+            rebinds: 1,
+            descriptors: 2,
+        },
+        SignatureWork {
+            discovery: 3,
+            positions: 2,
+            forced: 0,
+            rebinds: 1,
+            descriptors: 3,
+        },
+    ];
+    for ((subject, expected), walk) in subjects(&d).into_iter().zip(expected).zip(walks) {
         let swapped = Arc::new(AtomicBool::new(false));
         let (swap, once) = (Arc::clone(&graph), Arc::clone(&swapped));
+        let before = signature_work(&host);
         let read = with_build_hook(
             SignaturesOfTypeBuildPoint::Discovered,
             move || {
@@ -530,13 +605,152 @@ fn a_replacement_during_the_walk_is_walked_again_not_an_incomplete_answer() {
             },
             || d.signature_set_value(subject, SignatureKind::Call),
         );
+        let work = signature_work(&host).since(before);
         assert!(
             swapped.load(Ordering::SeqCst),
             "premise: the replacement landed mid-walk"
         );
-        let value = read.expect("the second walk answers");
-        assert_eq!(set_epoch(&value), Some(graph.signature_store().epoch()));
+        let value = read.expect("the walk answers");
+        assert_eq!(
+            set_epoch(&value),
+            Some(graph.signature_store().epoch()),
+            "the set is published in the current epoch"
+        );
+        assert_eq!(work, walk, "one walk, and one copy of what it found");
         assert_eq!(shared(&d, subject), expected);
+    }
+}
+
+/// Two subjects declaring the same single signature `(x: string) => number`.
+fn same_shape_callables(
+    d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+) -> [SemanticNodeId; 2] {
+    let string = prim(d, PrimitiveKind::String);
+    let number = prim(d, PrimitiveKind::Number);
+    let sig = |name| {
+        signature(
+            d,
+            name,
+            0,
+            SignatureKind::Call,
+            vec![param(string)],
+            vec![],
+            number,
+        )
+    };
+    [
+        callable(d, vec![sig("compared_source")]),
+        callable(d, vec![sig("compared_target")]),
+    ]
+}
+
+/// A comparison plan rendered structurally, so two hosts' plans compare.
+fn rendered_plan(
+    d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    plan: Result<SignatureComparisonPlan, verter_type_engine::semantic_query::IncompleteReason>,
+) -> String {
+    match plan {
+        Ok(plan) => format!(
+            "more parameters: {}; receivers: {:?} {:?}; positions: {:?}",
+            plan.source_has_more_parameters,
+            plan.source_receiver.map(|node| render_node(d, node, 0)),
+            plan.target_receiver.map(|node| render_node(d, node, 0)),
+            plan.positions
+                .iter()
+                .map(|(source, target)| (render_node(d, *source, 0), render_node(d, *target, 0)))
+                .collect::<Vec<_>>()
+        ),
+        Err(reason) => format!("incomplete: {reason:?}"),
+    }
+}
+
+/// Two signature sets read in different epochs compare without either
+/// being dispatched again: the source is answered by a build a replacement
+/// straddled — it walked and published in the epoch the replacement retired
+/// — and the target is built after it. The identity comparison works in the
+/// target's epoch and copies the source's one candidate into it; the
+/// positional plan reads each set in its own epoch. Both answer as a fresh
+/// host does, each subject walked once.
+///
+/// Dispatching both sets once more instead walks the retired source again.
+#[test]
+fn signatures_of_two_epochs_compare_without_a_second_dispatch() {
+    let (fresh_identity, fresh_plan) = {
+        let host = host();
+        let d = ProjectSemanticDispatch::new(host.as_ref());
+        let _builder = d.enter_construction_scope();
+        let [source, target] = same_shape_callables(&d);
+        (
+            d.signature_types_identical(source, target, SignatureKind::Call),
+            rendered_plan(
+                &d,
+                d.signature_comparison_plan(source, target, SignatureKind::Call, false),
+            ),
+        )
+    };
+    assert_eq!(
+        fresh_identity,
+        Some(true),
+        "premise: the two signatures are identical"
+    );
+    assert!(
+        !fresh_plan.starts_with("incomplete"),
+        "premise: {fresh_plan}"
+    );
+
+    // Each comparison on its own host, with the work it does and the copies
+    // it makes: one copy of the source's leaf for the identity comparison,
+    // none for the plan.
+    for (identity, rebinds) in [(true, 1), (false, 0)] {
+        let host = host();
+        let d = ProjectSemanticDispatch::new(host.as_ref());
+        let _builder = d.enter_construction_scope();
+        let graph = Arc::clone(d.graph_arc());
+        let [source, target] = same_shape_callables(&d);
+        let replaced = Arc::new(AtomicBool::new(false));
+        let (swap, once) = (Arc::clone(&graph), Arc::clone(&replaced));
+        let before = signature_work(&host);
+        let answer = with_build_hook(
+            SignaturesOfTypeBuildPoint::Settled,
+            move || {
+                if !once.swap(true, Ordering::SeqCst) {
+                    swap.compact_signature_store_over(0).expect("replaced");
+                }
+            },
+            || {
+                if identity {
+                    format!(
+                        "{:?}",
+                        d.signature_types_identical(source, target, SignatureKind::Call)
+                    )
+                } else {
+                    rendered_plan(
+                        &d,
+                        d.signature_comparison_plan(source, target, SignatureKind::Call, false),
+                    )
+                }
+            },
+        );
+        let work = signature_work(&host).since(before);
+        assert!(
+            replaced.load(Ordering::SeqCst),
+            "premise: the source's build straddled a replacement"
+        );
+        let expected = if identity {
+            format!("{fresh_identity:?}")
+        } else {
+            fresh_plan.clone()
+        };
+        assert_eq!(answer, expected, "identity comparison: {identity}");
+        assert_eq!(
+            work.discovery, 2,
+            "identity comparison: {identity}: each subject is walked once"
+        );
+        assert_eq!(
+            (work.rebinds, work.descriptors),
+            (rebinds, rebinds),
+            "identity comparison: {identity}"
+        );
     }
 }
 

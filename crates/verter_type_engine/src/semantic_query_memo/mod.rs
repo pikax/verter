@@ -1984,6 +1984,32 @@ impl SemanticGraphStore {
             .substitution_child_visits
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped once per subject node a signature discovery walk enters.
+    pub fn record_discovery_node_walked(&self) {
+        self.stats
+            .discovery_nodes_walked
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Bumped once per type position signature matching compares.
+    pub fn record_signature_position_compared(&self) {
+        self.stats
+            .signature_positions_compared
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Bumped once per signature result read begun.
+    pub fn record_signature_result_forced(&self) {
+        self.stats
+            .signature_results_forced
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Bumped once per pass copying signature records between kernel
+    /// epochs, with the descriptors it copied.
+    pub fn record_signature_rebind(&self, descriptors: u32) {
+        self.stats.signature_rebinds.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .signature_descriptors_rebound
+            .fetch_add(u64::from(descriptors), Ordering::Relaxed);
+    }
     pub fn record_conditional_decided(&self) {
         self.stats
             .conditional_decided_count
