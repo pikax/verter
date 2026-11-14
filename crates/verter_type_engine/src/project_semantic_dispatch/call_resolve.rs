@@ -11,7 +11,9 @@ use super::dispatch_txn::{
     ResolveCallPendingState, ResolveCallSelection, ReturnDomainMetadata, ReturnEquationFailure,
     ReturnEquationMember, ReturnObligationIdentity, SessionId,
 };
-use super::helper_continuation::{HelperDelivery, HelperDrive, HelperRequest, HelperStep};
+use super::helper_continuation::{
+    HelperAnswer, HelperDelivery, HelperDrive, HelperRequest, HelperStep,
+};
 use super::inference::session::{InferenceSessionSetup, InferenceSessionState, SessionCheckpoint};
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
@@ -415,7 +417,7 @@ struct PendingArgument {
 /// drive.
 struct ListRead<'r> {
     awaiting: &'r mut Option<SemanticQueryKey>,
-    delivery: Option<(SemanticQueryKey, super::query_frames::QueryDelivery)>,
+    delivery: Option<Box<super::helper_continuation::DeliveredRead>>,
     drive: HelperDrive,
 }
 
@@ -474,7 +476,7 @@ enum CandidateStart<'a> {
     },
     Resumed {
         suspended: Box<SuspendedCandidate>,
-        delivery: Option<(SemanticQueryKey, super::query_frames::QueryDelivery)>,
+        delivery: Option<Box<super::helper_continuation::DeliveredRead>>,
     },
 }
 
@@ -1765,7 +1767,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         drive: HelperDrive,
     ) -> HelperStep<CandidateVerdict> {
         let _contextual_isolation = self.isolate_contextual_call(&walk.key);
-        let mut delivery = delivery.map(HelperDelivery::into_query);
+        let mut delivery = delivery.map(HelperDelivery::into_read);
         // The shared signature list reads an apparent global (a primitive or
         // collection callee) from the project of the demanding site: the
         // call site is that site.
@@ -1906,7 +1908,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &ResolveCallKey,
         plan: &mut PlanStage,
-        mut delivery: Option<(SemanticQueryKey, super::query_frames::QueryDelivery)>,
+        mut delivery: Option<Box<super::helper_continuation::DeliveredRead>>,
         drive: HelperDrive,
     ) -> PlanProgress {
         // A call site demands exactly ITS bucket of the callee's shared
@@ -2048,7 +2050,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The callee's candidate list for `bucket` under `type_args`: the
     /// shared overload set. On a frame, a set the memo does not serve warm
     /// is the request (`Err`), and its delivery is read where it was asked;
-    /// a set whose entry admits its subject reads in place.
+    /// a set that did not come back as a set is classified by the callee's
+    /// list, which on a frame is a request too, its delivery entering the
+    /// classification where the walk waited. A request names the demand
+    /// scope the walk asked it under, its call site, so the frame producing
+    /// it reads a primitive or collection callee's apparent global
+    /// (`String`, `Array`) in that site's project.
     #[allow(clippy::too_many_arguments)]
     fn call_candidate_list(
         &self,
@@ -2057,10 +2064,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         type_args: &Arc<[SemanticNodeId]>,
         resolve_env_hash: crate::semantic_query::HashValue,
         awaiting: &mut Option<SemanticQueryKey>,
-        delivery: Option<(SemanticQueryKey, super::query_frames::QueryDelivery)>,
+        delivery: Option<Box<super::helper_continuation::DeliveredRead>>,
         drive: HelperDrive,
     ) -> Result<CallCandidates, Box<HelperRequest>> {
-        let key = SemanticQueryKey::ResolveOverloadSet {
+        let set = SemanticQueryKey::ResolveOverloadSet {
             callee,
             kind: bucket,
             type_args: Arc::clone(type_args),
@@ -2070,41 +2077,67 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             },
         };
         let answer = match (delivery, drive) {
-            (Some((delivered, delivery)), HelperDrive::Frame { depth }) => {
+            (Some(read), HelperDrive::Frame { depth }) => {
                 let awaited = awaiting
                     .take()
                     .expect("a delivery answers the candidate list the walk waited on");
                 verter_debug_assert!(
-                    awaited == delivered && delivered == key,
+                    awaited == read.key,
                     "a delivery answers the list it was asked"
                 );
-                Some((delivery, depth))
+                if matches!(awaited, SemanticQueryKey::SignaturesOfType { .. }) {
+                    // The walk stood at the list it read after its set
+                    // missed.
+                    let nodes =
+                        self.helper_signature_nodes(bucket, HelperAnswer::Delivered(read), depth);
+                    return Ok(self.candidates_of_missed_set(type_args, nodes));
+                }
+                verter_debug_assert!(awaited == set, "a delivery answers the set it was asked");
+                Some((HelperAnswer::Delivered(read), depth))
             }
             (Some(_), HelperDrive::InPlace) => {
                 unreachable!("a walk driven in place is delivered nothing")
             }
-            (None, HelperDrive::Frame { depth })
-                if !self.admits_through_entry(&key) && self.walk_scope_is_ambient() =>
-            {
-                match self.enter_helper_read(&key, depth) {
+            (None, HelperDrive::Frame { depth }) => match self.enter_helper_read(&set, depth) {
+                Ok(request) => {
+                    *awaiting = Some(set);
+                    return Err(Box::new(request));
+                }
+                Err(served) => Some((served, depth)),
+            },
+            (None, HelperDrive::InPlace) => None,
+        };
+        if let Some(candidates) = self.read_call_candidate_set(set, answer) {
+            return Ok(candidates);
+        }
+        // The set did not come back as a set: the callee's list says why.
+        let nodes = match drive {
+            HelperDrive::Frame { depth } => {
+                let list = SemanticQueryKey::SignaturesOfType {
+                    subject: callee,
+                    kind: bucket,
+                    context: crate::semantic_query::SemanticContextId::production(),
+                };
+                match self.enter_helper_read(&list, depth) {
                     Ok(request) => {
-                        *awaiting = Some(key);
+                        *awaiting = Some(list);
                         return Err(Box::new(request));
                     }
-                    Err(delivery) => Some((*delivery, depth)),
+                    Err(served) => self.helper_signature_nodes(bucket, served, depth),
                 }
             }
-            (None, _) => None,
+            HelperDrive::InPlace => self.shared_signature_nodes(callee, bucket),
         };
-        Ok(self.acquire_call_candidates(key, callee, bucket, type_args, answer))
+        Ok(self.candidates_of_missed_set(type_args, nodes))
     }
 
     /// The call signatures of `subject` a contextual candidate's mapping
     /// reads: the shared signature list. On a frame, a list the memo does
     /// not serve warm is the request (`Err`), and its delivery is read where
-    /// it was asked; a list whose entry admits its subject, or one the
-    /// runtime would read outside the walk's call-site scope, reads in
-    /// place, as call candidate lists do ([`Self::call_candidate_list`]).
+    /// it was asked, as call candidate lists are
+    /// ([`Self::call_candidate_list`]); a list whose entry admits its
+    /// subject is always a request, admitted in the call's frame where the
+    /// mapping asked.
     fn contextual_signature_nodes(
         &self,
         subject: SemanticNodeId,
@@ -2115,61 +2148,50 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             kind: SignatureKind::Call,
             context: crate::semantic_query::SemanticContextId::production(),
         };
-        let delivered = match (read.delivery.take(), read.drive) {
-            (Some((delivered, delivery)), HelperDrive::Frame { depth }) => {
+        match (read.delivery.take(), read.drive) {
+            (Some(delivered), HelperDrive::Frame { depth }) => {
                 let awaited = read
                     .awaiting
                     .take()
                     .expect("a delivery answers the signature list the mapping waited on");
                 verter_debug_assert!(
-                    awaited == delivered && delivered == key,
+                    awaited == delivered.key && awaited == key,
                     "a delivery answers the list it was asked"
                 );
-                Some((delivery, depth))
+                Ok(self.helper_signature_nodes(
+                    SignatureKind::Call,
+                    HelperAnswer::Delivered(delivered),
+                    depth,
+                ))
             }
             (Some(_), HelperDrive::InPlace) => {
                 unreachable!("a mapping driven in place is delivered nothing")
             }
-            (None, HelperDrive::Frame { depth })
-                if !self.admits_through_entry(&key) && self.walk_scope_is_ambient() =>
-            {
-                match self.enter_helper_read(&key, depth) {
-                    Ok(request) => {
-                        *read.awaiting = Some(key);
-                        return Err(Box::new(request));
-                    }
-                    Err(delivery) => Some((*delivery, depth)),
+            (None, HelperDrive::Frame { depth }) => match self.enter_helper_read(&key, depth) {
+                Ok(request) => {
+                    *read.awaiting = Some(key);
+                    Err(Box::new(request))
                 }
+                Err(served) => Ok(self.helper_signature_nodes(SignatureKind::Call, served, depth)),
+            },
+            (None, HelperDrive::InPlace) => {
+                Ok(self.shared_signature_nodes(subject, SignatureKind::Call))
             }
-            (None, _) => None,
-        };
-        Ok(match delivered {
-            Some((delivery, depth)) => {
-                let first = self.signature_set_of_read(self.read_helper_delivery(delivery, depth));
-                self.shared_signature_nodes_from(SignatureKind::Call, first)
-            }
-            None => self.shared_signature_nodes(subject, SignatureKind::Call),
-        })
+        }
     }
 
-    /// Whether a read the walk requests of its frame is scoped as the walk
-    /// would read it in place. The walk pushes its call site as the
-    /// innermost demand scope; a requested read is produced on the runtime
-    /// outside that push, under the scope beneath it — the enclosing demand
-    /// site, else the request's file. A primitive or collection callee's
-    /// candidate list looks its apparent global (`String`, `Array`) up in
-    /// that scope's project, so a list the runtime would read under another
-    /// scope, or under none, is read where the walk stands.
-    fn walk_scope_is_ambient(&self) -> bool {
-        let stack = self.lexical_demand_scope.borrow();
-        let Some((site, beneath)) = stack.split_last() else {
-            return false;
-        };
-        match beneath.last() {
-            Some(outer) => outer.as_ref() == site.as_ref(),
-            None => crate::request_context::current_request_canonical()
-                .is_some_and(|request| *request == *site.as_ref()),
-        }
+    /// The nodes of a signature list a walk on a frame read: its request's
+    /// delivery, or the read the memo served as it entered. Out of line, so
+    /// the walk's frame holds none of it.
+    #[inline(never)]
+    fn helper_signature_nodes(
+        &self,
+        kind: SignatureKind,
+        answer: HelperAnswer,
+        depth: u32,
+    ) -> super::signature_discovery::SharedSignatureNodes {
+        let first = self.signature_set_of_read(self.read_helper_answer(answer, depth));
+        self.shared_signature_nodes_from(kind, first)
     }
 
     /// Enter the argument at `position` a callback's consumer typed in
@@ -2248,7 +2270,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &ResolveCallKey,
         walk: &mut CandidateWalk,
-        mut delivery: Option<(SemanticQueryKey, super::query_frames::QueryDelivery)>,
+        mut delivery: Option<Box<super::helper_continuation::DeliveredRead>>,
         drive: HelperDrive,
     ) -> HelperStep<CandidateVerdict> {
         if let Some(position) = walk.delivered.take() {
@@ -2785,24 +2807,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Ok(graph.intern_node(data))
     }
 
-    /// Demand the ordered candidates of the callee's `bucket`, instantiated
-    /// under `type_args`, and classify a set that did not come back
-    /// through the SAME shared signature list the producer read — never
-    /// through the other bucket, whose settlement is not this call site's
-    /// business.
     /// The callee's candidates read from the overload set `key`: in place,
-    /// or from `answer`, the set's delivery to a walk on a frame whose needs
-    /// run at its depth.
-    fn acquire_call_candidates(
+    /// or from `answer`, the set's read by a walk on a frame whose needs run
+    /// at its depth. `None` when the set did not come back as a set, for the
+    /// callee's list to classify ([`Self::candidates_of_missed_set`]).
+    fn read_call_candidate_set(
         &self,
         key: SemanticQueryKey,
-        callee: SemanticNodeId,
-        bucket: SignatureKind,
-        type_args: &Arc<[SemanticNodeId]>,
-        answer: Option<(super::query_frames::QueryDelivery, u32)>,
-    ) -> CallCandidates {
+        answer: Option<(HelperAnswer, u32)>,
+    ) -> Option<CallCandidates> {
         let probe = self.observe_read(|| match answer {
-            Some((delivery, depth)) => self.read_helper_delivery(delivery, depth),
+            Some((answer, depth)) => self.read_helper_answer(answer, depth),
             None => self.execute_via_cold_build_helper(key),
         });
         if matches!(
@@ -2812,19 +2827,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Ok(read) = probe.adopt(self) {
                 if let QueryResult::Value(SemanticQueryValue::OverloadSet(candidates)) = read.value
                 {
-                    return CallCandidates::Candidates(candidates);
+                    return Some(CallCandidates::Candidates(candidates));
                 }
             }
-            return CallCandidates::Incomplete(
+            return Some(CallCandidates::Incomplete(
                 crate::semantic_query::IncompleteReason::UnsettledInput,
-            );
+            ));
         }
         if probe.discard().is_err() {
-            return CallCandidates::Incomplete(
+            return Some(CallCandidates::Incomplete(
                 crate::semantic_query::IncompleteReason::UnsettledInput,
-            );
+            ));
         }
-        match self.shared_signature_nodes(callee, bucket) {
+        None
+    }
+
+    /// Classify a set of the callee's `bucket`, instantiated under
+    /// `type_args`, that did not come back as a set, through `nodes`: the
+    /// SAME shared signature list the producer read — never through the
+    /// other bucket, whose settlement is not this call site's business.
+    fn candidates_of_missed_set(
+        &self,
+        type_args: &Arc<[SemanticNodeId]>,
+        nodes: super::signature_discovery::SharedSignatureNodes,
+    ) -> CallCandidates {
+        match nodes {
             super::signature_discovery::SharedSignatureNodes::Nodes(nodes) if nodes.is_empty() => {
                 CallCandidates::Empty
             }

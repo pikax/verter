@@ -72,7 +72,8 @@ use super::build::{InstantiateBuild, InstantiatePoll, InstantiateStart, TypeofBu
 use super::cost_receipt::Nesting;
 use super::family_continuation::{FamilyBuild, FamilyStep};
 use super::helper_continuation::{
-    HelperAwait, HelperDelivery, HelperDrive, HelperRequest, HelperStep, RelationRead,
+    DeliveredRead, HelperAnswer, HelperAwait, HelperDelivery, HelperDrive, HelperRequest,
+    HelperStep, RelationRead, RequestedQuery,
 };
 use super::query_entry::EntryBegin;
 use super::{BuildLocalTaint, CarrierNormalizationPrelude, ProjectSemanticDispatch};
@@ -143,6 +144,9 @@ pub(super) struct QueryProgram<'p, 'a, C: crate::resolver_core::ResolverCapabili
     /// The preludes of admitted keys a frame needs, for the frame that
     /// produces each ([`InstantiateFrame::prelude`]).
     preludes: FxHashMap<QueryDemand, Box<CarrierNormalizationPrelude>>,
+    /// The demand scope of a need, for the frame that produces it
+    /// ([`InstantiateFrame::scope`]).
+    scopes: FxHashMap<QueryDemand, DemandScope>,
     /// The depth a frame started now nests at: one below the frame whose
     /// step needed it (the drive runs one chain, so a demand starts right
     /// after the step that needed it, or after its wait restarts it).
@@ -189,34 +193,185 @@ pub(super) enum FrameBuild {
     /// A machinery relation root: its root obligation frame open, its
     /// operands' carrier walks demanded before the pair relates.
     Relation(Box<RelationFrameBuild>),
-    /// A family build whose need the frame is admitting
-    /// ([`super::query_entry`]): the admission stands at a read, the family
-    /// retained for the admitted need.
+    /// A build whose need the frame is admitting ([`super::query_entry`]):
+    /// a family's need, or the read a call's walk asked for. The admission
+    /// stands at a read, its holder retained for the admitted need.
     Admitting(Box<AdmissionBuild>),
-    /// An admitting family whose admission waits on a file's load, to read
-    /// that file next — or, `true`, a pending contributor's index — from the
-    /// load's terminal outcome.
+    /// An admission waiting on a file's load, to read that file next — or,
+    /// `true`, a pending contributor's index — from the load's terminal
+    /// outcome.
     AdmittingSource(Box<AdmissionBuild>, Arc<str>, LoadEnded, bool),
     /// A family build waiting on the canonical key its need was admitted
     /// as, with the prelude that read's delivery is attributed with.
     FamilyAdmitted(Box<FamilyBuild>, Box<AdmittedNeed>),
 }
 
-/// A family build's need being admitted in its frame: the admission, and
-/// the family that reads the admitted key once it settles.
+impl FrameBuild {
+    /// The call this build carries: its own, or the one an admission holds
+    /// while it admits the read the call's walk asked for.
+    fn call_mut(&mut self) -> Option<&mut CallBuild> {
+        match self {
+            Self::Call(call) => Some(&mut **call),
+            Self::Admitting(admission) | Self::AdmittingSource(admission, ..) => {
+                match &mut admission.holder {
+                    AdmissionHolder::Call(call) => Some(&mut **call),
+                    AdmissionHolder::Family(_) => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Where a call's walk asked for the read the build waits on, or for
+    /// the read being admitted for it.
+    fn request_origin(&self) -> Option<&RequestOrigin> {
+        match self {
+            Self::Call(call) => call.origin.as_ref(),
+            Self::Admitting(admission) | Self::AdmittingSource(admission, ..) => {
+                admission.holder.origin()
+            }
+            _ => None,
+        }
+    }
+
+    /// The key the build's need was admitted as, with its admission's
+    /// prelude: a family's, or a call's walk's.
+    fn admitted_need(&self) -> Option<&AdmittedNeed> {
+        match self {
+            Self::FamilyAdmitted(_, admitted) => Some(&**admitted),
+            Self::Call(call) => call.admitted.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+/// A need being admitted in its frame: the admission, and what reads the
+/// admitted key once it settles.
 pub(super) struct AdmissionBuild {
-    family: Box<FamilyBuild>,
+    holder: AdmissionHolder,
     entry: Box<super::query_entry::QueryEntryBuild>,
 }
 
-/// The canonical key a family's need was admitted as, and its admission's
-/// prelude: the frame producing the key publishes with it, and the family
-/// reads the key's delivery attributed with it, as the synchronous entry
-/// attributes the read it admitted.
+/// What reads an admitted key once its admission settles.
+pub(super) enum AdmissionHolder {
+    Family(Box<FamilyBuild>),
+    /// A call whose walk waits on the read being admitted.
+    Call(Box<CallBuild>),
+}
+
+impl AdmissionHolder {
+    /// Where the walk asked for the read being admitted: a call's request
+    /// origin; a family's need is admitted where its frame stands.
+    fn origin(&self) -> Option<&RequestOrigin> {
+        match self {
+            Self::Family(_) => None,
+            Self::Call(call) => call.origin.as_ref(),
+        }
+    }
+}
+
+/// A holder taken out of its frame while its need is admitted. Until it is
+/// put back in the frame, a call it holds is closed by this guard if the
+/// admission unwinds: its executor frame closes and its walk's collector is
+/// released, as the frame's abandon does for a call still in its frame.
+struct HeldAdmission<'d, 'a, C: crate::resolver_core::ResolverCapabilities> {
+    dispatch: &'d ProjectSemanticDispatch<'a, C>,
+    holder: Option<AdmissionHolder>,
+}
+
+impl<'d, 'a, C: crate::resolver_core::ResolverCapabilities> HeldAdmission<'d, 'a, C> {
+    fn new(dispatch: &'d ProjectSemanticDispatch<'a, C>, holder: AdmissionHolder) -> Self {
+        Self {
+            dispatch,
+            holder: Some(holder),
+        }
+    }
+
+    fn origin(&self) -> Option<&RequestOrigin> {
+        self.holder
+            .as_ref()
+            .expect("an admission holds its holder until it is put back")
+            .origin()
+    }
+
+    /// The holder, put back in its frame by the caller.
+    fn release(mut self) -> AdmissionHolder {
+        self.holder
+            .take()
+            .expect("an admission holds its holder until it is put back")
+    }
+}
+
+impl<C: crate::resolver_core::ResolverCapabilities> Drop for HeldAdmission<'_, '_, C> {
+    #[inline(never)]
+    fn drop(&mut self) {
+        let Some(AdmissionHolder::Call(call)) = self.holder.as_mut() else {
+            return;
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(read) = call.probe.take().and_then(|probe| probe.1) {
+            self.dispatch.release_call_read(read);
+        }
+        if let Some(idx) = call.frame.take() {
+            self.dispatch
+                .abandon_resolve_call_build(idx, call.walk.take());
+        }
+    }
+}
+
+/// The canonical key a need was admitted as, and its admission's prelude:
+/// the frame producing the key publishes with it, and the family or the
+/// call's walk reads the key's delivery attributed with it, as the
+/// synchronous entry attributes the read it admitted.
 pub(super) struct AdmittedNeed {
     key: SemanticQueryKey,
     prelude: CarrierNormalizationPrelude,
 }
+
+/// The demand stack a read is scoped by: the innermost site first.
+type DemandScopeStack =
+    verter_execution::sync_cell::SyncRefCell<smallvec::SmallVec<[verter_type_expr::OwnedStr; 2]>>;
+
+/// The demand site a requested read is scoped by, owned by the frame that
+/// produces the read: pushed for each of the frame's steps, and handed to
+/// every frame its needs start.
+pub(super) struct DemandScope(verter_type_expr::OwnedStr);
+
+impl DemandScope {
+    /// The innermost demand site on `stack` now.
+    pub(super) fn innermost(stack: &DemandScopeStack) -> Option<Self> {
+        stack.borrow().last().cloned().map(Self)
+    }
+
+    /// The same site, for a frame one of the holder's needs starts.
+    fn inherit(&self) -> Self {
+        Self(self.0.clone())
+    }
+
+    /// The site pushed until the guard drops.
+    fn enter<'g>(&self, stack: &'g DemandScopeStack) -> super::LexicalDemandScopeGuard<'g> {
+        super::LexicalDemandScopeGuard::push(stack, self.0.clone())
+    }
+}
+
+/// Where a helper asked for a read: the demand scope it stood under and the
+/// site it checked at.
+pub(super) struct RequestOrigin {
+    scope: Option<DemandScope>,
+    site: TupleSplicePosition,
+}
+
+// A scope and an origin travel with the frame that owns them to whichever
+// thread resumes it; each is handed on by an explicit inheritance, never
+// shared.
+static_assertions::assert_impl_all!(DemandScope: Send);
+static_assertions::assert_not_impl_any!(DemandScope: Clone, Copy);
+static_assertions::assert_impl_all!(RequestOrigin: Send);
+static_assertions::assert_not_impl_any!(RequestOrigin: Clone, Copy);
+static_assertions::assert_impl_all!(AdmissionHolder: Send);
+static_assertions::assert_not_impl_any!(AdmissionHolder: Clone, Copy);
+static_assertions::assert_impl_all!(AdmissionBuild: Send);
+static_assertions::assert_not_impl_any!(AdmissionBuild: Clone, Copy);
 
 /// A machinery relation root's frame between its steps: the relation
 /// computation its first step began — which owns the open root obligation
@@ -359,6 +514,12 @@ pub(super) struct CallBuild {
     awaiting: Option<HelperAwait>,
     /// The claim the awaited read entered with, until the runtime takes it.
     claim: Option<ClaimAttempt>,
+    /// Where the walk asked for the read it waits on, when the request
+    /// named it.
+    origin: Option<RequestOrigin>,
+    /// The key the awaited read was admitted as, with its admission's
+    /// prelude.
+    admitted: Option<Box<AdmittedNeed>>,
     /// The contextual call a test drives on this frame in place of the
     /// frame's own resolution ([`drive_contextual_call_here_for_tests`]),
     /// and its owned computation once begun.
@@ -374,6 +535,9 @@ pub(super) struct CallBuild {
 /// What a frame's build did in one step.
 enum FramePoll<'a> {
     Need(SemanticQueryKey),
+    /// The build's helper asked for this read, which its entry admits
+    /// first.
+    Admit(SemanticQueryKey),
     /// The build waits on a file's load before it reads the file.
     Await(LoadWait<'a>),
     Done(Box<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>>),
@@ -602,6 +766,11 @@ pub(super) struct InstantiateFrame<'p, 'a, C: crate::resolver_core::ResolverCapa
     /// the frame's publication, as a synchronous entry's prelude joins the
     /// build it admitted.
     prelude: Option<Box<CarrierNormalizationPrelude>>,
+    /// The demand site the read this frame produces was asked under, when
+    /// a helper's request named one or the needing frame carried one:
+    /// pushed for each of the frame's steps, and handed to the frames its
+    /// needs start.
+    scope: Option<DemandScope>,
 }
 
 /// What produces a frame's demand: the family memo's producer lease, or —
@@ -1025,6 +1194,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             task: graph.execution_task(),
             retries: FxHashMap::default(),
             preludes: FxHashMap::default(),
+            scopes: FxHashMap::default(),
             child_depth: ROOT_FRAME_DEPTH,
             suspends_loads,
             stop_wake: None,
@@ -1983,6 +2153,7 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a,
         key: &SemanticQueryKey,
         producer: FrameProducer<'p>,
         prelude: Option<Box<CarrierNormalizationPrelude>>,
+        scope: Option<DemandScope>,
     ) -> QueryFrame<'p, 'a, C> {
         QueryFrame::Instantiate(Box::new(InstantiateFrame {
             site: self.dispatch.checking_site.get(),
@@ -2001,6 +2172,7 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a,
             awaited_loads: Vec::new(),
             consumed_loads: Vec::new(),
             prelude,
+            scope,
         }))
     }
 }
@@ -2016,8 +2188,14 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
     type Subscription = PendingWait<'p>;
 
     fn start(&mut self, demand: &QueryDemand) -> Start<Self> {
-        // An admitted key's frame publishes with its admission's prelude.
+        // An admitted key's frame publishes with its admission's prelude,
+        // and a frame produced for a scoped read runs under its scope.
         let prelude = self.preludes.remove(demand);
+        let scope = if self.scopes.is_empty() {
+            None
+        } else {
+            self.scopes.remove(demand)
+        };
         let dispatch = &self.dispatch;
         let key = &demand.key;
         let _site = dispatch.checking_site_scope(demand.site);
@@ -2071,6 +2249,7 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                 key,
                 FrameProducer::RequestLocal { attempt },
                 prelude,
+                scope,
             ));
         }
         let (claim, carrier) = loop {
@@ -2112,9 +2291,13 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
             }
             Claim::Subscribed(subscription) => {
                 // Its producer may go away and the demand start again: the
-                // prelude stays for the frame that then produces it.
+                // prelude and the scope stay for the frame that then
+                // produces it.
                 if let Some(prelude) = prelude {
                     self.preludes.insert(demand.clone(), prelude);
+                }
+                if let Some(scope) = scope {
+                    self.scopes.insert(demand.clone(), scope);
                 }
                 Start::Subscribe(PendingWait::Claim(PendingClaim {
                     demand: demand.clone(),
@@ -2126,7 +2309,12 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
             Claim::Produce(lease) => {
                 #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
                 lease.hold_for_flight_rendezvous(dispatch.snapshot.flags());
-                Start::Produce(self.producing_frame(key, FrameProducer::Lease(lease), prelude))
+                Start::Produce(self.producing_frame(
+                    key,
+                    FrameProducer::Lease(lease),
+                    prelude,
+                    scope,
+                ))
             }
         }
     }
@@ -2159,12 +2347,30 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                         Some(FrameBuild::Relation(build)) => build.claim.take(),
                         Some(FrameBuild::Call(build)) => {
                             let claim = build.claim.take();
-                            if let Some(claim) = &claim {
-                                site = claim.checking_site();
+                            // The claim's site, else — for a read requested
+                            // unentered — the site the walk asked at.
+                            match (&claim, &build.origin) {
+                                (Some(claim), _) => site = claim.checking_site(),
+                                (None, Some(origin)) => site = origin.site,
+                                (None, None) => {}
                             }
                             #[cfg(any(test, feature = "test-support"))]
                             self.hold_call_need_for_tests(&demand.key, site);
                             claim
+                        }
+                        // A call's read admitted in its frame: the
+                        // admission's reads are checked where the walk
+                        // asked.
+                        Some(
+                            FrameBuild::Admitting(admission)
+                            | FrameBuild::AdmittingSource(admission, ..),
+                        ) => {
+                            if let Some(origin) = admission.holder.origin() {
+                                site = origin.site;
+                                #[cfg(any(test, feature = "test-support"))]
+                                self.hold_call_need_for_tests(&demand.key, site);
+                            }
+                            None
                         }
                         Some(FrameBuild::Flow(build)) => {
                             let claim = build.claim.take();
@@ -2190,9 +2396,28 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                     }
                     // A need admitted in its frame carries its admission's
                     // prelude to the frame that produces it.
-                    if let Some(FrameBuild::FamilyAdmitted(_, admitted)) = &frame.build {
+                    if let Some(admitted) = frame.build.as_ref().and_then(FrameBuild::admitted_need)
+                    {
                         self.preludes
                             .insert(demand.clone(), Box::new(admitted.prelude.clone()));
+                    }
+                    // The frame that produces the need runs under the scope
+                    // the read was asked in, else under this frame's own.
+                    let scope = frame
+                        .build
+                        .as_ref()
+                        .and_then(FrameBuild::request_origin)
+                        .and_then(|origin| origin.scope.as_ref())
+                        .or(frame.scope.as_ref());
+                    match scope {
+                        Some(scope) => {
+                            self.scopes.insert(demand.clone(), scope.inherit());
+                        }
+                        None => {
+                            if !self.scopes.is_empty() {
+                                self.scopes.remove(demand);
+                            }
+                        }
                     }
                 }
                 step
@@ -2369,16 +2594,18 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
     fn abandon(&mut self, frame: QueryFrame<'p, 'a, C>) {
         let QueryFrame::Instantiate(mut frame) = frame;
         // A probed contextual call stopped between its steps is released
-        // before the frame's own executor frame beneath it closes.
+        // before the frame's own executor frame beneath it closes — also
+        // while a read its walk asked for is being admitted.
         #[cfg(any(test, feature = "test-support"))]
-        if let Some(FrameBuild::Call(build)) = frame.build.as_mut() {
+        if let Some(build) = frame.build.as_mut().and_then(FrameBuild::call_mut) {
             if let Some(read) = build.probe.take().and_then(|probe| probe.1) {
                 self.dispatch.release_call_read(read);
             }
         }
-        // A call stopped between its steps releases the collector its walk
-        // held and closes the executor frame it opened.
-        if let Some(FrameBuild::Call(build)) = frame.build.as_mut() {
+        // A call stopped between its steps — or while a read its walk asked
+        // for is being admitted — releases the collector its walk held and
+        // closes the executor frame it opened.
+        if let Some(build) = frame.build.as_mut().and_then(FrameBuild::call_mut) {
             if let Some(idx) = build.frame.take() {
                 self.dispatch
                     .abandon_resolve_call_build(idx, build.walk.take());
@@ -2413,10 +2640,13 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                 family.release_retained_accounting(&self.dispatch);
             }
             // An admission stopped between its stages releases the carrier
-            // it holds on the normalization record.
+            // it holds on the normalization record; a call it held was
+            // released above.
             Some(FrameBuild::Admitting(admission) | FrameBuild::AdmittingSource(admission, ..)) => {
-                let AdmissionBuild { mut family, entry } = *admission;
-                family.release_retained_accounting(&self.dispatch);
+                let AdmissionBuild { holder, entry } = *admission;
+                if let AdmissionHolder::Family(mut family) = holder {
+                    family.release_retained_accounting(&self.dispatch);
+                }
                 self.dispatch.abandon_query_entry(entry);
             }
             other => frame.build = other,
@@ -3176,9 +3406,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // read is now delivered into, so its facts are observed again
             // here, where the synchronous entry's reader observed them.
             if let Some(admitted) = admitted {
-                let AdmittedNeed { key, prelude } = *admitted;
-                prelude.replay_facts();
-                delivery.read = self.attribute_query_read(&key, false, delivery.read, &prelude);
+                delivery = self.attribute_admitted_delivery(delivery, *admitted);
             }
             self.read_frame_delivery(FrameDelivery {
                 delivery,
@@ -3306,16 +3534,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             return FramePoll::Need(need);
                         }
                         EntryBegin::Admits(entry) => {
+                            let held = HeldAdmission::new(self, AdmissionHolder::Family(family));
                             let step = self.advance_query_entry(
                                 entry,
                                 super::query_entry::EntryDelivery::Start,
                             );
-                            return self.advance_admission_frame(
-                                build,
-                                family,
-                                step,
-                                suspends_loads,
-                            );
+                            return self.advance_admission_frame(build, held, step, suspends_loads);
                         }
                     }
                 }
@@ -3335,39 +3559,48 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Carry a family's need admission on from `step`: the read it makes
-    /// next becomes the frame's need, the admission and the family retained
-    /// by the frame; a file it reads next is read at once when no load is
+    /// Carry a need's admission on from `step`: the read it makes next
+    /// becomes the frame's need, the admission and its holder retained by
+    /// the frame; a file it reads next is read at once when no load is
     /// needed, and on a production poll's drive the frame otherwise waits on
     /// the file's load first; its ports (the global lookup's index reads)
-    /// are answered in place. Once the admission settles, the family needs
-    /// the admitted key, and the frame keeps the prelude its delivery is
-    /// attributed with and the frame producing it publishes with.
+    /// are answered in place. Once the admission settles, the holder — a
+    /// family, or a call whose walk asked for the read — needs the admitted
+    /// key, and the frame keeps the prelude its delivery is attributed with
+    /// and the frame producing it publishes with. A call's read is admitted
+    /// under the demand scope and checking site its walk asked it at.
     fn advance_admission_frame(
         &self,
         build: &mut Option<FrameBuild>,
-        family: Box<FamilyBuild>,
+        held: HeldAdmission<'_, 'a, C>,
         mut step: super::query_entry::EntryStep,
         suspends_loads: bool,
     ) -> FramePoll<'a> {
         use super::query_entry::{EntryDelivery, EntryStep};
+        let _origin = self.enter_request_origin(held.origin());
         loop {
             step = match step {
                 EntryStep::Admitted(key, prelude) => {
-                    *build = Some(FrameBuild::FamilyAdmitted(
-                        family,
-                        Box::new(AdmittedNeed {
-                            key: key.clone(),
-                            prelude: *prelude,
-                        }),
-                    ));
+                    let admitted = Box::new(AdmittedNeed {
+                        key: key.clone(),
+                        prelude: *prelude,
+                    });
+                    *build = Some(match held.release() {
+                        AdmissionHolder::Family(family) => {
+                            FrameBuild::FamilyAdmitted(family, admitted)
+                        }
+                        AdmissionHolder::Call(mut call) => {
+                            call.admitted = Some(admitted);
+                            FrameBuild::Call(call)
+                        }
+                    });
                     return FramePoll::Need(key);
                 }
                 EntryStep::Read(key, entry)
                     if self.reads_as_frame_need(&key) && !self.admits_through_entry(&key) =>
                 {
                     *build = Some(FrameBuild::Admitting(Box::new(AdmissionBuild {
-                        family,
+                        holder: held.release(),
                         entry,
                     })));
                     return FramePoll::Need(key);
@@ -3392,7 +3625,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     match self.family_file_load(&file, suspends_loads) {
                         Some(wait) => {
                             *build = Some(FrameBuild::AdmittingSource(
-                                Box::new(AdmissionBuild { family, entry }),
+                                Box::new(AdmissionBuild {
+                                    holder: held.release(),
+                                    entry,
+                                }),
                                 file,
                                 Arc::clone(&wait.ended),
                                 false,
@@ -3408,7 +3644,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     match self.family_file_index(&file, suspends_loads) {
                         Some(wait) => {
                             *build = Some(FrameBuild::AdmittingSource(
-                                Box::new(AdmissionBuild { family, entry }),
+                                Box::new(AdmissionBuild {
+                                    holder: held.release(),
+                                    entry,
+                                }),
                                 file,
                                 Arc::clone(&wait.ended),
                                 true,
@@ -3424,10 +3663,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Resume a family's need admission with the delivery of the read it
-    /// waited on, consumed inside the admission's stage — under its tracer
-    /// and the observation it holds — as the synchronous entry's nested read
-    /// is consumed.
+    /// Resume a need's admission with the delivery of the read it waited
+    /// on, consumed inside the admission's stage — under its tracer and the
+    /// observation it holds, and where a call's walk asked for the read
+    /// being admitted — as the synchronous entry's nested read is consumed.
     fn resume_admission_frame(
         &self,
         build: &mut Option<FrameBuild>,
@@ -3438,7 +3677,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(FrameBuild::Admitting(admission)) = build.take() else {
             unreachable!("an admitting frame resumes its admission")
         };
-        let AdmissionBuild { family, entry } = *admission;
+        let AdmissionBuild { holder, entry } = *admission;
+        let held = HeldAdmission::new(self, holder);
         let mut delivery = Some(FrameDelivery {
             delivery,
             depth: depth + 1,
@@ -3449,14 +3689,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.read_frame_delivery(delivery),
             ))
         };
-        let step =
-            self.advance_query_entry(entry, super::query_entry::EntryDelivery::Read(&mut read));
-        self.advance_admission_frame(build, family, step, suspends_loads)
+        let step = {
+            let _origin = self.enter_request_origin(held.origin());
+            self.advance_query_entry(entry, super::query_entry::EntryDelivery::Read(&mut read))
+        };
+        self.advance_admission_frame(build, held, step, suspends_loads)
     }
 
-    /// Resume a family's need admission whose file's load ended: the file
-    /// read from that terminal outcome, once — or, for a pending
-    /// contributor, the admission goes on without reading it.
+    /// Resume a need's admission whose file's load ended: the file read
+    /// from that terminal outcome, once — or, for a pending contributor,
+    /// the admission goes on without reading it.
     fn resume_admission_source(
         &self,
         build: &mut Option<FrameBuild>,
@@ -3466,15 +3708,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         else {
             unreachable!("a loading admission resumes its admission")
         };
-        let AdmissionBuild { family, entry } = *admission;
+        let AdmissionBuild { holder, entry } = *admission;
+        let held = HeldAdmission::new(self, holder);
         let integrated = Self::consume_family_load(&canonical, &ended);
         let delivery = if index {
             super::query_entry::EntryDelivery::Index { materialize: false }
         } else {
             super::query_entry::EntryDelivery::Source { serve: integrated }
         };
-        let step = self.advance_query_entry(entry, delivery);
-        self.advance_admission_frame(build, family, step, suspends_loads)
+        let step = {
+            let _origin = self.enter_request_origin(held.origin());
+            self.advance_query_entry(entry, delivery)
+        };
+        self.advance_admission_frame(build, held, step, suspends_loads)
     }
 
     /// The next load a frame's build would perform as it begins, when the
@@ -3609,6 +3855,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         'a: 'p,
     {
         let _site = self.checking_site_scope(frame.site);
+        // A frame produced for a scoped read runs each step under that
+        // scope: its entry loads, its build's poll and its completion.
+        let _demand_scope = frame
+            .scope
+            .as_ref()
+            .map(|scope| scope.enter(&self.lexical_demand_scope));
         // A build whose files are still loading waits on each load before
         // it begins: nothing of it has run, so the step the last load
         // restarts begins it once, over loaded files.
@@ -3678,10 +3930,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     Some(FrameBuild::Conditional(build)) => self
                         .drain_conditional(&frame.key, build, delivery, frame.depth + 1)
                         .into(),
-                    // So does a call's walk, for its operands.
-                    Some(FrameBuild::Call(build)) => {
-                        self.drain_call(&frame.key, build, delivery, frame.depth + 1)
-                    }
+                    // So does a call's walk, for its operands; a read its
+                    // walk asks for whose entry admits it is admitted here.
+                    Some(FrameBuild::Call(_)) => self.drain_call_frame(
+                        &frame.key,
+                        &mut frame.build,
+                        delivery,
+                        frame.depth + 1,
+                        suspends_loads,
+                    ),
                     // A relation root delivers each to the operand demand its
                     // pair waits on.
                     Some(FrameBuild::Relation(build)) => {
@@ -3802,6 +4059,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         drop(installed);
         drop(taint);
         match poll {
+            FramePoll::Admit(_) => unreachable!("a frame admits the read its call asked for"),
             FramePoll::Await(load) => EvalStep::Await(PendingWait::Load(load)),
             // The program settles the need's site from the read's claim.
             FramePoll::Need(key) => EvalStep::Need {
@@ -3903,18 +4161,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticQueryKey::ResolveCall(_) => match self.cold_build_budget_refusal(frame_key) {
                 Some(refusal) => InstantiatePoll::Done(Box::new(refusal)).into(),
                 None => {
-                    let FrameBuild::Call(build) =
-                        frame_build.insert(FrameBuild::Call(Box::default()))
-                    else {
-                        unreachable!("the build was just inserted")
-                    };
+                    *frame_build = Some(FrameBuild::Call(Box::default()));
                     #[cfg(any(test, feature = "test-support"))]
-                    {
+                    if let Some(FrameBuild::Call(build)) = frame_build.as_mut() {
                         build.probe = CONTEXTUAL_CALL_PROBE_HERE
                             .with(std::cell::Cell::take)
                             .map(|probe| Box::new((probe, None)));
                     }
-                    self.drain_call(frame_key, build, None, depth + 1)
+                    self.drain_call_frame(frame_key, frame_build, None, depth + 1, suspends_loads)
                 }
             },
             SemanticQueryKey::FlowReturn(_) => {
@@ -4112,10 +4366,83 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Carry a call frame on ([`Self::drain_call`]); a read the call's walk
+    /// asked for whose entry admits it is admitted in this frame first
+    /// ([`Self::begin_helper_admission`]).
+    fn drain_call_frame(
+        &self,
+        key: &SemanticQueryKey,
+        frame_build: &mut Option<FrameBuild>,
+        delivery: Option<QueryDelivery>,
+        depth: u32,
+        suspends_loads: bool,
+    ) -> FramePoll<'a> {
+        let Some(FrameBuild::Call(build)) = frame_build.as_mut() else {
+            unreachable!("a call frame carries its call")
+        };
+        match self.drain_call(key, build, delivery, depth) {
+            FramePoll::Admit(need) => {
+                self.begin_helper_admission(need, frame_build, suspends_loads)
+            }
+            poll => poll,
+        }
+    }
+
+    /// Admit the read a call's walk asked for, in the call's frame, as a
+    /// family's need is admitted ([`Self::advance_family_frame`]): under the
+    /// demand scope and checking site the walk asked it at, each read the
+    /// admission makes is the frame's need, the call retained; once it
+    /// settles, the admitted key is the need, and its delivery reaches the
+    /// walk with the admission's prelude.
+    fn begin_helper_admission(
+        &self,
+        need: SemanticQueryKey,
+        frame_build: &mut Option<FrameBuild>,
+        suspends_loads: bool,
+    ) -> FramePoll<'a> {
+        verter_debug_assert!(
+            matches!(frame_build, Some(FrameBuild::Call(_))),
+            "only a call's walk asks for a read its entry admits"
+        );
+        let tag = need.tag();
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| { ctx.record_dispatched_query_tag(tag) });
+        match self.begin_query_entry(self.canonicalize_entry_key(need)) {
+            // The call stays in its frame.
+            EntryBegin::Plain(need) => FramePoll::Need(need),
+            EntryBegin::Admits(entry) => {
+                let Some(FrameBuild::Call(call)) = frame_build.take() else {
+                    unreachable!("only a call's walk asks for a read its entry admits")
+                };
+                let held = HeldAdmission::new(self, AdmissionHolder::Call(call));
+                let step = {
+                    let _origin = self.enter_request_origin(held.origin());
+                    self.advance_query_entry(entry, super::query_entry::EntryDelivery::Start)
+                };
+                self.advance_admission_frame(frame_build, held, step, suspends_loads)
+            }
+        }
+    }
+
+    /// The demand scope and checking site of `origin`, installed until the
+    /// returned guards drop: where a helper asked for the read being
+    /// admitted. Nothing is installed without an origin.
+    fn enter_request_origin(&self, origin: Option<&RequestOrigin>) -> impl Sized + '_ {
+        origin.map(move |origin| {
+            (
+                self.checking_site_scope(origin.site),
+                origin
+                    .scope
+                    .as_ref()
+                    .map(|scope| scope.enter(&self.lexical_demand_scope)),
+            )
+        })
+    }
+
     /// Carry a call resolution's frame on: its first step opens the
     /// executor frame; each step advances the call's walk with the delivery
     /// of the read it stood at, until it stands at another — the frame's
-    /// need — or delivers its verdict and the frame closes.
+    /// need, or a read its entry admits first ([`FramePoll::Admit`]) — or
+    /// delivers its verdict and the frame closes.
     fn drain_call(
         &self,
         key: &SemanticQueryKey,
@@ -4137,13 +4464,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if build.probe.is_some() {
             return self.drain_contextual_call_probe(idx, build, delivery, depth);
         }
-        let delivered = delivery.map(|delivery| {
-            let awaiting = build
-                .awaiting
-                .take()
-                .expect("a delivery answers the read the walk waited on");
-            self.helper_delivery(awaiting, delivery)
-        });
+        let delivered = delivery.map(|delivery| self.call_helper_delivery(build, delivery));
+        // PLANTED(restart): once, begin the walk again over delivered answers.
+        static PLANTED_RESTARTED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        let delivered = match delivered {
+            Some(_) if !PLANTED_RESTARTED.swap(true, std::sync::atomic::Ordering::SeqCst) => {
+                build.walk = None;
+                None
+            }
+            delivered => delivered,
+        };
         let walk = build
             .walk
             .get_or_insert_with(|| super::call_resolve::CallWalk::new((**call).clone()));
@@ -4159,7 +4490,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         })
                     });
                 }
-                self.helper_request_poll(request, &mut build.awaiting, &mut build.claim)
+                self.call_request_poll(request, build)
             }
             HelperStep::Done(output) => {
                 build.frame = None;
@@ -4184,13 +4515,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         delivery: Option<QueryDelivery>,
         depth: u32,
     ) -> FramePoll<'a> {
-        let mut delivered = delivery.map(|delivery| {
-            let awaiting = build
-                .awaiting
-                .take()
-                .expect("a delivery answers the read the probed call waited on");
-            self.helper_delivery(awaiting, delivery)
-        });
+        let mut delivered = delivery.map(|delivery| self.call_helper_delivery(build, delivery));
         let (probe, read) = &mut **build.probe.as_mut().expect("an armed probe");
         let read = read.get_or_insert_with(|| {
             super::helper_continuation::CallRead::begin(probe.call.clone(), Default::default())
@@ -4215,11 +4540,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             })
                         });
                     }
-                    return self.helper_request_poll(
-                        request,
-                        &mut build.awaiting,
-                        &mut build.claim,
-                    );
+                    return self.call_request_poll(request, build);
                 }
                 HelperStep::Done((step, _)) => {
                     build.probe = None;
@@ -4246,21 +4567,84 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Enter `key` as a helper computation's read on a frame whose needs run
     /// `depth` deep, exactly as the synchronous entry would enter it: the
     /// read the memo serves warm, or the request with the claim it entered
-    /// with, which continues when the runtime starts it.
+    /// with, which continues when the runtime starts it. A request names the
+    /// demand scope and checking site it was asked at, so the frame that
+    /// produces it reads under them. A key whose entry admits its subject is
+    /// entered nowhere yet: the memo cannot be asked for it before its
+    /// admission settles the key, so it is always a request, which its frame
+    /// admits where the helper asked.
     pub(super) fn enter_helper_read(
         &self,
         key: &SemanticQueryKey,
         depth: u32,
-    ) -> Result<HelperRequest, Box<QueryDelivery>> {
-        self.enter_query_frame(key, depth)
-            .map(|claim| HelperRequest::query(key.clone(), Some(claim)))
+    ) -> Result<HelperRequest, HelperAnswer> {
+        if self.admits_through_entry(key) {
+            return Ok(HelperRequest::unadmitted(
+                key.clone(),
+                self.request_origin(),
+            ));
+        }
+        let claim = self
+            .enter_query_frame(key, depth)
+            .map_err(HelperAnswer::Served)?;
+        Ok(match DemandScope::innermost(&self.lexical_demand_scope) {
+            Some(scope) => HelperRequest::sited(
+                key.clone(),
+                claim,
+                RequestOrigin {
+                    scope: Some(scope),
+                    site: self.checking_site.get(),
+                },
+            ),
+            None => HelperRequest::query(key.clone(), Some(claim)),
+        })
     }
 
-    /// The read a helper computation makes of a delivery it requested, or
-    /// that was served warm as it entered, as the frame's need nested
-    /// `depth` deep.
-    pub(super) fn read_helper_delivery(&self, delivery: QueryDelivery, depth: u32) -> ValueRead {
+    /// Where a helper asks for a read now: the innermost demand site and the
+    /// checking site.
+    fn request_origin(&self) -> RequestOrigin {
+        RequestOrigin {
+            scope: DemandScope::innermost(&self.lexical_demand_scope),
+            site: self.checking_site.get(),
+        }
+    }
+
+    /// The read a helper makes of an answer on a frame whose needs run
+    /// `depth` deep. An admitted read's facts are observed and its read
+    /// attributed with its admission's prelude here, where the helper reads
+    /// it.
+    #[inline(never)]
+    pub(super) fn read_helper_answer(&self, answer: HelperAnswer, depth: u32) -> ValueRead {
+        let delivery = match answer {
+            HelperAnswer::Served(delivery) => *delivery,
+            HelperAnswer::Delivered(read) => {
+                let DeliveredRead {
+                    delivery, admitted, ..
+                } = *read;
+                match admitted {
+                    Some(admitted) => self.attribute_admitted_delivery(delivery, *admitted),
+                    None => delivery,
+                }
+            }
+        };
         self.read_delivery(delivery, Nesting::Frame { depth })
+    }
+
+    /// Observe an admission's facts and attribute the admitted key's read
+    /// with its prelude, as the synchronous entry attributes the read it
+    /// admitted. The admission ran in the frame, outside the tracer of the
+    /// evaluation the read is delivered into, so its facts are observed
+    /// again here, where the synchronous entry's reader observed them.
+    #[inline(never)]
+    fn attribute_admitted_delivery(
+        &self,
+        mut delivery: QueryDelivery,
+        admitted: AdmittedNeed,
+    ) -> QueryDelivery {
+        let AdmittedNeed { key, prelude } = admitted;
+        prelude.replay_facts();
+        delivery.read = self.attribute_query_read(&key, false, delivery.read, &prelude);
+        delivery
     }
 
     /// Carry a relation's operand demand on with the delivery of the read it
@@ -4273,10 +4657,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub(super) fn advance_operand_demand(
         &self,
         demand: &mut OperandDemand,
-        delivered: Option<(SemanticQueryKey, QueryDelivery)>,
+        delivered: Option<Box<DeliveredRead>>,
         depth: u32,
     ) -> Option<HelperRequest> {
-        if let Some((key, delivery)) = delivered {
+        if let Some((key, delivery)) = delivered.map(DeliveredRead::into_query) {
             let awaited = demand
                 .awaiting
                 .take()
@@ -4373,7 +4757,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         awaiting: &mut Option<HelperAwait>,
         claim: &mut Option<ClaimAttempt>,
     ) -> FramePoll<'a> {
-        let (key, entered) = request.into_query();
+        let RequestedQuery {
+            key,
+            claim: entered,
+            origin,
+            admits,
+        } = request.into_query();
+        verter_debug_assert!(
+            origin.is_none() && !admits,
+            "a relation's operand read is entered where its frame stands"
+        );
         *awaiting = Some(HelperAwait::query(key.clone()));
         *claim = entered;
         FramePoll::Need(key)
@@ -4382,7 +4775,45 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The delivery a helper computation resumes with: what the frame's need
     /// for the request it stood at delivered.
     fn helper_delivery(&self, awaiting: HelperAwait, delivery: QueryDelivery) -> HelperDelivery {
-        HelperDelivery::query(awaiting.into_key(), delivery)
+        HelperDelivery::query(awaiting.into_key(), delivery, None)
+    }
+
+    /// The call frame's next poll for the request its walk stands at: the
+    /// request's query as the frame's need — or, when its entry admits it,
+    /// the read the frame admits first ([`FramePoll::Admit`]) — its entered
+    /// claim kept for the runtime, and where the walk asked for it kept for
+    /// the frames that produce it.
+    fn call_request_poll(&self, request: HelperRequest, build: &mut CallBuild) -> FramePoll<'a> {
+        let RequestedQuery {
+            key,
+            claim,
+            origin,
+            admits,
+        } = request.into_query();
+        build.awaiting = Some(HelperAwait::query(key.clone()));
+        build.claim = claim;
+        build.origin = origin;
+        if admits {
+            FramePoll::Admit(key)
+        } else {
+            FramePoll::Need(key)
+        }
+    }
+
+    /// The delivery a call's walk resumes with: what the frame's need for
+    /// the read it stood at delivered, with the admission the frame admitted
+    /// it through.
+    fn call_helper_delivery(
+        &self,
+        build: &mut CallBuild,
+        delivery: QueryDelivery,
+    ) -> HelperDelivery {
+        let awaiting = build
+            .awaiting
+            .take()
+            .expect("a delivery answers the read the walk waited on");
+        build.origin = None;
+        HelperDelivery::query(awaiting.into_key(), delivery, build.admitted.take())
     }
 
     /// Carry a relation root's frame on. Its first step validates the key
