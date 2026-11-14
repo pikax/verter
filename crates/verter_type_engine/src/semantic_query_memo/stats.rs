@@ -239,6 +239,8 @@ pub(crate) struct AtomicSemanticGraphStats {
     pub(super) signature_comparisons_decided: Tally,
     /// Parameter positions union synthesis composed.
     pub(super) signature_parameters_composed: Tally,
+    /// Declarations identity-carrier walks name for instantiation.
+    pub(super) carrier_declarations_unwrapped: Tally,
     /// Signature result reads performed.
     pub(super) signature_results_forced: Tally,
     /// Passes copying signature records between kernel epochs.
@@ -337,6 +339,7 @@ impl Default for AtomicSemanticGraphStats {
             signature_positions_compared: Tally::default(),
             signature_comparisons_decided: Tally::default(),
             signature_parameters_composed: Tally::default(),
+            carrier_declarations_unwrapped: Tally::default(),
             signature_results_forced: Tally::default(),
             signature_rebinds: Tally::default(),
             signature_descriptors_rebound: Tally::default(),
@@ -573,6 +576,9 @@ impl SemanticGraphStore {
                 .load(Ordering::Relaxed),
             signature_parameters_composed: stats
                 .signature_parameters_composed
+                .load(Ordering::Relaxed),
+            carrier_declarations_unwrapped: stats
+                .carrier_declarations_unwrapped
                 .load(Ordering::Relaxed),
             signature_results_forced: stats.signature_results_forced.load(Ordering::Relaxed),
             signature_rebinds: stats.signature_rebinds.load(Ordering::Relaxed),
