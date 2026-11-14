@@ -9148,12 +9148,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         demand_canonical: &str,
         name: &str,
     ) -> Option<ResolvedRootIdentity> {
-        // One implementation, driven in place: the lookup a family steps as
-        // ports and loads ([`GlobalLookup`]) is read here where the caller
-        // stands, each port answered and each file served at once.
-        use super::port_continuations::{GlobalLookup, GlobalStep};
-        let (mut lookup, mut step) =
-            GlobalLookup::begin(Arc::from(demand_canonical), Arc::from(name));
+        let (lookup, step) = super::port_continuations::GlobalLookup::begin(
+            Arc::from(demand_canonical),
+            Arc::from(name),
+        );
+        self.drive_global_lookup_in_place(lookup, step)
+    }
+
+    /// Drive `lookup` on from `step` to the declaration it finds: one
+    /// implementation, driven in place — the lookup a family steps as ports
+    /// and loads ([`GlobalLookup`](super::port_continuations::GlobalLookup))
+    /// is read here where the caller stands, each port answered and each
+    /// file served at once. Inlined into its callers even unoptimized
+    /// (LLVM's always-inliner runs at every level), so driving the lookup
+    /// adds no native frame beneath the reads it makes in place.
+    #[inline(always)]
+    pub(super) fn drive_global_lookup_in_place(
+        &self,
+        mut lookup: super::port_continuations::GlobalLookup,
+        mut step: super::port_continuations::GlobalStep,
+    ) -> Option<ResolvedRootIdentity> {
+        use super::port_continuations::GlobalStep;
         loop {
             step = match step {
                 GlobalStep::Found(found) => return found,

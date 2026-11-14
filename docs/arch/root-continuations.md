@@ -1209,7 +1209,13 @@ Every node it enters, every intersection member it flattens and every
 signature-list entry settles through its carrier chain as the owned
 `SourceCarrierRead` over the shared deferred evaluation: the read the
 chain names — an instantiation, or a read inside the settlement's
-evaluation, delivered inside that evaluation — is the build's need. The
+evaluation, delivered inside that evaluation — is the build's need. A
+primitive, literal, template, symbol, array or tuple reads its apparent
+wrapper as the path walk does: the global declaration lookup
+(`GlobalLookup`, begun in the demand site the stage stands in) is stepped
+as the build's ports, loads and indexes, and the instantiation of the
+declaration it finds (`global_wrapper_answered`) is the build's need,
+whose surface the walk enters under the subject's level. The
 walk counts its own work (`discovery_nodes_walked` per node entered,
 `discovery_signatures_published` per signature published) and moves no
 stage counter. A frame drives it when a frame needs the list (an overload
@@ -1217,7 +1223,16 @@ set's, an apparent type's, a call's); read synchronously, or polled as a
 root, `SignaturesOfType` is built in place by the same stages through
 `drive_family_value_in_place`, each read made where the walk stands. A
 walk released while it stands in a settlement's evaluation abandons that
-evaluation's recordings (`FamilyBuild::release_retained_accounting`).
+evaluation's recordings (`FamilyBuild::release_retained_accounting`); one
+standing at its wrapper holds nothing on the dispatcher.
+`a_signature_list_waiting_on_a_primitive_arms_wrapper_resumes_without_walking_again`
+holds the later arm's wrapper instantiation of an overload set over
+`string | number`, read under a request on the declaring file, and
+requires the set's list to yield there with the earlier
+arm's signature published, and — released — to resume elsewhere to the
+synchronous read, entering no node and publishing no signature again;
+`a_signature_list_released_or_cancelled_at_a_primitive_arms_wrapper_leaves_nothing_open`
+drops or cancels it there.
 Substitution (`substitute.rs`) is one owned walk, `SubstitutionWalk`: a
 flat stack of the cold levels it has opened, each with the node's payload,
 its children in visit order, the children substituted so far, its cost
@@ -2252,10 +2267,6 @@ asked in. Two needs keep their frame's scope instead:
 Signature discovery and the kernel still read in place, inventoried for
 conversion:
 
-- a walk's apparent-wrapper lookup and instantiation, read in place by
-  the stage standing at a primitive, literal, template, symbol, array or
-  tuple (`global_wrapper_surface`): the lookup's owned form is not yet
-  the walk's need;
 - a runtime nominal's augmentation fold (`collect_augmentation_contributions`),
   a class expression's instance surface (`class_expression_read_surface`)
   and a rest parameter's carrier unwrap (`unwrap_identity_carrier_for_relation`),

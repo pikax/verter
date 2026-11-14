@@ -1340,12 +1340,15 @@ pub(super) enum WalkProgress {
     Read(WalkNeed),
 }
 
-/// A dependency a hop names: a query, or — while a global wrapper's
-/// declaration lookup steps — the resolver port or the file the lookup
-/// reads next ([`WrapperStage::Lookup`]).
+/// A dependency a walk names — a path walk's hop, or a signature discovery
+/// walk's settlement or apparent wrapper: a query, or — while a global
+/// wrapper's declaration lookup steps — the resolver port or the file the
+/// lookup reads next ([`WrapperStage::Lookup`], and the discovery walk's
+/// wrapper lookup).
 pub(super) enum WalkNeed {
     Query(SemanticQueryKey),
-    /// The resolver port the lookup stands at ([`WalkState::port_read`]).
+    /// The resolver port the lookup stands at ([`WalkState::port_read`], or
+    /// the discovery walk's).
     Port,
     /// The file whose indexed input the lookup reads next.
     Load(Arc<str>),
@@ -1353,8 +1356,9 @@ pub(super) enum WalkNeed {
     Index(Arc<str>),
 }
 
-/// The answer a walk standing at its lookup's port or file resumes with
-/// ([`PathWalker::resume_lookup`]).
+/// The answer a walk standing at its wrapper lookup's port or file resumes
+/// with: a path walk ([`PathWalker::resume_lookup`]) or a signature
+/// discovery walk.
 pub(super) enum LookupAnswer {
     Port(super::port_continuations::PortAnswer),
     /// The file's indexed input (`None` when the live view serves none,
