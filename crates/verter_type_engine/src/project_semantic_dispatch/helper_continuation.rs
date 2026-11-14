@@ -17,8 +17,11 @@
 //!   the one dependency it reads next, holding everything it computed
 //!   before that read;
 //! - a frame of the continuation runtime turns a request into its own need
-//!   (`ProjectSemanticDispatch::helper_request_poll`) and hands the delivery
-//!   back (`ProjectSemanticDispatch::helper_delivery`); the synchronous
+//!   (`ProjectSemanticDispatch::helper_request_poll`, or
+//!   `ProjectSemanticDispatch::call_request_poll` for a call, which admits
+//!   first a read whose entry admits it) and hands the delivery back
+//!   (`ProjectSemanticDispatch::helper_delivery`,
+//!   `ProjectSemanticDispatch::call_helper_delivery`); the synchronous
 //!   driver answers in place, so the helper never stops for one;
 //! - a consumer that stops while its helper waits releases it
 //!   (`ProjectSemanticDispatch::release_relation_read`), which closes what
@@ -39,12 +42,18 @@
 //! callbacks with its consumer. On a frame, the round a callback's typed
 //! arguments begin continues the call's executor walk over the plan it
 //! retained, and a contextual candidate's preparation suspends at the
-//! signature lists its mapping reads. A pair or member relation computes
-//! in place on either driver.
+//! signature lists its mapping reads. A list a walk reads is a request
+//! under the demand scope it was asked in, whatever scope lies beneath the
+//! walk's call site; a list whose entry admits its subject is admitted in
+//! the call's frame, its admission's reads the frame's needs, and the
+//! admitted key's delivery is read with the admission's prelude where the
+//! walk asked; and the callee's list read after a set that did not come
+//! back as a set is a request too. A pair or member relation computes in
+//! place on either driver.
 
 use super::call_resolve::{CallWalk, ContextualCallState, DeclaredCallResult, ResolveCallStep};
 use super::dispatch_txn::{InferenceOccurrence, RelationStep};
-use super::query_frames::{OperandDemand, QueryDelivery};
+use super::query_frames::{AdmittedNeed, OperandDemand, QueryDelivery, RequestOrigin};
 use super::relation::{RelateRootBuild, RelationDispatch, RootDispatch};
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
@@ -74,6 +83,8 @@ enum RequestKind {
     /// A query, needed as a frame's need would be: the claim it already
     /// entered with continues when the runtime starts it.
     Query(SemanticQueryKey, Option<ClaimAttempt>),
+    /// A query asked for under a demand scope, or one whose entry admits it.
+    Sited(Box<SitedQuery>),
     /// A contextual call's callback exchange: the call names the
     /// context-sensitive argument at `position` and the contextual type its
     /// consumer types that argument under. The candidate's collector stays
@@ -84,10 +95,60 @@ enum RequestKind {
     },
 }
 
+/// A query a helper asked for where it stood: under a demand scope, or
+/// through an entry that admits its subject.
+struct SitedQuery {
+    key: SemanticQueryKey,
+    entry: ReadEntry,
+    origin: RequestOrigin,
+}
+
+/// How a sited query was entered.
+enum ReadEntry {
+    /// Entered as the synchronous entry enters it; its claim continues.
+    Entered(ClaimAttempt),
+    /// Its entry admits its subject first: nothing is entered yet.
+    Unadmitted,
+}
+
+/// A query request taken apart for its frame: the query, the claim it
+/// entered with, where it was asked, and whether its entry admits it
+/// before any claim.
+pub(super) struct RequestedQuery {
+    pub(super) key: SemanticQueryKey,
+    pub(super) claim: Option<ClaimAttempt>,
+    pub(super) origin: Option<RequestOrigin>,
+    pub(super) admits: bool,
+}
+
 impl HelperRequest {
     pub(super) fn query(key: SemanticQueryKey, claim: Option<ClaimAttempt>) -> Self {
         Self {
             kind: RequestKind::Query(key, claim),
+        }
+    }
+
+    /// A query entered with `claim` under the demand scope and checking
+    /// site of `origin`, where the helper asked for it.
+    pub(super) fn sited(key: SemanticQueryKey, claim: ClaimAttempt, origin: RequestOrigin) -> Self {
+        Self {
+            kind: RequestKind::Sited(Box::new(SitedQuery {
+                key,
+                entry: ReadEntry::Entered(claim),
+                origin,
+            })),
+        }
+    }
+
+    /// A query whose entry admits its subject before any claim: its frame
+    /// admits it under `origin`, where the helper asked for it.
+    pub(super) fn unadmitted(key: SemanticQueryKey, origin: RequestOrigin) -> Self {
+        Self {
+            kind: RequestKind::Sited(Box::new(SitedQuery {
+                key,
+                entry: ReadEntry::Unadmitted,
+                origin,
+            })),
         }
     }
 
@@ -105,6 +166,7 @@ impl HelperRequest {
     pub(super) fn query_key_for_tests(&self) -> &SemanticQueryKey {
         match &self.kind {
             RequestKind::Query(key, _) => key,
+            RequestKind::Sited(sited) => &sited.key,
             RequestKind::Callback { .. } => unreachable!("a frame requests queries"),
         }
     }
@@ -117,15 +179,33 @@ impl HelperRequest {
                 position,
                 contextual,
             } => Some((position, contextual)),
-            RequestKind::Query(..) => None,
+            RequestKind::Query(..) | RequestKind::Sited(_) => None,
         }
     }
 
-    /// The query and the claim it entered with, for a frame's driver: a
-    /// frame drives only helpers that read queries.
-    pub(super) fn into_query(self) -> (SemanticQueryKey, Option<ClaimAttempt>) {
+    /// The query, the claim it entered with and where it was asked, for a
+    /// frame's driver: a frame drives only helpers that read queries.
+    pub(super) fn into_query(self) -> RequestedQuery {
         match self.kind {
-            RequestKind::Query(key, claim) => (key, claim),
+            RequestKind::Query(key, claim) => RequestedQuery {
+                key,
+                claim,
+                origin: None,
+                admits: false,
+            },
+            RequestKind::Sited(sited) => {
+                let SitedQuery { key, entry, origin } = *sited;
+                let (claim, admits) = match entry {
+                    ReadEntry::Entered(claim) => (Some(claim), false),
+                    ReadEntry::Unadmitted => (None, true),
+                };
+                RequestedQuery {
+                    key,
+                    claim,
+                    origin: Some(origin),
+                    admits,
+                }
+            }
             RequestKind::Callback { .. } => {
                 unreachable!("a callback exchange is its consumer's, not a frame's need")
             }
@@ -164,19 +244,60 @@ pub(super) struct HelperDelivery {
     kind: DeliveryKind,
 }
 
-#[allow(clippy::large_enum_variant)] // a query's delivery is the common one, read where it lands
 enum DeliveryKind {
-    Query(SemanticQueryKey, QueryDelivery),
+    Query(Box<DeliveredRead>),
     /// The call's arguments with the one its callback exchange named typed
     /// by the consumer.
     #[allow(dead_code)] // interface for the flow evaluator's retained call frames
     Callback(Arc<[CallArgKey]>),
 }
 
+/// What a helper's request delivered: the read it asked for and, when its
+/// frame admitted the read first, the admission it is attributed with.
+pub(super) struct DeliveredRead {
+    pub(super) key: SemanticQueryKey,
+    pub(super) delivery: QueryDelivery,
+    pub(super) admitted: Option<Box<AdmittedNeed>>,
+}
+
+impl DeliveredRead {
+    /// The query and its delivery, for a read no entry admitted: a
+    /// relation's operand instantiation.
+    pub(super) fn into_query(self: Box<Self>) -> (SemanticQueryKey, QueryDelivery) {
+        let DeliveredRead {
+            key,
+            delivery,
+            admitted,
+        } = *self;
+        verter_debug_assert!(
+            admitted.is_none(),
+            "an operand read is admitted by no entry"
+        );
+        (key, delivery)
+    }
+}
+
+/// A read a helper makes on a frame: its request's delivery, or the read the
+/// memo served as it entered.
+pub(super) enum HelperAnswer {
+    Delivered(Box<DeliveredRead>),
+    Served(Box<QueryDelivery>),
+}
+
 impl HelperDelivery {
-    pub(super) fn query(key: SemanticQueryKey, delivery: QueryDelivery) -> Self {
+    /// The delivery of `key`, with the admission its frame admitted it
+    /// through, if any.
+    pub(super) fn query(
+        key: SemanticQueryKey,
+        delivery: QueryDelivery,
+        admitted: Option<Box<AdmittedNeed>>,
+    ) -> Self {
         Self {
-            kind: DeliveryKind::Query(key, delivery),
+            kind: DeliveryKind::Query(Box::new(DeliveredRead {
+                key,
+                delivery,
+                admitted,
+            })),
         }
     }
 
@@ -189,10 +310,10 @@ impl HelperDelivery {
         }
     }
 
-    /// The query this delivery answers, and its delivery.
-    pub(super) fn into_query(self) -> (SemanticQueryKey, QueryDelivery) {
+    /// The read this delivery answers.
+    pub(super) fn into_read(self) -> Box<DeliveredRead> {
         match self.kind {
-            DeliveryKind::Query(key, delivery) => (key, delivery),
+            DeliveryKind::Query(read) => read,
             DeliveryKind::Callback(_) => unreachable!("a query's read is delivered a query"),
         }
     }
@@ -200,7 +321,7 @@ impl HelperDelivery {
     fn into_callback(self) -> Arc<[CallArgKey]> {
         match self.kind {
             DeliveryKind::Callback(args) => args,
-            DeliveryKind::Query(..) => {
+            DeliveryKind::Query(_) => {
                 unreachable!("a callback exchange is answered by its typed arguments")
             }
         }
@@ -466,6 +587,29 @@ static_assertions::assert_impl_all!(HelperDelivery: Send);
 static_assertions::assert_not_impl_any!(RelationRead: Clone, Copy);
 static_assertions::assert_not_impl_any!(CallRead: Clone, Copy);
 static_assertions::assert_not_impl_any!(HelperRequest: Clone, Copy);
+static_assertions::assert_impl_all!(DeliveredRead: Send);
+static_assertions::assert_not_impl_any!(DeliveredRead: Clone, Copy);
+static_assertions::assert_impl_all!(HelperAnswer: Send);
+static_assertions::assert_not_impl_any!(HelperAnswer: Clone, Copy);
+// The delivery a helper is advanced with is a pointer or the callback's
+// arguments.
+const _: () = assert!(std::mem::size_of::<HelperDelivery>() <= 24);
+const _: () =
+    assert!(std::mem::size_of::<Option<Box<DeliveredRead>>>() == std::mem::size_of::<usize>());
+
+// A sited request adds nothing to the request a helper returns by value.
+#[cfg(test)]
+#[allow(dead_code)]
+enum UnsitedRequestLayout {
+    Query(SemanticQueryKey, Option<ClaimAttempt>),
+    Callback {
+        position: u32,
+        contextual: SemanticNodeId,
+    },
+}
+#[cfg(test)]
+const _: () =
+    assert!(std::mem::size_of::<RequestKind>() == std::mem::size_of::<UnsitedRequestLayout>());
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// Advance a pair or member relation with the delivery of the request
@@ -552,7 +696,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let HelperDrive::Frame { depth } = drive else {
                         unreachable!("only a frame suspends a relation at its operands")
                     };
-                    let delivered = delivery.take().map(HelperDelivery::into_query);
+                    let delivered = delivery.take().map(HelperDelivery::into_read);
                     if let Some(request) =
                         self.advance_operand_demand(&mut demand, delivered, depth)
                     {

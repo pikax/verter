@@ -2319,7 +2319,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Staged<Box<StagedMember>> {
         let mut delivery = delivery;
         if member.dispatch.is_none() {
-            let delivered = delivery.take().map(HelperDelivery::into_query);
+            let delivered = delivery.take().map(HelperDelivery::into_read);
             if let Some(request) = self.advance_operand_demand(&mut member.demand, delivered, depth)
             {
                 return Staged::Held(Box::new((member, request)));

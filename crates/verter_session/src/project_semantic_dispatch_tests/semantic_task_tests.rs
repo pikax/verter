@@ -1837,27 +1837,55 @@ fn suspend_the_contextual_call<R>(
 
 const CALLBACK_ROUNDS_FILE: &str = "/semantic-task/callback-rounds.ts";
 
-/// Two generic calls whose callbacks a consumer types. `both` names `f` and
+/// Generic calls whose callbacks a consumer types. `both` names `f` and
 /// then `g`, whose parameter type reads the `U` that typing `f` infers;
-/// `echo` names its callback beside a spread argument.
+/// `echo` names its callback beside a spread argument; `each` maps an array
+/// of callbacks, whose parameter type's own signature list is read through
+/// the `Array` wrapper its host's project declares ([`round_call_host`]).
 const CALLBACK_ROUNDS: &str = "type Box<T> = { v: T };\n\
      declare function both<T, U, V>(seed: T, f: (x: T) => U, g: (y: U) => V): [T, U, V];\n\
      declare function typedF(x: number): Box<3>;\n\
      declare function typedG(y: Box<3>): string;\n\
      declare function echo<T>(seed: T, f: (x: T) => T): T;\n\
-     declare function typedEcho(x: number): number;\n";
+     declare function typedEcho(x: number): number;\n\
+     declare function each<T>(seed: T, fs: ((x: T) => string)[]): T;\n\
+     declare const typedFs: ((x: number) => string)[];\n";
 
 fn callback_rounds_host() -> Arc<crate::VerterHost> {
+    callback_rounds_host_of(CALLBACK_ROUNDS)
+}
+
+fn callback_rounds_host_of(script: &str) -> Arc<crate::VerterHost> {
     let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
     crate::u6_flow_shape_corpus_tests::upsert(
         &host,
         CALLBACK_ROUNDS_FILE,
-        &crate::u6_flow_shape_corpus_tests::module_script(CALLBACK_ROUNDS),
+        &crate::u6_flow_shape_corpus_tests::module_script(script),
         crate::FileLanguage::script_ts(),
     );
     host.ensure_indexed_ready(CALLBACK_ROUNDS_FILE)
         .expect("the calls have indexed input");
     host
+}
+
+/// The module's contribution of the global `Array` interface. The test
+/// host's project has no library, so without it an array's apparent wrapper
+/// is found nowhere: its signature list's admission asks the library, the
+/// pending contributors and the population, finds no declaration and
+/// settles to `never` without reading a wrapper instantiation.
+const ARRAY_GLOBAL: &str = "declare global { interface Array<T> { length: number } }\n";
+
+/// The host `case`'s call runs on: the callback rounds, and for an array of
+/// callbacks the same module also declaring the `Array` wrapper the array's
+/// signature list is admitted through, so its admission reads the wrapper's
+/// instantiation.
+fn round_call_host(case: RoundCall) -> Arc<crate::VerterHost> {
+    match case {
+        RoundCall::CallbackArray => {
+            callback_rounds_host_of(&format!("{CALLBACK_ROUNDS}{ARRAY_GLOBAL}"))
+        }
+        RoundCall::TwoCallbacks | RoundCall::CallbackBesideSpread => callback_rounds_host(),
+    }
 }
 
 /// The type of the declared function `name`.
@@ -1891,6 +1919,12 @@ enum RoundCall {
     /// `echo(...[number], f)`, `f` typed by `typedEcho`: no collector is
     /// held, and the typed call is checked again.
     CallbackBesideSpread,
+    /// `each(number, fs)`, `fs` typed by `typedFs`: the mapping of `fs`'s
+    /// parameter type reads that array's own signature list, whose entry
+    /// admits it through the `Array` wrapper the call site's project
+    /// declares, while the candidate's collector holds what the seed
+    /// inferred for `T`.
+    CallbackArray,
 }
 
 /// The call `case` names, the key of the call frame that drives it (its
@@ -1954,6 +1988,14 @@ fn round_call(
                 vec![argument(tuple, true, false), eager(f)],
             )
         }
+        RoundCall::CallbackArray => {
+            let fs = callback_round_value(dispatch, "typedFs");
+            (
+                callback_round_value(dispatch, "each"),
+                vec![eager(number), argument(fs, false, true)],
+                vec![eager(number), eager(fs)],
+            )
+        }
     };
     let call = super::call_resolve_tests::call_key_at(
         dispatch,
@@ -1988,6 +2030,16 @@ fn call_round_work_since(after: [u64; 3], before: [u64; 3]) -> [u64; 3] {
     ]
 }
 
+/// The admission stages query entries walked on `host`, wherever they ran:
+/// one per stage of an entry's sugar, carrier, apparent-wrapper and
+/// signature-subject normalization.
+fn round_call_admission(host: &crate::VerterHost) -> u64 {
+    host.project_type_store()
+        .semantic_graph()
+        .stats_snapshot()
+        .admission_stages_walked
+}
+
 /// The display of the return type a resolved call selected.
 fn round_call_answer(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
@@ -2010,19 +2062,23 @@ fn round_call_answer(
 /// and the call work that did. Its premise: the round the last callback's
 /// typing completes executes the call again, so two walks begin.
 fn synchronous_round_call(case: RoundCall) -> (String, [u64; 3]) {
-    let (answer, work, _) = synchronous_round_call_with_signatures(case);
-    (answer, work)
+    let run = synchronous_round_call_with_signatures(case);
+    (run.answer, run.work)
 }
 
-/// [`synchronous_round_call`], with the signature work the call did.
-fn synchronous_round_call_with_signatures(
-    case: RoundCall,
-) -> (
-    String,
-    [u64; 3],
-    super::signature_epoch_tests::SignatureWork,
-) {
-    let host = callback_rounds_host();
+/// What a synchronous consumer's drive of a call did: its answer, its call
+/// work, its signature work and the admission stages its entries walked.
+struct SynchronousRoundCall {
+    answer: String,
+    work: [u64; 3],
+    signatures: super::signature_epoch_tests::SignatureWork,
+    admission: u64,
+}
+
+/// [`synchronous_round_call`], with the signature work and the admission
+/// stages the call did.
+fn synchronous_round_call_with_signatures(case: RoundCall) -> SynchronousRoundCall {
+    let host = round_call_host(case);
     let _request =
         verter_type_engine::request_context::install_test_request_for(CALLBACK_ROUNDS_FILE);
     let dispatch = ProjectSemanticDispatch::new(&*host);
@@ -2030,9 +2086,11 @@ fn synchronous_round_call_with_signatures(
     let (frame, call, typed) = round_call(&dispatch, case);
     let before = call_round_work(&host);
     let before_signatures = super::signature_epoch_tests::signature_work(&host);
+    let before_admission = round_call_admission(&host);
     let step = dispatch.drive_contextual_call_in_place_for_tests(frame, call, typed);
     let work = call_round_work_since(call_round_work(&host), before);
     let signatures = super::signature_epoch_tests::signature_work(&host).since(before_signatures);
+    let admission = round_call_admission(&host) - before_admission;
     let verter_type_engine::project_semantic_dispatch::call_resolve::ResolveCallStep::Complete(
         result,
     ) = &step
@@ -2045,7 +2103,12 @@ fn synchronous_round_call_with_signatures(
         "premise: the call is executed again once its last callback is typed"
     );
     assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
-    (answer, work, signatures)
+    SynchronousRoundCall {
+        answer,
+        work,
+        signatures,
+        admission,
+    }
 }
 
 /// The reads a call frame needs that are signature lists, once the
@@ -2053,6 +2116,42 @@ fn synchronous_round_call_with_signatures(
 fn signature_lists_after_a_typed_callback(key: &SemanticQueryKey) -> bool {
     matches!(key, SemanticQueryKey::SignaturesOfType { .. })
         && verter_type_engine::project_semantic_dispatch::call_callbacks_typed_here_for_tests() >= 1
+}
+
+thread_local! {
+    /// The instantiations [`instantiations_held_and_noted`] selected on this
+    /// thread, in the order the call frame needed them.
+    static HELD_INSTANTIATIONS: std::cell::RefCell<Vec<SemanticQueryKey>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The reads a call frame needs that are instantiations, each noted on this
+/// thread as it is selected.
+fn instantiations_held_and_noted(key: &SemanticQueryKey) -> bool {
+    let holds = matches!(key, SemanticQueryKey::Instantiate(_));
+    if holds {
+        HELD_INSTANTIATIONS.with(|held| held.borrow_mut().push(key.clone()));
+    }
+    holds
+}
+
+/// The instantiations [`instantiations_held_and_noted`] selected on this
+/// thread since the last call, which forgets them.
+fn take_held_instantiations() -> Vec<SemanticQueryKey> {
+    HELD_INSTANTIATIONS.with(|held| std::mem::take(&mut *held.borrow_mut()))
+}
+
+/// Whether every noted instantiation is one of the `Array` interface: the
+/// wrapper an array's signature list is read through.
+fn every_instantiation_is_the_array_wrapper(keys: &[SemanticQueryKey]) -> bool {
+    !keys.is_empty()
+        && keys.iter().all(|key| {
+            matches!(
+                key,
+                SemanticQueryKey::Instantiate(instantiate)
+                    if instantiate.base().merged_symbol_name.as_ref() == "Array"
+            )
+        })
 }
 
 /// What a call frame driving a contextual call on the continuation runtime
@@ -2082,6 +2181,8 @@ struct RoundCallRun {
     work: [u64; 3],
     /// Signature work done over the whole polled read.
     signatures: super::signature_epoch_tests::SignatureWork,
+    /// Admission stages query entries walked over the whole polled read.
+    admission: u64,
     /// Kernel epochs the read retired as a list was about to be pinned.
     retirements: usize,
     answer: String,
@@ -2130,7 +2231,7 @@ fn poll_round_call_retiring(
         call_callbacks_typed_here_for_tests, drive_contextual_call_here_for_tests,
         hold_call_needs_here_for_tests, take_call_suspensions_for_tests, ContextualCallProbe,
     };
-    let host = callback_rounds_host();
+    let host = round_call_host(case);
     let _request =
         verter_type_engine::request_context::install_test_request_for(CALLBACK_ROUNDS_FILE);
     let mut dispatch = ProjectSemanticDispatch::new(&*host);
@@ -2142,6 +2243,7 @@ fn poll_round_call_retiring(
     let _ = take_call_suspensions_for_tests();
     let before = call_round_work(&host);
     let before_signatures = super::signature_epoch_tests::signature_work(&host);
+    let before_admission = round_call_admission(&host);
     let retirements = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut entry = dispatch.poll_query(SemanticQueryKey::ResolveCall(Box::new(frame)));
     drive_contextual_call_here_for_tests(Some(ContextualCallProbe { call, typed }));
@@ -2234,12 +2336,17 @@ fn poll_round_call_retiring(
         woken,
         work: call_round_work_since(call_round_work(&host), before),
         signatures: super::signature_epoch_tests::signature_work(&host).since(before_signatures),
+        admission: round_call_admission(&host) - before_admission,
         retirements: retirements.load(std::sync::atomic::Ordering::SeqCst),
         answer,
     };
     assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
     assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
     assert!(graph.resident_flight_keys_for_tests().is_empty());
+    assert!(
+        dispatch.lexical_demand_scope.borrow().is_empty(),
+        "the read leaves no demand scope behind"
+    );
     drop(scope);
     drop(dispatch);
     run
@@ -2319,8 +2426,11 @@ fn a_contextual_call_waiting_on_a_signature_list_its_resumed_candidate_reads_kee
 /// more time.
 #[test]
 fn a_contextual_list_retired_before_it_is_pinned_is_read_once() {
-    let (synchronous, _, synchronous_signatures) =
-        synchronous_round_call_with_signatures(RoundCall::TwoCallbacks);
+    let SynchronousRoundCall {
+        answer: synchronous,
+        signatures: synchronous_signatures,
+        ..
+    } = synchronous_round_call_with_signatures(RoundCall::TwoCallbacks);
     let run = poll_round_call_retiring(RoundCall::TwoCallbacks, None, true);
     assert_eq!(
         run.retirements, 1,
@@ -2476,6 +2586,279 @@ fn a_callback_beside_a_spread_argument_is_rechecked_over_the_retained_plan_witho
         "the candidate is checked again on the frame too"
     );
     assert_eq!(run.answer, synchronous);
+}
+
+/// A contextual call driven on a frame maps an array of callbacks: the
+/// parameter type's own signature list, read last in each round's mapping,
+/// is an array's, whose entry admits it through the `Array` wrapper the
+/// call site's module declares. The list is a request the call's frame
+/// admits where the mapping asked, each read of the admission the frame's
+/// need: the first poll, which may not wait, returns `Pending` at the
+/// wrapper's instantiation another task is producing — in the first round,
+/// with the candidate's collector holding what the seed inferred for `T`,
+/// no callback typed and no candidate check begun. Polled again, here and on
+/// another thread, it stays pending and does no work. Released, it resumes
+/// on another thread and answers as the synchronous consumer does, with one
+/// walk, the synchronous candidate and argument work, and the synchronous
+/// consumer's admission stages: each round's list is admitted once, in the
+/// frame, as the synchronous entry admits it once per round.
+#[test]
+fn a_contextual_list_over_an_array_parameter_suspends_at_its_admissions_wrapper_read() {
+    let synchronous = synchronous_round_call_with_signatures(RoundCall::CallbackArray);
+    assert_eq!(
+        synchronous.answer, "number",
+        "premise: the call returns what the seed inferred for `T`"
+    );
+    assert_eq!(
+        synchronous.work,
+        [2, 1, 2],
+        "premise: the consumer's typed round executes the call again; one candidate check          relates both arguments"
+    );
+    let _ = take_held_instantiations();
+    let run = poll_round_call(
+        RoundCall::CallbackArray,
+        Some(instantiations_held_and_noted),
+    );
+    let held_reads = take_held_instantiations();
+    assert!(
+        run.yielded,
+        "the call yields at its list's admission instead of waiting the producer out          (premise: the module's `Array` is found, so the admission reads its instantiation):          held {held_reads:?}"
+    );
+    assert_eq!(
+        run.typed_at_hold, 0,
+        "the first round's mapping reads the list before the callback is named"
+    );
+    let last = run
+        .suspensions
+        .last()
+        .unwrap_or_else(|| panic!("the call suspends with its collector held"));
+    assert!(
+        matches!(
+            last.needs.as_slice(),
+            [SemanticQueryKey::SignaturesOfType { .. }]
+        ),
+        "it waits on the array parameter's signature list: {last:?}"
+    );
+    assert_eq!(
+        last.collected_candidates, 1,
+        "its collector holds what the seed inferred for `T`"
+    );
+    assert_eq!(
+        run.at_hold,
+        [1, 0, 0],
+        "one walk began, and no candidate check before the list is read"
+    );
+    assert!(run.held >= 1);
+    assert!(
+        every_instantiation_is_the_array_wrapper(&held_reads),
+        "the frame waits on the `Array` wrapper its admission reads: {held_reads:?}"
+    );
+    assert!(run.repolled_pending);
+    assert_eq!(run.pending_elsewhere, Some(true));
+    assert_eq!(run.repoll_work, [0; 3], "a pending repoll does no work");
+    assert!(run.woken, "the producer going away wakes the frame");
+    assert_eq!(
+        run.work,
+        [1, synchronous.work[1], synchronous.work[2]],
+        "the call walks once, with the synchronous candidate and argument work"
+    );
+    assert_eq!(
+        run.admission, synchronous.admission,
+        "each round's list is admitted once, in the call's frame"
+    );
+    assert_eq!(run.answer, synchronous.answer);
+}
+
+/// How a test lets go of a call frame's task while the task waits.
+#[derive(Clone, Copy, Debug)]
+enum Release {
+    /// The task is left pending, and its lender drops it here.
+    DroppedHere,
+    /// The task is dropped on another thread.
+    DroppedElsewhere,
+    /// The request is cancelled on another thread, and the woken call reads
+    /// its cancellation.
+    Cancelled,
+}
+
+/// A request on the callback rounds' file that a test may cancel.
+fn cancellable_round_request() -> Arc<verter_type_engine::request_context::RequestContext> {
+    verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from(CALLBACK_ROUNDS_FILE),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        1_000_000,
+    )
+}
+
+/// The first poll of `each(number, fs)`'s frame, under the hold on its
+/// instantiations, stopped at the wrapper read of its list's admission:
+/// pending, no callback typed, the call suspended at the array's signature
+/// list with its collector holding the seed's inference, and the held read
+/// the `Array` wrapper. Disarms the hold.
+fn assert_the_call_waits_at_its_lists_admission(pending: bool) {
+    use verter_type_engine::project_semantic_dispatch::{
+        call_callbacks_typed_here_for_tests, hold_call_needs_here_for_tests,
+        take_call_suspensions_for_tests,
+    };
+    hold_call_needs_here_for_tests(None);
+    assert!(pending, "the call yields at its list's admission");
+    assert_eq!(call_callbacks_typed_here_for_tests(), 0);
+    let suspensions = take_call_suspensions_for_tests();
+    let last = suspensions
+        .last()
+        .unwrap_or_else(|| panic!("the call suspends with its collector held"));
+    assert!(
+        matches!(
+            last.needs.as_slice(),
+            [SemanticQueryKey::SignaturesOfType { .. }]
+        ),
+        "it waits on the array parameter's signature list: {last:?}"
+    );
+    assert_eq!(last.collected_candidates, 1);
+    let held = take_held_instantiations();
+    assert!(
+        every_instantiation_is_the_array_wrapper(&held),
+        "the frame waits on the `Array` wrapper its admission reads: {held:?}"
+    );
+}
+
+/// A contextual call waiting, with its collector held, on the wrapper read
+/// its array parameter's list admission makes, released while pending — its
+/// task dropped here or on another thread, or its request cancelled —
+/// closes what it opened: no session is left that could still collect, no
+/// obligation frame stays open, no flight or wait remains and no demand
+/// scope is left pushed. The call then resolves in place to the synchronous
+/// answer.
+#[test]
+fn a_call_released_while_its_lists_admission_waits_leaves_nothing_open() {
+    use verter_type_engine::project_semantic_dispatch::{
+        drive_contextual_call_here_for_tests, hold_call_needs_here_for_tests,
+        take_call_suspensions_for_tests, ContextualCallProbe,
+    };
+    let synchronous = synchronous_round_call_with_signatures(RoundCall::CallbackArray).answer;
+    for release in [
+        Release::DroppedHere,
+        Release::DroppedElsewhere,
+        Release::Cancelled,
+    ] {
+        let host = round_call_host(RoundCall::CallbackArray);
+        let (frame, call, typed) = {
+            let request = cancellable_round_request();
+            let _request = match release {
+                Release::Cancelled => {
+                    verter_type_engine::request_context::RequestContextGuard::install(Arc::clone(
+                        &request,
+                    ))
+                }
+                Release::DroppedHere | Release::DroppedElsewhere => {
+                    verter_type_engine::request_context::install_test_request_for(
+                        CALLBACK_ROUNDS_FILE,
+                    )
+                }
+            };
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let _scope = dispatch.enter_construction_scope();
+            let graph = host.project_type_store().semantic_graph();
+            let (frame, call, typed) = round_call(&dispatch, RoundCall::CallbackArray);
+            let waker = Waker::from(Arc::new(CountingWaker::default()));
+            let _ = take_call_suspensions_for_tests();
+            let _ = take_held_instantiations();
+            drive_contextual_call_here_for_tests(Some(ContextualCallProbe {
+                call: call.clone(),
+                typed: typed.clone(),
+            }));
+            hold_call_needs_here_for_tests(Some(instantiations_held_and_noted));
+            let key = SemanticQueryKey::ResolveCall(Box::new(frame.clone()));
+            match release {
+                Release::Cancelled => {
+                    let mut entry = dispatch.poll_query(key);
+                    let pending = {
+                        let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                        entry.poll(&waker).is_pending()
+                    };
+                    assert_the_call_waits_at_its_lists_admission(pending);
+                    std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| request.cancel())
+                            .join()
+                            .expect("the request is cancelled on another thread");
+                    });
+                    let read = match entry.poll(&waker) {
+                        Poll::Ready(read) => read,
+                        Poll::Pending => {
+                            panic!("the woken call reads its cancellation without the producer")
+                        }
+                    };
+                    assert!(
+                        matches!(
+                            read.value(),
+                            QueryResult::Error(
+                                verter_type_engine::semantic_query::QueryError::Cancelled
+                            )
+                        ),
+                        "the cancelled call reads a terminal cancellation: {read:?}"
+                    );
+                    drop(entry);
+                }
+                Release::DroppedHere | Release::DroppedElsewhere => {
+                    dispatch
+                        .with_semantic_task_for_tests(key, |slot| {
+                            let task = slot.as_mut().expect("the task is lent");
+                            let pending = {
+                                let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                                task.poll_for_tests(&waker).is_pending()
+                            };
+                            assert_the_call_waits_at_its_lists_admission(pending);
+                            if matches!(release, Release::DroppedElsewhere) {
+                                let task = slot.take().expect("the task is lent");
+                                std::thread::scope(|scope| {
+                                    scope
+                                        .spawn(move || drop(task))
+                                        .join()
+                                        .expect("the task drops on another thread");
+                                });
+                            }
+                            // Otherwise the task is left pending: the lender
+                            // takes it back.
+                        })
+                        .expect("the cold root runs as a task");
+                }
+            }
+            drive_contextual_call_here_for_tests(None);
+            assert_eq!(
+                dispatch.open_request_state_for_tests(),
+                NOTHING_OPEN,
+                "the released call closes what it opened ({release:?})"
+            );
+            assert_eq!(graph.wait_graph_counts_for_tests().1, 0, "({release:?})");
+            let resident = graph.resident_flight_keys_for_tests();
+            assert!(
+                resident.is_empty(),
+                "the call's flights and the held producers go ({release:?}): {resident:?}"
+            );
+            assert!(
+                dispatch.lexical_demand_scope.borrow().is_empty(),
+                "no demand scope is left pushed ({release:?})"
+            );
+            (frame, call, typed)
+        };
+        let _request =
+            verter_type_engine::request_context::install_test_request_for(CALLBACK_ROUNDS_FILE);
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let step = dispatch.drive_contextual_call_in_place_for_tests(frame, call, typed);
+        let verter_type_engine::project_semantic_dispatch::call_resolve::ResolveCallStep::Complete(
+            result,
+        ) = &step
+        else {
+            panic!("the call resolves after the release ({release:?}): {step:?}");
+        };
+        assert_eq!(round_call_answer(&dispatch, result), synchronous);
+    }
 }
 
 /// A contextual call whose callback reads a `typeof` another task is
@@ -9954,31 +10337,167 @@ mod semantic_poll_contract {
         woken: bool,
         /// Work done over the whole polled read.
         work: [u64; 2],
+        /// The walks, admission stages, discovery nodes and continuation
+        /// stages done over the whole polled read.
+        extent: CallReadExtent,
+        /// Kernel epochs the read retired as a list was about to be pinned.
+        retirements: usize,
         read: ValueRead,
     }
 
-    /// `pick(1, box)`'s result polled at the production entry on a fresh
-    /// host while another task produces each read its call frame needs that
-    /// `held` selects; released, its task resumes on another thread and the
-    /// answer is delivered here.
-    fn poll_call_holding(
+    /// The physical work a call's read did beyond its candidates and
+    /// arguments, wherever it ran: the executor walks begun, the admission
+    /// stages query entries walked, the nodes signature discovery walked,
+    /// and the family continuation builds begun and stages resumed.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct CallReadExtent {
+        walks: u64,
+        admission: u64,
+        discovery: u64,
+        stages: (u64, u64),
+    }
+
+    impl CallReadExtent {
+        fn of(host: &crate::VerterHost) -> Self {
+            Self {
+                walks: call_walks(host),
+                admission: admission_stages(host),
+                discovery: signature_work(host).discovery,
+                stages: continuation_stages(host),
+            }
+        }
+
+        /// The work done since `before`.
+        fn since(self, before: Self) -> Self {
+            Self {
+                walks: self.walks - before.walks,
+                admission: self.admission - before.admission,
+                discovery: self.discovery - before.discovery,
+                stages: (
+                    self.stages.0 - before.stages.0,
+                    self.stages.1 - before.stages.1,
+                ),
+            }
+        }
+    }
+
+    /// The executor walks call resolutions on `host` began, wherever they
+    /// ran.
+    fn call_walks(host: &crate::VerterHost) -> u64 {
+        host.project_type_store()
+            .semantic_graph()
+            .stats_snapshot()
+            .call_walks_begun
+    }
+
+    /// Run `body`; with `retire`, the signature kernel replaces its epoch
+    /// once during it, as the first signature list pinned after a call's
+    /// walk began is about to be pinned, counting the retirement in
+    /// `retirements`.
+    fn retiring_at_the_first_pin_of_a_walk<R>(
+        host: &crate::VerterHost,
+        retire: bool,
+        retirements: &Arc<std::sync::atomic::AtomicUsize>,
+        body: impl FnOnce() -> R,
+    ) -> R {
+        if !retire {
+            return body();
+        }
+        let graph = Arc::clone(host.project_type_store().semantic_graph());
+        let walks_before = call_walks(host);
+        let retirements = Arc::clone(retirements);
+        super::super::signature_epoch_tests::with_build_hook(
+            verter_type_engine::project_semantic_dispatch::signature_discovery::SignaturesOfTypeBuildPoint::Pinning,
+            move || {
+                if graph.stats_snapshot().call_walks_begun > walks_before
+                    && retirements
+                        .compare_exchange(
+                            0,
+                            1,
+                            std::sync::atomic::Ordering::SeqCst,
+                            std::sync::atomic::Ordering::SeqCst,
+                        )
+                        .is_ok()
+                {
+                    graph
+                        .signature_store()
+                        .replace_epoch()
+                        .expect("the kernel replaces its epoch");
+                }
+            },
+            body,
+        )
+    }
+
+    /// What the synchronous entry's read of a call did on a fresh host.
+    struct SynchronousCall {
+        summary: ReadSummary,
+        work: [u64; 2],
+        extent: CallReadExtent,
+        retirements: usize,
+    }
+
+    /// The read of `key` through the synchronous entry on `host`, under a
+    /// request on `request_file` (none without one), retiring the kernel's
+    /// epoch as [`retiring_at_the_first_pin_of_a_walk`] does when `retire`,
+    /// and the work it did.
+    fn synchronous_call_on(
+        host: &crate::VerterHost,
+        request_file: Option<&str>,
+        key: fn(&HostDispatch<'_>) -> SemanticQueryKey,
+        retire: bool,
+    ) -> SynchronousCall {
+        let _request =
+            request_file.map(verter_type_engine::request_context::install_test_request_for);
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let _scope = dispatch.enter_construction_scope();
+        let key = key(&dispatch);
+        let before = call_work(host);
+        let extent = CallReadExtent::of(host);
+        let retirements = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let read = retiring_at_the_first_pin_of_a_walk(host, retire, &retirements, || {
+            dispatch.execute_via_cold_build_helper(key)
+        });
+        let run = SynchronousCall {
+            summary: read_summary(&dispatch, &read),
+            work: call_work_since(call_work(host), before),
+            extent: CallReadExtent::of(host).since(extent),
+            retirements: retirements.load(std::sync::atomic::Ordering::SeqCst),
+        };
+        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+        assert!(dispatch.lexical_demand_scope.borrow().is_empty());
+        run
+    }
+
+    /// The read of `key` polled at the production entry on `host` — under a
+    /// request on `request_file`, none without one — while another task
+    /// produces each read its call frame needs that `held` selects;
+    /// released, its task resumes on another thread and the answer is
+    /// delivered here. With `retire`, the kernel's epoch is replaced during
+    /// the first poll as [`retiring_at_the_first_pin_of_a_walk`] does.
+    fn poll_call_holding_on(
+        host: Arc<crate::VerterHost>,
+        request_file: Option<&str>,
+        key: fn(&HostDispatch<'_>) -> SemanticQueryKey,
         held: fn(&SemanticQueryKey) -> bool,
+        retire: bool,
     ) -> (Arc<crate::VerterHost>, HeldCall) {
-        let host = call_host();
-        // The call is demanded by a request on its own file, as a root a
-        // request reads from its file is.
-        let _request = verter_type_engine::request_context::install_test_request_for(CALL_FILE);
+        let _request =
+            request_file.map(verter_type_engine::request_context::install_test_request_for);
         let mut dispatch = ProjectSemanticDispatch::new(&*host);
         let scope = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
-        let key = call_result_key(&dispatch);
+        let key = key(&dispatch);
         let counter = Arc::new(CountingWaker::default());
         let waker = Waker::from(Arc::clone(&counter));
         let _ = verter_type_engine::project_semantic_dispatch::take_call_suspensions_for_tests();
         let before = call_work(&host);
+        let extent = CallReadExtent::of(&host);
+        let retirements = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut entry = dispatch.poll_query(key);
         verter_type_engine::project_semantic_dispatch::hold_call_needs_here_for_tests(Some(held));
-        let first = entry.poll(&waker);
+        let first =
+            retiring_at_the_first_pin_of_a_walk(&host, retire, &retirements, || entry.poll(&waker));
         verter_type_engine::project_semantic_dispatch::hold_call_needs_here_for_tests(None);
         let at_hold = call_work_since(call_work(&host), before);
         let suspensions =
@@ -10027,11 +10546,17 @@ mod semantic_poll_contract {
             repoll_work,
             woken,
             work: call_work_since(call_work(&host), before),
+            extent: CallReadExtent::of(&host).since(extent),
+            retirements: retirements.load(std::sync::atomic::Ordering::SeqCst),
             read,
         };
         assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
         assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
         assert!(graph.resident_flight_keys_for_tests().is_empty());
+        assert!(
+            dispatch.lexical_demand_scope.borrow().is_empty(),
+            "the read leaves no demand scope behind"
+        );
         drop(scope);
         drop(dispatch);
         (host, run)
@@ -10058,7 +10583,13 @@ mod semantic_poll_contract {
     #[test]
     fn a_call_root_waiting_on_its_second_argument_resumes_without_beginning_its_candidate_again() {
         let (synchronous, synchronous_work) = synchronous_call();
-        let (host, run) = poll_call_holding(instantiation_reads);
+        let (host, run) = poll_call_holding_on(
+            call_host(),
+            Some(CALL_FILE),
+            call_result_key,
+            instantiation_reads,
+            false,
+        );
         assert!(
             run.yielded,
             "the call yields while another task instantiates its second argument's operand"
@@ -10108,7 +10639,13 @@ mod semantic_poll_contract {
     #[test]
     fn a_call_root_waiting_on_its_candidate_list_resumes_to_the_synchronous_read() {
         let (synchronous, synchronous_work) = synchronous_call();
-        let (host, run) = poll_call_holding(candidate_list_reads);
+        let (host, run) = poll_call_holding_on(
+            call_host(),
+            Some(CALL_FILE),
+            call_result_key,
+            candidate_list_reads,
+            false,
+        );
         assert!(
             run.yielded,
             "the call yields while another task produces its candidate list"
@@ -10197,58 +10734,250 @@ mod semantic_poll_contract {
                                   const r = s(1);\n\
                                   export {};\n";
 
-    /// `s(1)`'s result read on a fresh host with no request to scope it:
-    /// through the synchronous entry, or polled at the production entry.
-    fn primitive_call_read(polled: bool) -> ReadSummary {
+    const PRIMITIVE_UNION_CALL_FILE: &str = "/semantic-task/primitive-union-call.ts";
+
+    /// A call whose callee is a union of two primitives: each arm's call
+    /// signatures are those of its wrapper interface the call site's
+    /// project declares, and both arms declare the same one.
+    const PRIMITIVE_UNION_CALL: &str = "declare global { interface String { (radix: number): boolean } interface Number { (radix: number): boolean } }\n\
+                                        declare const s: string | number;\n\
+                                        const r = s(1);\n\
+                                        export {};\n";
+
+    const DROPPED_CALL_FILE: &str = "/semantic-task/dropped-call.ts";
+
+    /// A call whose one candidate takes no type arguments, called with one:
+    /// the explicit type argument drops it, so its overload set comes back
+    /// empty-handed and the callee's list classifies the miss.
+    const DROPPED_CALL: &str = "declare function only(a: number): void;\n\
+                                const r = only<string>(1);\n";
+
+    /// A fresh host holding `source` at `file`, indexed.
+    fn call_script_host(file: &str, source: &str) -> Arc<crate::VerterHost> {
         let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
         crate::u6_flow_shape_corpus_tests::upsert(
             &host,
-            PRIMITIVE_CALL_FILE,
-            PRIMITIVE_CALL,
+            file,
+            source,
             crate::FileLanguage::script_ts(),
         );
-        host.ensure_indexed_ready(PRIMITIVE_CALL_FILE)
+        host.ensure_indexed_ready(file)
             .expect("the call has indexed input");
-        let mut dispatch = ProjectSemanticDispatch::new(&*host);
-        let _scope = dispatch.enter_construction_scope();
-        let key = dispatch.typeof_key_for(
+        host
+    }
+
+    fn primitive_call_host() -> Arc<crate::VerterHost> {
+        call_script_host(PRIMITIVE_CALL_FILE, PRIMITIVE_CALL)
+    }
+
+    fn primitive_union_call_host() -> Arc<crate::VerterHost> {
+        call_script_host(PRIMITIVE_UNION_CALL_FILE, PRIMITIVE_UNION_CALL)
+    }
+
+    fn dropped_call_host() -> Arc<crate::VerterHost> {
+        call_script_host(
+            DROPPED_CALL_FILE,
+            &crate::u6_flow_shape_corpus_tests::module_script(DROPPED_CALL),
+        )
+    }
+
+    /// The `typeof` of the call's result `r` in `file`.
+    fn call_result_in(dispatch: &HostDispatch<'_>, file: &str) -> SemanticQueryKey {
+        dispatch.typeof_key_for(
             ValueRootKey {
-                scope: ScopeId::file(
-                    PRIMITIVE_CALL_FILE,
-                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                ),
+                scope: ScopeId::file(file, verter_type_expr::TopLevelOwnerId::ordinary_file()),
                 name: verter_type_expr::OwnedStr::from("r"),
             },
             ProjectionReductionContext::published(ProjectionMode::Navigate),
-        );
-        let read = if polled {
-            let mut entry = dispatch.poll_query(key);
-            let read = poll_until_ready(|waker| entry.poll(waker));
-            drop(entry);
-            read
-        } else {
-            dispatch.execute_via_cold_build_helper(key)
-        };
-        read_summary(&dispatch, &read)
+        )
     }
 
-    /// A primitive callee's candidate list is read in the call site's
-    /// scope wherever the call's walk runs: on a frame of the continuation
-    /// runtime with no request to scope what the runtime reads, the walk
-    /// reads the list where it stands, under its call site, and `s(1)`
-    /// selects `(radix: number): boolean` exactly as the synchronous entry
-    /// does.
+    fn primitive_call_result_key(dispatch: &HostDispatch<'_>) -> SemanticQueryKey {
+        call_result_in(dispatch, PRIMITIVE_CALL_FILE)
+    }
+
+    fn primitive_union_call_result_key(dispatch: &HostDispatch<'_>) -> SemanticQueryKey {
+        call_result_in(dispatch, PRIMITIVE_UNION_CALL_FILE)
+    }
+
+    fn dropped_call_result_key(dispatch: &HostDispatch<'_>) -> SemanticQueryKey {
+        call_result_in(dispatch, DROPPED_CALL_FILE)
+    }
+
+    fn signature_list_reads(key: &SemanticQueryKey) -> bool {
+        matches!(key, SemanticQueryKey::SignaturesOfType { .. })
+    }
+
+    /// What a call through `string`'s call signatures answers: the
+    /// project's `String` call signature's return.
+    fn selects_the_wrapper_call_signature(answer: &str) -> bool {
+        matches!(
+            answer,
+            "boolean" | "Union(false | true)" | "Union(true | false)"
+        )
+    }
+
+    /// A primitive callee's candidate list is requested under its call
+    /// site's scope, whatever scope lies beneath the call's walk: on a frame
+    /// of the continuation runtime with no request and no enclosing demand
+    /// site, the list another task is producing stops the call before any
+    /// candidate begins. Polled again while held, under a probe that
+    /// forbids every wait, and on another thread, it stays pending and does
+    /// no work. Released, the frame that produces the list reads `String`
+    /// in the call site's project, the walk resumes at its list — never
+    /// begun again — and `s(1)` selects `(radix: number): boolean` exactly
+    /// as the synchronous entry does, receipt tree included, with the
+    /// synchronous admission and discovery work.
     #[test]
-    fn a_primitive_callees_candidate_list_is_read_in_its_call_sites_scope() {
-        let synchronous = primitive_call_read(false);
-        assert!(
-            matches!(
-                synchronous.0.as_str(),
-                "boolean" | "Union(false | true)" | "Union(true | false)"
-            ),
-            "premise: the call selects the project's `String` call signature: {synchronous:?}"
+    fn a_primitive_callees_candidate_list_is_requested_under_its_call_sites_scope() {
+        let synchronous = synchronous_call_on(
+            &primitive_call_host(),
+            None,
+            primitive_call_result_key,
+            false,
         );
-        assert_eq!(primitive_call_read(true), synchronous);
+        assert!(
+            selects_the_wrapper_call_signature(&synchronous.summary.0),
+            "premise: the call selects the project's `String` call signature: {:?}",
+            synchronous.summary
+        );
+        assert_eq!(
+            synchronous.work,
+            [1, 1],
+            "premise: one candidate begun, its one argument related"
+        );
+        assert_eq!(synchronous.extent.walks, 1, "premise: the call walks once");
+        let (host, run) = poll_call_holding_on(
+            primitive_call_host(),
+            None,
+            primitive_call_result_key,
+            candidate_list_reads,
+            false,
+        );
+        assert!(
+            run.yielded,
+            "the call yields while another task produces its candidate list"
+        );
+        assert_eq!(run.held, 1, "the call frame waits on its candidate list");
+        assert!(
+            run.suspensions.is_empty(),
+            "no candidate began: {:?}",
+            run.suspensions
+        );
+        assert_eq!(run.at_hold, [0; 2], "no candidate begins before its list");
+        assert!(run.repolled_pending);
+        assert_eq!(run.pending_elsewhere, Some(true));
+        assert_eq!(run.repoll_work, [0; 2], "a pending repoll does no work");
+        assert!(run.woken, "the producer going away wakes the call");
+        assert_eq!(run.work, [1, 1]);
+        assert_eq!(
+            run.extent.walks, 1,
+            "the walk resumes at its list and is never begun again"
+        );
+        assert_eq!(
+            (run.extent.admission, run.extent.discovery),
+            (synchronous.extent.admission, synchronous.extent.discovery),
+            "the list's wrapper is admitted and its callee discovered as the synchronous entry does"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous.summary);
+    }
+
+    /// The demand scope a request was asked under reaches every frame its
+    /// read needs: `s: string | number`'s candidate list, requested under the
+    /// call site with no request and no enclosing demand site, is produced
+    /// by a frame whose need — the union's own signature list, which no
+    /// entry admits — starts another frame. That frame discovers both arms,
+    /// each reading its wrapper (`String`, `Number`) in the scope it was
+    /// handed, and the call selects as the synchronous entry does, receipt
+    /// tree included, with one walk and the synchronous discovery work.
+    #[test]
+    fn a_frame_reading_for_a_scoped_request_hands_the_scope_to_the_frames_it_needs() {
+        let synchronous = synchronous_call_on(
+            &primitive_union_call_host(),
+            None,
+            primitive_union_call_result_key,
+            false,
+        );
+        assert!(
+            selects_the_wrapper_call_signature(&synchronous.summary.0),
+            "premise: the call selects the arms' shared wrapper call signature: {:?}",
+            synchronous.summary
+        );
+        let (host, run) = poll_call_holding_on(
+            primitive_union_call_host(),
+            None,
+            primitive_union_call_result_key,
+            candidate_list_reads,
+            false,
+        );
+        assert!(
+            run.yielded,
+            "the call yields while another task produces its candidate list"
+        );
+        assert_eq!(run.extent.walks, 1, "the call walks once");
+        assert_eq!(
+            run.extent.discovery, synchronous.extent.discovery,
+            "the union's arms are discovered as the synchronous entry discovers them"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous.summary);
+    }
+
+    /// A set that did not come back as a set is classified by the callee's
+    /// list, and on a frame that list is a request: `only<string>(1)`'s set
+    /// drops its one candidate, and the list the set pinned was retired as
+    /// it was pinned, so the list read after the miss is cold. Another task
+    /// producing it stops the call before any candidate begins; released,
+    /// the delivered list classifies the miss, and the call answers as the
+    /// synchronous entry does, receipt tree included, with one walk and the
+    /// synchronous discovery and continuation work: the set is not read
+    /// again.
+    #[test]
+    fn a_candidate_list_read_after_a_missed_set_is_requested_and_classifies_the_miss() {
+        let synchronous = synchronous_call_on(
+            &dropped_call_host(),
+            Some(DROPPED_CALL_FILE),
+            dropped_call_result_key,
+            true,
+        );
+        assert_eq!(
+            synchronous.retirements, 1,
+            "premise: the list the set pinned was retired as it was pinned"
+        );
+        let (host, run) = poll_call_holding_on(
+            dropped_call_host(),
+            Some(DROPPED_CALL_FILE),
+            dropped_call_result_key,
+            signature_list_reads,
+            true,
+        );
+        assert_eq!(
+            run.retirements, 1,
+            "premise: the list the set pinned was retired as it was pinned"
+        );
+        assert!(
+            run.yielded,
+            "the call yields at the list it reads after its set missed"
+        );
+        assert_eq!(run.held, 1, "the call frame waits on the callee's list");
+        assert!(
+            run.suspensions.is_empty(),
+            "no candidate began: {:?}",
+            run.suspensions
+        );
+        assert_eq!(run.at_hold, [0; 2], "no candidate begins before the list");
+        assert_eq!(run.extent.walks, 1, "the call walks once");
+        assert_eq!(
+            run.extent.discovery, synchronous.extent.discovery,
+            "the callee is discovered as often as the synchronous entry discovers it"
+        );
+        assert_eq!(
+            run.extent.stages, synchronous.extent.stages,
+            "the set is not read again once the list is delivered"
+        );
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        assert_eq!(read_summary(&dispatch, &run.read), synchronous.summary);
     }
 
     /// `alias<args>` over the aliases' file.
