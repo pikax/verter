@@ -7422,7 +7422,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 collect_throw_points: false,
                 scope_shadows: Vec::new(),
                 call_evidence: Vec::new(),
-                call_drive: None,
                 expression_write_nodes: rustc_hash::FxHashMap::default(),
                 capture_write_lookahead: rustc_hash::FxHashMap::default(),
                 executed_walk: ExecutedSliceWalk::default(),
@@ -10885,7 +10884,10 @@ use read::{ReadDelivery, ReadNesting, ReadStep, ReadWait};
 #[path = "flow_return_operators.rs"]
 mod operators;
 pub(super) use call_stack::HeldContextualRoute;
-use call_stack::{CallArgumentWait, CallDrive, CallFunctionWait, CallInFlight, CallStep};
+use call_stack::{
+    CallArgumentWait, CallFunctionWait, CallInFlight, CallNext, CallStep, CallSuffix, DirectRail,
+    DirectReturn, OptionalChainTail,
+};
 
 #[path = "flow_return_call_effects.rs"]
 mod call_effects;
@@ -10948,6 +10950,21 @@ pub(super) trait FlowReadDriver {
     ) -> ReadStep<SemanticNodeId>;
     /// Answer a read the body requested and its root read answers.
     fn answer_read(&self, wait: ReadWait) -> ReadDelivery;
+    /// Drive a call not yet begun to its first answer.
+    fn begin_call(
+        &self,
+        call: &mut super::helper_continuation::CallRead,
+    ) -> super::helper_continuation::CallAnswer;
+    /// Hand a call the arguments its callback exchange asked for, the named
+    /// one typed, and drive it to its next answer.
+    fn resume_call(
+        &self,
+        call: &mut super::helper_continuation::CallRead,
+        args: Arc<[crate::semantic_query::CallArgKey]>,
+    ) -> super::helper_continuation::CallAnswer;
+    /// Release a call its route stops before it answered. It arrives boxed,
+    /// so no frame of the route holds a call by value.
+    fn release_call(&self, call: Box<super::helper_continuation::CallRead>);
 }
 
 /// Nested semantic demands always return to the existing driver. All calls
@@ -11147,24 +11164,6 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
         value: SemanticNodeId,
     ) -> SemanticNodeId;
     fn execute_relate_pair(&self, source: SemanticNodeId, target: SemanticNodeId) -> RelationStep;
-    fn execute_contextual_call(
-        &self,
-        key: ResolveCallKey,
-        state: &mut super::call_resolve::ContextualCallState,
-    ) -> (
-        ResolveCallStep,
-        Option<super::call_resolve::DeclaredCallResult>,
-    );
-    fn resume_contextual_call(
-        &self,
-        key: &mut ResolveCallKey,
-        args: &[crate::semantic_query::CallArgKey],
-        position: usize,
-        state: &mut super::call_resolve::ContextualCallState,
-    ) -> (
-        ResolveCallStep,
-        Option<super::call_resolve::DeclaredCallResult>,
-    );
     fn demand_type_node(
         &self,
         key: SemanticQueryKey,
@@ -11571,6 +11570,50 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowReadDriver
         let _answer = body_reads::enter_request_answer();
         self.read_requested(wait)
     }
+    fn begin_call(
+        &self,
+        call: &mut super::helper_continuation::CallRead,
+    ) -> super::helper_continuation::CallAnswer {
+        body_read_site!("begin_call");
+        #[cfg(any(test, feature = "test-support"))]
+        let _stage = body_reads::enter_call_stage("execute_contextual_call");
+        // The call computation a non-blocking evaluator advances, driven
+        // in place.
+        ProjectSemanticDispatch::drive_call_in_place(self, call)
+    }
+    fn resume_call(
+        &self,
+        call: &mut super::helper_continuation::CallRead,
+        args: Arc<[crate::semantic_query::CallArgKey]>,
+    ) -> super::helper_continuation::CallAnswer {
+        body_read_site!("resume_call");
+        #[cfg(any(test, feature = "test-support"))]
+        let _stage = body_reads::enter_call_stage("resume_contextual_call");
+        let delivery = super::helper_continuation::HelperDelivery::callback(args);
+        let drive = super::helper_continuation::HelperDrive::InPlace;
+        match ProjectSemanticDispatch::advance_call_read(self, call, Some(delivery), drive) {
+            super::helper_continuation::HelperStep::Done(answer) => answer,
+            // A further callback the call names in place is its answer, as
+            // the callback its first answer in place names is.
+            super::helper_continuation::HelperStep::Request(request) => {
+                let contextual = request
+                    .callback_at()
+                    .expect("a call driven in place requests no query");
+                (
+                    ResolveCallStep::Degraded(
+                        crate::semantic_query::ResolveCallFailure::ContextSensitiveInference {
+                            contextual: Some(contextual),
+                        },
+                    ),
+                    None,
+                )
+            }
+        }
+    }
+    fn release_call(&self, call: Box<super::helper_continuation::CallRead>) {
+        body_read_site!("release_call");
+        ProjectSemanticDispatch::release_call_read(self, *call);
+    }
 }
 impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     for ProjectSemanticDispatch<'_, C>
@@ -11911,39 +11954,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     fn execute_relate_pair(&self, source: SemanticNodeId, target: SemanticNodeId) -> RelationStep {
         body_read_site!("execute_relate_pair");
         ProjectSemanticDispatch::execute_relate_pair(self, source, target)
-    }
-    fn execute_contextual_call(
-        &self,
-        key: ResolveCallKey,
-        state: &mut super::call_resolve::ContextualCallState,
-    ) -> (
-        ResolveCallStep,
-        Option<super::call_resolve::DeclaredCallResult>,
-    ) {
-        body_read_site!("execute_contextual_call");
-        #[cfg(any(test, feature = "test-support"))]
-        let _stage = body_reads::enter_call_stage("execute_contextual_call");
-        // The call computation a non-blocking evaluator advances, driven
-        // in place.
-        let mut call = super::helper_continuation::CallRead::begin(key, std::mem::take(state));
-        let answer = ProjectSemanticDispatch::drive_call_in_place(self, &mut call);
-        *state = call.into_contextual();
-        answer
-    }
-    fn resume_contextual_call(
-        &self,
-        key: &mut ResolveCallKey,
-        args: &[crate::semantic_query::CallArgKey],
-        position: usize,
-        state: &mut super::call_resolve::ContextualCallState,
-    ) -> (
-        ResolveCallStep,
-        Option<super::call_resolve::DeclaredCallResult>,
-    ) {
-        body_read_site!("resume_contextual_call");
-        #[cfg(any(test, feature = "test-support"))]
-        let _stage = body_reads::enter_call_stage("resume_contextual_call");
-        ProjectSemanticDispatch::resume_contextual_call(self, key, args, position, state)
     }
     fn demand_type_node(
         &self,
@@ -12704,6 +12714,22 @@ impl<D: FlowDemandDriver> FlowReadDriver for FlowCx<'_, D> {
     fn answer_read(&self, wait: ReadWait) -> ReadDelivery {
         self.driver.answer_read(wait)
     }
+    fn begin_call(
+        &self,
+        call: &mut super::helper_continuation::CallRead,
+    ) -> super::helper_continuation::CallAnswer {
+        self.driver.begin_call(call)
+    }
+    fn resume_call(
+        &self,
+        call: &mut super::helper_continuation::CallRead,
+        args: Arc<[crate::semantic_query::CallArgKey]>,
+    ) -> super::helper_continuation::CallAnswer {
+        self.driver.resume_call(call, args)
+    }
+    fn release_call(&self, call: Box<super::helper_continuation::CallRead>) {
+        self.driver.release_call(call)
+    }
 }
 impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     type Caps = D::Caps;
@@ -12989,29 +13015,6 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn execute_relate_pair(&self, source: SemanticNodeId, target: SemanticNodeId) -> RelationStep {
         self.driver.execute_relate_pair(source, target)
-    }
-    fn execute_contextual_call(
-        &self,
-        key: ResolveCallKey,
-        state: &mut super::call_resolve::ContextualCallState,
-    ) -> (
-        ResolveCallStep,
-        Option<super::call_resolve::DeclaredCallResult>,
-    ) {
-        self.driver.execute_contextual_call(key, state)
-    }
-    fn resume_contextual_call(
-        &self,
-        key: &mut ResolveCallKey,
-        args: &[crate::semantic_query::CallArgKey],
-        position: usize,
-        state: &mut super::call_resolve::ContextualCallState,
-    ) -> (
-        ResolveCallStep,
-        Option<super::call_resolve::DeclaredCallResult>,
-    ) {
-        self.driver
-            .resume_contextual_call(key, args, position, state)
     }
     fn demand_type_node(
         &self,
@@ -14065,17 +14068,13 @@ struct FlowEvaluatorState<'b> {
     /// express.
     scope_shadows: Vec<ScopeShadow>,
     /// The call occurrences this evaluation ACTUALLY evaluated to a
-    /// decided value or coinductive hold, recorded at the one call sink
-    /// (`eval_call`) — the evaluator-origin evidence the discharge-report
-    /// producer claims call and relation obligations from. A call the
-    /// evaluation never performed, or one it could only degrade, records
-    /// nothing, so its obligations stay unclaimed and the demand
-    /// finalizes unproven.
+    /// decided value or coinductive hold, recorded where a call's value
+    /// computation finishes on the run's stack — the evaluator-origin
+    /// evidence the discharge-report producer claims call and relation
+    /// obligations from. A call the evaluation never performed, or one it
+    /// could only degrade, records nothing, so its obligations stay
+    /// unclaimed and the demand finalizes unproven.
     call_evidence: Vec<FlowCallEvidence>,
-    /// The drive of the call whose value computes from
-    /// [`FlowEvaluator::eval_expr`]'s stack
-    /// ([`call_stack`]); `None` outside one.
-    call_drive: Option<CallDrive>,
     /// Expression-position write application (the R2 source-order rule):
     /// the pre-scanned right-hand-side verdicts of the CURRENT statement's
     /// [`SliceExpr::Assignment`] writes, keyed by the write's frame span.
@@ -15020,7 +15019,7 @@ fn push_narrowing_into(
 /// remember. Deleting the *reasons* left the *path*.
 ///
 /// This type deletes the path. Inside
-/// [`FlowEvaluator::eval_expr`] / [`FlowEvaluator::eval_call`] a
+/// [`FlowEvaluator::eval_expr`] / [`FlowEvaluator::begin_call_value`] a
 /// [`FlowReturnFailure`] is UNSPELLABLE, not merely unspelled: there is no
 /// variant to construct one into, and `?` over a
 /// `Result<_, FlowReturnFailure>` does not typecheck against a
@@ -30018,13 +30017,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// A call of member `member` of the value `object`, its receiver:
     /// resolved through the executor, which reads the receiver, else through
     /// the one call sink.
-    fn call_member_of_value(
+    fn call_member_of_value<'e>(
         &mut self,
         object: SemanticNodeId,
         member: &Arc<str>,
         site: verter_session_query::flow::slice::SliceCallSite,
-        arguments: &verter_session_query::flow::slice::SliceCallArguments,
-    ) -> Positional<CallValue> {
+    ) -> CallNext<'e> {
         self.st.call_receivers.insert(site.span(), object);
         let Some(callee) = self
             .project_path_navigate(object, std::slice::from_ref(member))
@@ -30035,12 +30033,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 )
             })
         else {
-            return self.degraded_unrepresentable_callee();
+            return CallNext::Value(self.degraded_unrepresentable_callee());
         };
-        if let Some(value) = self.eval_call_via_resolve_call(callee, site, arguments) {
-            return value;
-        }
-        self.call_return_of_callee_node(callee, site)
+        CallNext::of_callee(callee)
     }
 
     /// Evaluate one flow expression to a graph node.
@@ -30446,7 +30441,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         }
                     }
                     Some(Waiting::CallOperand(flight)) => {
-                        let step = self.resume_call_operand(*flight, value);
+                        let step = self.resume_call_operand(flight, value);
                         match self.resumed_call_step(run, step, suspend) {
                             ResumedCall::Value(done) => value = done,
                             ResumedCall::Descend => break,
@@ -30454,7 +30449,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         }
                     }
                     Some(Waiting::CallArgument(wait)) => {
-                        let step = self.resume_call_argument(*wait, value);
+                        let step = self.resume_call_argument(wait, value);
                         match self.resumed_call_step(run, step, suspend) {
                             ResumedCall::Value(done) => value = done,
                             ResumedCall::Descend => break,
@@ -30470,7 +30465,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         }
                     }
                     Some(Waiting::CallFunction(wait)) => {
-                        let step = self.resume_call_function(*wait, value);
+                        let step = self.resume_call_function(wait, value);
                         match self.resumed_call_step(run, step, suspend) {
                             ResumedCall::Value(done) => value = done,
                             ResumedCall::Descend => break,
@@ -30898,22 +30893,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             }
             verter_session_query::flow::slice::SliceExpr::This(this) => self.eval_this(this),
 
-            // EVERY call form, through the ONE call sink. `CallValue`'s
-            // constructors all decide what happens to the callee's own
-            // type-parameter clause, so no arm below can hand a callee's
-            // return back to this frame untouched by accident — only by
-            // asking for `own_frame_binder` by name.
-            verter_session_query::flow::slice::SliceExpr::Call(call, site, arguments) => {
-                // A call is a throw point: an enclosing `try`'s catch /
-                // finally can be entered from HERE, with the state as it
-                // stands BEFORE the call (an enclosing write has not
-                // applied yet — exactly the checker's antecedent).
-                self.capture_throw_point();
-                match self.eval_call(call, *site, arguments) {
-                    Positional::Value(value) => Positional::Value(value.into_node()),
-                    Positional::Hold => Positional::Hold,
-                    Positional::Unmodeled => Positional::Unmodeled,
-                }
+            // Every call evaluates from the run's stack ([`call_stack`]).
+            verter_session_query::flow::slice::SliceExpr::Call(..) => {
+                unreachable!("a call evaluates from its run's stack")
             }
             verter_session_query::flow::slice::SliceExpr::EvolvingArray(operation) => {
                 self.eval_evolving_operation(operation)
@@ -31712,12 +31694,13 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         })
     }
 
-    /// Resolve one authored call or `new` expression through the call
-    /// executor: the key the executor route mints from the retained
-    /// snapshot (argument expressions, explicit type arguments, the
-    /// receiver evaluated in this frame, and the call/construct form),
-    /// executed. `None` when the call cannot be keyed — an unindexed
-    /// call, or an argument this substrate cannot type.
+    /// A call's executor route driven where nothing suspends, for a
+    /// guard's or a statement effect's own question about a call: the
+    /// key the route mints from the retained snapshot (argument
+    /// expressions, explicit type arguments, the receiver evaluated in
+    /// this frame, and the call/construct form), executed. `None` when
+    /// the call cannot be keyed — an unindexed call, or an argument this
+    /// substrate cannot type.
     fn resolve_call_step(
         &mut self,
         callee: SemanticNodeId,
@@ -31752,33 +31735,15 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         }
     }
 
-    /// The call-executor route of one authored call or `new` expression:
+    /// Fold a call's executor route `step` into the frame's vocabulary:
     /// overload selection and argument-driven clause inference are the
-    /// executor's applicability machinery, so this rail re-reads the
-    /// authored call from the retained snapshot (argument expressions,
-    /// explicit type arguments and the call/construct form are parse
-    /// facts, never re-derived), mints the
-    /// content-free key, and folds the typed outcome back into the
-    /// frame's vocabulary — a completed, already-instantiated return
-    /// through the callee gate's named no-transfer constructor, an
-    /// SCC back-edge as a hold, a typed refusal as the
-    /// `UnrepresentableCallee` degradation this rail already defines for
-    /// a callee it cannot represent.
-    fn eval_call_via_resolve_call(
-        &mut self,
-        callee: SemanticNodeId,
-        site: verter_session_query::flow::slice::SliceCallSite,
-        arguments: &verter_session_query::flow::slice::SliceCallArguments,
-    ) -> Option<Positional<CallValue>> {
-        if let Some(answer) = self.driven_call_route(callee, site, arguments) {
-            return answer;
-        }
-        let step = self.resolve_call_step(callee, site, arguments);
-        self.fold_resolve_call_step(step, callee, site)
-    }
-
-    /// Fold a call's executor route `step` into the frame's vocabulary
-    /// ([`Self::eval_call_via_resolve_call`]).
+    /// executor's applicability machinery, and its typed outcome folds
+    /// back here — a completed, already-instantiated return through the
+    /// callee gate's named no-transfer constructor, an SCC back-edge as a
+    /// hold, a typed refusal as the `UnrepresentableCallee` degradation
+    /// this rail already defines for a callee it cannot represent. `None`
+    /// when the route decided nothing: the call's next stage reads its
+    /// callee itself.
     fn fold_resolve_call_step(
         &mut self,
         step: Option<Positional<super::call_resolve::ResolveCallStep>>,
@@ -31975,988 +31940,1181 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         }
     }
 
-    /// Evaluate one CALL to the value it contributes to this frame.
-    ///
-    /// The ONE place a callee's return becomes a caller's value — which
-    /// makes it the ONE place the evaluation's call evidence is recorded:
-    /// a call that evaluates to a value or a coinductive hold, without
-    /// minting a fresh degradation, deposits its span (plus whether every
-    /// relation outcome the resolution consumed was decided) onto the
-    /// evidence ledger the discharge-report producer claims call and
-    /// relation obligations from. An unmodelled or freshly-degraded call
-    /// deposits nothing — its obligations stay unclaimed.
-    fn eval_call(
-        &mut self,
-        call: &verter_session_query::flow::slice::SliceCall,
-        site: verter_session_query::flow::slice::SliceCallSite,
-        arguments: &verter_session_query::flow::slice::SliceCallArguments,
-    ) -> Positional<CallValue> {
-        let mark = self.call_evidence_mark();
-        let value = self.eval_call_value(call, site, arguments);
-        self.finish_call_evidence(site, mark, value)
-    }
-
-    /// The call sink's value computation ([`Self::eval_call`] records the
-    /// evidence around it). Every arm returns a [`CallValue`], whose
-    /// constructors each decide what happens to the CALLEE's own
-    /// type-parameter clause — the rule cannot be silently skipped at a
-    /// new arm, only chosen.
+    /// The first stage of a call's value computation: its callee read and
+    /// selected, up to the call's value or up to the executor route the
+    /// computation continues after ([`Self::continue_call_value`]). Every
+    /// value is a [`CallValue`], whose constructors each decide what
+    /// happens to the CALLEE's own type-parameter clause — the rule cannot
+    /// be silently skipped at a new arm, only chosen.
     ///
     /// [`Positional`], exactly as in [`Self::eval_expr`]: a call this
     /// substrate cannot resolve is an unmodelled POSITION, and the type
     /// leaves no way to say otherwise.
-    fn eval_call_value(
+    fn begin_call_value<'e>(
         &mut self,
-        call: &verter_session_query::flow::slice::SliceCall,
+        call: &'e verter_session_query::flow::slice::SliceCall,
         site: verter_session_query::flow::slice::SliceCallSite,
         arguments: &verter_session_query::flow::slice::SliceCallArguments,
-    ) -> Positional<CallValue> {
-        let graph = self.dispatch.graph();
+        operand: Option<Positional<SemanticNodeId>>,
+    ) -> CallNext<'e> {
+        use verter_session_query::flow::slice::SliceCall;
         match call {
-            verter_session_query::flow::slice::SliceCall::Nested(function) => {
-                // An IIFE: the call's value is the nested function's
-                // evaluated return. The nested function's signature node
-                // carries its OWN clause — `(<T>(x: T): T => x)("a")`
-                // declares `T` right there — so the same clause rule the
-                // resolved-callee route applies has to apply here, and it
-                // does, because both routes take their value from the ONE
-                // signature reader.
-                let signature = match self.call_operand_value(function, site) {
-                    Positional::Value(signature) => signature,
-                    Positional::Hold => return Positional::Hold,
-                    Positional::Unmodeled => return Positional::Unmodeled,
-                };
-                // A call of an `any` value (a call's `any` result) is the
-                // checker's untyped call: `any`.
-                if matches!(
-                    graph.node_data(signature).as_deref(),
-                    Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
-                ) {
-                    return Positional::Value(CallValue::modeled_any(self.dispatch));
-                }
-                // A generic callee infers its clause from the arguments
-                // through the executor, as a binding-held one does.
-                if self.call_group_needs_executor(signature, site) {
-                    if let Some(value) = self.eval_call_via_resolve_call(signature, site, arguments)
-                    {
-                        return value;
-                    }
-                }
-                // A nested function value's signature is COMPOSED here:
-                // its return is the flow join of its own body, evaluated
-                // with its clause bound. A resolved same-named
-                // declaration inside it is therefore a foreign symbol.
-                match CallValue::of_signature_node(
-                    self.dispatch,
-                    signature,
-                    site,
-                    ReturnOrigin::ClauseScoped,
-                ) {
-                    SignatureCall::Value(value) => {
-                        self.absorb_body_degradation(signature);
-                        Positional::Value(value)
-                    }
-                    // An IIFE whose composed signature is not callable,
-                    // whose return position missed, or whose clause could
-                    // not be recovered: the CALL has no modelled value.
-                    // The enclosing structure still does.
-                    SignatureCall::NotCallable
-                    | SignatureCall::ReturnMiss
-                    | SignatureCall::ClauseUnavailable => Positional::Unmodeled,
-                }
-            }
-            verter_session_query::flow::slice::SliceCall::Direct(target) => {
-                // An exact same-file direct call — a Flow obligation edge
-                // through the ONE key construction when the callee's return
-                // is body-derived, or its DECLARED carrier when the callee
-                // annotates one (a declared return always wins over the
-                // body). A back-edge to an in-flight target is a
-                // coinductive hold (neither a contributor nor a failure);
-                // an empty-cycle outcome is a hold the SCC close discharges
-                // on the component's admitted returns; every other outcome
-                // contributes the callee's return or its typed failure.
-                // A MEMBER position (a class member, an object literal's
-                // method) is not its declaration's value: only its own
-                // served return answers the call.
-                let prepared = match &target.part {
-                    verter_type_expr::facts::FunctionPartIdentity::Member { .. } => None,
-                    _ => self.dispatch.source.prepared_value_decl_return_only(
-                        self.st.canonical,
-                        target.declaration.owner,
-                        target.declaration.name.as_ref(),
-                    ),
-                };
-                // A value declaration carrying an AUTHORED annotation is
-                // typed by that annotation, full stop: the initializer
-                // only has to be assignable to it. `const f: () => 42 =
-                // () => 42` IS `() => 42`, so `f()` is `42` — taking the
-                // initializer's own inferred signature here would publish
-                // `number`, confidently and warm, for a callee whose
-                // declared type says otherwise. The annotated callee is
-                // therefore resolved as a VALUE TYPE through the same
-                // shared path a parenthesised or ambient callee takes,
-                // never through the initializer's flow position.
-                if prepared.as_ref().is_some_and(|prepared| {
-                    matches!(
-                        prepared.type_annotation.classification,
-                        verter_type_expr::facts::ValueAnnotationClass::Direct
-                            | verter_type_expr::facts::ValueAnnotationClass::TypeOfAlias
-                    ) && matches!(
-                        prepared.type_annotation.annotation,
-                        Some(verter_type_expr::facts::SemanticTypeSource::Authored(_))
-                    )
-                }) {
-                    let callee = verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
-                        path: target
-                            .declaration
-                            .name
-                            .split('.')
-                            .map(str::to_string)
-                            .collect(),
-                        type_args: Vec::new(),
-                    });
-                    let Some(callee_node) =
-                        self.dispatch.lower_type_expr_in_owner_scope_with_context(
-                            self.st.canonical,
-                            self.st.owner,
-                            &callee,
-                            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                        )
-                    else {
-                        return self.degraded_unrepresentable_callee();
-                    };
-                    // The checker still checks the call against the annotated
-                    // type: for a lone non-generic signature the executor
-                    // decides applicability first, and an undecided executor
-                    // leaves the declared-return read. A generic callee keeps
-                    // the interim answer (no call-site instantiation here).
-                    if self.callee_call_needs_applicability_check(callee_node, arguments.len()) {
-                        if let Some(value) =
-                            self.eval_call_via_resolve_call(callee_node, site, arguments)
-                        {
-                            return value;
-                        }
-                    }
-                    return self.call_return_of_callee_node(callee_node, site);
-                }
-                let ordinal = match &target.part {
-                    verter_type_expr::facts::FunctionPartIdentity::DeclarationBody => {
-                        target.overload_ordinal as usize
-                    }
-                    _ => 0,
-                };
-                // An OVERLOADED callee is not answerable by this rail's
-                // lone-signature read: TypeScript resolves an overloaded
-                // call by ARGUMENTS, picking the FIRST applicable
-                // signature in declaration order, and the function-program
-                // index reaches only one entry of the group (the trailing
-                // implementation the language HIDES, for a bodied group).
-                // Argument-driven selection is the call executor's
-                // applicability machinery, so the authored call routes
-                // through it — the ordered group, the authored argument
-                // literals, and a typed refusal when nothing applies,
-                // never a warm-admitted wrong answer and never the
-                // implementation's own signature.
-                // So is a callee whose type parameters a `this` parameter
-                // infers: the call's receiver (`void` for a bare call) is
-                // the executor's evidence.
-                if prepared.as_ref().is_some_and(|prepared| {
-                    prepared.signatures.len() > 1
-                        || prepared.signatures.get(ordinal).is_some_and(|signature| {
-                            !signature.type_parameters.is_empty()
-                                && signature
-                                    .parameters
-                                    .first()
-                                    .is_some_and(|param| param.name.as_deref() == Some("this"))
-                        })
-                }) || self.direct_callee_is_augmented(target)
-                {
-                    let Some(callee) = self.direct_callee_value_node(target) else {
-                        return self.degraded_unrepresentable_callee();
-                    };
-                    // An undecided executor maps to the same degradation
-                    // this rail would publish without it — there is no
-                    // lone-signature read to fall back to.
-                    return self
-                        .eval_call_via_resolve_call(callee, site, arguments)
-                        .unwrap_or_else(|| self.degraded_unrepresentable_callee());
-                }
-                // A lone non-generic callee with a DECLARED return answers
-                // that return whatever the arguments, and the checker still
-                // checks the call: the executor decides applicability so a
-                // call it does not accept carries the checker's diagnostic.
-                // An undecided executor leaves the declared read below.
-                if prepared.as_ref().is_some_and(|prepared| {
-                    matches!(
-                        prepared.signatures.as_slice(),
-                        [signature] if signature.type_parameters.is_empty()
-                            && matches!(
-                                signature.return_source,
-                                verter_type_expr::facts::FunctionReturnSource::Declared(_)
-                            )
-                    )
-                }) {
-                    if let Some(callee) = self.direct_callee_value_node(target) {
-                        if let Some(value) =
-                            self.eval_call_via_resolve_call(callee, site, arguments)
-                        {
-                            return value;
-                        }
-                    }
-                }
-                let source = prepared.as_ref().and_then(|prepared| {
-                    prepared
-                        .signatures
-                        .get(ordinal)
-                        .map(|signature| signature.return_source.clone())
-                });
-                // The callee's OWN type-parameter clause. Whatever the
-                // callee answers with — its body-derived flow return or
-                // its DECLARED carrier — is expressed IN those binders, so
-                // handing it back verbatim publishes the CALLEE's generic
-                // parameter as THIS frame's value. Under the file-scoped
-                // name-keyed binder identity that node is shared with
-                // every same-named clause in the file, so an enclosing
-                // `class Holder<T>` would then substitute the caller's
-                // `Holder<number>` into a value that has nothing to do
-                // with it — cleanly and warm.
-                //
-                // Instantiating those parameters is the same rule the
-                // sibling callee-TYPE / signature-node routes apply
-                // (`CallValue::of_signature_node`), so EVERY route to one
-                // callee answers alike. Call-site instantiation proper —
-                // explicit type arguments AND argument inference — is
-                // not performed here; a DECLARED DEFAULT is already exact
-                // (`f<T = number>()` IS `number`), and `unknown` is the
-                // interim answer everywhere else — exact for the one shape
-                // TS itself cannot infer (`bare<T>(): T` called with no
-                // arguments IS `unknown`).
-                //
-                // The clause is read from the per-file FUNCTION PROGRAM
-                // INDEX, keyed by the target's exact program identity
-                // (part + overload ordinal), NOT from the prepared value
-                // declaration: a direct-call target is a served position
-                // of THIS file by construction, while the value registry
-                // does not carry every one of them — a namespace-scoped
-                // function has no prepared declaration, and reading the
-                // clause from there would silently leave exactly those
-                // callees leaking their binder.
-                let callee_clause = match self.direct_callee_clause(target, site) {
-                    CalleeClauseLookup::Clause(clause) => clause,
-                    // The callee's clause could not be READ. Handing its
-                    // return back with nothing instantiated is the leak;
-                    // this is the `UnrepresentableCallee` degradation the
-                    // rail already defines — usable, `ReturnOnly`, never
-                    // warm.
-                    CalleeClauseLookup::Unavailable => {
-                        return self.degraded_unrepresentable_callee()
-                    }
-                };
-                // Argument-driven clause inference (and explicit type
-                // arguments) are the call executor's domain too: a
-                // generic callee whose call SUPPLIES inference evidence
-                // routes through it, binding the clause from the authored
-                // argument literals with constraint / declared-default
-                // fallback — rather than this rail's `unknown` interim
-                // for every parameter the arguments could have bound. A
-                // call supplying NO evidence keeps the rail's answer: a
-                // declared default is exact, and `unknown` is the
-                // checker's own answer for an unbound parameter.
-                if callee_clause.is_generic()
-                    && (site.supplies_parameter_ordinal(0) || site.has_explicit_type_arguments())
-                {
-                    if let Some(callee) = self.direct_callee_value_node(target) {
-                        if let Some(value) =
-                            self.eval_call_via_resolve_call(callee, site, arguments)
-                        {
-                            return value;
-                        }
-                    }
-                }
-                // A target the value registry does not carry as a
-                // prepared declaration (a namespace-scoped function) is
-                // only reachable through the body-derived demand.
-                let source = source.unwrap_or_else(|| {
-                    verter_type_expr::facts::FunctionReturnSource::Flow(
-                        verter_type_expr::facts::FlowFunctionReturnIdentity {
-                            anchor: verter_type_expr::locators::AuthoredAnchor {
-                                canonical_id: verter_type_expr::OwnedStr::from(self.st.canonical),
-                                owner: target.declaration.owner,
-                                symbol: target.declaration.name.clone(),
-                                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
-                            },
-                            function_part: target.part.clone(),
-                            overload_ordinal: target.overload_ordinal,
-                        },
-                    )
-                });
-                match &source {
-                    verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
-                        let key = self.dispatch.flow_return_key_for(identity);
-                        let pending_before = self.dispatch.pending_obligation_count();
-                        let read = self
-                            .dispatch
-                            .observe_read(|| self.dispatch.execute_flow_return(key.clone()));
-                        let provisional = self.dispatch.pending_obligation_count() > pending_before;
-                        let declined =
-                            provisional || matches!(read.value(), FlowReturnStep::Hold(_));
-                        let step = if declined {
-                            read.discard()
-                        } else {
-                            self.dispatch.adopt_read(read)
-                        }
-                        .unwrap_or_else(FlowReturnStep::Aborted);
-                        match step {
-                            FlowReturnStep::Complete(result) => {
-                                // A degraded callee value degrades every
-                                // consumer of that value: absorb the
-                                // callee's typed reason into this frame.
-                                if let Some(degradation) = result.degradation() {
-                                    self.record_degradation(degradation);
-                                }
-                                // A callee that pops as a PROVISIONAL
-                                // member of THIS component leaves its
-                                // result provisional until the close's
-                                // equation fixed point — the call is an
-                                // edge. A callee that closed its own SCC
-                                // independently is final: no edge.
-                                if self.dispatch.pending_obligation_count() > pending_before {
-                                    // The hold carries the SAME clause this
-                                    // arm just applied: the fixed point
-                                    // repeats this transfer, so it owes the
-                                    // same obligation.
-                                    self.st
-                                        .holds
-                                        .push(HeldCallee::foreign(key, callee_clause.clone()));
-                                }
-                                let value = CallValue::of_served_return(
-                                    self.dispatch,
-                                    &callee_clause,
-                                    result.return_type(),
-                                    ReturnOrigin::ClauseScoped,
-                                );
-                                // The callee's sealed fresh literal arms
-                                // stay fresh across this direct-call rail
-                                // exactly as across the executor route:
-                                // record the call's fresh provenance so a
-                                // value position widens them, the return
-                                // join keeps them, and a `const` binding
-                                // records its widening membership.
-                                if !result.fresh_literal_arms().is_empty() {
-                                    self.st.call_fresh_literal_returns.push(FreshCallReturn {
-                                        span: site.span(),
-                                        node: value.node(),
-                                        values: Arc::from(&result.fresh_literal_arms()[..]),
-                                    });
-                                }
-                                Positional::Value(value)
-                            }
-                            FlowReturnStep::Hold(key) => self.circular_call(&key),
-                            // The CALLEE's frame failed. That is a fact
-                            // about the callee's body, and it reaches this
-                            // frame at exactly one place: the call.
-                            // Re-raising it here is what made one helper's
-                            // unmodelled control surface delete the whole
-                            // caller's surface.
-                            FlowReturnStep::Aborted(_) | FlowReturnStep::NoValue(_) => {
-                                Positional::Unmodeled
-                            }
-                        }
-                    }
-                    source => match self
-                        .dispatch
-                        .execute_function_return_source(source, self.st.canonical)
-                    {
-                        // The callee's DECLARED return locator, lowered in
-                        // file owner scope where its own clause is not in
-                        // scope: the resolved same-named declaration IS
-                        // the clause parameter, misresolved.
-                        super::flow_return::FunctionReturnNode::Declared(hot) => {
-                            Positional::Value(CallValue::of_served_return(
-                                self.dispatch,
-                                &callee_clause,
-                                hot.node(),
-                                ReturnOrigin::OwnerScopeDeclared,
-                            ))
-                        }
-                        // A declared locator that would not raise, and a
-                        // signature with NO recoverable return carrier,
-                        // both leave this CALL without a value.
-                        super::flow_return::FunctionReturnNode::DeclaredMiss
-                        | super::flow_return::FunctionReturnNode::Absent => Positional::Unmodeled,
-                        super::flow_return::FunctionReturnNode::Flow(_)
-                        | super::flow_return::FunctionReturnNode::Aborted(_)
-                        | super::flow_return::FunctionReturnNode::NoValue(_) => {
-                            unreachable!("a Declared/Absent source never reaches the flow rail")
-                        }
-                    },
-                }
-            }
-            verter_session_query::flow::slice::SliceCall::OnBinding {
+            SliceCall::Nested(_) => self.nested_call(site, operand),
+            SliceCall::Direct(target) => self.direct_call(target, site, arguments),
+            SliceCall::OnBinding {
                 binding,
                 param,
-                name: _,
                 captured,
                 ..
-            } => {
-                // A call on a function-typed binding: the call's value is
-                // the binding's signature return. Calling an `any`-typed
-                // or unbound binding is `any` EXACTLY (the implicit-`any`
-                // call); calling a binding whose value is neither
-                // callable nor `any` is the `NonCallableBinding`
-                // DEGRADATION — a modeled `any`, not the real semantics.
-                // The binding's own reaching definition wins; the
-                // parameter ordinal is the FALLBACK a `var` redeclaring
-                // a parameter name resolves to before its declarator
-                // runs (mirrors the `Local` read). A narrowing standing on
-                // the binding is what the callee reads, as any read of it
-                // does: `typeof f === "function"` leaves `f()` calling the
-                // callable arms alone.
-                let node = self
-                    .frame_binding_read(binding)
-                    .or_else(|| self.read_local(binding))
-                    .or_else(|| {
-                        param.and_then(|ordinal| self.st.params.get(ordinal as usize).copied())
-                    });
-                let Some(node) = node else {
-                    // A CAPTURED callee the seeded snapshot does not carry
-                    // has no honest value: the POSITION carries the marker
-                    // rather than the same-frame implicit-`any` call.
-                    if *captured {
-                        return Positional::Value(self.unmodeled_call_position());
-                    }
-                    return Positional::Value(CallValue::modeled_any(self.dispatch));
-                };
-                // A function-typed BINDING carries the callee's clause on
-                // its own signature node — `const id = <T>(x: T): T => x`
-                // binds `T` there — so this route takes its value from the
-                // same signature reader the resolved-callee route does. A
-                // binding is otherwise indistinguishable from any other
-                // callee: nothing about "the callee happens to be a local"
-                // makes its binders this frame's to publish.
-                // A binding's value is either a nested function value's
-                // COMPOSED signature or a lowered function-TYPE
-                // annotation, and BOTH are clause-scoped: the composed
-                // signature is built in the callee's own frame, and a
-                // `<T>(x: T) => T` annotation lowers with its clause in
-                // scope, so both spell the clause as binders. The one
-                // shape that could carry an owner-scope misresolution —
-                // `typeof declaredFn` — does not reach a `Signature`
-                // node here at all (it resolves to a non-callable
-                // surface and degrades), so nothing on this route needs
-                // the owner-scope claim while claiming it destroys a
-                // correct arm: a same-named FOREIGN declaration reached
-                // through the callee's body is a different symbol, and
-                // the IIFE route — the same body, invoked directly —
-                // already keeps it.
-                // An overloaded or inference-bearing binding-held callee
-                // resolves through the executor, never the first
-                // signature's raw return; an undecided executor falls
-                // back to the rail's own signature read (overloads keep
-                // the typed degradation — the read cannot pick).
-                if self.call_group_needs_executor(node, site) {
-                    let overloaded = matches!(
-                        self.dispatch.shared_signature_buckets(node),
-                        Ok((call_sigs, construct_sigs))
-                            if call_sigs.len() + construct_sigs.len() > 1
-                    );
-                    if let Some(value) = self.eval_call_via_resolve_call(node, site, arguments) {
-                        return value;
-                    }
-                    if overloaded {
-                        return self.degraded_unrepresentable_callee();
-                    }
-                }
-                // The signature read carries no receiver: a signature whose
-                // value depends on one is the typed marker here.
-                if matches!(
-                    self.dispatch.shared_signature_buckets(node),
-                    Ok((call_sigs, construct_sigs))
-                        if call_sigs
-                            .iter()
-                            .chain(construct_sigs.iter())
-                            .any(|signature| self.signature_reads_receiver(*signature))
-                ) {
-                    return self.degraded_unrepresentable_callee();
-                }
-                match CallValue::of_signature_node(
-                    self.dispatch,
-                    node,
-                    site,
-                    ReturnOrigin::ClauseScoped,
-                ) {
-                    SignatureCall::Value(value) => {
-                        self.absorb_body_degradation(node);
-                        Positional::Value(value)
-                    }
-                    // The binding's signature has no transferable return:
-                    // its return position missed, or a needed clause
-                    // default could not be recovered. Positional.
-                    SignatureCall::ReturnMiss | SignatureCall::ClauseUnavailable => {
-                        Positional::Unmodeled
-                    }
-                    SignatureCall::NotCallable
-                        if matches!(
-                            graph.node_data(node).as_deref(),
-                            Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
-                        ) =>
-                    {
-                        Positional::Value(CallValue::modeled_any(self.dispatch))
-                    }
-                    SignatureCall::NotCallable => {
-                        self.record_degradation(
-                            crate::semantic_query::FlowReturnDegradation::NonCallableBinding,
-                        );
-                        Positional::Value(CallValue::modeled_any(self.dispatch))
-                    }
-                }
-            }
-            verter_session_query::flow::slice::SliceCall::LocalFunctionShadow => {
+            } => self.binding_call(binding, *param, *captured, site),
+            SliceCall::LocalFunctionShadow => {
                 // A call to a hoisted nested function declaration: the
                 // declaration shadows every outer same-name callee; exact
                 // recovery of the nested declaration's own return is not
                 // implemented. The CALL carries the marker — never the
                 // outer callee's value, and never the enclosing frame.
-                Positional::Unmodeled
+                CallNext::Value(Positional::Unmodeled)
             }
-            verter_session_query::flow::slice::SliceCall::DirectSelf => {
-                // Only the frame that OWNS a flow slot can hold on it.
-                let Some(self_slot) = self.st.self_slot else {
-                    return Positional::Unmodeled;
-                };
-                match self.dispatch.execute_flow_return(self_slot.clone()) {
-                    // A `return` of the bare self-call contributes nothing:
-                    // its return is the function's other returns.
-                    FlowReturnStep::Hold(_) if self.st.bare_self_return == Some(site.span()) => {
-                        // The one hold whose target's binders are THIS
-                        // frame's own: a self-call's callee IS the caller,
-                        // so the fixed point must leave them alone.
-                        self.st.holds.push(HeldCallee::own_frame(self_slot.clone()));
-                        Positional::Hold
-                    }
-                    FlowReturnStep::Hold(key) => self.circular_call(&key),
-                    FlowReturnStep::Complete(_) => {
-                        unreachable!("a same-slot recursive edge is always a hold in flight")
-                    }
-                    FlowReturnStep::Aborted(_) | FlowReturnStep::NoValue(_) => {
-                        Positional::Unmodeled
-                    }
-                }
-            }
-            verter_session_query::flow::slice::SliceCall::OnHeritage {
+            SliceCall::DirectSelf => CallNext::Value(self.self_call(site)),
+            SliceCall::OnHeritage {
                 heritage,
                 member,
                 static_side,
                 this,
-            } => {
-                // `super.m()` — the base member through the HERITAGE
-                // surface. The heritage expression's value type (the base
-                // constructor) lowers through the same shared body-type
-                // lowering an authored annotation takes; the base member
-                // walks the ONE shared `ProjectPath { Navigate }`
-                // projection — `prototype` plus the authored member path
-                // for an INSTANCE member's `super`, the member path
-                // directly on the constructor for a STATIC member's — so
-                // only the DEMANDED member is materialised, never the
-                // base's whole surface. The resolved callee then takes the
-                // one call sink every other resolved callee takes.
-                let base = self.lower_body_type(heritage.ty());
-                let mut segments: Vec<Arc<str>> = Vec::with_capacity(member.len() + 1);
-                if !*static_side {
-                    segments.push(Arc::from("prototype"));
-                }
-                segments.extend(member.iter().cloned());
-                let Some(callee) = self.project_path_navigate_with(base, &segments, false) else {
-                    return self.degraded_unrepresentable_callee();
-                };
-                // The base member's polymorphic `this` is this class's own
-                // `this`, never the base's instance; a frame whose `this`
-                // this evaluator cannot read leaves it unbound, and the call
-                // sink gives the typed marker.
-                let callee = if self.dispatch.receiver_this_types(callee).is_empty() {
-                    callee
-                } else {
-                    match this.as_ref().map(|this| self.eval_this(this)) {
-                        Some(Positional::Value(receiver)) => {
-                            self.dispatch.bind_callee_receiver(callee, receiver)
-                        }
-                        Some(Positional::Hold) => return Positional::Hold,
-                        Some(Positional::Unmodeled) | None => callee,
-                    }
-                };
-                self.call_return_of_callee_node(callee, site)
-            }
-            verter_session_query::flow::slice::SliceCall::Symbolic(callee) => {
-                let (ty, binding, member_spans) =
-                    (callee.ty(), callee.frame_root(), callee.member_spans());
-                // The symbolic `ReturnType<typeof …>` carrier: lower the
-                // callee, resolve its signature through the same builtin
-                // `ReturnType` reduction every consumer uses, and take the
-                // call-bucket return — an unrepresentable / unresolvable
-                // callee is the `UnrepresentableCallee` DEGRADATION: a
-                // usable modeled-`any`, `ReturnOnly` by contract.
-                let verter_type_expr::TypeExpr::Ref {
-                    name,
-                    type_arguments,
-                } = ty
-                else {
-                    return self.degraded_unrepresentable_callee();
-                };
-                if !super::signature_utility::SignatureUtility::ReturnType.spells(name.as_ref())
-                    || type_arguments.len() != 1
-                {
-                    return self.degraded_unrepresentable_callee();
-                }
-                // A member-call callee rooted at a FRAME binding
-                // (`fn.call`, `local.call`, `instance.run`): the owner
-                // scope answers nothing for the root, but the frame
-                // substitutes it — resolve the root through the frame and
-                // project the member tail, exactly as the frame-rooted
-                // `typeof` leaf does. Everything else lowers in owner
-                // scope as before.
-                let mut frame_rooted = false;
-                let callee_node =
-                    match self.frame_rooted_typeof_path_node(&type_arguments[0], binding) {
-                        Some(node) => {
-                            frame_rooted = true;
-                            Some(node)
-                        }
-                        None => self.dispatch.lower_type_expr_in_owner_scope_with_context(
-                            self.st.canonical,
-                            self.st.owner,
-                            &type_arguments[0],
-                            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-                        ),
-                    };
-                // A callee its object proves absent is the checker's TS2339,
-                // and a call of its error type is untyped.
-                if self.member_read_missed(callee_node) {
-                    let recovered =
-                        self.recovered_member_callee(&type_arguments[0], binding, member_spans);
-                    if let Some(recovered) = recovered {
-                        return recovered;
-                    }
-                }
-                let Some(callee_node) = callee_node else {
-                    return self.degraded_unrepresentable_callee();
-                };
-                // A FRAME-ROOTED member callee carries receiver semantics
-                // this rail's lone signature read is blind to (the ambient
-                // `.call` / `.apply` rebase, a `this`-typed method): route
-                // it through the executor first. The fallback is exactly
-                // the answer this rail gave before the executor existed —
-                // a frame-rooted member callee lowered to nothing then, so
-                // nothing that worked can regress. An undecided executor
-                // (`None`) keeps the rail's own read below.
-                if frame_rooted {
-                    if let Some(value) =
-                        self.eval_call_via_resolve_call(callee_node, site, arguments)
-                    {
-                        return value;
-                    }
-                }
-                // An overloaded or inference-bearing symbolic callee
-                // resolves through the executor exactly like a direct
-                // one — the lone non-generic read stays on this rail,
-                // and an undecided executor falls back to it.
-                if self.call_group_needs_executor(callee_node, site) {
-                    let overloaded = matches!(
-                        self.dispatch.shared_signature_buckets(callee_node),
-                        Ok((call_sigs, construct_sigs))
-                            if call_sigs.len() + construct_sigs.len() > 1
-                    );
-                    if let Some(value) =
-                        self.eval_call_via_resolve_call(callee_node, site, arguments)
-                    {
-                        return value;
-                    }
-                    if overloaded {
-                        return self.degraded_unrepresentable_callee();
-                    }
-                }
-                self.call_return_of_callee_node(callee_node, site)
-            }
-            verter_session_query::flow::slice::SliceCall::Member { receiver, member } => {
-                // `this.m()`: the member of the receiver's value, called
-                // through the executor that reads its receiver-bound
-                // signatures, else the lone signature read.
-                let receiver = match self.call_operand_value(receiver, site) {
-                    Positional::Value(node) => node,
-                    Positional::Hold => return Positional::Hold,
-                    Positional::Unmodeled => return Positional::Unmodeled,
-                };
-                let is_any = |node: SemanticNodeId| {
-                    matches!(
-                        self.dispatch.arena().node_data(node).as_deref(),
-                        Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
-                    )
-                };
-                let mut callee_node = receiver;
-                // The object the called member is read off: the call's
-                // receiver, which the executor route reads.
-                let mut object = receiver;
-                for name in member.iter() {
-                    // A member of an `any` receiver is `any`.
-                    if is_any(callee_node) {
-                        break;
-                    }
-                    object = callee_node;
-                    let this_source = self.this_member_source(callee_node, name);
-                    let Some(read) = this_source
-                        .and_then(|source| self.receiver_non_public_member(source, name))
-                        .or_else(|| {
-                            self.project_path_navigate(
-                                this_source.unwrap_or(callee_node),
-                                std::slice::from_ref(name),
-                            )
-                        })
-                    else {
-                        return self.degraded_unrepresentable_callee();
-                    };
-                    callee_node = match this_source {
-                        Some(_) => self.dispatch.bind_this_receiver(read, callee_node),
-                        None => read,
-                    };
-                }
-                // A call of an `any` callee (a member of an `any` receiver)
-                // is the checker's untyped call: `any`.
-                if is_any(callee_node) {
-                    return Positional::Value(CallValue::modeled_any(self.dispatch));
-                }
-                self.st.call_receivers.insert(site.span(), object);
-                if let Some(value) = self.eval_call_via_resolve_call(callee_node, site, arguments) {
-                    return value;
-                }
-                self.call_return_of_callee_node(callee_node, site)
-            }
-            verter_session_query::flow::slice::SliceCall::OptionalChain {
+            } => self.heritage_call(heritage, member, *static_side, this, site),
+            SliceCall::Symbolic(callee) => self.symbolic_call(callee, site),
+            SliceCall::Member { member, .. } => self.member_call(member, site, operand),
+            SliceCall::OptionalChain {
                 root,
                 links,
                 name_spans,
                 optional_call,
                 after,
                 after_spans,
-            } => {
-                // The checker's optional chain: each `?.` edge strips its
-                // base's nullish arms (short-circuiting to `undefined`
-                // when nothing else is left), the callee is read and called
-                // exactly as a member callee is, the links after the call
-                // read off its value, and the chain's value carries
-                // `undefined` beside the read when a strip removed arms.
-                let node = match self.call_operand_value(root, site) {
-                    Positional::Value(node) => node,
-                    Positional::Hold => return Positional::Hold,
-                    Positional::Unmodeled => return Positional::Unmodeled,
-                };
-                // A member of an `any` receiver, its call, and every read
-                // off that are `any`.
-                if self.node_is_semantic_any(node) {
-                    return Positional::Value(CallValue::modeled_any(self.dispatch));
-                }
-                let undefined = self
-                    .dispatch
-                    .graph()
-                    .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
-                let narrow_root = match root.as_ref() {
-                    verter_session_query::flow::slice::SliceExpr::Param { ordinal, binding } => {
-                        Some(verter_session_query::flow::slice::SliceNarrowRoot::Param {
-                            ordinal: *ordinal,
-                            binding: *binding,
-                        })
-                    }
-                    verter_session_query::flow::slice::SliceExpr::Local {
-                        binding,
-                        name,
-                        captured: false,
-                        ..
-                    } => Some(verter_session_query::flow::slice::SliceNarrowRoot::Local {
-                        name: Arc::clone(name),
-                        binding: binding.clone(),
-                    }),
-                    _ => None,
-                };
-                let mut stripped = false;
-                let mut callee = node;
-                let mut receiver = None;
-                // A callee link the receiver proves absent is the checker's
-                // TS2339 at its name, and the call of its error type is
-                // `any`, exactly as a member-valued chain reads it.
-                let reads_own_literal = self.reads_own_literal(root, node);
-                for index in 0..links.len() {
-                    if self.node_is_semantic_any(callee) {
-                        return Positional::Value(CallValue::modeled_any(self.dispatch));
-                    }
-                    match self.optional_chain_link(
-                        callee,
-                        links,
-                        OptionalLinkSite {
-                            index,
-                            name_span: name_spans.get(index).copied(),
-                            reads_own_literal: index == 0 && reads_own_literal,
-                        },
-                        narrow_root.as_ref(),
-                        &mut stripped,
-                    ) {
-                        OptionalLink::Read { base, read } => {
-                            receiver = Some(base);
-                            callee = read;
-                        }
-                        OptionalLink::ShortCircuit => {
-                            return Positional::Value(CallValue::of_resolved_call(
-                                self.dispatch,
-                                undefined,
-                            ));
-                        }
-                        OptionalLink::Unmodeled => return Positional::Unmodeled,
-                    }
-                }
-                if self.node_is_semantic_any(callee) {
-                    return Positional::Value(CallValue::modeled_any(self.dispatch));
-                }
-                if *optional_call {
-                    match self.strip_nullish_arms_for_optional_read(callee) {
-                        NullishStrip::Unchanged => {}
-                        NullishStrip::Stripped(base) => {
-                            stripped = true;
-                            callee = base;
-                        }
-                        NullishStrip::AllNullish => {
-                            return Positional::Value(CallValue::of_resolved_call(
-                                self.dispatch,
-                                undefined,
-                            ));
-                        }
-                    }
-                }
-                // The receiver the chain read the callee off is the call's
-                // receiver: the executor reads it where it would evaluate
-                // the authored (unstripped) one.
-                if let Some(receiver) = receiver {
-                    self.st.call_receivers.insert(site.span(), receiver);
-                }
-                let value = match self.eval_call_via_resolve_call(callee, site, arguments) {
-                    Some(value) => value,
-                    None => self.call_return_of_callee_node(callee, site),
-                };
-                let value = match value {
-                    Positional::Value(value) => value,
-                    other => return other,
-                };
-                if after.is_empty() && !(stripped && self.st.nullability.is_strict()) {
-                    return Positional::Value(value);
-                }
-                let mut current = value.into_node();
-                for index in 0..after.len() {
-                    if self.node_is_semantic_any(current) {
-                        break;
-                    }
-                    let site = OptionalLinkSite {
-                        index,
-                        name_span: after_spans.get(index).copied(),
-                        reads_own_literal: false,
-                    };
-                    match self.optional_chain_link(current, after, site, None, &mut stripped) {
-                        OptionalLink::Read { read, .. } => current = read,
-                        OptionalLink::ShortCircuit => {
-                            return Positional::Value(CallValue::of_resolved_call(
-                                self.dispatch,
-                                undefined,
-                            ));
-                        }
-                        OptionalLink::Unmodeled => return Positional::Unmodeled,
-                    }
-                }
-                // The short-circuit's `undefined` is a strict-null fact,
-                // exactly as for a member-valued chain.
-                if stripped && self.st.nullability.is_strict() {
-                    current = self.union(&[current, undefined]);
-                }
-                Positional::Value(CallValue::of_resolved_call(self.dispatch, current))
+            } => self.optional_chain_call(
+                root,
+                links,
+                name_spans,
+                *optional_call,
+                after,
+                after_spans,
+                site,
+                operand,
+            ),
+            SliceCall::OnValue { member, .. } => self.value_member_call(member, site, operand),
+            SliceCall::OnElement { index, .. } => self.element_call(index, site, operand),
+            SliceCall::Construct(_) => self.construct_call(operand),
+            SliceCall::TaggedTemplate(_) => self.tagged_template_call(site, operand),
+        }
+    }
+
+    /// The stage of a call's value computation after its executor route:
+    /// `then` with the route's folded `answer`. An answer is the call's
+    /// value, but for an optional chain, which reads its links after the
+    /// call off it.
+    fn continue_call_value<'e>(
+        &mut self,
+        site: verter_session_query::flow::slice::SliceCallSite,
+        then: CallSuffix<'e>,
+        answer: Option<Positional<CallValue>>,
+    ) -> CallNext<'e> {
+        if let CallSuffix::OptionalChain(tail) = then {
+            return CallNext::Value(self.optional_chain_tail(site, *tail, answer));
+        }
+        if let Some(value) = answer {
+            return CallNext::Value(value);
+        }
+        let value = match then {
+            CallSuffix::Signature { node } => self.signature_call_value(node, site),
+            CallSuffix::CalleeNode { callee } => self.call_return_of_callee_node(callee, site),
+            // An undecided executor maps to the same degradation the
+            // callee's own read would publish: there is no lone-signature
+            // read to fall back to.
+            CallSuffix::Degrade => self.degraded_unrepresentable_callee(),
+            CallSuffix::DirectRail(rail) => {
+                let DirectRail { target, source } = *rail;
+                return self.direct_call_rail(target, site, source, true);
             }
-            verter_session_query::flow::slice::SliceCall::OnValue { object, member } => {
-                // `new C().m()`, `b.m().m()`: the member of the value is
-                // the callee, resolved through the executor (the value its
-                // receiver) exactly like a frame-rooted member callee, else
-                // through the one call sink.
-                let object = match self.call_operand_value(object, site) {
-                    Positional::Value(node) => node,
-                    Positional::Hold => return Positional::Hold,
-                    Positional::Unmodeled => return Positional::Unmodeled,
-                };
-                self.call_member_of_value(object, member, site, arguments)
+            CallSuffix::DirectReturn(rest) => {
+                let DirectReturn {
+                    target,
+                    source,
+                    clause,
+                } = *rest;
+                self.direct_call_return(target, site, source, clause)
             }
-            verter_session_query::flow::slice::SliceCall::OnElement { object, index } => {
-                // `t[k]()`: the key is a binding read (a leaf, evaluated
-                // here), and its literal type names the member of the
-                // object the call resolves over, the object its receiver.
-                // A key of any other type is the typed marker.
-                let object = match self.call_operand_value(object, site) {
-                    Positional::Value(node) => node,
-                    Positional::Hold => return Positional::Hold,
-                    Positional::Unmodeled => return Positional::Unmodeled,
-                };
-                let key = match self.eval_expr(index) {
-                    Positional::Value(node) => node,
-                    Positional::Hold => return Positional::Hold,
-                    Positional::Unmodeled => return Positional::Unmodeled,
-                };
-                let member: Arc<str> = match self.dispatch.arena().node_data(key).as_deref() {
-                    Some(SemanticNodeData::Literal(
-                        crate::semantic_query::LiteralValue::String(name),
-                    )) => Arc::from(name.as_str()),
-                    Some(SemanticNodeData::Literal(
-                        crate::semantic_query::LiteralValue::Number(value),
-                    )) if value.is_finite() && value.fract() == 0.0 && value.abs() < 1e15 => {
-                        Arc::from(format!("{}", *value as i64).as_str())
-                    }
-                    _ => return self.degraded_unrepresentable_callee(),
-                };
-                self.call_member_of_value(object, &member, site, arguments)
-            }
-            verter_session_query::flow::slice::SliceCall::Construct(constructor) => {
-                // `new C(…)` — the checker's `resolveNewExpression`: the
-                // constructor's construct signatures, from the shared
-                // signature list, resolved by the call executor exactly as
-                // a call resolves over its call signatures (overload
-                // choice, argument inference and explicit type arguments
-                // included). There is no lone-signature read to fall back
-                // to, so an undecided executor degrades the position.
-                let constructor = match self.call_operand_value(constructor, site) {
-                    Positional::Value(node) => node,
-                    Positional::Hold => return Positional::Hold,
-                    Positional::Unmodeled => return Positional::Unmodeled,
-                };
-                self.eval_call_via_resolve_call(constructor, site, arguments)
-                    .unwrap_or_else(|| self.degraded_unrepresentable_callee())
-            }
-            verter_session_query::flow::slice::SliceCall::TaggedTemplate(tag) => {
-                // `` tag`a${x}b` `` — the checker's
-                // `resolveTaggedTemplateExpression`: a call of the tag whose
-                // first argument is the template strings. It takes the
-                // routes an ordinary call over a resolved callee takes: an
-                // overloaded or inference-bearing tag resolves through the
-                // executor, a lone signature through the one call sink.
-                let tag = match self.call_operand_value(tag, site) {
-                    Positional::Value(node) => node,
-                    Positional::Hold => return Positional::Hold,
-                    Positional::Unmodeled => return Positional::Unmodeled,
-                };
-                if self.call_group_needs_executor(tag, site) {
-                    let overloaded = matches!(
-                        self.dispatch.shared_signature_buckets(tag),
-                        Ok((call_sigs, construct_sigs))
-                            if call_sigs.len() + construct_sigs.len() > 1
-                    );
-                    if let Some(value) = self.eval_call_via_resolve_call(tag, site, arguments) {
-                        return value;
-                    }
-                    if overloaded {
-                        return self.degraded_unrepresentable_callee();
-                    }
+            // Overloads keep the typed degradation: the signature read
+            // cannot pick.
+            CallSuffix::Binding { node, overloaded } => {
+                if overloaded {
+                    self.degraded_unrepresentable_callee()
+                } else {
+                    self.binding_call_value(node, site)
                 }
-                self.call_return_of_callee_node(tag, site)
+            }
+            CallSuffix::SymbolicGroup { callee } => return self.symbolic_group(callee, site, true),
+            CallSuffix::Group { callee, overloaded } => {
+                if overloaded {
+                    self.degraded_unrepresentable_callee()
+                } else {
+                    self.call_return_of_callee_node(callee, site)
+                }
+            }
+            CallSuffix::OptionalChain(_) => {
+                unreachable!("an optional chain reads its links off the answer above")
+            }
+        };
+        CallNext::Value(value)
+    }
+
+    /// An immediately invoked function value's call.
+    #[inline(never)]
+    fn nested_call<'e>(
+        &mut self,
+        site: verter_session_query::flow::slice::SliceCallSite,
+        operand: Option<Positional<SemanticNodeId>>,
+    ) -> CallNext<'e> {
+        let graph = self.dispatch.graph();
+        // An IIFE: the call's value is the nested function's
+        // evaluated return. The nested function's signature node
+        // carries its OWN clause — `(<T>(x: T): T => x)("a")`
+        // declares `T` right there — so the same clause rule the
+        // resolved-callee route applies has to apply here, and it
+        // does, because both routes take their value from the ONE
+        // signature reader.
+        let signature = match call_stack::delivered_operand(operand) {
+            Positional::Value(signature) => signature,
+            Positional::Hold => return CallNext::Value(Positional::Hold),
+            Positional::Unmodeled => return CallNext::Value(Positional::Unmodeled),
+        };
+        // A call of an `any` value (a call's `any` result) is the
+        // checker's untyped call: `any`.
+        if matches!(
+            graph.node_data(signature).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+        ) {
+            return CallNext::Value(Positional::Value(CallValue::modeled_any(self.dispatch)));
+        }
+        // A generic callee infers its clause from the arguments
+        // through the executor, as a binding-held one does.
+        if self.call_group_needs_executor(signature, site) {
+            return CallNext::route(signature, CallSuffix::Signature { node: signature });
+        }
+        CallNext::Value(self.signature_call_value(signature, site))
+    }
+
+    /// The call value of an immediately invoked function value's
+    /// `signature`.
+    fn signature_call_value(
+        &mut self,
+        signature: SemanticNodeId,
+        site: verter_session_query::flow::slice::SliceCallSite,
+    ) -> Positional<CallValue> {
+        // A nested function value's signature is COMPOSED here:
+        // its return is the flow join of its own body, evaluated
+        // with its clause bound. A resolved same-named
+        // declaration inside it is therefore a foreign symbol.
+        match CallValue::of_signature_node(
+            self.dispatch,
+            signature,
+            site,
+            ReturnOrigin::ClauseScoped,
+        ) {
+            SignatureCall::Value(value) => {
+                self.absorb_body_degradation(signature);
+                Positional::Value(value)
+            }
+            // An IIFE whose composed signature is not callable,
+            // whose return position missed, or whose clause could
+            // not be recovered: the CALL has no modelled value.
+            // The enclosing structure still does.
+            SignatureCall::NotCallable
+            | SignatureCall::ReturnMiss
+            | SignatureCall::ClauseUnavailable => Positional::Unmodeled,
+        }
+    }
+
+    /// A same-file direct call.
+    #[inline(never)]
+    fn direct_call<'e>(
+        &mut self,
+        target: &'e verter_session_query::function_program::FunctionProgramKey,
+        site: verter_session_query::flow::slice::SliceCallSite,
+        arguments: &verter_session_query::flow::slice::SliceCallArguments,
+    ) -> CallNext<'e> {
+        // An exact same-file direct call — a Flow obligation edge
+        // through the ONE key construction when the callee's return
+        // is body-derived, or its DECLARED carrier when the callee
+        // annotates one (a declared return always wins over the
+        // body). A back-edge to an in-flight target is a
+        // coinductive hold (neither a contributor nor a failure);
+        // an empty-cycle outcome is a hold the SCC close discharges
+        // on the component's admitted returns; every other outcome
+        // contributes the callee's return or its typed failure.
+        // A MEMBER position (a class member, an object literal's
+        // method) is not its declaration's value: only its own
+        // served return answers the call.
+        let prepared = match &target.part {
+            verter_type_expr::facts::FunctionPartIdentity::Member { .. } => None,
+            _ => self.dispatch.source.prepared_value_decl_return_only(
+                self.st.canonical,
+                target.declaration.owner,
+                target.declaration.name.as_ref(),
+            ),
+        };
+        // A value declaration carrying an AUTHORED annotation is
+        // typed by that annotation, full stop: the initializer
+        // only has to be assignable to it. `const f: () => 42 =
+        // () => 42` IS `() => 42`, so `f()` is `42` — taking the
+        // initializer's own inferred signature here would publish
+        // `number`, confidently and warm, for a callee whose
+        // declared type says otherwise. The annotated callee is
+        // therefore resolved as a VALUE TYPE through the same
+        // shared path a parenthesised or ambient callee takes,
+        // never through the initializer's flow position.
+        if prepared.as_ref().is_some_and(|prepared| {
+            matches!(
+                prepared.type_annotation.classification,
+                verter_type_expr::facts::ValueAnnotationClass::Direct
+                    | verter_type_expr::facts::ValueAnnotationClass::TypeOfAlias
+            ) && matches!(
+                prepared.type_annotation.annotation,
+                Some(verter_type_expr::facts::SemanticTypeSource::Authored(_))
+            )
+        }) {
+            let callee = verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
+                path: target
+                    .declaration
+                    .name
+                    .split('.')
+                    .map(str::to_string)
+                    .collect(),
+                type_args: Vec::new(),
+            });
+            let Some(callee_node) = self.dispatch.lower_type_expr_in_owner_scope_with_context(
+                self.st.canonical,
+                self.st.owner,
+                &callee,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            ) else {
+                return CallNext::Value(self.degraded_unrepresentable_callee());
+            };
+            // The checker still checks the call against the annotated
+            // type: for a lone non-generic signature the executor
+            // decides applicability first, and an undecided executor
+            // leaves the declared-return read. A generic callee keeps
+            // the interim answer (no call-site instantiation here).
+            if self.callee_call_needs_applicability_check(callee_node, arguments.len()) {
+                return CallNext::of_callee(callee_node);
+            }
+            return CallNext::Value(self.call_return_of_callee_node(callee_node, site));
+        }
+        let ordinal = match &target.part {
+            verter_type_expr::facts::FunctionPartIdentity::DeclarationBody => {
+                target.overload_ordinal as usize
+            }
+            _ => 0,
+        };
+        // An OVERLOADED callee is not answerable by this rail's
+        // lone-signature read: TypeScript resolves an overloaded
+        // call by ARGUMENTS, picking the FIRST applicable
+        // signature in declaration order, and the function-program
+        // index reaches only one entry of the group (the trailing
+        // implementation the language HIDES, for a bodied group).
+        // Argument-driven selection is the call executor's
+        // applicability machinery, so the authored call routes
+        // through it — the ordered group, the authored argument
+        // literals, and a typed refusal when nothing applies,
+        // never a warm-admitted wrong answer and never the
+        // implementation's own signature.
+        // So is a callee whose type parameters a `this` parameter
+        // infers: the call's receiver (`void` for a bare call) is
+        // the executor's evidence.
+        if prepared.as_ref().is_some_and(|prepared| {
+            prepared.signatures.len() > 1
+                || prepared.signatures.get(ordinal).is_some_and(|signature| {
+                    !signature.type_parameters.is_empty()
+                        && signature
+                            .parameters
+                            .first()
+                            .is_some_and(|param| param.name.as_deref() == Some("this"))
+                })
+        }) || self.direct_callee_is_augmented(target)
+        {
+            let Some(callee) = self.direct_callee_value_node(target) else {
+                return CallNext::Value(self.degraded_unrepresentable_callee());
+            };
+            // An undecided executor maps to the same degradation
+            // this rail would publish without it — there is no
+            // lone-signature read to fall back to.
+            return CallNext::route(callee, CallSuffix::Degrade);
+        }
+        let source = prepared.as_ref().and_then(|prepared| {
+            prepared
+                .signatures
+                .get(ordinal)
+                .map(|signature| signature.return_source.clone())
+        });
+        // A lone non-generic callee with a DECLARED return answers
+        // that return whatever the arguments, and the checker still
+        // checks the call: the executor decides applicability so a
+        // call it does not accept carries the checker's diagnostic.
+        // An undecided executor leaves the declared read below.
+        if prepared.as_ref().is_some_and(|prepared| {
+            matches!(
+                prepared.signatures.as_slice(),
+                [signature] if signature.type_parameters.is_empty()
+                    && matches!(
+                        signature.return_source,
+                        verter_type_expr::facts::FunctionReturnSource::Declared(_)
+                    )
+            )
+        }) {
+            if let Some(callee) = self.direct_callee_value_node(target) {
+                let rail = Box::new(DirectRail { target, source });
+                return CallNext::route(callee, CallSuffix::DirectRail(rail));
             }
         }
+        self.direct_call_rail(target, site, source, false)
+    }
+
+    /// A same-file direct call's own rail: its callee's clause, then its
+    /// executor route for a generic callee whose call supplies inference
+    /// evidence, unless that route was `asked` already, else the callee's
+    /// return.
+    fn direct_call_rail<'e>(
+        &mut self,
+        target: &'e verter_session_query::function_program::FunctionProgramKey,
+        site: verter_session_query::flow::slice::SliceCallSite,
+        source: Option<verter_type_expr::facts::FunctionReturnSource>,
+        asked: bool,
+    ) -> CallNext<'e> {
+        // The callee's OWN type-parameter clause. Whatever the
+        // callee answers with — its body-derived flow return or
+        // its DECLARED carrier — is expressed IN those binders, so
+        // handing it back verbatim publishes the CALLEE's generic
+        // parameter as THIS frame's value. Under the file-scoped
+        // name-keyed binder identity that node is shared with
+        // every same-named clause in the file, so an enclosing
+        // `class Holder<T>` would then substitute the caller's
+        // `Holder<number>` into a value that has nothing to do
+        // with it — cleanly and warm.
+        //
+        // Instantiating those parameters is the same rule the
+        // sibling callee-TYPE / signature-node routes apply
+        // (`CallValue::of_signature_node`), so EVERY route to one
+        // callee answers alike. Call-site instantiation proper —
+        // explicit type arguments AND argument inference — is
+        // not performed here; a DECLARED DEFAULT is already exact
+        // (`f<T = number>()` IS `number`), and `unknown` is the
+        // interim answer everywhere else — exact for the one shape
+        // TS itself cannot infer (`bare<T>(): T` called with no
+        // arguments IS `unknown`).
+        //
+        // The clause is read from the per-file FUNCTION PROGRAM
+        // INDEX, keyed by the target's exact program identity
+        // (part + overload ordinal), NOT from the prepared value
+        // declaration: a direct-call target is a served position
+        // of THIS file by construction, while the value registry
+        // does not carry every one of them — a namespace-scoped
+        // function has no prepared declaration, and reading the
+        // clause from there would silently leave exactly those
+        // callees leaking their binder.
+        let callee_clause = match self.direct_callee_clause(target, site) {
+            CalleeClauseLookup::Clause(clause) => clause,
+            // The callee's clause could not be READ. Handing its
+            // return back with nothing instantiated is the leak;
+            // this is the `UnrepresentableCallee` degradation the
+            // rail already defines — usable, `ReturnOnly`, never
+            // warm.
+            CalleeClauseLookup::Unavailable => {
+                return CallNext::Value(self.degraded_unrepresentable_callee())
+            }
+        };
+        // Argument-driven clause inference (and explicit type
+        // arguments) are the call executor's domain too: a
+        // generic callee whose call SUPPLIES inference evidence
+        // routes through it, binding the clause from the authored
+        // argument literals with constraint / declared-default
+        // fallback — rather than this rail's `unknown` interim
+        // for every parameter the arguments could have bound. A
+        // call supplying NO evidence keeps the rail's answer: a
+        // declared default is exact, and `unknown` is the
+        // checker's own answer for an unbound parameter.
+        if !asked
+            && callee_clause.is_generic()
+            && (site.supplies_parameter_ordinal(0) || site.has_explicit_type_arguments())
+        {
+            if let Some(callee) = self.direct_callee_value_node(target) {
+                let rest = Box::new(DirectReturn {
+                    target,
+                    source,
+                    clause: callee_clause,
+                });
+                return CallNext::route(callee, CallSuffix::DirectReturn(rest));
+            }
+        }
+        CallNext::Value(self.direct_call_return(target, site, source, callee_clause))
+    }
+
+    /// A same-file direct call's value off its callee's return, the
+    /// body-derived flow return or the declared one, under the callee's
+    /// own clause.
+    fn direct_call_return(
+        &mut self,
+        target: &verter_session_query::function_program::FunctionProgramKey,
+        site: verter_session_query::flow::slice::SliceCallSite,
+        source: Option<verter_type_expr::facts::FunctionReturnSource>,
+        callee_clause: CalleeClause,
+    ) -> Positional<CallValue> {
+        // A target the value registry does not carry as a
+        // prepared declaration (a namespace-scoped function) is
+        // only reachable through the body-derived demand.
+        let source = source.unwrap_or_else(|| {
+            verter_type_expr::facts::FunctionReturnSource::Flow(
+                verter_type_expr::facts::FlowFunctionReturnIdentity {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: verter_type_expr::OwnedStr::from(self.st.canonical),
+                        owner: target.declaration.owner,
+                        symbol: target.declaration.name.clone(),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                    },
+                    function_part: target.part.clone(),
+                    overload_ordinal: target.overload_ordinal,
+                },
+            )
+        });
+        match &source {
+            verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
+                let key = self.dispatch.flow_return_key_for(identity);
+                let pending_before = self.dispatch.pending_obligation_count();
+                let read = self
+                    .dispatch
+                    .observe_read(|| self.dispatch.execute_flow_return(key.clone()));
+                let provisional = self.dispatch.pending_obligation_count() > pending_before;
+                let declined = provisional || matches!(read.value(), FlowReturnStep::Hold(_));
+                let step = if declined {
+                    read.discard()
+                } else {
+                    self.dispatch.adopt_read(read)
+                }
+                .unwrap_or_else(FlowReturnStep::Aborted);
+                match step {
+                    FlowReturnStep::Complete(result) => {
+                        // A degraded callee value degrades every
+                        // consumer of that value: absorb the
+                        // callee's typed reason into this frame.
+                        if let Some(degradation) = result.degradation() {
+                            self.record_degradation(degradation);
+                        }
+                        // A callee that pops as a PROVISIONAL
+                        // member of THIS component leaves its
+                        // result provisional until the close's
+                        // equation fixed point — the call is an
+                        // edge. A callee that closed its own SCC
+                        // independently is final: no edge.
+                        if self.dispatch.pending_obligation_count() > pending_before {
+                            // The hold carries the SAME clause this
+                            // arm just applied: the fixed point
+                            // repeats this transfer, so it owes the
+                            // same obligation.
+                            self.st
+                                .holds
+                                .push(HeldCallee::foreign(key, callee_clause.clone()));
+                        }
+                        let value = CallValue::of_served_return(
+                            self.dispatch,
+                            &callee_clause,
+                            result.return_type(),
+                            ReturnOrigin::ClauseScoped,
+                        );
+                        // The callee's sealed fresh literal arms
+                        // stay fresh across this direct-call rail
+                        // exactly as across the executor route:
+                        // record the call's fresh provenance so a
+                        // value position widens them, the return
+                        // join keeps them, and a `const` binding
+                        // records its widening membership.
+                        if !result.fresh_literal_arms().is_empty() {
+                            self.st.call_fresh_literal_returns.push(FreshCallReturn {
+                                span: site.span(),
+                                node: value.node(),
+                                values: Arc::from(&result.fresh_literal_arms()[..]),
+                            });
+                        }
+                        Positional::Value(value)
+                    }
+                    FlowReturnStep::Hold(key) => self.circular_call(&key),
+                    // The CALLEE's frame failed. That is a fact
+                    // about the callee's body, and it reaches this
+                    // frame at exactly one place: the call.
+                    // Re-raising it here is what made one helper's
+                    // unmodelled control surface delete the whole
+                    // caller's surface.
+                    FlowReturnStep::Aborted(_) | FlowReturnStep::NoValue(_) => {
+                        Positional::Unmodeled
+                    }
+                }
+            }
+            source => match self
+                .dispatch
+                .execute_function_return_source(source, self.st.canonical)
+            {
+                // The callee's DECLARED return locator, lowered in
+                // file owner scope where its own clause is not in
+                // scope: the resolved same-named declaration IS
+                // the clause parameter, misresolved.
+                super::flow_return::FunctionReturnNode::Declared(hot) => {
+                    Positional::Value(CallValue::of_served_return(
+                        self.dispatch,
+                        &callee_clause,
+                        hot.node(),
+                        ReturnOrigin::OwnerScopeDeclared,
+                    ))
+                }
+                // A declared locator that would not raise, and a
+                // signature with NO recoverable return carrier,
+                // both leave this CALL without a value.
+                super::flow_return::FunctionReturnNode::DeclaredMiss
+                | super::flow_return::FunctionReturnNode::Absent => Positional::Unmodeled,
+                super::flow_return::FunctionReturnNode::Flow(_)
+                | super::flow_return::FunctionReturnNode::Aborted(_)
+                | super::flow_return::FunctionReturnNode::NoValue(_) => {
+                    unreachable!("a Declared/Absent source never reaches the flow rail")
+                }
+            },
+        }
+    }
+
+    /// A call on a function-typed binding.
+    #[inline(never)]
+    fn binding_call<'e>(
+        &mut self,
+        binding: &verter_session_query::flow::binding::FlowBindingRef,
+        param: Option<u32>,
+        captured: bool,
+        site: verter_session_query::flow::slice::SliceCallSite,
+    ) -> CallNext<'e> {
+        // A call on a function-typed binding: the call's value is
+        // the binding's signature return. Calling an `any`-typed
+        // or unbound binding is `any` EXACTLY (the implicit-`any`
+        // call); calling a binding whose value is neither
+        // callable nor `any` is the `NonCallableBinding`
+        // DEGRADATION — a modeled `any`, not the real semantics.
+        // The binding's own reaching definition wins; the
+        // parameter ordinal is the FALLBACK a `var` redeclaring
+        // a parameter name resolves to before its declarator
+        // runs (mirrors the `Local` read). A narrowing standing on
+        // the binding is what the callee reads, as any read of it
+        // does: `typeof f === "function"` leaves `f()` calling the
+        // callable arms alone.
+        let node = self
+            .frame_binding_read(binding)
+            .or_else(|| self.read_local(binding))
+            .or_else(|| param.and_then(|ordinal| self.st.params.get(ordinal as usize).copied()));
+        let Some(node) = node else {
+            // A CAPTURED callee the seeded snapshot does not carry
+            // has no honest value: the POSITION carries the marker
+            // rather than the same-frame implicit-`any` call.
+            if captured {
+                return CallNext::Value(Positional::Value(self.unmodeled_call_position()));
+            }
+            return CallNext::Value(Positional::Value(CallValue::modeled_any(self.dispatch)));
+        };
+        // A function-typed BINDING carries the callee's clause on
+        // its own signature node — `const id = <T>(x: T): T => x`
+        // binds `T` there — so this route takes its value from the
+        // same signature reader the resolved-callee route does. A
+        // binding is otherwise indistinguishable from any other
+        // callee: nothing about "the callee happens to be a local"
+        // makes its binders this frame's to publish.
+        // A binding's value is either a nested function value's
+        // COMPOSED signature or a lowered function-TYPE
+        // annotation, and BOTH are clause-scoped: the composed
+        // signature is built in the callee's own frame, and a
+        // `<T>(x: T) => T` annotation lowers with its clause in
+        // scope, so both spell the clause as binders. The one
+        // shape that could carry an owner-scope misresolution —
+        // `typeof declaredFn` — does not reach a `Signature`
+        // node here at all (it resolves to a non-callable
+        // surface and degrades), so nothing on this route needs
+        // the owner-scope claim while claiming it destroys a
+        // correct arm: a same-named FOREIGN declaration reached
+        // through the callee's body is a different symbol, and
+        // the IIFE route — the same body, invoked directly —
+        // already keeps it.
+        // An overloaded or inference-bearing binding-held callee
+        // resolves through the executor, never the first
+        // signature's raw return; an undecided executor falls
+        // back to the rail's own signature read (overloads keep
+        // the typed degradation — the read cannot pick).
+        if self.call_group_needs_executor(node, site) {
+            let overloaded = matches!(
+                self.dispatch.shared_signature_buckets(node),
+                Ok((call_sigs, construct_sigs))
+                    if call_sigs.len() + construct_sigs.len() > 1
+            );
+            return CallNext::route(node, CallSuffix::Binding { node, overloaded });
+        }
+        CallNext::Value(self.binding_call_value(node, site))
+    }
+
+    /// The call value of a function-typed binding's `node`, read off its
+    /// own signature.
+    fn binding_call_value(
+        &mut self,
+        node: SemanticNodeId,
+        site: verter_session_query::flow::slice::SliceCallSite,
+    ) -> Positional<CallValue> {
+        let graph = self.dispatch.graph();
+        // The signature read carries no receiver: a signature whose
+        // value depends on one is the typed marker here.
+        if matches!(
+            self.dispatch.shared_signature_buckets(node),
+            Ok((call_sigs, construct_sigs))
+                if call_sigs
+                    .iter()
+                    .chain(construct_sigs.iter())
+                    .any(|signature| self.signature_reads_receiver(*signature))
+        ) {
+            return self.degraded_unrepresentable_callee();
+        }
+        match CallValue::of_signature_node(self.dispatch, node, site, ReturnOrigin::ClauseScoped) {
+            SignatureCall::Value(value) => {
+                self.absorb_body_degradation(node);
+                Positional::Value(value)
+            }
+            // The binding's signature has no transferable return:
+            // its return position missed, or a needed clause
+            // default could not be recovered. Positional.
+            SignatureCall::ReturnMiss | SignatureCall::ClauseUnavailable => Positional::Unmodeled,
+            SignatureCall::NotCallable
+                if matches!(
+                    graph.node_data(node).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+                ) =>
+            {
+                Positional::Value(CallValue::modeled_any(self.dispatch))
+            }
+            SignatureCall::NotCallable => {
+                self.record_degradation(
+                    crate::semantic_query::FlowReturnDegradation::NonCallableBinding,
+                );
+                Positional::Value(CallValue::modeled_any(self.dispatch))
+            }
+        }
+    }
+
+    /// A recursive call of the function this frame evaluates.
+    #[inline(never)]
+    fn self_call(
+        &mut self,
+        site: verter_session_query::flow::slice::SliceCallSite,
+    ) -> Positional<CallValue> {
+        // Only the frame that OWNS a flow slot can hold on it.
+        let Some(self_slot) = self.st.self_slot else {
+            return Positional::Unmodeled;
+        };
+        match self.dispatch.execute_flow_return(self_slot.clone()) {
+            // A `return` of the bare self-call contributes nothing:
+            // its return is the function's other returns.
+            FlowReturnStep::Hold(_) if self.st.bare_self_return == Some(site.span()) => {
+                // The one hold whose target's binders are THIS
+                // frame's own: a self-call's callee IS the caller,
+                // so the fixed point must leave them alone.
+                self.st.holds.push(HeldCallee::own_frame(self_slot.clone()));
+                Positional::Hold
+            }
+            FlowReturnStep::Hold(key) => self.circular_call(&key),
+            FlowReturnStep::Complete(_) => {
+                unreachable!("a same-slot recursive edge is always a hold in flight")
+            }
+            FlowReturnStep::Aborted(_) | FlowReturnStep::NoValue(_) => Positional::Unmodeled,
+        }
+    }
+
+    /// A `super` member call.
+    #[inline(never)]
+    fn heritage_call<'e>(
+        &mut self,
+        heritage: &verter_session_query::flow::slice::GatedType,
+        member: &[Arc<str>],
+        static_side: bool,
+        this: &Option<verter_session_query::flow::slice::SliceThis>,
+        site: verter_session_query::flow::slice::SliceCallSite,
+    ) -> CallNext<'e> {
+        // `super.m()` — the base member through the HERITAGE
+        // surface. The heritage expression's value type (the base
+        // constructor) lowers through the same shared body-type
+        // lowering an authored annotation takes; the base member
+        // walks the ONE shared `ProjectPath { Navigate }`
+        // projection — `prototype` plus the authored member path
+        // for an INSTANCE member's `super`, the member path
+        // directly on the constructor for a STATIC member's — so
+        // only the DEMANDED member is materialised, never the
+        // base's whole surface. The resolved callee then takes the
+        // one call sink every other resolved callee takes.
+        let base = self.lower_body_type(heritage.ty());
+        let mut segments: Vec<Arc<str>> = Vec::with_capacity(member.len() + 1);
+        if !static_side {
+            segments.push(Arc::from("prototype"));
+        }
+        segments.extend(member.iter().cloned());
+        let Some(callee) = self.project_path_navigate_with(base, &segments, false) else {
+            return CallNext::Value(self.degraded_unrepresentable_callee());
+        };
+        // The base member's polymorphic `this` is this class's own
+        // `this`, never the base's instance; a frame whose `this`
+        // this evaluator cannot read leaves it unbound, and the call
+        // sink gives the typed marker.
+        let callee = if self.dispatch.receiver_this_types(callee).is_empty() {
+            callee
+        } else {
+            match this.as_ref().map(|this| self.eval_this(this)) {
+                Some(Positional::Value(receiver)) => {
+                    self.dispatch.bind_callee_receiver(callee, receiver)
+                }
+                Some(Positional::Hold) => return CallNext::Value(Positional::Hold),
+                Some(Positional::Unmodeled) | None => callee,
+            }
+        };
+        CallNext::Value(self.call_return_of_callee_node(callee, site))
+    }
+
+    /// A call of a callee the slice spells as a `typeof` path.
+    #[inline(never)]
+    fn symbolic_call<'e>(
+        &mut self,
+        callee: &verter_session_query::flow::slice::SymbolicCallee,
+        site: verter_session_query::flow::slice::SliceCallSite,
+    ) -> CallNext<'e> {
+        let (ty, binding, member_spans) = (callee.ty(), callee.frame_root(), callee.member_spans());
+        // The symbolic `ReturnType<typeof …>` carrier: lower the
+        // callee, resolve its signature through the same builtin
+        // `ReturnType` reduction every consumer uses, and take the
+        // call-bucket return — an unrepresentable / unresolvable
+        // callee is the `UnrepresentableCallee` DEGRADATION: a
+        // usable modeled-`any`, `ReturnOnly` by contract.
+        let verter_type_expr::TypeExpr::Ref {
+            name,
+            type_arguments,
+        } = ty
+        else {
+            return CallNext::Value(self.degraded_unrepresentable_callee());
+        };
+        if !super::signature_utility::SignatureUtility::ReturnType.spells(name.as_ref())
+            || type_arguments.len() != 1
+        {
+            return CallNext::Value(self.degraded_unrepresentable_callee());
+        }
+        // A member-call callee rooted at a FRAME binding
+        // (`fn.call`, `local.call`, `instance.run`): the owner
+        // scope answers nothing for the root, but the frame
+        // substitutes it — resolve the root through the frame and
+        // project the member tail, exactly as the frame-rooted
+        // `typeof` leaf does. Everything else lowers in owner
+        // scope as before.
+        let mut frame_rooted = false;
+        let callee_node = match self.frame_rooted_typeof_path_node(&type_arguments[0], binding) {
+            Some(node) => {
+                frame_rooted = true;
+                Some(node)
+            }
+            None => self.dispatch.lower_type_expr_in_owner_scope_with_context(
+                self.st.canonical,
+                self.st.owner,
+                &type_arguments[0],
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            ),
+        };
+        // A callee its object proves absent is the checker's TS2339,
+        // and a call of its error type is untyped.
+        if self.member_read_missed(callee_node) {
+            let recovered = self.recovered_member_callee(&type_arguments[0], binding, member_spans);
+            if let Some(recovered) = recovered {
+                return CallNext::Value(recovered);
+            }
+        }
+        let Some(callee_node) = callee_node else {
+            return CallNext::Value(self.degraded_unrepresentable_callee());
+        };
+        // A FRAME-ROOTED member callee carries receiver semantics
+        // this rail's lone signature read is blind to (the ambient
+        // `.call` / `.apply` rebase, a `this`-typed method): route
+        // it through the executor first. The fallback is exactly
+        // the answer this rail gave before the executor existed —
+        // a frame-rooted member callee lowered to nothing then, so
+        // nothing that worked can regress. An undecided executor
+        // (`None`) keeps the rail's own read.
+        if frame_rooted {
+            let callee = callee_node;
+            return CallNext::route(callee, CallSuffix::SymbolicGroup { callee });
+        }
+        self.symbolic_group(callee_node, site, false)
+    }
+
+    /// A symbolic callee's group decision: an overloaded or
+    /// inference-bearing callee's executor route, unless it was `asked`
+    /// already, else its lone signature's read.
+    fn symbolic_group<'e>(
+        &mut self,
+        callee: SemanticNodeId,
+        site: verter_session_query::flow::slice::SliceCallSite,
+        asked: bool,
+    ) -> CallNext<'e> {
+        // An overloaded or inference-bearing symbolic callee
+        // resolves through the executor exactly like a direct
+        // one — the lone non-generic read stays on this rail,
+        // and an undecided executor falls back to it.
+        if self.call_group_needs_executor(callee, site) {
+            let overloaded = matches!(
+                self.dispatch.shared_signature_buckets(callee),
+                Ok((call_sigs, construct_sigs))
+                    if call_sigs.len() + construct_sigs.len() > 1
+            );
+            if !asked {
+                return CallNext::route(callee, CallSuffix::Group { callee, overloaded });
+            }
+            if overloaded {
+                return CallNext::Value(self.degraded_unrepresentable_callee());
+            }
+        }
+        CallNext::Value(self.call_return_of_callee_node(callee, site))
+    }
+
+    /// A call of a member of a receiver.
+    #[inline(never)]
+    fn member_call<'e>(
+        &mut self,
+        member: &[Arc<str>],
+        site: verter_session_query::flow::slice::SliceCallSite,
+        operand: Option<Positional<SemanticNodeId>>,
+    ) -> CallNext<'e> {
+        // `this.m()`: the member of the receiver's value, called
+        // through the executor that reads its receiver-bound
+        // signatures, else the lone signature read.
+        let receiver = match call_stack::delivered_operand(operand) {
+            Positional::Value(node) => node,
+            Positional::Hold => return CallNext::Value(Positional::Hold),
+            Positional::Unmodeled => return CallNext::Value(Positional::Unmodeled),
+        };
+        let is_any = |node: SemanticNodeId| {
+            matches!(
+                self.dispatch.arena().node_data(node).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+            )
+        };
+        let mut callee_node = receiver;
+        // The object the called member is read off: the call's
+        // receiver, which the executor route reads.
+        let mut object = receiver;
+        for name in member.iter() {
+            // A member of an `any` receiver is `any`.
+            if is_any(callee_node) {
+                break;
+            }
+            object = callee_node;
+            let this_source = self.this_member_source(callee_node, name);
+            let Some(read) = this_source
+                .and_then(|source| self.receiver_non_public_member(source, name))
+                .or_else(|| {
+                    self.project_path_navigate(
+                        this_source.unwrap_or(callee_node),
+                        std::slice::from_ref(name),
+                    )
+                })
+            else {
+                return CallNext::Value(self.degraded_unrepresentable_callee());
+            };
+            callee_node = match this_source {
+                Some(_) => self.dispatch.bind_this_receiver(read, callee_node),
+                None => read,
+            };
+        }
+        // A call of an `any` callee (a member of an `any` receiver)
+        // is the checker's untyped call: `any`.
+        if is_any(callee_node) {
+            return CallNext::Value(Positional::Value(CallValue::modeled_any(self.dispatch)));
+        }
+        self.st.call_receivers.insert(site.span(), object);
+        CallNext::of_callee(callee_node)
+    }
+
+    /// The call an optional chain holds.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn optional_chain_call<'e>(
+        &mut self,
+        root: &verter_session_query::flow::slice::SliceExpr,
+        links: &[(Arc<str>, bool)],
+        name_spans: &[verter_session_query::flow::frame_span::FrameSpan],
+        optional_call: bool,
+        after: &'e [(Arc<str>, bool)],
+        after_spans: &'e [verter_session_query::flow::frame_span::FrameSpan],
+        site: verter_session_query::flow::slice::SliceCallSite,
+        operand: Option<Positional<SemanticNodeId>>,
+    ) -> CallNext<'e> {
+        // The checker's optional chain: each `?.` edge strips its
+        // base's nullish arms (short-circuiting to `undefined`
+        // when nothing else is left), the callee is read and called
+        // exactly as a member callee is, the links after the call
+        // read off its value, and the chain's value carries
+        // `undefined` beside the read when a strip removed arms.
+        let node = match call_stack::delivered_operand(operand) {
+            Positional::Value(node) => node,
+            Positional::Hold => return CallNext::Value(Positional::Hold),
+            Positional::Unmodeled => return CallNext::Value(Positional::Unmodeled),
+        };
+        // A member of an `any` receiver, its call, and every read
+        // off that are `any`.
+        if self.node_is_semantic_any(node) {
+            return CallNext::Value(Positional::Value(CallValue::modeled_any(self.dispatch)));
+        }
+        let undefined = self
+            .dispatch
+            .graph()
+            .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+        let narrow_root = match root {
+            verter_session_query::flow::slice::SliceExpr::Param { ordinal, binding } => {
+                Some(verter_session_query::flow::slice::SliceNarrowRoot::Param {
+                    ordinal: *ordinal,
+                    binding: *binding,
+                })
+            }
+            verter_session_query::flow::slice::SliceExpr::Local {
+                binding,
+                name,
+                captured: false,
+                ..
+            } => Some(verter_session_query::flow::slice::SliceNarrowRoot::Local {
+                name: Arc::clone(name),
+                binding: binding.clone(),
+            }),
+            _ => None,
+        };
+        let mut stripped = false;
+        let mut callee = node;
+        let mut receiver = None;
+        // A callee link the receiver proves absent is the checker's
+        // TS2339 at its name, and the call of its error type is
+        // `any`, exactly as a member-valued chain reads it.
+        let reads_own_literal = self.reads_own_literal(root, node);
+        for index in 0..links.len() {
+            if self.node_is_semantic_any(callee) {
+                return CallNext::Value(Positional::Value(CallValue::modeled_any(self.dispatch)));
+            }
+            match self.optional_chain_link(
+                callee,
+                links,
+                OptionalLinkSite {
+                    index,
+                    name_span: name_spans.get(index).copied(),
+                    reads_own_literal: index == 0 && reads_own_literal,
+                },
+                narrow_root.as_ref(),
+                &mut stripped,
+            ) {
+                OptionalLink::Read { base, read } => {
+                    receiver = Some(base);
+                    callee = read;
+                }
+                OptionalLink::ShortCircuit => {
+                    let value = CallValue::of_resolved_call(self.dispatch, undefined);
+                    return CallNext::Value(Positional::Value(value));
+                }
+                OptionalLink::Unmodeled => return CallNext::Value(Positional::Unmodeled),
+            }
+        }
+        if self.node_is_semantic_any(callee) {
+            return CallNext::Value(Positional::Value(CallValue::modeled_any(self.dispatch)));
+        }
+        if optional_call {
+            match self.strip_nullish_arms_for_optional_read(callee) {
+                NullishStrip::Unchanged => {}
+                NullishStrip::Stripped(base) => {
+                    stripped = true;
+                    callee = base;
+                }
+                NullishStrip::AllNullish => {
+                    let value = CallValue::of_resolved_call(self.dispatch, undefined);
+                    return CallNext::Value(Positional::Value(value));
+                }
+            }
+        }
+        // The receiver the chain read the callee off is the call's
+        // receiver: the executor reads it where it would evaluate
+        // the authored (unstripped) one.
+        if let Some(receiver) = receiver {
+            self.st.call_receivers.insert(site.span(), receiver);
+        }
+        let tail = OptionalChainTail {
+            callee,
+            stripped,
+            undefined,
+            after,
+            after_spans,
+        };
+        CallNext::route(callee, CallSuffix::OptionalChain(Box::new(tail)))
+    }
+
+    /// An optional chain's call value off its executor route's `answer`,
+    /// else off its callee's one call signature, and the links after the
+    /// call read off it.
+    fn optional_chain_tail(
+        &mut self,
+        site: verter_session_query::flow::slice::SliceCallSite,
+        tail: OptionalChainTail<'_>,
+        answer: Option<Positional<CallValue>>,
+    ) -> Positional<CallValue> {
+        let OptionalChainTail {
+            callee,
+            mut stripped,
+            undefined,
+            after,
+            after_spans,
+        } = tail;
+        let value = match answer {
+            Some(value) => value,
+            None => self.call_return_of_callee_node(callee, site),
+        };
+        let value = match value {
+            Positional::Value(value) => value,
+            other => return other,
+        };
+        if after.is_empty() && !(stripped && self.st.nullability.is_strict()) {
+            return Positional::Value(value);
+        }
+        let mut current = value.into_node();
+        for index in 0..after.len() {
+            if self.node_is_semantic_any(current) {
+                break;
+            }
+            let site = OptionalLinkSite {
+                index,
+                name_span: after_spans.get(index).copied(),
+                reads_own_literal: false,
+            };
+            match self.optional_chain_link(current, after, site, None, &mut stripped) {
+                OptionalLink::Read { read, .. } => current = read,
+                OptionalLink::ShortCircuit => {
+                    return Positional::Value(CallValue::of_resolved_call(
+                        self.dispatch,
+                        undefined,
+                    ));
+                }
+                OptionalLink::Unmodeled => return Positional::Unmodeled,
+            }
+        }
+        // The short-circuit's `undefined` is a strict-null fact,
+        // exactly as for a member-valued chain.
+        if stripped && self.st.nullability.is_strict() {
+            current = self.union(&[current, undefined]);
+        }
+        Positional::Value(CallValue::of_resolved_call(self.dispatch, current))
+    }
+
+    /// A call of a member of a value.
+    #[inline(never)]
+    fn value_member_call<'e>(
+        &mut self,
+        member: &Arc<str>,
+        site: verter_session_query::flow::slice::SliceCallSite,
+        operand: Option<Positional<SemanticNodeId>>,
+    ) -> CallNext<'e> {
+        // `new C().m()`, `b.m().m()`: the member of the value is
+        // the callee, resolved through the executor (the value its
+        // receiver) exactly like a frame-rooted member callee, else
+        // through the one call sink.
+        let object = match call_stack::delivered_operand(operand) {
+            Positional::Value(node) => node,
+            Positional::Hold => return CallNext::Value(Positional::Hold),
+            Positional::Unmodeled => return CallNext::Value(Positional::Unmodeled),
+        };
+        self.call_member_of_value(object, member, site)
+    }
+
+    /// A call of an element of a value, keyed by a literal.
+    #[inline(never)]
+    fn element_call<'e>(
+        &mut self,
+        index: &verter_session_query::flow::slice::SliceExpr,
+        site: verter_session_query::flow::slice::SliceCallSite,
+        operand: Option<Positional<SemanticNodeId>>,
+    ) -> CallNext<'e> {
+        // `t[k]()`: the key is a binding read (a leaf, evaluated
+        // here), and its literal type names the member of the
+        // object the call resolves over, the object its receiver.
+        // A key of any other type is the typed marker.
+        let object = match call_stack::delivered_operand(operand) {
+            Positional::Value(node) => node,
+            Positional::Hold => return CallNext::Value(Positional::Hold),
+            Positional::Unmodeled => return CallNext::Value(Positional::Unmodeled),
+        };
+        let key = match self.eval_expr(index) {
+            Positional::Value(node) => node,
+            Positional::Hold => return CallNext::Value(Positional::Hold),
+            Positional::Unmodeled => return CallNext::Value(Positional::Unmodeled),
+        };
+        let member: Arc<str> = match self.dispatch.arena().node_data(key).as_deref() {
+            Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(name))) => {
+                Arc::from(name.as_str())
+            }
+            Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(value)))
+                if value.is_finite() && value.fract() == 0.0 && value.abs() < 1e15 =>
+            {
+                Arc::from(format!("{}", *value as i64).as_str())
+            }
+            _ => return CallNext::Value(self.degraded_unrepresentable_callee()),
+        };
+        self.call_member_of_value(object, &member, site)
+    }
+
+    /// A `new` expression.
+    #[inline(never)]
+    fn construct_call<'e>(&mut self, operand: Option<Positional<SemanticNodeId>>) -> CallNext<'e> {
+        // `new C(…)` — the checker's `resolveNewExpression`: the
+        // constructor's construct signatures, from the shared
+        // signature list, resolved by the call executor exactly as
+        // a call resolves over its call signatures (overload
+        // choice, argument inference and explicit type arguments
+        // included). There is no lone-signature read to fall back
+        // to, so an undecided executor degrades the position.
+        let constructor = match call_stack::delivered_operand(operand) {
+            Positional::Value(node) => node,
+            Positional::Hold => return CallNext::Value(Positional::Hold),
+            Positional::Unmodeled => return CallNext::Value(Positional::Unmodeled),
+        };
+        CallNext::route(constructor, CallSuffix::Degrade)
+    }
+
+    /// A tagged template.
+    #[inline(never)]
+    fn tagged_template_call<'e>(
+        &mut self,
+        site: verter_session_query::flow::slice::SliceCallSite,
+        operand: Option<Positional<SemanticNodeId>>,
+    ) -> CallNext<'e> {
+        // `` tag`a${x}b` `` — the checker's
+        // `resolveTaggedTemplateExpression`: a call of the tag whose
+        // first argument is the template strings. It takes the
+        // routes an ordinary call over a resolved callee takes: an
+        // overloaded or inference-bearing tag resolves through the
+        // executor, a lone signature through the one call sink.
+        let tag = match call_stack::delivered_operand(operand) {
+            Positional::Value(node) => node,
+            Positional::Hold => return CallNext::Value(Positional::Hold),
+            Positional::Unmodeled => return CallNext::Value(Positional::Unmodeled),
+        };
+        if self.call_group_needs_executor(tag, site) {
+            let overloaded = matches!(
+                self.dispatch.shared_signature_buckets(tag),
+                Ok((call_sigs, construct_sigs))
+                    if call_sigs.len() + construct_sigs.len() > 1
+            );
+            let callee = tag;
+            return CallNext::route(callee, CallSuffix::Group { callee, overloaded });
+        }
+        CallNext::Value(self.call_return_of_callee_node(tag, site))
     }
 }
 

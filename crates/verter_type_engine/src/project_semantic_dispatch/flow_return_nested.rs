@@ -958,7 +958,6 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 collect_throw_points: false,
                 scope_shadows: Vec::new(),
                 call_evidence: Vec::new(),
-                call_drive: None,
                 expression_write_nodes: rustc_hash::FxHashMap::default(),
                 capture_write_lookahead: rustc_hash::FxHashMap::default(),
                 executed_walk: ExecutedSliceWalk::default(),
