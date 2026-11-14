@@ -224,8 +224,9 @@ impl VerterHost {
 }
 
 /// Prepare `captured`'s execution inputs for a host root: the Vue macro
-/// bundle is produced by the pollable path, which hands the root's driver
-/// its producer and dispatch steps through `work`.
+/// bundle is produced, and the dependency verdict decided, by the pollable
+/// paths, which hand the root's driver their producers and dispatch steps
+/// through `work`.
 pub(crate) async fn prepare_execution_inputs_pollable<'h>(
     host: &'h VerterHost,
     captured: &CapturedCompileInput,
@@ -239,14 +240,16 @@ pub(crate) async fn prepare_execution_inputs_pollable<'h>(
                 .produce_vue_macro_codegen_pollable(&snapshot.canonical_id, macros, work)
                 .await
                 .map_err(CompileInputsFailure::Aborted)?;
-            vue_execution_inputs_from_macro_output(
+            let verdict = super::vue_macro_dependency_diagnostics::collect_pollable(
                 host,
                 snapshot,
-                macro_output,
-                axis,
+                &macro_output,
                 captured.hydration.gaps(),
+                work,
             )
-            .map(PreparedExecutionInputs::Vue)
+            .await;
+            vue_execution_inputs_from_macro_output(host, snapshot, macro_output, axis, verdict)
+                .map(PreparedExecutionInputs::Vue)
         }
         ExecutionInputDemand::Svelte {
             css_hash_override,
@@ -271,8 +274,20 @@ pub(crate) fn prepare_execution_inputs(
             let macro_output = host
                 .produce_vue_macro_codegen(&captured_input.canonical_id, macros)
                 .map_err(CompileInputsFailure::Aborted)?;
-            vue_execution_inputs_from_macro_output(host, captured_input, macro_output, axis, &[])
-                .map(PreparedExecutionInputs::Vue)
+            let verdict = super::vue_macro_dependency_diagnostics::collect(
+                host,
+                captured_input,
+                &macro_output,
+                &[],
+            );
+            vue_execution_inputs_from_macro_output(
+                host,
+                captured_input,
+                macro_output,
+                axis,
+                verdict,
+            )
+            .map(PreparedExecutionInputs::Vue)
         }
         ExecutionInputDemand::Svelte {
             css_hash_override,
@@ -283,10 +298,10 @@ pub(crate) fn prepare_execution_inputs(
     }
 }
 
-/// The Vue execution inputs over one produced macro bundle: decide the
-/// dependency verdict, restate the dependency axis (when the route owns
-/// one), refuse on this file's macro dependency diagnostics, and build the
-/// ephemeral execution-input carrier.
+/// The Vue execution inputs over one produced macro bundle and the
+/// dependency verdict its caller decided over it: restate the dependency
+/// axis (when the route owns one), refuse on this file's macro dependency
+/// diagnostics, and build the ephemeral execution-input carrier.
 ///
 /// The axis restatement runs BEFORE the dependency refusal so a compile
 /// refused for an unresolvable macro type still records the dependencies
@@ -306,14 +321,8 @@ fn vue_execution_inputs_from_macro_output(
     snapshot: &CompileInput,
     macro_output: VueMacroCodegenOutput,
     axis: SharedDependencyAxis,
-    hydration_gaps: &[CompileDependencyGap],
+    verdict: super::vue_macro_dependency_diagnostics::MacroDependencyVerdict,
 ) -> Result<VueHostExecutionInputs, CompileInputsFailure> {
-    let verdict = super::vue_macro_dependency_diagnostics::collect(
-        host,
-        snapshot,
-        &macro_output,
-        hydration_gaps,
-    );
     if axis == SharedDependencyAxis::Restate {
         let transitive_macro_type_deps: std::collections::BTreeSet<String> =
             macro_output.transitive_canonicals.iter().cloned().collect();

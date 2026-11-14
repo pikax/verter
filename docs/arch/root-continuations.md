@@ -20,7 +20,7 @@ producer, returns before an incomplete nested dependency settles.
 | Store-view and per-attempt snapshot capture, owner indexing and overlay indexing suspend through their existing handoffs | Metadata computation, extraction/fallthrough and output materialization still call synchronous dependency paths |
 | Cache admission, scheduler completion, resolver flights, carrier publication/stable parse, store-view capture, lowering and workspace resolution offer task-owned handoffs with independent cancellation | Higher callers must consume these owned APIs throughout their traversal instead of driving compatibility entries inside a poll |
 | Root state and converted scopes move between polling threads | Nested semantic dispatch still drives tasks or waits on subscriptions synchronously; complete-root no-replay is not proved |
-| Compile roots hand out one macro producer and retain followers; their blocker loads suspend through the owned load handoff | That producer runs a synchronous traversal; blocker route resolution is still answered synchronously inside the poll |
+| Compile roots hand out one macro producer and retain followers; their blocker routes, blocker loads and dependency-verdict walk suspend through the owned resolution and load handoffs | That producer runs a synchronous traversal; taking a route can still ingest configured programs inside the poll for an importer no configured project lists |
 | An external consumer fixture and a queued-wake driver exercise multiple roots | The driver does not yet prove progress across every nested family with admission closed and no retained synchronous stack |
 
 The parse-once, zero eager-body and one shallow-walk assertions cover overlay
@@ -165,10 +165,20 @@ What each root suspends on today:
   Before it captures its input, the compile root hydrates its blockers
   (`host_resolve/compile_blocker_hydration.rs`): it resolves each external
   block source and macro type import, records the owner's dependency edges
-  and loads each resolved blocker through `begin_load`. While a load is
-  pending the root hands out a scheduler dispatch step and returns
-  `Pending`; the load's completion wakes it. Route resolution is still
-  answered synchronously inside the poll. Hydration's outcome is typed
+  and loads each resolved blocker through `begin_load`. Each route
+  resolves through `VerterHost::resolve_for_persistent_state_pollable`,
+  the pollable twin of the synchronous `resolve_for_persistent_state`:
+  both take the importer's route (`import_resolution_route`: the importer
+  mapping, configured-program ingestion and ownership choice), record the
+  owner edge (`observed_resolution`) and admit the answer with its witness
+  (`admit_persistent_resolution`); the twin resolves on that route through
+  the workspace's owned handoff (`begin_resolution` with the route's
+  owner). While a resolution is pending the root hands out the
+  resolution's producer and returns `Pending`; while a load is pending it
+  hands out a scheduler dispatch step. A workspace without the owned
+  protocol answers in place. Taking the route can still ingest configured
+  programs inside the poll for an importer no configured project lists.
+  Hydration's outcome is typed
   (`BlockerHydration`): a refused route or a load that does not integrate
   is recorded as a gap and the remaining blockers still load. The capture
   (`capture_compile_input`) takes that outcome by value, so it cannot run
@@ -181,12 +191,16 @@ What each root suspends on today:
   `CompileRequestFailure::DependenciesIncomplete` with those gaps and the
   same diagnostics a proved-absent dependency reports; a proved-absent one
   stays `Refused`. On that failure path the verdict's walk to the export
-  (`ensure_indexed_ready_serve` on each file along the route) still runs
-  synchronously inside the poll. The profile-derived lanes (the
-  virtual-file lane and the runtime render lane) run the same hydration
-  through its synchronous entry (`hydrate_compile_blockers`), which loads
-  each blocker in place with `ensure_loaded` as before, and keep their
-  diagnostics. They take their input through the same
+  (`host_resolve/vue_macro_dependency_diagnostics.rs`) reads each file
+  along the route through `ensure_indexed_ready_serve_owning_loads`,
+  handing out a dispatch step while the read is pending, and resolves each
+  step through the same pollable twin, so it too enters no wait inside the
+  poll. The profile-derived lanes (the virtual-file lane and the runtime
+  render lane) run the same hydration through its synchronous entry
+  (`hydrate_compile_blockers`), which resolves each route with
+  `resolve_for_persistent_state` and loads each blocker in place with
+  `ensure_loaded` as before, and run the same verdict walk in place
+  (`collect`), and keep their diagnostics. They take their input through the same
   `capture_compile_input`, handing it the outcome of their own hydration;
   no lane assembles a compile input of its own. The capture also returns
   the block-content stamp a publishing lane fences its publication on,
@@ -204,7 +218,8 @@ lowering shards held answers its first poll `Pending` without entering a
 wait, and once they are released resumes to a fresh host's props and to the
 answer its own host then gives synchronously (failed before the capture
 chain was pollable, by a synchronous `DeclLowering` wait); the compile root's polls enter no wait under a
-forbidding probe, cold and warm, handing out its producer once; and a second
+forbidding probe, cold and warm, handing out its macro producer once and
+its props route's resolution producer once; and a second
 compile root following the first's held producer answers `Pending` and
 completes once that producer runs. One thread drives three compile roots
 — two of one request and one of another — begun before driving starts:
@@ -219,10 +234,21 @@ synchronous capture behind a held build is refused, and running the macro
 producer inside the compile root's poll fails the compile cases. A driver
 that polls the handed-out producer instead of running it gets the
 synchronous answer. In `host_resolve/compile_inputs_tests`, a compile root
-whose template blocker's source read is held answers its first poll `Pending`
-under a forbidding probe, having begun one owned load and no blocking
-load, and resumes on another thread to its host's synchronous answer and
-a cold host's generated code; a refused
+whose template route is resolving answers its first poll `Pending` under a
+forbidding probe with no owner edge recorded, having handed out the
+resolution's producer, and once that producer runs on another thread
+resumes there to its host's synchronous answer (resolving the route with
+the synchronous entry fails it); an owned blocker-route resolution answers
+and records the witness and owner edge the synchronous one does, over a
+filesystem and an in-memory workspace (skipping the twin's witness
+recording fails it); the dependency verdict's walk to a missing export,
+polled under a forbidding probe, suspends on an owned load of a module
+nobody loaded and decides what the in-place walk decides (an in-place
+indexed read fails it); a compile root
+whose template blocker's source read is held answers `Pending`
+under a forbidding probe once its route resolved, having begun one owned
+load and no blocking load, and resumes on another thread to its host's
+synchronous answer and a cold host's generated code; a refused
 blocker route leaves the other blockers loading; a block source hydration
 loads is in the captured input; an unsupplied re-export target answers
 the incomplete failure naming the barrel's route, and supplying exactly
@@ -2002,7 +2028,12 @@ Above this handoff, host loading and index dependency extraction
 resolver import/route demands, explicit-project intrinsics and program ordering
 belong to DISPATCH; metadata import traversal belongs to META; hydration and
 compile traversal above program ordering belong to COMPILE. Those caller
-conversions consume these APIs separately from the dependency owner.
+conversions consume these APIs separately from the dependency owner. A
+compile root's blocker hydration and dependency verdict's walk consume
+them through `VerterHost::resolve_for_persistent_state_pollable`, which
+takes the same route, records the same owner edge and admits with the same
+witness as the synchronous `resolve_for_persistent_state` and hands its
+driver the resolution's producer.
 
 ## Boundaries that still block
 
@@ -2272,11 +2303,11 @@ traversals consume those interfaces as they become suspendable.
 | Resolver request singleflight follower (`SingleflightGroup::run_retaining`) | ResolverFlight | `verter_session/src/resolver_core/mod.rs` | `run_stable_request` ← the cold component-meta resolve; fallthrough requests; module exports, overlays, prepared declarations, source requests | `OwnedResolverFlight::poll` with producer transfer; callers still synchronous |
 | Store-view capture (`StoreViewManager::base_view`) | StoreViewBuild | `verter_session/src/store_view_handoff.rs` | `capture_batch_fixed_view` at every component-meta entry | `VerterHost::begin_store_view` with owned build/maintenance producer; callers still synchronous |
 | Carrier publication and stable parse | CarrierPublication | `verter_session/src/carrier_publication_store/owned.rs` | scheduler Source stage; base/overlay structure | `OwnedPublication` → external Work and owned S subscription; `OwnedStableParse` → external stable producer; callers still synchronous |
-| Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`) | SchedulerCompletion | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `VerterHost::begin_load` → owned scheduler request → `HostLoadCommit`; a macro payload's owner, a frame's entry loads (its file, its bundle's import targets) and a compile root's blocker hydration wait on it; other synchronous callers externally drive and integrate |
+| Host load (`CooperativeSchedulerAdapter::drive` → `Scheduler::wait_or_drive`) | SchedulerCompletion | `verter_session/src/cooperative_scheduler.rs`, `verter_scheduler/src/scheduler.rs` | `VerterHost::ensure_loaded` from component-meta registry/scope producers, prepared declarations, eval programs/environments, the frontier engine and compile entries | `VerterHost::begin_load` → owned scheduler request → `HostLoadCommit`; a macro payload's owner, a frame's entry loads (its file, its bundle's import targets), a compile root's blocker hydration and its dependency verdict's walk (`ensure_indexed_ready_serve_owning_loads`) wait on it; other synchronous callers externally drive and integrate |
 | Batch upsert completion (`Scheduler::wait_batch`) | SchedulerCompletion | `verter_scheduler/src/scheduler.rs` | `PreparedUpsertBatch::finish` ← `compile_many` | as above |
 | Scoped cache-node producer drive (`execute_scoped_cache_node`; external polling plus a rayon `install`) | ScopedCacheNode / CpuPool | `verter_scheduler/src/scheduler/scoped_handoff.rs` | Vue macro codegen in compile and the Vue API projector | `ScopedCacheNodeHandoff::poll` transfers a producer to the external driver; semantic callers still use the synchronous wrapper |
 | Scheduler inbox submission (`send_submission`) | SchedulerAdmission | `verter_scheduler/src/scheduler/submission.rs` | `submit_request`, `submit_batch_atomic`, scoped cache nodes | owned `SchedulerSubmission::poll` for requests/batches; existing root callers still use synchronous wrappers |
-| Workspace resolution (synchronous compatibility entries) | WorkspaceResolution | `verter_workspace/src/resolution_flights.rs` | DISPATCH: host loading, analysis-stage dependencies and shared resolver import/route demands; META: metadata's import traversal; COMPILE: hydration and compile traversal | `WorkspaceRead::begin_resolution` / `begin_project_resolution` transfer retained phase work and register owned flight/publication readiness; traversal callers still synchronous |
+| Workspace resolution (synchronous compatibility entries) | WorkspaceResolution | `verter_workspace/src/resolution_flights.rs` | DISPATCH: host loading, analysis-stage dependencies and shared resolver import/route demands; META: metadata's import traversal; COMPILE: hydration and compile traversal | `WorkspaceRead::begin_resolution` / `begin_project_resolution` transfer retained phase work and register owned flight/publication readiness; a compile root's blocker hydration and dependency verdict's walk consume it through `VerterHost::resolve_for_persistent_state_pollable`; other traversal callers still synchronous |
 | Host CPU pool batch (`HostBatchCoordinator::run_batch` → `HostCpuPool::install`) | CpuPool | `verter_session/src/host_batch_coordinator.rs` | `compile_many`, `get_component_meta_batch` | none; the batch topology itself is the executor's to replace |
 | Declaration-lowering synchronous entries (`acquire_lease*`, `run_leased*`) | `DeclLowering` | `verter_semantic_source/src/decl_lowering.rs` | IndexedReady materialization and the declaration body memo, from inside resolution and semantic evaluation | the `begin_*` handoffs above; callers still synchronous |
 

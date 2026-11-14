@@ -9,14 +9,21 @@
 //! - supplying exactly the named gaps is enough to compile, and the
 //!   answer then equals a fresh host's;
 //! - a payload lookup that ended early is incomplete, never missing;
-//! - a compile root whose blocker is loading answers `Pending` without
-//!   waiting and resumes to the synchronous entry's answer;
+//! - a compile root whose blocker route is resolving, or whose blocker is
+//!   loading, answers `Pending` without waiting and resumes to the
+//!   synchronous entry's answer;
+//! - an owned blocker-route resolution records the witness and owner edge
+//!   the synchronous one records, over a filesystem and an in-memory
+//!   workspace;
+//! - the dependency verdict's walk to a missing export enters no wait
+//!   inside a root's poll and decides what the in-place walk decides;
 //! - a refused blocker route does not stop the other blockers loading;
 //! - a source block hydration loads is in the input the compile captures.
 
+use std::future::Future;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::task::{Poll, Wake, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 
 use verter_compiler::compile_request::{
     CompileProduct, CompileRequest, FrameworkCompileRequest, IdeProductRequest,
@@ -25,6 +32,13 @@ use verter_compiler::compile_request::{
 use verter_execution::blocking::WaitProbe;
 
 use super::compile_blocker_hydration::BlockerHydration;
+use super::compile_inputs::SourceWitnessDemand;
+use super::vue_macro_dependency_diagnostics::{collect, collect_pollable};
+use crate::block_content::SuppliedBlockScope;
+use crate::host_manage::import_route_witness::ResolutionWitnessScope;
+use crate::host_test_audit::ResolutionCurrencyObservation;
+use crate::root_continuation::RootWorkSlot;
+use crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand;
 use crate::types::{
     CompileDependencyGap, CompileErrorPolicy, CompileProfile, CompileRequestFailure,
     CompileRequestResponse, CompiledProduct, DependencyResolution, DiagnosticsSnapshot,
@@ -441,10 +455,11 @@ fn drive_root(
 }
 
 /// A compile root whose template blocker is still loading answers
-/// `Pending` on its first poll without entering a wait, having begun that
-/// one load as an owned load and handed its driver a dispatch step. Once
-/// the read goes on, another thread drives the root to the answer the
-/// synchronous compile entry gives.
+/// `Pending` without entering a wait, once its template's route has
+/// resolved through the producer it handed out, having begun that one load
+/// as an owned load and handed its driver a dispatch step. Once the read
+/// goes on, another thread drives the root to the answer the synchronous
+/// compile entry gives.
 #[test]
 fn a_compile_root_whose_blocker_is_loading_stays_pending_and_resumes_to_the_synchronous_answer() {
     let files = [(VIEW, VIEW_SOURCE)];
@@ -466,7 +481,22 @@ fn a_compile_root_whose_blocker_is_loading_stays_pending_and_resumes_to_the_sync
         let _forbid = WaitProbe::forbid();
         root.poll(&waker)
     };
-    assert!(first.is_pending(), "the root waits for its loading blocker");
+    assert!(
+        first.is_pending(),
+        "the root waits for its template's route"
+    );
+    let resolution = root
+        .take_work()
+        .expect("the root hands out its route's resolution");
+    assert!(resolution.is_producer() && resolution.run());
+    let second = {
+        let _forbid = WaitProbe::forbid();
+        root.poll(&waker)
+    };
+    assert!(
+        second.is_pending(),
+        "the root waits for its loading blocker"
+    );
     assert_eq!(loads(&host.test_force.loads_begun) - before, 1);
     let work = root
         .take_work()
@@ -502,6 +532,279 @@ fn a_compile_root_whose_blocker_is_loading_stays_pending_and_resumes_to_the_sync
         .expect("the cold host compiles");
     assert!(runtime_code(&cold).contains("from-the-view"));
     assert_eq!(runtime_code(&answer), runtime_code(&cold));
+}
+
+/// The owner-edge observations `host` recorded for `APP`'s `specifier`
+/// since they were last taken.
+fn owner_edges(host: &VerterHost, specifier: &str) -> usize {
+    host.take_resolution_currency_observations()
+        .iter()
+        .filter(|observation| match observation {
+            ResolutionCurrencyObservation::OwnerEdgeRecomputed {
+                owner,
+                specifier: observed,
+                ..
+            }
+            | ResolutionCurrencyObservation::OwnerEdgeReused {
+                owner,
+                specifier: observed,
+                ..
+            } => owner == APP && observed == specifier,
+            _ => false,
+        })
+        .count()
+}
+
+/// A compile root whose template's route is still resolving answers
+/// `Pending` on its first poll without entering a wait, having handed its
+/// driver the resolution's producer: the route records no owner edge before
+/// that producer runs. Run on another thread, the producer resolves the
+/// route, and the root, driven there, resumes to the answer this host's
+/// synchronous compile entry gives.
+#[test]
+fn a_compile_root_whose_blocker_route_is_resolving_stays_pending_and_resumes_to_the_synchronous_answer(
+) {
+    let host = workspace_host(&[(VIEW, VIEW_SOURCE)]);
+    upsert(&host, APP, VIEW_APP_SOURCE);
+    let handed_out = |host: &VerterHost| {
+        host.test_force
+            .resolution_producers_handed_out
+            .load(Ordering::SeqCst)
+    };
+
+    host.begin_resolution_currency_observation();
+    let mut root = host.begin_compile_request(APP, request());
+    let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let first = {
+        let _forbid = WaitProbe::forbid();
+        root.poll(&waker)
+    };
+    assert!(
+        first.is_pending(),
+        "the root waits for its template's route"
+    );
+    assert_eq!(
+        owner_edges(&host, "./view.html"),
+        0,
+        "the route is not resolved inside the root's poll"
+    );
+    assert_eq!(handed_out(&host), 1);
+    let resolution = root
+        .take_work()
+        .expect("the root hands out its route's resolution");
+    assert!(
+        resolution.is_producer(),
+        "a resolving route needs its resolution's producer run"
+    );
+
+    let answer = std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                assert!(resolution.run(), "the resolution's producer runs");
+                drive_root(root)
+            })
+            .join()
+            .expect("the root resumes on another thread")
+    })
+    .expect("the resumed root compiles");
+    assert_ne!(
+        owner_edges(&host, "./view.html"),
+        0,
+        "the resumed root records the route's owner edge"
+    );
+
+    // A block source's map label names the host's own revision of it, so
+    // the answer is compared with this host's synchronous one.
+    let synchronous = host
+        .compile_request(APP, request())
+        .expect("the synchronous route compiles");
+    assert_eq!(rendered(&answer), rendered(&synchronous));
+    assert!(runtime_code(&answer).contains("from-the-view"));
+}
+
+/// What one blocker-route resolution recorded: its target, the witness it
+/// recorded into the scope around it, and its owner-edge observations.
+type RouteRecord = (
+    verter_workspace::ResolutionPublication<String>,
+    Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
+    Vec<ResolutionCurrencyObservation>,
+);
+
+/// Resolve `importer`'s `./types` as a macro type blocker route, through
+/// the owned entry or the synchronous one, and record what it recorded.
+/// The owned entry is polled under a forbidding probe, and the producer it
+/// hands out runs between polls.
+fn blocker_route_record(host: &VerterHost, importer: &str, owned: bool) -> RouteRecord {
+    let context = verter_session_query::resolution::ResolutionContext {
+        phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+        kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
+    };
+    host.begin_resolution_currency_observation();
+    let scope = ResolutionWitnessScope::enter();
+    let publication = if owned {
+        let work = RootWorkSlot::new();
+        let mut resolution = std::pin::pin!(
+            host.resolve_for_persistent_state_pollable(importer, "./types", context, &work)
+        );
+        loop {
+            let polled = {
+                let _forbid = WaitProbe::forbid();
+                resolution
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+            };
+            if let Poll::Ready(publication) = polled {
+                break publication;
+            }
+            let producer = work
+                .take()
+                .expect("a pending resolution hands out its producer");
+            assert!(producer.is_producer() && producer.run());
+        }
+    } else {
+        host.resolve_for_persistent_state(importer, "./types", context)
+    };
+    (
+        publication.map_result(|resolution| resolution.source_id),
+        scope.collected(),
+        host.take_resolution_currency_observations(),
+    )
+}
+
+/// A blocker route resolved through the owned handoff answers what the
+/// synchronous entry answers and records the same witness and owner edge,
+/// over a filesystem workspace and an in-memory one.
+#[test]
+fn a_pollable_blocker_route_records_the_same_witness_and_owner_edge_as_the_synchronous_one() {
+    let check = |make_host: &dyn Fn() -> VerterHost, importer: &str| {
+        // One host, so both resolve under its own session population.
+        let host = make_host();
+        let synchronous = blocker_route_record(&host, importer, false);
+        let owned = blocker_route_record(&host, importer, true);
+        assert_eq!(owned, synchronous);
+        let (publication, witness, observations) = synchronous;
+        let target = publication.into_delivered().flatten();
+        assert!(
+            target
+                .as_deref()
+                .is_some_and(|target| target.ends_with("/src/types.ts")),
+            "the route resolves to the types module: {target:?}"
+        );
+        assert!(!witness.is_empty(), "the resolution records its witness");
+        assert!(
+            !observations.is_empty(),
+            "the resolution records its owner edge"
+        );
+    };
+
+    check(
+        &|| {
+            let host = workspace_host(&[(TYPES, TYPES_SOURCE)]);
+            upsert(&host, APP, TYPES_APP_SOURCE);
+            host
+        },
+        APP,
+    );
+
+    let root = verter_test_support::unique_temp_dir("pollable_blocker_route");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).expect("the fixture directory is created");
+    std::fs::write(root.join("src/types.ts"), TYPES_SOURCE).expect("the types module is written");
+    std::fs::write(root.join("src/App.vue"), TYPES_APP_SOURCE).expect("the component is written");
+    let canonical = |path: &str| root.join(path).to_string_lossy().replace('\\', "/");
+    let app = canonical("src/App.vue");
+    check(
+        &|| {
+            let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(
+                verter_workspace::FilesystemOptions::default(),
+            ));
+            let host = VerterHost::new(HostConfig::default(), workspace);
+            upsert(&host, &app, TYPES_APP_SOURCE);
+            host
+        },
+        &app,
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The dependency verdict's walk to a missing export, run as a root's
+/// computation, enters no wait inside its polls: the route to the types
+/// module resolves through a handed-out producer, and the module, which
+/// nobody has loaded, is read through an owned load the walk suspends on
+/// while its read is held. The verdict is the one the in-place walk gives
+/// over the same inputs: the type is proved absent.
+#[test]
+fn the_missing_dependency_walk_enters_no_wait_inside_a_root_poll() {
+    let source = TYPES_APP_SOURCE.replace("{ Props }", "{ Missing as Props }");
+    let compiled = strict_host();
+    upsert(&compiled, TYPES, TYPES_SOURCE);
+    upsert(&compiled, APP, &source);
+    let snapshot = compiled
+        .capture_compile_input(
+            APP,
+            SuppliedBlockScope::Unprofiled,
+            BlockerHydration::Complete,
+            SourceWitnessDemand::Skip,
+        )
+        .expect("the component is captured")
+        .input;
+    let output = compiled
+        .produce_vue_macro_codegen(APP, VueMacroCodegenDemand::Runtime)
+        .expect("the macro bundle is produced");
+    assert!(
+        !output.dependency_failures.is_empty(),
+        "the imported type is missing"
+    );
+
+    let walking = workspace_host(&[(TYPES, TYPES_SOURCE)]);
+    let gate = Arc::clone(&walking.test_force.source_load_gate);
+    gate.hold(TYPES);
+    let mut held = HeldRead(Some(&*gate));
+    let work = RootWorkSlot::new();
+    let mut walk = Box::pin(collect_pollable(&walking, &snapshot, &output, &[], &work));
+    let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let mut held_load_pending = false;
+    let verdict = loop {
+        let polled = {
+            let _forbid = WaitProbe::forbid();
+            walk.as_mut().poll(&mut Context::from_waker(&waker))
+        };
+        if let Poll::Ready(verdict) = polled {
+            break verdict;
+        }
+        match work.take() {
+            Some(producer) if producer.is_producer() => assert!(producer.run()),
+            Some(dispatch) => {
+                if !held_load_pending {
+                    held_load_pending = true;
+                    assert_eq!(walking.test_force.loads_begun.load(Ordering::SeqCst), 1);
+                    held.release();
+                }
+                if !dispatch.run() {
+                    std::thread::park();
+                }
+            }
+            None => std::thread::park(),
+        }
+    };
+    drop(walk);
+    assert!(
+        held_load_pending,
+        "the walk suspended on the types module's owned load"
+    );
+    assert_eq!(
+        walking
+            .test_force
+            .blocking_loads_begun
+            .load(Ordering::SeqCst),
+        0
+    );
+
+    let in_place = workspace_host(&[(TYPES, TYPES_SOURCE)]);
+    let expected = collect(&in_place, &snapshot, &output, &[]);
+    assert_eq!(verdict, expected);
+    assert_eq!(expected.diagnostics.len(), 1, "{expected:?}");
+    assert_eq!(expected.incomplete, None, "the type is proved absent");
 }
 
 /// Clears the forced route refusal when the test ends, however it ends.

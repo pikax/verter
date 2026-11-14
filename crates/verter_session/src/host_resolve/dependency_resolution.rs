@@ -231,6 +231,26 @@ impl VerterHost {
         self.resolve_dependency_lane(None, owner_canonical, import_source, kind)
     }
 
+    /// [`Self::resolve_loaded_dependency_canonical`] as a pollable
+    /// computation: the lane resolves through
+    /// [`Self::resolve_for_persistent_state_pollable`], handing the driver
+    /// its producer through `work`.
+    pub(crate) async fn resolve_loaded_dependency_canonical_pollable<'h>(
+        &'h self,
+        owner_canonical: &str,
+        import_source: &str,
+        kind: verter_session_query::resolution::ResolveRequestKind,
+        work: &crate::root_continuation::RootWorkSlot<'h>,
+    ) -> verter_workspace::ResolutionPublication<String> {
+        let ctx = verter_session_query::resolution::ResolutionContext {
+            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+            kind,
+        };
+        self.resolve_for_persistent_state_pollable(owner_canonical, import_source, ctx, work)
+            .await
+            .map_result(|resolution| resolution.source_id)
+    }
+
     pub(crate) fn resolve_type_dependency_canonical(
         &self,
         owner_canonical: &str,
@@ -244,7 +264,7 @@ impl VerterHost {
     ///
     /// `TypeImport` first; with no target, the `EsmImport` fallback; either
     /// delivered target, admitted or unretained, normalized to its
-    /// declaration companion ([`Self::normalize_type_target`]). A refusal on any lane is
+    /// declaration companion ([`Self::type_route_policy`]). A refusal on any lane is
     /// the answer — never a "not found". Every lane resolves through the
     /// SAME snapshot, so an overlay view never mixes its own answer with a
     /// workspace one, and there is no second policy for overlays to drift
@@ -275,6 +295,50 @@ impl VerterHost {
         import_source: &str,
         lanes: Option<&TypeRouteLanes>,
     ) -> verter_workspace::ResolutionPublication<String> {
+        let policy = self.type_route_policy(import_source, |specifier, kind| {
+            let answer = self.request_lane(overlay, owner_canonical, &specifier, kind, lanes);
+            std::future::ready(answer)
+        });
+        verter_execution::blocking::complete_now(std::pin::pin!(policy))
+    }
+
+    /// [`Self::resolve_type_dependency_canonical`] as a pollable
+    /// computation: the same policy, each lane resolved through
+    /// [`Self::resolve_loaded_dependency_canonical_pollable`], so a pending
+    /// lane hands the driver its producer through `work`.
+    pub(crate) async fn resolve_type_dependency_canonical_pollable<'h>(
+        &'h self,
+        owner_canonical: &str,
+        import_source: &str,
+        work: &crate::root_continuation::RootWorkSlot<'h>,
+    ) -> verter_workspace::ResolutionPublication<String> {
+        self.type_route_policy(import_source, move |specifier, kind| async move {
+            self.resolve_loaded_dependency_canonical_pollable(
+                owner_canonical,
+                &specifier,
+                kind,
+                work,
+            )
+            .await
+        })
+        .await
+    }
+
+    /// The type-route policy over `lane`, which answers one lane — a
+    /// specifier under one request kind — of the importer the policy runs
+    /// for: `TypeImport` first; with no target, the `EsmImport` fallback;
+    /// either delivered target normalized to its declaration companion
+    /// through its own `TypeImport` lane.
+    async fn type_route_policy<Lane, Answer>(
+        &self,
+        import_source: &str,
+        mut lane: Lane,
+    ) -> verter_workspace::ResolutionPublication<String>
+    where
+        Lane: FnMut(String, verter_session_query::resolution::ResolveRequestKind) -> Answer,
+        Answer: std::future::Future<Output = verter_workspace::ResolutionPublication<String>>,
+    {
+        use verter_session_query::resolution::ResolveRequestKind;
         #[cfg(test)]
         if self
             .test_force
@@ -290,43 +354,26 @@ impl VerterHost {
         // A miss falls through to the runtime lane; a refusal is the
         // answer. A lane answered unretained leaves every answer derived
         // from it unretained.
-        let target = self
-            .request_lane(
-                overlay,
-                owner_canonical,
-                import_source,
-                verter_session_query::resolution::ResolveRequestKind::TypeImport,
-                lanes,
-            )
-            .or_else_publication(|| {
-                self.request_lane(
-                    overlay,
-                    owner_canonical,
-                    import_source,
-                    verter_session_query::resolution::ResolveRequestKind::EsmImport,
-                    lanes,
-                )
-            });
-        self.normalize_type_target(overlay, owner_canonical, target, lanes)
-    }
-
-    fn normalize_type_target(
-        &self,
-        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
-        owner_canonical: &str,
-        target: verter_workspace::ResolutionPublication<String>,
-        lanes: Option<&TypeRouteLanes>,
-    ) -> verter_workspace::ResolutionPublication<String> {
+        let typed = lane(import_source.to_owned(), ResolveRequestKind::TypeImport).await;
+        let target = if typed.is_none() {
+            let runtime = lane(import_source.to_owned(), ResolveRequestKind::EsmImport).await;
+            typed.or_else_publication(|| runtime)
+        } else {
+            typed
+        };
         let Some(Some(runtime_target)) = target.delivered().map(|result| result.cloned()) else {
             return target;
         };
-        let normalized = self.request_lane(
-            overlay,
-            owner_canonical,
-            &runtime_target,
-            verter_session_query::resolution::ResolveRequestKind::TypeImport,
-            lanes,
-        );
+        let normalized = lane(runtime_target, ResolveRequestKind::TypeImport).await;
+        Self::normalized_type_target(target, normalized)
+    }
+
+    /// A delivered type-route `target` after its declaration-companion lane
+    /// answered `normalized`.
+    fn normalized_type_target(
+        target: verter_workspace::ResolutionPublication<String>,
+        normalized: verter_workspace::ResolutionPublication<String>,
+    ) -> verter_workspace::ResolutionPublication<String> {
         match normalized {
             verter_workspace::ResolutionPublication::Refused(refusal) => {
                 verter_workspace::ResolutionPublication::Refused(refusal)

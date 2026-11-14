@@ -24,6 +24,8 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use verter_workspace::resolution_handoff::ResolutionError;
+
 use crate::id::canonicalize_id;
 #[cfg(feature = "semantic-observe")]
 use crate::meta_provenance::MetaProvenanceSnapshot;
@@ -348,12 +350,87 @@ impl VerterHost {
         import_source: &str,
         ctx: verter_session_query::resolution::ResolutionContext,
     ) -> verter_workspace::ResolutionPublication {
-        let publication = self
-            .resolve_import_outcome_in(overlay, parent_canonical_id, import_source, ctx)
-            .into_publication();
-        crate::host_manage::import_route_witness::record_resolution_witness(&publication);
-        crate::host_manage::import_route_witness::note_unretained_resolution(&publication);
-        publication
+        admit_persistent_resolution(self.resolve_import_outcome_in(
+            overlay,
+            parent_canonical_id,
+            import_source,
+            ctx,
+        ))
+    }
+
+    /// [`Self::resolve_for_persistent_state`] as a pollable computation,
+    /// run as the execution task installed on the polling thread.
+    ///
+    /// It takes the importer's route as the synchronous entry does, then
+    /// resolves through the workspace's owned handoff
+    /// ([`verter_workspace::WorkspaceRead::begin_resolution`]): while the
+    /// resolution is pending, it hands the driver the resolution's producer
+    /// through `work` and returns `Pending`, so the resolution never runs
+    /// inside the poll. Its answer records the same owner edge and witness
+    /// the synchronous entry records. A workspace without the owned
+    /// protocol answers in place, as its synchronous entry does.
+    pub(crate) async fn resolve_for_persistent_state_pollable<'h>(
+        &'h self,
+        parent_canonical_id: &str,
+        import_source: &str,
+        ctx: verter_session_query::resolution::ResolutionContext,
+        work: &crate::root_continuation::RootWorkSlot<'h>,
+    ) -> verter_workspace::ResolutionPublication {
+        let route = self.import_resolution_route(parent_canonical_id);
+        let outcome = match self
+            .resolve_on_route_owned(&route, import_source, ctx, work)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(ResolutionError::Unsupported) => route.resolve_in_place(None, import_source, ctx),
+            Err(stopped) => stopped.into_refused_outcome(),
+        };
+        admit_persistent_resolution(self.observed_resolution(&route, import_source, outcome))
+    }
+
+    /// Resolve `import_source` on `route` through the workspace's owned
+    /// handoff, handing each producer it transfers to the driver.
+    async fn resolve_on_route_owned<'h>(
+        &'h self,
+        route: &ImportResolutionRoute,
+        import_source: &str,
+        ctx: verter_session_query::resolution::ResolutionContext,
+        work: &crate::root_continuation::RootWorkSlot<'h>,
+    ) -> Result<verter_workspace::ResolutionOutcome, ResolutionError> {
+        use std::task::Poll;
+        use verter_workspace::resolution_handoff::{ResolutionRequest, ResolutionStep};
+        let waiter = verter_execution::tasks::ExecutionScope::current(&self.task_registry)
+            .unwrap_or_else(|| self.task_registry.register_task());
+        let stop = self.cooperative_drive.cancellation().clone();
+        let workspace = Arc::clone(&route.workspace) as Arc<dyn verter_workspace::WorkspaceRead>;
+        let mut resolution = workspace.begin_resolution(
+            ResolutionRequest {
+                importer: route.importer.to_string(),
+                specifier: import_source.to_owned(),
+                context: ctx,
+                published: None,
+                overlay: None,
+                project: route.owner.clone(),
+            },
+            waiter,
+            stop,
+        );
+        std::future::poll_fn(|cx| match resolution.poll(cx.waker()) {
+            Poll::Ready(Ok(ResolutionStep::Produce(producer))) => {
+                #[cfg(test)]
+                self.test_force
+                    .resolution_producers_handed_out
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                work.offer(crate::root_continuation::RootWork::produce(move || {
+                    run_resolution_producer(producer);
+                }));
+                Poll::Pending
+            }
+            Poll::Ready(Ok(ResolutionStep::Value(outcome))) => Poll::Ready(Ok(outcome)),
+            Poll::Ready(Err(stopped)) => Poll::Ready(Err(stopped)),
+            Poll::Pending => Poll::Pending,
+        })
+        .await
     }
 
     fn resolve_import_outcome_in(
@@ -363,6 +440,31 @@ impl VerterHost {
         import_source: &str,
         ctx: verter_session_query::resolution::ResolutionContext,
     ) -> verter_workspace::ResolutionOutcome {
+        let route = self.import_resolution_route(parent_canonical_id);
+        let outcome = route.resolve_in_place(overlay, import_source, ctx);
+        self.observed_resolution(&route, import_source, outcome)
+    }
+
+    /// `outcome`, after recording its owner edge onto the host's test
+    /// audit: the step every resolution entry ends with.
+    fn observed_resolution(
+        &self,
+        route: &ImportResolutionRoute,
+        import_source: &str,
+        outcome: verter_workspace::ResolutionOutcome,
+    ) -> verter_workspace::ResolutionOutcome {
+        #[cfg(test)]
+        self.observe_owner_edge_outcome(route.importer.as_ref(), import_source, &outcome);
+        #[cfg(not(test))]
+        let _ = (route, import_source);
+        outcome
+    }
+
+    /// Where `parent_canonical_id`'s imports resolve: the importer they
+    /// resolve as, and the configured program that owns it, after settling
+    /// the configured programs that decide that ownership. Every resolution
+    /// entry takes its route here, synchronous or owned.
+    fn import_resolution_route(&self, parent_canonical_id: &str) -> ImportResolutionRoute {
         // Typeinfo scratch files inline the active request scope and therefore
         // resolve their synthetic imports in that real scope's project
         // context. The request context supplies the actual published-project
@@ -412,27 +514,11 @@ impl VerterHost {
                 _ => None,
             }
         });
-        let outcome = match (reachable_owner, overlay) {
-            (Some(owner), overlay) => workspace.resolve_import_from_project_outcome(
-                &owner,
-                overlay,
-                importer.as_ref(),
-                import_source,
-                ctx,
-            ),
-            (None, None) => self
-                .ws()
-                .resolve_import_outcome(importer.as_ref(), import_source, ctx),
-            (None, Some(overlay)) => self.ws().resolve_import_outcome_with_overlay(
-                overlay,
-                importer.as_ref(),
-                import_source,
-                ctx,
-            ),
-        };
-        #[cfg(test)]
-        self.observe_owner_edge_outcome(importer.as_ref(), import_source, &outcome);
-        outcome
+        ImportResolutionRoute {
+            workspace,
+            importer,
+            owner: reachable_owner,
+        }
     }
 
     /// The session view's resolution-visible overlay: its upserted
@@ -1493,6 +1579,78 @@ impl VerterHost {
             alias_map.insert(alias.clone(), canonical_id.to_string());
         }
     }
+}
+
+/// Where one importer's imports resolve
+/// ([`VerterHost::import_resolution_route`]).
+struct ImportResolutionRoute {
+    /// The workspace the route was taken in.
+    workspace: Arc<dyn verter_workspace::WorkspaceAccess>,
+    /// The importer the imports resolve as.
+    importer: Arc<str>,
+    /// The configured program the importer resolves in, if one owns it.
+    owner: Option<verter_session_query::resolution::ProjectOwnership>,
+}
+
+impl ImportResolutionRoute {
+    /// Resolve `import_source` on this route on the calling thread, against
+    /// the workspace's own view (`None`) or a request overlay's.
+    fn resolve_in_place(
+        &self,
+        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
+        import_source: &str,
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> verter_workspace::ResolutionOutcome {
+        let importer = self.importer.as_ref();
+        match (&self.owner, overlay) {
+            (Some(owner), overlay) => self.workspace.resolve_import_from_project_outcome(
+                owner,
+                overlay,
+                importer,
+                import_source,
+                ctx,
+            ),
+            (None, None) => self
+                .workspace
+                .resolve_import_outcome(importer, import_source, ctx),
+            (None, Some(overlay)) => self.workspace.resolve_import_outcome_with_overlay(
+                overlay,
+                importer,
+                import_source,
+                ctx,
+            ),
+        }
+    }
+}
+
+/// `outcome` at a boundary that may retain its target: the publication, after
+/// recording its observations into the open witness scopes and marking an
+/// unretained answer's enclosing computes non-cacheable.
+fn admit_persistent_resolution(
+    outcome: verter_workspace::ResolutionOutcome,
+) -> verter_workspace::ResolutionPublication {
+    let publication = outcome.into_publication();
+    crate::host_manage::import_route_witness::record_resolution_witness(&publication);
+    crate::host_manage::import_route_witness::note_unretained_resolution(&publication);
+    publication
+}
+
+/// Run a resolution producer a root handed out to its end, on this thread:
+/// each slice it transfers runs here, and while it waits on work it does
+/// not own (another demand's flight, a held publication), this thread
+/// waits with it.
+fn run_resolution_producer(mut producer: verter_workspace::resolution_handoff::ResolutionProducer) {
+    use std::task::Poll;
+    verter_execution::blocking::block_on_when_pending(
+        verter_execution::blocking::WaitFamily::WorkspaceResolution,
+        |waker| loop {
+            match producer.poll(waker) {
+                Poll::Ready(Some(slice)) => slice.run(),
+                Poll::Ready(None) => return Poll::Ready(()),
+                Poll::Pending => return Poll::Pending,
+            }
+        },
+    );
 }
 
 /// A host release boundary ([`VerterHost::release_completion`]).

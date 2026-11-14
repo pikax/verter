@@ -187,8 +187,42 @@ fn compile_owner(host: &VerterHost) -> Vec<String> {
 /// What the work a compile root handed its driver reached, by kind.
 #[derive(Default)]
 struct HandedOut {
+    /// Macro bundle producers.
     producers: usize,
+    /// Blocker route resolution producers.
+    route_producers: usize,
     dispatch_steps: usize,
+}
+
+/// How many resolution producers `host`'s compile roots have handed out.
+/// A producer handed out by a poll that advanced this count is a blocker
+/// route's resolution; any other is the root's macro bundle producer.
+fn resolutions_handed_out(host: &VerterHost) -> usize {
+    host.test_force
+        .resolution_producers_handed_out
+        .load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Poll `root` on this thread, running the resolution producers its
+/// blocker routes hand out, until it waits on something other than a route.
+/// Every poll is `Pending` and enters no wait.
+fn poll_past_route_resolutions(host: &VerterHost, root: &mut crate::CompileRequestRoot<'_>) {
+    let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    loop {
+        let before = resolutions_handed_out(host);
+        let polled = {
+            let _forbid = WaitProbe::forbid();
+            root.poll(&waker)
+        };
+        assert!(polled.is_pending(), "the root suspends");
+        if resolutions_handed_out(host) == before {
+            return;
+        }
+        let resolution = root
+            .take_work()
+            .expect("a route's resolution producer is handed out");
+        assert!(resolution.is_producer() && resolution.run());
+    }
 }
 
 /// Drive the owner's compile root on this thread: every poll runs under
@@ -202,6 +236,7 @@ fn compile_owner_through_root(
     let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
     let mut handed = HandedOut::default();
     loop {
+        let before = resolutions_handed_out(host);
         let polled = {
             let _probe = probe();
             root.poll(&waker)
@@ -211,7 +246,11 @@ fn compile_owner_through_root(
         }
         match root.take_work() {
             Some(work) if work.is_producer() => {
-                handed.producers += 1;
+                if resolutions_handed_out(host) > before {
+                    handed.route_producers += 1;
+                } else {
+                    handed.producers += 1;
+                }
                 std::thread::scope(|scope| {
                     scope
                         .spawn(move || work.run())
@@ -387,7 +426,8 @@ fn root_continuations_mixed_component_meta_inventory() {
 /// Its macro bundle's scoped cache node elects it producer, and the root
 /// hands that producer to its driver instead of running it, cold or warm;
 /// the producer's own macro traversal runs where the driver runs it. The
-/// answer is the synchronous entry's.
+/// route to the props module resolves the same way, through the producer
+/// of its resolution. The answer is the synchronous entry's.
 #[test]
 fn root_continuations_compile_root_hands_its_producer_to_its_driver() {
     let host = host();
@@ -396,13 +436,15 @@ fn root_continuations_compile_root_hands_its_producer_to_its_driver() {
     assert_eq!(cold_code, warm_code);
     assert!(cold_code.iter().any(|code| code.contains("caption")));
     assert_eq!((cold.producers, warm.producers), (1, 1));
+    assert_eq!((cold.route_producers, warm.route_producers), (1, 1));
     assert_eq!(compile_owner(&host), cold_code);
 }
 
 /// A driver that advances the work a compile root hands out by polling it,
 /// rather than running it, gets the answer the synchronous entry gives: the
 /// polled producer runs its body, answers that it progressed, and the root
-/// then answers from the bundle it produced.
+/// then answers from the bundle it produced. A route resolution's producer
+/// is polled the same way.
 #[test]
 fn a_driver_that_polls_handed_out_producer_work_gets_the_driven_answer() {
     let host = host();
@@ -411,6 +453,7 @@ fn a_driver_that_polls_handed_out_producer_work_gets_the_driven_answer() {
     let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
     let mut producers_polled = 0;
     let answer = loop {
+        let before = resolutions_handed_out(&host);
         let polled = {
             let _forbid = WaitProbe::forbid();
             root.poll(&waker)
@@ -422,7 +465,7 @@ fn a_driver_that_polls_handed_out_producer_work_gets_the_driven_answer() {
             std::thread::park();
             continue;
         };
-        let producer = work.is_producer();
+        let producer = work.is_producer() && resolutions_handed_out(&host) == before;
         let progressed = std::thread::scope(|scope| {
             scope
                 .spawn(|| {
@@ -462,16 +505,20 @@ fn root_continuations_compile_root_suspends_on_another_roots_producer() {
     let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
     let mut producing = host.begin_compile_request(OWNER, owner_compile_request());
     let producer = loop {
+        let before = resolutions_handed_out(&host);
         assert!(producing.poll(&waker).is_pending());
         match producing.take_work() {
-            Some(work) if work.is_producer() => break work,
-            Some(dispatch) => {
-                let _ = dispatch.run();
+            Some(work) if work.is_producer() && resolutions_handed_out(&host) == before => {
+                break work
+            }
+            Some(other) => {
+                let _ = other.run();
             }
             None => std::thread::park(),
         }
     };
-    let following = host.begin_compile_request(OWNER, owner_compile_request());
+    let mut following = host.begin_compile_request(OWNER, owner_compile_request());
+    poll_past_route_resolutions(&host, &mut following);
     let answer = pending_before_release(
         POLL_DEADLINE,
         following,
@@ -513,11 +560,14 @@ fn root_continuations_cancelling_a_suspended_follower_spares_its_producer() {
         host.begin_compile_request(OWNER, owner_compile_request())
     };
     let producer = loop {
+        let before = resolutions_handed_out(&host);
         assert!(producing.poll(&unpark).is_pending());
         match producing.take_work() {
-            Some(work) if work.is_producer() => break work,
-            Some(dispatch) => {
-                let _ = dispatch.run();
+            Some(work) if work.is_producer() && resolutions_handed_out(&host) == before => {
+                break work
+            }
+            Some(other) => {
+                let _ = other.run();
             }
             None => std::thread::park(),
         }
@@ -532,6 +582,7 @@ fn root_continuations_cancelling_a_suspended_follower_spares_its_producer() {
             cancel,
         )
     };
+    poll_past_route_resolutions(&host, &mut following);
     let (wake_tx, wake_rx) = mpsc::channel::<()>();
     let follower = Waker::from(Arc::new(ChannelWaker(parking_lot::Mutex::new(wake_tx))));
     let first = {
@@ -586,16 +637,20 @@ fn root_continuations_a_reset_answers_a_suspended_follower_root() {
     let unpark = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
     let mut producing = host.begin_compile_request(OWNER, owner_compile_request());
     let producer = loop {
+        let before = resolutions_handed_out(&host);
         assert!(producing.poll(&unpark).is_pending());
         match producing.take_work() {
-            Some(work) if work.is_producer() => break work,
-            Some(dispatch) => {
-                let _ = dispatch.run();
+            Some(work) if work.is_producer() && resolutions_handed_out(&host) == before => {
+                break work
+            }
+            Some(other) => {
+                let _ = other.run();
             }
             None => std::thread::park(),
         }
     };
     let mut following = host.begin_compile_request(OWNER, owner_compile_request());
+    poll_past_route_resolutions(&host, &mut following);
     let (wake_tx, wake_rx) = mpsc::channel::<()>();
     let follower = Waker::from(Arc::new(ChannelWaker(parking_lot::Mutex::new(wake_tx))));
     assert!(following.poll(&follower).is_pending());
@@ -1136,8 +1191,10 @@ fn drive_on_one_thread(mut roots: Vec<crate::CompileRequestRoot<'_>>) -> DriverR
 }
 
 /// One thread drives three compile roots — two of the same request and one
-/// of the child component — begun before driving starts, with no other
-/// pool: every poll answers or suspends without entering a wait, each
+/// of the child component — begun, and polled past their blocker routes'
+/// resolutions, before driving starts, with no other pool: each owner root
+/// resolves its props route through a producer of its own, and then every
+/// poll answers or suspends without entering a wait, each
 /// shared macro bundle is produced once, by the work its first root hands
 /// out while the other root of the request waits suspended, and every
 /// answer is the synchronous entry's. A follower's wake arrives while the
@@ -1162,12 +1219,21 @@ fn root_continuations_one_thread_drives_several_suspended_roots() {
                 .expect("the child compiles"),
         ),
     );
-    let roots = vec![
-        host.begin_compile_request(OWNER, owner_compile_request()),
-        host.begin_compile_request(OWNER, owner_compile_request()),
-        host.begin_compile_request(CHILD, owner_compile_request()),
-    ];
-    let run = drive_on_one_thread(roots);
+    let mut producing = host.begin_compile_request(OWNER, owner_compile_request());
+    let mut following = host.begin_compile_request(OWNER, owner_compile_request());
+    let mut child_root = host.begin_compile_request(CHILD, owner_compile_request());
+    let resolutions = resolutions_handed_out(&host);
+    for root in [&mut producing, &mut following, &mut child_root] {
+        poll_past_route_resolutions(&host, root);
+    }
+    assert_eq!(
+        resolutions_handed_out(&host) - resolutions,
+        2,
+        "each owner root resolves its props route through a producer of its own"
+    );
+    // The follower is polled first, so the work its sibling hands out wakes
+    // it while the driver runs that work.
+    let run = drive_on_one_thread(vec![following, producing, child_root]);
     assert_eq!(run.answers, vec![owner.clone(), owner, child]);
     assert_eq!(run.producers, 2, "one producer per distinct macro bundle");
     assert!(run.polls > 3, "a root suspended and was resumed");
