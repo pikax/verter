@@ -325,7 +325,7 @@ fn read_return(
 ) -> Result<SemanticNodeId, IncompleteReason> {
     let store = d.graph().store().signature_store();
     match d.read_signature_result(
-        store,
+        &store.bind_current(),
         candidate.signature,
         call,
         ResultDemand::Return,
@@ -619,7 +619,7 @@ fn enumeration_forces_no_body_and_an_unrecoverable_body_effect_forces_none() {
 
     let call = identity_substitution(store, candidate);
     let effects = d.read_signature_result(
-        store,
+        &store.bind_current(),
         candidate.signature,
         call,
         ResultDemand::Effects,

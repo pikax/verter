@@ -1144,8 +1144,11 @@ emits/slots/model projection), ordered intersection reductions
 (`ReduceIntersection`: each nested subgroup), overload sets
 (`ResolveOverloadSet`: the callee's
 `SignaturesOfType` list, then the `ReadSignatureResult` each composite
-candidate's node form applies, one at a time; a list a kernel-epoch
-replacement retired is read once more; with explicit type arguments, each
+candidate's node form applies, one at a time; the list is read once — a
+list a kernel-epoch replacement retired is read through the epoch it was
+published in, and a composite whose result read was named in a retired
+epoch is named again after one pass copies its descriptor into the current
+epoch; with explicit type arguments, each
 candidate of the settled list in turn through explicit instantiation,
 below, the ones that cannot take the arguments dropping) and apparent types (`ApparentType`:
 the anchor walk's signature lists of an object surface, the base's call and
@@ -1439,16 +1442,28 @@ are.
   completed is therefore forgotten and that one demand started again; the
   family that needed it keeps its stage, and a list retired before it
   completed is never kept.
-- **Reads named from retired handles are never consumed.** A composite
-  candidate's `ReadSignatureResult` is named from the descriptors of the
-  list it was pinned from. When a replacement retires that list while the
-  read waits, no answer to the read is an answer to the list: the build
-  reports it (`FamilyBuild::awaits_retired_read`), and either driver resumes
-  it with a rail-free retired answer instead of the read — the frame drops
-  the delivery unread, the in-place driver does not make the read — so the
-  stale read's incompleteness never taints the family. The list is then read
-  once more in the current epoch, as a retirement found at pinning is; a
-  second retirement leaves it unsettled.
+- **One epoch per computation; retired handles are rebound, never
+  re-read.** Every kernel computation holds one `EpochBinding` for its
+  whole life — a discovery walk the epoch current as it begins, a result
+  read the epoch its key names, a list the epoch its delivered value was
+  published in — and interns into it even after a replacement retires it.
+  A delivered list is pinned through its own lease, so a list retired
+  before or after it completed is read once. A composite candidate's
+  `ReadSignatureResult` is named in the list's epoch; when a replacement
+  retires that epoch while the read waits, the build reports it
+  (`FamilyBuild::awaits_retired_read`). A result forced before the
+  retirement is delivered and consumed where it was published (its own
+  lease). Any other answer is not consumed — the frame drops the delivery
+  unread, the in-place driver does not make the read — so the stale read's
+  incompleteness never taints the family; the list then copies its
+  unsettled composite descriptors into the current epoch in one pass
+  (`EpochRebind`, a metadata copy that reads no query and waits on
+  nothing) and names the read again. Each retirement costs one copy of
+  what is still unsettled; the list, the composites it settled and their
+  results are never read again. A walk whose epoch retired before it
+  published copies its found set into the current epoch; the identity
+  comparison of two sets read in different epochs copies the source's
+  candidate into the target's.
 - **Owned, exclusively advanced state.** `FamilyBuild` and `FamilyStep` are
   asserted `Send` and neither `Clone` nor `Copy`: a build is moved into each
   stage and out again, never shared between drivers. A polled root lends its
@@ -1472,14 +1487,20 @@ and `a_class_instance_surface_whose_declaring_file_is_loading_resumes_elsewhere_
 hold the scheduler source read of the file the family loads, and
 `a_family_released_or_cancelled_while_its_file_loads_leaves_nothing_open`
 drops or cancels each while it waits there.
-`completed_signature_list_is_revalidated_after_retirement` retires the
-kernel epoch once, as a list's build settles it and, separately, as a
-consumer holds the completed list to pin it, and requires an overload set
-over authored leaves, one over a composite and an apparent type to read
-what the synchronous entry reads with no replacement, each reading the
-retired list exactly once more;
-`an_overload_set_whose_list_retires_while_its_composite_result_is_held_reads_its_list_once_more`
-retires it while the composite's result is held.
+`a_signature_list_retired_before_its_consumer_reads_it_is_read_through_its_own_epoch`
+retires the kernel epoch once, as a list's build settles it and,
+separately, as a consumer holds the completed list to pin it, and requires
+an overload set over authored leaves, one over a composite and an apparent
+type to read what the synchronous entry reads with no replacement, each
+reading the list once, with the synchronous entry's discovery, matching and
+result work (counted by `discovery_nodes_walked`,
+`signature_positions_compared` and `signature_results_forced`) and one
+copy (`signature_rebinds`, `signature_descriptors_rebound`) for the
+composite;
+`an_overload_set_whose_list_retires_while_its_composite_result_is_held_rebinds_the_composite_and_reads_its_list_once`
+retires it once, and twice, while the composite's result is held;
+`a_composite_result_forced_before_its_epoch_retired_is_delivered_not_forced_again`
+retires it after the result was forced.
 `family_load_failure_is_terminal` polls a declaration lookup, a macro
 payload and a class instance and a class static surface whose file the
 workspace does not hold and requires a bounded answer equal to the
@@ -2121,9 +2142,8 @@ inventoried for conversion by its owner:
   argument's program expression evaluates in place), contextual candidate
   preparation below its signature lists (substitution, including its
   intersection and template-literal reductions, fixation, the lists a
-  composite candidate's signature results read, a list read under a
-  non-ambient scope or through an entry that admits its subject, and a
-  delivered list an epoch change retired before it was read), the
+  composite candidate's signature results read, and a list read under a
+  non-ambient scope or through an entry that admits its subject), the
   relations both applicability passes make (inside each
   relation), fixation, the post-fixation checks, the selected candidate's
   return (its declared recipe or its body's flow return), diagnostics,
@@ -2136,6 +2156,26 @@ inventoried for conversion by its owner:
 - a relation driven in place (inside an open obligation, a binding root,
   a re-discharge) and a relation a seam joined below a drive's root, which
   demand nothing first.
+
+Signature discovery and the kernel still read in place, inventoried for
+conversion:
+
+- the whole discovery walk and every read it makes: `SignaturesOfType`
+  builds in one step; the handles it publishes are safe to retain across
+  a suspension;
+- the kernel callbacks that reach the dispatch from inside matching and
+  union composition (`identical`, `intersect`, `map_binders`,
+  `forced_result`), in the walk's epoch;
+- a composite candidate's result forced by the in-place list readers
+  (`signature_nodes_of`), including for a contextual list delivered on a
+  frame: a result read in the list's own epoch, not a list read;
+- a list read under a non-ambient scope or through an admitting entry, and
+  the candidate list read after a missed overload set;
+- a retired value refused warm, by a joiner and by the request's kept
+  completions: a later reader recomputes it, no continuation replays;
+- a result read named in a retired epoch whose read was refused or failed
+  is named once more after its rebind: the driver's rail-free answer does
+  not say which, so a failed read costs one more attempt per retirement.
 
 The substitution walk suspends only at its template-literal reduction, and
 only where its holder forwards the read: an overload set with explicit

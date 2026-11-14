@@ -3149,8 +3149,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => unreachable!("a family frame resumes its own build"),
         };
         // A read named from kernel handles retired while the frame waited
-        // answers nothing: it is dropped unread, its rails and receipt never
-        // the build's, and the build reads its source again.
+        // answers only with a result forced before the retirement, which the
+        // build consumes where it was published. Anything else it read is
+        // dropped unread, its rails and receipt never the build's, and the
+        // build names its read again, rebound into the current epoch.
         let retired = family.awaits_retired_read(&self.continuation_stage());
         let mut delivery = Some((delivery, admitted));
         // The delivery is consumed where the build consumes its read: as
@@ -3158,7 +3160,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // stands in, under that evaluation's tracer and recording.
         let mut read = || {
             let (mut delivery, admitted) = delivery.take().expect("a delivery is read once");
-            if retired {
+            if retired
+                && !matches!(
+                    delivery.read.value,
+                    QueryResult::Value(SemanticQueryValue::SignatureResult(_))
+                )
+            {
                 drop(delivery);
                 return super::family_continuation::retired_read();
             }

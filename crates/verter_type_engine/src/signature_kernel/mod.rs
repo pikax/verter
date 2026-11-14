@@ -13,6 +13,7 @@ mod lifetime;
 mod positional;
 mod provenance;
 mod read_view;
+mod rebind;
 mod records;
 mod result;
 mod storage;
@@ -26,7 +27,9 @@ pub use discovery::{
     ParamInput, RestInput, ResultInput, SignatureInput,
 };
 #[allow(unused_imports)]
-pub use lifetime::{SignatureEpochLease, SignatureStore, StoreError, EPOCH_RECORD_CAP};
+pub use lifetime::{
+    EpochBinding, SignatureEpochLease, SignatureStore, StoreError, EPOCH_RECORD_CAP,
+};
 #[allow(unused_imports)]
 pub use positional::{
     tuple_inference_plan, MinArityFlags, PositionalMode, PositionalShape, ProjectedElement,
@@ -40,6 +43,8 @@ pub use provenance::{
 };
 #[allow(unused_imports)]
 pub use read_view::{BorrowedSet, ReadError, SemanticReadView};
+#[allow(unused_imports)]
+pub use rebind::EpochRebind;
 #[allow(unused_imports)]
 pub use records::{
     AppliedResult, AppliedResultId, BinderDeclaration, BinderSpace, BinderSpaceId, BodyLocatorId,
@@ -76,8 +81,17 @@ mod provenance_tests;
 #[cfg(test)]
 mod read_view_tests;
 #[cfg(test)]
+mod rebind_tests;
+#[cfg(test)]
 mod records_tests;
 #[cfg(test)]
 mod storage_tests;
 #[cfg(test)]
 mod substitution_tests;
+
+// A binding is one computation's epoch: moved with the computation that
+// holds it, never shared by copy, so two holders never disagree about which
+// epoch their records belong to. A rebind pass lives inside one call.
+static_assertions::assert_impl_all!(EpochBinding: Send);
+static_assertions::assert_not_impl_any!(EpochBinding: Clone, Copy);
+static_assertions::assert_not_impl_any!(EpochRebind<'static>: Clone, Copy);
