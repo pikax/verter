@@ -1359,6 +1359,7 @@
           "crates/verter_ffi/src/convert/string_helpers.rs",
           "crates/verter_ffi/src/convert/tests.rs",
           "crates/verter_ffi/src/convert/typeinfo.rs",
+          "crates/verter_ffi/src/typeinfo.rs",
           "crates/verter_napi/src/lib.rs",
           "crates/verter_napi/src/typeinfo.rs",
           "crates/verter_session/benches/projection_safety_bench.rs",

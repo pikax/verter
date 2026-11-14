@@ -11,10 +11,10 @@ use napi::{Error, Status};
 use napi_derive::napi;
 #[cfg(feature = "semantic-observe")]
 use serde::Deserialize;
-use serde::Serialize;
-use verter_protocol::types::{FfiComponentMeta, FfiComponentMetaResolution};
+use verter_ffi::component_meta::{encode_audit_bundle, encode_component_meta_payload, AuditBundle};
 #[cfg(feature = "semantic-observe")]
 use verter_session::component_meta_audit::assertions::RequestAuditRecordAssertions;
+#[cfg(feature = "semantic-observe")]
 use verter_session::component_meta_audit::RequestAuditRecord;
 use verter_session::component_meta_host::{
     ComponentMetaHost, ComponentMetaHostError, ComponentMetaSession as HostComponentMetaSession,
@@ -26,29 +26,6 @@ use crate::{
 
 fn meta_err(e: ComponentMetaHostError) -> Error {
     Error::new(Status::GenericFailure, e.to_string())
-}
-
-/// Shared encode function passed to session payload methods: consume the
-/// session-owned output envelope (all wire type lanes already materialized
-/// under the request-bound view) and encode the mechanical FFI projection.
-fn encode_meta_payload(output: verter_session::meta_resolve::ComponentMetaOutput) -> Vec<u8> {
-    let ffi = verter_ffi::convert::component_meta_output_to_ffi(output);
-    verter_protocol::component_meta::encode_component_meta_payload(&ffi)
-}
-
-/// JSON bundle emitted by `getComponentMetaWithAudit`. Three lanes:
-/// - `analysis`: FFI projection of `ComponentMetaAnalysis` — `FfiComponentMeta`
-///   already derives `Serialize` (camelCase).
-/// - `resolution`: FFI projection of `ResolvedComponentMetaState` —
-///   `FfiComponentMetaResolution` (camelCase).
-/// - `record`: `RequestAuditRecord` (ts-rs–generated type surface; u64/i64
-///   fields transport as decimal strings).
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AuditBundle {
-    analysis: FfiComponentMeta,
-    resolution: FfiComponentMetaResolution,
-    record: RequestAuditRecord,
 }
 
 #[cfg(feature = "semantic-observe")]
@@ -299,7 +276,7 @@ impl NapiMetaSession {
         let session = self.session()?;
         catch_panic(std::panic::AssertUnwindSafe(|| {
             let payload = session
-                .get_component_meta_payload(&canonical_or_alias, encode_meta_payload)
+                .get_component_meta_payload(&canonical_or_alias, encode_component_meta_payload)
                 .map_err(meta_err)?;
             Ok(payload.map(Buffer::from))
         }))?
@@ -330,7 +307,10 @@ impl NapiMetaSession {
         let session = self.session()?;
         catch_panic(std::panic::AssertUnwindSafe(|| {
             let payloads = session
-                .get_component_meta_batch_payloads(&canonicals_or_aliases, encode_meta_payload)
+                .get_component_meta_batch_payloads(
+                    &canonicals_or_aliases,
+                    encode_component_meta_payload,
+                )
                 .map_err(meta_err)?;
             Ok(payloads
                 .into_iter()
@@ -386,12 +366,8 @@ impl NapiMetaSession {
                 resolution: ffi_resolution,
                 record,
             };
-            let json = serde_json::to_vec(&bundle).map_err(|e| {
-                Error::new(
-                    Status::GenericFailure,
-                    format!("audit bundle serialization error: {e}"),
-                )
-            })?;
+            let json =
+                encode_audit_bundle(&bundle).map_err(|e| Error::new(Status::GenericFailure, e))?;
             Ok(Some(Buffer::from(json)))
         }))?
     }
@@ -500,7 +476,7 @@ impl NapiMetaSession {
         let session = self.session()?;
         catch_panic(std::panic::AssertUnwindSafe(|| {
             let payload = session
-                .get_component_meta_payload(&canonical_or_alias, encode_meta_payload)
+                .get_component_meta_payload(&canonical_or_alias, encode_component_meta_payload)
                 .map_err(meta_err)?;
             Ok(payload.map(Buffer::from))
         }))?

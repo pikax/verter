@@ -26,12 +26,14 @@ use std::panic::AssertUnwindSafe;
 
 use serde::{Deserialize, Serialize};
 use verter_compiler::compile_request::{CompileRequest, CompileRequestError};
+use verter_ffi::component_meta::AuditBundle;
 use verter_ffi::convert::*;
 use verter_ffi::types::*;
-use verter_protocol::types::{FfiComponentMeta, FfiComponentMetaResolution};
+use verter_protocol::types::FfiComponentMeta;
 use verter_session as host;
 #[cfg(feature = "semantic-observe")]
 use verter_session::component_meta_audit::assertions::RequestAuditRecordAssertions;
+#[cfg(feature = "semantic-observe")]
 use verter_session::component_meta_audit::RequestAuditRecord;
 use wasm_bindgen::prelude::*;
 
@@ -69,15 +71,6 @@ use audit::{
 use compile_request_response::{
     compile_request_failure_to_string, compile_request_response_to_wasm,
 };
-
-/// WASM audit bundle — mirror of the NAPI binding's bundle shape.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WasmAuditBundle {
-    analysis: FfiComponentMeta,
-    resolution: FfiComponentMetaResolution,
-    record: RequestAuditRecord,
-}
 
 #[cfg(feature = "semantic-observe")]
 /// Minimal decoder for `whyLoadedFromAuditJson` / `whyInstantiatedFromAuditJson`
@@ -1452,16 +1445,12 @@ impl WasmVerterHost {
         let envelope = crate::typeinfo::decode_type_info_graph_request(request)?;
         let host = std::sync::Arc::clone(&self.inner);
         catch_panic(AssertUnwindSafe(move || {
-            let (outcome, record) = host.type_info_with_audit(envelope).into_parts();
-            let response = match outcome {
-                Ok(response) => response,
-                Err(error) => crate::typeinfo::framework_error_response(error),
-            };
-            let response_bytes = crate::typeinfo::encode_type_info_graph_response(&response);
-            let audit_json = crate::typeinfo::encode_stored_audit_record(&record)?;
+            let (response, audit_record) =
+                verter_ffi::typeinfo::type_info_with_audit(&host, envelope)
+                    .map_err(|e| JsValue::from_str(&e))?;
             let result = crate::typeinfo::WasmFrameworkSurfaceResult {
-                response: response_bytes,
-                audit_record: audit_json,
+                response,
+                audit_record,
             };
             to_wasm_value(&result)
         }))?
@@ -2271,7 +2260,7 @@ impl WasmMetaSession {
                     "audited component-meta output carries no resolution sidecar",
                 ));
             };
-            let bundle = WasmAuditBundle {
+            let bundle = AuditBundle {
                 analysis: ffi,
                 resolution: ffi_resolution,
                 record,

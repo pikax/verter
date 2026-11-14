@@ -1,26 +1,15 @@
-//! Typed WASM helpers for the typeinfo host substrate (mirror of
-//! `crate::audit`).
-//!
-//! WASM consumers exchange JSON strings rather than `Buffer` blobs (the
-//! existing project convention — `serde_wasm_bindgen` performs the
-//! `JsValue` ↔ string boundary). The Rust-side substrate is identical
-//! to NAPI; only the encoding shape changes.
+//! WASM result types and error mapping for the shared typeinfo adapter.
 
-use prost::Message;
 use serde::Serialize;
-use verter_audit::RequestAuditRecord;
-use verter_protocol::typeinfo::graph::{
-    TypeInfoCapabilityHandshakeRequest, TypeInfoCapabilityHandshakeResponse, TypeInfoGraphRequest,
-    TypeInfoGraphResponse,
+pub(crate) use shared::{
+    encode_capability_handshake_response, project_resolved_root, split_resolve_outcome,
 };
-use verter_session::host_resolve_type_audit::TypeResolutionRequestError;
+use verter_ffi::typeinfo as shared;
+use verter_protocol::typeinfo::graph::{TypeInfoCapabilityHandshakeRequest, TypeInfoGraphRequest};
 use verter_type_engine::semantic_query::ProjectionMode;
-use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
 use verter_type_expr::TypeExpr;
 use wasm_bindgen::prelude::*;
 
-/// Response shape for `resolveSymbolWithAudit`: all fields are JSON
-/// strings.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WasmTypeInfoResolveResult {
@@ -35,93 +24,6 @@ pub(crate) struct WasmTypeInfoResolveResult {
     pub error: Option<String>,
 }
 
-/// Split a resolve / evaluate outcome into the resolved node's owning
-/// root (if any)
-/// and an optional dispatch-fault description. Mirrors
-/// `crate::typeinfo` on the NAPI side: a genuine dispatch fault is
-/// surfaced through the result DTO's `error` channel instead of being
-/// silently erased to a `None` node.
-pub(crate) fn split_resolve_outcome(
-    outcome: Result<Option<NodeRoot>, TypeResolutionRequestError>,
-) -> (Option<NodeRoot>, Option<String>) {
-    match outcome {
-        Ok(node) => (node, None),
-        Err(fault) => (None, Some(format!("{fault:?}"))),
-    }
-}
-
-/// Project a resolved root to its wire `TypeExpr` bytes. The projection
-/// takes its own view after the audited resolve; when that view cannot
-/// settle the answer is the `UnstableState` fault on the `error` channel,
-/// never a silent `null` that reads as a non-fault miss.
-pub(crate) fn project_resolved_root(
-    host: &verter_session::VerterHost,
-    resolved: Option<NodeRoot>,
-) -> (Option<Vec<u8>>, Option<String>) {
-    let Some(node) = resolved else {
-        return (None, None);
-    };
-    match host.project_node_to_type_expr_json_bytes(&node) {
-        Ok(bytes) => (bytes, None),
-        Err(unsettled) => (
-            None,
-            Some(format!("{:?}", TypeResolutionRequestError::from(unsettled))),
-        ),
-    }
-}
-
-/// Encode a record into the optional `auditRecord` DTO slot,
-/// projecting the host carrier's mandatory record through the
-/// historical "null when audit is disabled / filtered" contract: only
-/// an [`verter_audit::AuditCaptureState::ActiveStored`] record encodes
-/// to a JSON string; a filtered or disabled record projects to `None`.
-pub(crate) fn encode_stored_audit_record(
-    rec: &RequestAuditRecord,
-) -> Result<Option<String>, JsValue> {
-    match rec.capture_state {
-        verter_audit::AuditCaptureState::ActiveStored => encode_audit_record(rec).map(Some),
-        verter_audit::AuditCaptureState::FilteredNoop
-        | verter_audit::AuditCaptureState::AuditDisabled
-        | verter_audit::AuditCaptureState::Unavailable => Ok(None),
-    }
-}
-
-/// Encode a `RequestAuditRecord` to a JSON string.
-pub(crate) fn encode_audit_record(rec: &RequestAuditRecord) -> Result<String, JsValue> {
-    serde_json::to_string(rec)
-        .map_err(|e| JsValue::from_str(&format!("audit record serialization error: {e}")))
-}
-
-/// Decode a JSON string array of `TypeExpr` values into the host slice
-/// shape used by `resolve_named_symbol_with_audit`.
-pub(crate) fn decode_type_expr_list(json: Option<String>) -> Result<Vec<TypeExpr>, JsValue> {
-    let Some(s) = json else {
-        return Ok(Vec::new());
-    };
-    if s.is_empty() || s == "null" {
-        return Ok(Vec::new());
-    }
-    serde_json::from_str(&s)
-        .map_err(|e| JsValue::from_str(&format!("type-expr list decode error: {e}")))
-}
-
-/// Convert the FFI mode tag to the host enum, with `None` selecting the
-/// host default.
-pub(crate) fn parse_resolve_mode(mode: Option<String>) -> Result<Option<ProjectionMode>, JsValue> {
-    let Some(tag) = mode else {
-        return Ok(None);
-    };
-    let parsed = verter_ffi::convert::parse_projection_mode(&tag)
-        .map_err(|e| JsValue::from_str(&format!("resolve-symbol mode error: {e}")))?;
-    Ok(Some(parsed))
-}
-
-/// Combined response shape for `typeInfoWithAudit` (WASM).
-///
-/// `response` is the protobuf-encoded `TypeInfoGraphResponse` (always
-/// present — the validation-first executor always yields a typed
-/// response). `audit_record` carries the per-request `RequestAuditRecord`
-/// JSON string; `null` when audit is off / filtered.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WasmFrameworkSurfaceResult {
@@ -133,48 +35,34 @@ pub(crate) struct WasmFrameworkSurfaceResult {
     pub audit_record: Option<String>,
 }
 
-/// Decode a protobuf-encoded [`TypeInfoGraphRequest`] envelope from
-/// raw bytes.
+pub(crate) fn decode_type_expr_list(json: Option<String>) -> Result<Vec<TypeExpr>, JsValue> {
+    let bytes = json
+        .as_deref()
+        .filter(|json| *json != "null")
+        .map(str::as_bytes);
+    shared::decode_type_expr_list(bytes).map_err(|e| JsValue::from_str(&e))
+}
+
+pub(crate) fn parse_resolve_mode(mode: Option<String>) -> Result<Option<ProjectionMode>, JsValue> {
+    shared::parse_resolve_mode(mode.as_deref()).map_err(|e| JsValue::from_str(&e))
+}
+
+pub(crate) fn encode_stored_audit_record(
+    rec: &verter_audit::RequestAuditRecord,
+) -> Result<Option<String>, JsValue> {
+    shared::encode_stored_audit_record(rec).map_err(|e| JsValue::from_str(&e))
+}
+
 pub(crate) fn decode_type_info_graph_request(
     bytes: &[u8],
 ) -> Result<TypeInfoGraphRequest, JsValue> {
-    TypeInfoGraphRequest::decode(bytes)
-        .map_err(|e| JsValue::from_str(&format!("type-info graph request decode error: {e}")))
+    shared::decode_type_info_graph_request(bytes).map_err(|e| JsValue::from_str(&e))
 }
 
-/// Decode a protobuf-encoded [`TypeInfoCapabilityHandshakeRequest`] from
-/// raw bytes.
 pub(crate) fn decode_capability_handshake_request(
     bytes: &[u8],
 ) -> Result<TypeInfoCapabilityHandshakeRequest, JsValue> {
-    TypeInfoCapabilityHandshakeRequest::decode(bytes)
-        .map_err(|e| JsValue::from_str(&format!("capability handshake decode error: {e}")))
-}
-
-/// Encode a [`TypeInfoCapabilityHandshakeResponse`] to protobuf bytes.
-pub(crate) fn encode_capability_handshake_response(
-    resp: &TypeInfoCapabilityHandshakeResponse,
-) -> Vec<u8> {
-    resp.encode_to_vec()
-}
-
-/// Encode a [`TypeInfoGraphResponse`] to protobuf bytes.
-pub(crate) fn encode_type_info_graph_response(resp: &TypeInfoGraphResponse) -> Vec<u8> {
-    let encoded = resp.encode_to_vec();
-    verter_audit::attribute_n!(TypeInfoGraphEncode, encoded.len());
-    encoded
-}
-
-/// Wrap a typed `TypeInfoRequestError` back into the `error` arm of a
-/// [`TypeInfoGraphResponse`] (parity with the NAPI binding — the
-/// `AuditedResult` Err arm drops the error-arm response).
-pub(crate) fn framework_error_response(
-    error: verter_protocol::typeinfo::graph::TypeInfoRequestError,
-) -> TypeInfoGraphResponse {
-    use verter_protocol::verter::v1::type_info_graph_response;
-    TypeInfoGraphResponse {
-        kind: Some(type_info_graph_response::Kind::Error(error)),
-    }
+    shared::decode_capability_handshake_request(bytes).map_err(|e| JsValue::from_str(&e))
 }
 
 /// The symbol inventory of `canonical`, answered by the list-symbols
