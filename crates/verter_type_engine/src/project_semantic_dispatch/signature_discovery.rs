@@ -195,25 +195,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> DiscoveryTypes for GraphType
         self.dispatch.graph().record_signature_comparison_decided();
     }
 
-    fn intersect(&self, members: &[TypeToken]) -> Option<TypeToken> {
-        let nodes: Option<Vec<SemanticNodeId>> = members.iter().map(|t| self.node(*t)).collect();
-        let node = self
-            .dispatch
-            .intern_normalized_union_or_intersection(&nodes?, false);
-        self.token(node)
-    }
-
-    fn map_binders(
-        &self,
-        ty: TypeToken,
-        map: &[(SemanticNodeId, SemanticNodeId)],
-    ) -> Option<TypeToken> {
-        let node = self.node(ty)?;
-        let mapped = self.dispatch.substitute_canonical(
-            node,
-            &CanonicalTypeSubstitution::new(self.dispatch.graph().store(), map.to_vec()),
-        );
-        self.token(mapped)
+    fn parameter_composed(&self) {
+        self.dispatch.graph().record_signature_parameter_composed();
     }
 
     fn unknown(&self) -> Option<TypeToken> {
@@ -277,7 +260,8 @@ fn wrapper_flow(wrapper: super::apparent_type::GlobalWrapper) -> DiscoveryFlow {
 /// carrier chain stands at the read the chain names, and a level reading a
 /// global wrapper stands at each port and file its declaration lookup
 /// reads and then at its instantiation, and a level composing a union's or
-/// an intersection's lists stands at each result its matching compares
+/// an intersection's lists stands at each result its matching compares and
+/// at each parameter intersection a union synthesis composes
 /// ([`DiscoveryRead`]): a frame driver suspends there and resumes the walk
 /// on whichever thread delivers the read, the in-place driver reads it
 /// where it stands. No stage that completed runs again.
@@ -339,13 +323,24 @@ enum DiscoveryFrame {
     Composing(Box<CompositionStage>),
 }
 
-/// A kernel composition, between two of its questions, and the result
-/// read the walk stands at for it.
+/// A kernel composition, between two of its questions, and the read the
+/// walk stands at for it.
 struct CompositionStage {
     composition: SignatureComposition,
+    /// The read the walk stands at for the composition, or delivered it.
+    read: CompositionRead,
+}
+
+/// What a composition's level keeps for a read of the walk.
+enum CompositionRead {
+    /// Nothing is outstanding and nothing is undelivered.
+    None,
     /// The candidate whose result the walk waits on, and the epoch its
     /// read was named in.
-    forcing: Option<(SignatureCandidate, crate::signature_kernel::GraphEpoch)>,
+    Result(SignatureCandidate, crate::signature_kernel::GraphEpoch),
+    /// A parameter intersection its read delivered: the answer the
+    /// composition's next step is given.
+    Reduced(TypeToken),
 }
 
 /// The members of an intersection type with every member that is itself an
@@ -391,6 +386,10 @@ enum DiscoveryRead {
     /// candidate's result, delivered in its own value domain
     /// ([`ProjectSemanticDispatch::deliver_forced_result`]).
     ForcedResult,
+    /// The intersection of parameter types a union synthesis composes: the
+    /// reduction of the operands the composition stands at
+    /// ([`ProjectSemanticDispatch::deliver_parameter_intersection`]).
+    ParameterIntersection,
 }
 
 /// The read of the global wrapper `name` over `args` while its declaration
@@ -420,8 +419,9 @@ enum DiscoveryFlow {
     Found(Vec<SignatureCandidate>),
     /// The top level has every list: combine it.
     Combine,
-    /// The top level is a composition just built: advance it from its
-    /// start.
+    /// The top level is a composition just built, or one whose parameter
+    /// intersection was delivered: advance it from its start, or with
+    /// that intersection.
     Compose,
     /// The subject's candidates: no level is left.
     Complete(Vec<SignatureCandidate>),
@@ -515,7 +515,8 @@ impl DiscoveryWalk {
             Some(
                 DiscoveryRead::WrapperLookup(_)
                 | DiscoveryRead::Wrapper
-                | DiscoveryRead::ForcedResult,
+                | DiscoveryRead::ForcedResult
+                | DiscoveryRead::ParameterIntersection,
             )
             | None => false,
         }
@@ -539,7 +540,7 @@ impl DiscoveryWalk {
             && matches!(
                 self.frames.last(),
                 Some(DiscoveryFrame::Composing(stage))
-                    if stage.forcing.is_some_and(|(_, named)| named != current)
+                    if matches!(stage.read, CompositionRead::Result(_, named) if named != current)
             )
     }
 
@@ -549,6 +550,21 @@ impl DiscoveryWalk {
             unreachable!("a composition is advanced on top of the walk")
         };
         stage
+    }
+
+    /// The graph nodes of the types the composition on top of the walk
+    /// intersects, in order; `None` when one is unreadable.
+    fn intersection_operands(&self) -> Option<Arc<[SemanticNodeId]>> {
+        let Some(DiscoveryFrame::Composing(stage)) = self.frames.last() else {
+            unreachable!("a composition's intersection is read on top of the walk")
+        };
+        let view = self.binding.view();
+        stage
+            .composition
+            .operands()
+            .iter()
+            .map(|ty| view.type_token_node(*ty).ok())
+            .collect()
     }
 
     /// The resolver port the walk stands at ([`super::walk::WalkNeed::Port`]):
@@ -575,8 +591,8 @@ impl DiscoveryWalk {
     /// Release what the walk holds on its computation's recording: a
     /// settlement standing in a deferred evaluation abandons the recordings
     /// that evaluation opened, top first. A wrapper's lookup or
-    /// instantiation, and a composition's result read, hold nothing on the
-    /// dispatcher.
+    /// instantiation, a composition's result read and a union synthesis's
+    /// parameter intersection hold nothing on the dispatcher.
     pub(super) fn release<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
         dispatch: &ProjectSemanticDispatch<'_, C>,
@@ -828,8 +844,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// The walk standing at a query, given `node_read`, that read: the
     /// settlement's evaluation has it delivered inside the evaluation, the
-    /// chain's instantiation to the chain, and a wrapper's instantiation is
-    /// the surface the walk enters.
+    /// chain's instantiation to the chain, a wrapper's instantiation is the
+    /// surface the walk enters, and a parameter intersection is kept for
+    /// the composition the walk loop advances next.
     #[inline(never)]
     fn deliver_discovery_read(
         &self,
@@ -853,6 +870,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Some(DiscoveryRead::Wrapper) => wrapper_flow(
                 super::apparent_type::GlobalWrapper::of_read(node_read().value),
             ),
+            Some(DiscoveryRead::ParameterIntersection) => {
+                self.deliver_parameter_intersection(walk, node_read)
+            }
             Some(DiscoveryRead::WrapperLookup(_) | DiscoveryRead::ForcedResult) | None => {
                 unreachable!("a node delivery answers the node query the walk stands at")
             }
@@ -1600,7 +1620,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 walk.frames
                     .push(DiscoveryFrame::Composing(Box::new(CompositionStage {
                         composition,
-                        forcing: None,
+                        read: CompositionRead::None,
                     })));
                 DiscoveryFlow::Compose
             }
@@ -1623,9 +1643,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         SignatureComposition::intersection(&walk.binding, &types, kernel_kind(walk.kind), lists)
     }
 
-    /// Carry the composition on top of the walk on from `answer`: its
-    /// candidates, the level done, or the result read its next comparison
-    /// names, the walk standing there. An identity question is answered
+    /// Carry the composition on top of the walk on from `answer` — given
+    /// none, from the parameter intersection its level kept: its
+    /// candidates, the level done, or the read its next question names, the
+    /// walk standing there. A binder closure — an identity question under a
+    /// moving correspondence, a synthesis's binder mapping — is answered
     /// where the stage stands.
     #[inline(never)]
     fn advance_composition(
@@ -1643,22 +1665,41 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let Some(DiscoveryFrame::Composing(stage)) = walk.frames.last_mut() else {
                     unreachable!("a composition is advanced on top of the walk")
                 };
+                if answer.is_none() {
+                    if let CompositionRead::Reduced(ty) = stage.read {
+                        stage.read = CompositionRead::None;
+                        answer = Some(TypeAnswer::Type(ty));
+                    }
+                }
                 match stage.composition.step(&walk.binding, &types, answer.take()) {
                     Ok(KernelStep::Done(found)) => {
                         walk.frames.pop();
                         return DiscoveryFlow::Found(found);
                     }
                     Ok(KernelStep::Ask(TypeRequest::Identical { a, b })) => {
-                        match self.identity_in_place(
+                        let closed = self.closed_under_binders(
                             &walk.binding,
                             a,
-                            b,
                             stage.composition.correspondence(),
-                            false,
-                        ) {
-                            Some(same) => TypeAnswer::Identical(same),
+                        );
+                        match (closed, walk.binding.view().type_token_node(b).ok()) {
+                            (Some(na), Some(nb)) => {
+                                TypeAnswer::Identical(self.same_stable_type(na, nb))
+                            }
+                            _ => return failed_unsettled(),
+                        }
+                    }
+                    Ok(KernelStep::Ask(TypeRequest::MapBinders { ty })) => {
+                        match self
+                            .closed_under_binders(&walk.binding, ty, stage.composition.binder_map())
+                            .and_then(|node| walk.binding.intern_type_token(node, None).ok())
+                        {
+                            Some(mapped) => TypeAnswer::Type(mapped),
                             None => return failed_unsettled(),
                         }
+                    }
+                    Ok(KernelStep::Ask(TypeRequest::Intersect)) => {
+                        return self.name_parameter_intersection(walk)
                     }
                     Ok(KernelStep::Ask(TypeRequest::ForcedResult(candidate))) => {
                         return self.name_forced_result(walk, candidate)
@@ -1667,6 +1708,51 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
             };
             answer = Some(request);
+        }
+    }
+
+    /// Name the reduction of the parameter types the composition on top of
+    /// the walk intersects, and stand at it. Its key names graph nodes
+    /// only, so no epoch retires it.
+    #[inline(never)]
+    fn name_parameter_intersection(&self, walk: &mut DiscoveryWalk) -> DiscoveryFlow {
+        let Some(members) = walk.intersection_operands() else {
+            return failed_unsettled();
+        };
+        walk.stand(
+            DiscoveryRead::ParameterIntersection,
+            super::walk::WalkNeed::Query(
+                crate::semantic_query::SemanticQueryKey::reduce_intersection_operands(
+                    self.graph().store(),
+                    members,
+                ),
+            ),
+        )
+    }
+
+    /// The walk standing at a parameter intersection, given `node_read`,
+    /// its reduction's read: the intersection is kept in the composition's
+    /// level, which the walk loop advances, so nothing of this delivery
+    /// sits beneath the composition's next questions.
+    #[inline(never)]
+    fn deliver_parameter_intersection(
+        &self,
+        walk: &mut DiscoveryWalk,
+        node_read: &mut dyn FnMut() -> crate::semantic_query::CacheRead<
+            crate::semantic_query::QueryResult<SemanticNodeId>,
+        >,
+    ) -> DiscoveryFlow {
+        let Some(members) = walk.intersection_operands() else {
+            return failed_unsettled();
+        };
+        let read = node_read();
+        let node = self.intersection_of_reduction(&members, &read.value);
+        match walk.binding.intern_type_token(node, None) {
+            Ok(ty) => {
+                walk.composition_stage().read = CompositionRead::Reduced(ty);
+                DiscoveryFlow::Compose
+            }
+            Err(_) => failed_unsettled(),
         }
     }
 
@@ -1680,7 +1766,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> DiscoveryFlow {
         match self.forced_result_key(&walk.binding, candidate) {
             Ok(key) => {
-                walk.composition_stage().forcing = Some((candidate, key.descriptor.epoch()));
+                walk.composition_stage().read =
+                    CompositionRead::Result(candidate, key.descriptor.epoch());
                 walk.stand(
                     DiscoveryRead::ForcedResult,
                     super::walk::WalkNeed::Query(
@@ -1744,11 +1831,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let Some(DiscoveryRead::ForcedResult) = walk.standing.take() else {
             unreachable!("a result is delivered to the walk standing at it")
         };
-        let (candidate, named) = walk
-            .composition_stage()
-            .forcing
-            .take()
-            .expect("a composition standing at a result names its candidate");
+        let CompositionRead::Result(candidate, named) =
+            std::mem::replace(&mut walk.composition_stage().read, CompositionRead::None)
+        else {
+            unreachable!("a composition standing at a result names its candidate")
+        };
         let partial = read.result_is_partial();
         match read.value {
             QueryResult::Value(SemanticQueryValue::SignatureResult(result)) => {
@@ -3337,15 +3424,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 KernelStep::Done(same) => return Some(same),
                 KernelStep::Ask(request) => request,
             };
-            answer =
-                Some(match request {
-                    TypeRequest::Identical { a, b } => TypeAnswer::Identical(
-                        self.identity_in_place(binding, a, b, comparison.correspondence(), true)?,
-                    ),
-                    TypeRequest::ForcedResult(candidate) => TypeAnswer::ForcedResult(
-                        self.force_result_in_binding(binding, candidate).ok()?,
-                    ),
-                });
+            answer = Some(match request {
+                TypeRequest::Identical { a, b } => {
+                    let na = self.closed_under_binders(binding, a, comparison.correspondence())?;
+                    let nb = binding.view().type_token_node(b).ok()?;
+                    TypeAnswer::Identical(self.relate_type_identity(na, nb)?)
+                }
+                TypeRequest::ForcedResult(candidate) => {
+                    TypeAnswer::ForcedResult(self.force_result_in_binding(binding, candidate).ok()?)
+                }
+                TypeRequest::MapBinders { .. } | TypeRequest::Intersect => {
+                    unreachable!("one comparison composes no parameters")
+                }
+            });
         }
     }
 
@@ -3359,51 +3450,42 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             == crate::semantic_query::stable_key::stable_key_for_node(store, b)
     }
 
-    /// Whether `a` is identical to `b` under the binder correspondence
-    /// `corr`, answered where the asker stands: `a` closed under the pairs
-    /// that move a binder, then compared by stable key, or with `semantic`
-    /// by the relation authority. `None` when either type is unreadable or
-    /// the relation is undecided.
+    /// The node `ty` names in `binding`, closed under the pairs of `pairs`
+    /// (`(from, to)`) that move a binder, where the asker stands: an
+    /// identity question's left type under its correspondence, or a union
+    /// synthesis's right-side type under its binder map. `None` when the
+    /// type is unreadable.
     ///
-    /// A correspondence pairs binders with binders, and a substitution
-    /// names a read only where a changed template's every hole folds into
-    /// its text, which a binder never does: the closure names no template
-    /// reduction, so it is made in place.
+    /// The pairs map binders onto binders, and a substitution names a read
+    /// only where a changed template's every hole folds into its text,
+    /// which a binder never does: the closure names no template reduction,
+    /// so it is made in place.
     #[inline(never)]
-    fn identity_in_place(
+    fn closed_under_binders(
         &self,
         binding: &EpochBinding,
-        a: TypeToken,
-        b: TypeToken,
-        corr: &[(SemanticNodeId, SemanticNodeId)],
-        semantic: bool,
-    ) -> Option<bool> {
-        let view = binding.view();
-        let na = view.type_token_node(a).ok()?;
-        let nb = view.type_token_node(b).ok()?;
+        ty: TypeToken,
+        pairs: &[(SemanticNodeId, SemanticNodeId)],
+    ) -> Option<SemanticNodeId> {
+        let node = binding.view().type_token_node(ty).ok()?;
         let moving: Vec<(SemanticNodeId, SemanticNodeId)> =
-            corr.iter().copied().filter(|(x, y)| x != y).collect();
-        let na = if moving.is_empty() {
-            na
-        } else {
-            let graph = self.graph();
-            verter_debug_assert!(
-                moving.iter().all(|(_, image)| matches!(
-                    graph.node_data(*image).as_deref(),
-                    Some(SemanticNodeData::TypeParam { .. })
-                )),
-                "a binder correspondence maps binders onto binders, so its closure names no \
-                 template reduction"
-            );
-            self.substitute_canonical(
-                na,
-                &CanonicalTypeSubstitution::new(self.graph().store(), moving),
-            )
-        };
-        if semantic {
-            return self.relate_type_identity(na, nb);
+            pairs.iter().copied().filter(|(x, y)| x != y).collect();
+        if moving.is_empty() {
+            return Some(node);
         }
-        Some(self.same_stable_type(na, nb))
+        let graph = self.graph();
+        verter_debug_assert!(
+            moving.iter().all(|(_, image)| matches!(
+                graph.node_data(*image).as_deref(),
+                Some(SemanticNodeData::TypeParam { .. })
+            )),
+            "a binder correspondence maps binders onto binders, so its closure names no \
+             template reduction"
+        );
+        Some(self.substitute_canonical(
+            node,
+            &CanonicalTypeSubstitution::new(self.graph().store(), moving),
+        ))
     }
 
     /// The result `candidate`, a handle of `binding`'s epoch, denotes: its

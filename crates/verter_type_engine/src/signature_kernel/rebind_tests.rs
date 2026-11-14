@@ -47,16 +47,7 @@ impl DiscoveryTypes for TokenTypes<'_> {
         Some(a == b)
     }
     fn comparison_decided(&self) {}
-    fn intersect(&self, members: &[TypeToken]) -> Option<TypeToken> {
-        members.first().copied()
-    }
-    fn map_binders(
-        &self,
-        ty: TypeToken,
-        _: &[(SemanticNodeId, SemanticNodeId)],
-    ) -> Option<TypeToken> {
-        Some(ty)
-    }
+    fn parameter_composed(&self) {}
     fn unknown(&self) -> Option<TypeToken> {
         self.binding
             .intern_type_token(SemanticNodeId(9_000), None)
@@ -83,6 +74,16 @@ impl RequestAnswers for TokenTypes<'_> {
     }
     fn forced_result(&self, _: &SignatureCandidate) -> Result<ForcedResult, IncompleteReason> {
         Err(IncompleteReason::UnresolvedObligation)
+    }
+    fn intersect(&self, members: &[TypeToken]) -> Option<TypeToken> {
+        members.first().copied()
+    }
+    fn map_binders(
+        &self,
+        ty: TypeToken,
+        _: &[(SemanticNodeId, SemanticNodeId)],
+    ) -> Option<TypeToken> {
+        Some(ty)
     }
 }
 

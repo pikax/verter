@@ -6707,6 +6707,11 @@ pub struct SemanticGraphStats {
     /// charge. A comparison that fails undecided or waits on its holder is
     /// not counted; a pair decided again counts again.
     pub signature_comparisons_decided: u64,
+    /// Parameter positions union synthesis composed, wherever it ran: one
+    /// per position slot of a synthesized union signature, counted where
+    /// the slot is built, the extra rest element included and a receiver
+    /// not, outside every charge. A position composed again counts again.
+    pub signature_parameters_composed: u64,
     /// Signature result reads performed, whichever driver made them: one
     /// per read begun, counted before its recipe is read. A result forced
     /// again counts again.
@@ -13113,8 +13118,8 @@ mod tests {
     ///   binder_substitutions, substitution_child_visits,
     ///   discovery_nodes_walked, discovery_signatures_published,
     ///   signature_positions_compared, signature_comparisons_decided,
-    ///   signature_results_forced, signature_rebinds,
-    ///   signature_descriptors_rebound.
+    ///   signature_parameters_composed, signature_results_forced,
+    ///   signature_rebinds, signature_descriptors_rebound.
     /// - Exceptional-path: same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
@@ -13168,6 +13173,7 @@ mod tests {
             "discovery_signatures_published",
             "signature_positions_compared",
             "signature_comparisons_decided",
+            "signature_parameters_composed",
             "signature_results_forced",
             "signature_rebinds",
             "signature_descriptors_rebound",

@@ -1,8 +1,8 @@
 //! Record-level signature discovery: publishing candidates from neutral
 //! input, the record helpers union and intersection composition build
-//! composites with, a union signature's parameter composition, and a
-//! declaration's heritage and merged-declaration concatenation. Signature
-//! comparison and the union and intersection compositions are owned
+//! composites with, and a declaration's heritage and merged-declaration
+//! concatenation. Signature comparison, the union and intersection
+//! compositions and a union signature's parameter composition are owned
 //! machines in [`super::matching`].
 //!
 //! Everything here works over V2 records and is independent of the
@@ -17,7 +17,7 @@ use crate::semantic_query::{
 };
 
 use super::lifetime::{EpochBinding, SignatureStore, StoreError};
-use super::positional::{PositionalMode, PositionalShape, SlotTypeFacts, TypeAt};
+use super::positional::{PositionalShape, SlotTypeFacts};
 use super::provenance::{
     ArmIdentity, ConstituentSequence, DeclarationGroupId, DeclarationParentId, MappedConstituent,
     OriginRelation, OverloadOrder, SignatureProvenance,
@@ -85,14 +85,9 @@ pub trait DiscoveryTypes: SlotTypeFacts {
     ) -> Option<bool>;
     /// One signature pair was decided.
     fn comparison_decided(&self);
-    /// The intersection of parameter types, in order.
-    fn intersect(&self, members: &[TypeToken]) -> Option<TypeToken>;
-    /// Rewrite binder occurrences (`from -> to`) inside a type.
-    fn map_binders(
-        &self,
-        ty: TypeToken,
-        map: &[(SemanticNodeId, SemanticNodeId)],
-    ) -> Option<TypeToken>;
+    /// One parameter position of a synthesized union signature was
+    /// composed.
+    fn parameter_composed(&self);
     fn unknown(&self) -> Option<TypeToken>;
     fn any(&self) -> Option<TypeToken>;
     fn is_any(&self, ty: TypeToken) -> bool;
@@ -165,7 +160,7 @@ fn slot(store: &EpochBinding, p: &ParamInput) -> Res<ParameterSlot> {
     })
 }
 
-struct NoFacts;
+pub(super) struct NoFacts;
 impl SlotTypeFacts for NoFacts {
     fn accepts_void(&self, _: TypeToken) -> bool {
         false
@@ -558,175 +553,6 @@ pub(super) fn composite_candidate(
     }
     let provenance = composite_provenance(store, view, rep, ordinal)?;
     Ok(store.candidate(descriptor, provenance)?)
-}
-
-/// `combineSignaturesOfUnionMembers`, after the two signatures' binder
-/// spaces matched: parameter types intersect position by position, the
-/// minimum is the larger of the two, an extra rest element is added when
-/// only the shorter side has a rest. `map_right` maps the right side's
-/// binders onto the left's (empty unless both are generic). Binder mapping
-/// and parameter intersection are read through `types`.
-pub(super) fn combine_union_parameters(
-    store: &EpochBinding,
-    types: &dyn DiscoveryTypes,
-    l: &Loaded<'_>,
-    r: &Loaded<'_>,
-    left: SignatureCandidate,
-    map_right: &[(SemanticNodeId, SemanticNodeId)],
-) -> Res<SignatureCandidate> {
-    let lp = l.positional(types);
-    let rp = r.positional(types);
-    let (longest, shorter, right_is_longest) = if lp.parameter_count() >= rp.parameter_count() {
-        (&lp, &rp, false)
-    } else {
-        (&rp, &lp, true)
-    };
-    let longest_count = longest.parameter_count();
-    let either_rest = lp.has_rest() || rp.has_rest();
-    let needs_extra_rest = either_rest && !longest.has_rest();
-    let mapped = |ty: TypeToken, from_right: bool| -> Res<TypeToken> {
-        if from_right && !map_right.is_empty() {
-            match types.map_binders(ty, map_right) {
-                Some(t) => Ok(t),
-                None => undecided(),
-            }
-        } else {
-            Ok(ty)
-        }
-    };
-    let type_of =
-        |shape: &PositionalShape<'_>, pos: usize, from_right: bool| -> Res<Option<TypeToken>> {
-            Ok(match shape.type_at(pos) {
-                TypeAt::One(s) => Some(mapped(s.ty, from_right)?),
-                TypeAt::Run { element, tail } => {
-                    let mut parts = vec![mapped(element, from_right)?];
-                    for t in tail {
-                        parts.push(mapped(t.ty, from_right)?);
-                    }
-                    match types.intersect(&parts) {
-                        Some(t) => Some(t),
-                        None => return undecided(),
-                    }
-                }
-                TypeAt::GenericRest { rest, .. } => Some(mapped(rest, from_right)?),
-                TypeAt::Absent => None,
-            })
-        };
-    let min_l = lp.effective_minimum(PositionalMode::Comparison);
-    let min_r = rp.effective_minimum(PositionalMode::Comparison);
-    let mut parameters: Vec<ParameterSlot> = Vec::new();
-    let mut rest_slot: Option<RestSlot> = None;
-    for pos in 0..longest_count {
-        let longest_ty = type_of(longest, pos, right_is_longest)?
-            .ok_or(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput))?;
-        let shorter_ty = type_of(shorter, pos, !right_is_longest)?
-            .or(types.unknown())
-            .ok_or(DiscoveryError::Incomplete(IncompleteReason::Budget))?;
-        let ty = match types.intersect(&[longest_ty, shorter_ty]) {
-            Some(t) => t,
-            None => return undecided(),
-        };
-        let is_rest = either_rest && !needs_extra_rest && pos + 1 == longest_count;
-        let optional = pos >= min_l && pos >= min_r;
-        let name = match longest.type_at(pos) {
-            TypeAt::One(s) => s.name,
-            _ => None,
-        };
-        let slot = ParameterSlot {
-            ty,
-            optionality: ParameterOptionality {
-                declared_optional: optional && !is_rest,
-                includes_undefined: optional && !is_rest,
-            },
-            name,
-        };
-        if is_rest {
-            rest_slot = Some(RestSlot {
-                slot,
-                kind: RestKind::Array,
-                tail: Box::from([]),
-            });
-        } else {
-            parameters.push(slot);
-        }
-    }
-    if needs_extra_rest {
-        let ty = type_of(shorter, longest_count, !right_is_longest)?
-            .ok_or(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput))?;
-        rest_slot = Some(RestSlot {
-            slot: ParameterSlot::new(ty, ParameterOptionality::required()),
-            kind: RestKind::Array,
-            tail: Box::from([]),
-        });
-    }
-    let receiver = match (l.receiver, r.receiver) {
-        (None, None) => None,
-        (Some(a), None) => Some(a),
-        (None, Some(a)) => Some(ParameterSlot {
-            ty: mapped(a.ty, true)?,
-            ..a
-        }),
-        (Some(a), Some(b)) => {
-            let b_ty = mapped(b.ty, true)?;
-            match types.intersect(&[a.ty, b_ty]) {
-                Some(ty) => Some(ParameterSlot { ty, ..a }),
-                None => return undecided(),
-            }
-        }
-    };
-    let layout_record = ParameterLayout {
-        parameters: parameters.into_boxed_slice(),
-        rest: rest_slot,
-    };
-    let flags = l
-        .shape
-        .signature_semantic_flags
-        .union(r.shape.signature_semantic_flags);
-    let mut declared_minimum =
-        PositionalShape::new(&layout_record, receiver, flags, &NoFacts).declared_minimum();
-    declared_minimum = declared_minimum.max(l.shape.declared_minimum.max(r.shape.declared_minimum));
-    let layout = store.intern_layout(layout_record, None)?;
-    let this_parameter = match receiver {
-        Some(rc) => Some(store.intern_slot(rc, None)?),
-        None => None,
-    };
-    let binder_space = if l.space.binders.is_empty() {
-        r.shape.binder_declarations
-    } else {
-        l.shape.binder_declarations
-    };
-    let shape = store.intern_shape(
-        SignatureInputShape {
-            kind: l.shape.kind,
-            binder_declarations: binder_space,
-            this_parameter,
-            parameter_layout: layout,
-            declared_minimum,
-            signature_semantic_flags: flags,
-        },
-        None,
-    )?;
-    let base = if l.space.binders.is_empty() { r } else { l };
-    let recipe = store.intern_recipe(*l.recipe, None)?;
-    let template = store.intern_template(
-        SignatureTemplate {
-            input_shape: shape,
-            result_recipe: recipe,
-        },
-        None,
-    )?;
-    let descriptor = store.intern_descriptor(
-        SignatureDescriptor {
-            template,
-            declaration_environment: base.descriptor.declaration_environment,
-            residual_binders: base.descriptor.residual_binders,
-        },
-        None,
-    )?;
-    if let Some(source) = store.descriptor_source(left.signature)? {
-        store.record_descriptor_source(descriptor, source)?;
-    }
-    Ok(store.candidate(descriptor, left.provenance)?)
 }
 
 /// Whether a member's construct list is a MIXIN constructor: exactly one

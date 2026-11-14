@@ -2008,6 +2008,12 @@ impl SemanticGraphStore {
             .signature_comparisons_decided
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped once per parameter position union synthesis composes.
+    pub fn record_signature_parameter_composed(&self) {
+        self.stats
+            .signature_parameters_composed
+            .fetch_add(1, Ordering::Relaxed);
+    }
     /// Bumped once per signature result read begun.
     pub fn record_signature_result_forced(&self) {
         self.stats

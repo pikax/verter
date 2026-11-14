@@ -1279,11 +1279,23 @@ whose surface the walk enters under the subject's level. A union's arms
 and an intersection type's members are combined by a kernel machine
 (`SignatureComposition`, `signature_kernel/matching.rs`) the walk carries
 as its own level (`DiscoveryFrame::Composing`): a step answers what the
-graph tells at rest and asks its holder the rest. An identity question
-under a binder correspondence that moves a binder is answered where the
-stage stands (`identity_in_place`, through `substitute_canonical`; a
-correspondence pairs binders with binders, so the closure names no
-template reduction). A result a comparison includes is the
+graph tells at rest and asks its holder the rest. A binder closure — an
+identity question under a binder correspondence that moves a binder, and
+a union synthesis's mapping of the other arm's types into the master's
+binders (`TypeRequest::MapBinders`, asked only when its binder map moves
+a binder) — is answered where the stage stands (`closed_under_binders`,
+through `substitute_canonical`; the pairs map binders onto binders, so
+the closure names no template reduction). A union synthesis composes its
+parameters with a position cursor (`ParameterComposition`, cut at each
+binder mapping and each intersection): each position's intersection,
+a rest run's and the receivers' too, is the `ReduceIntersection` read of
+the operands it stands at (`TypeRequest::Intersect`), the build's need.
+Its key names graph nodes only, so no epoch retires it; the delivered
+reduction (or, its read failed, the ordered intersection
+`intersection_of_reduction` builds, the same fallback the dispatch funnel
+uses) is kept in the composition's level (`CompositionRead::Reduced`) and
+the walk loop advances the composition with it, so no delivery sits
+beneath its next closures. A result a comparison includes is the
 `ReadSignatureResult` read of the candidate under the identity call
 substitution, the build's need: memoized, so each candidate is forced
 once however many comparisons read it, read where it was published
@@ -1294,15 +1306,16 @@ into the current epoch (`FamilyBuild::awaits_retired_read`). The
 walk counts its own work (`discovery_nodes_walked` per node entered,
 `discovery_signatures_published` per signature published), the kernel
 its matching (`signature_comparisons_decided` per pair decided,
-`signature_positions_compared` per identity it asks), and moves no stage
-counter. A frame drives it when a frame needs the list (an overload
+`signature_positions_compared` per identity it asks,
+`signature_parameters_composed` per synthesized parameter position, the
+extra rest element included), and moves no stage counter. A frame drives it when a frame needs the list (an overload
 set's, an apparent type's, a call's); read synchronously, or polled as a
 root, `SignaturesOfType` is built in place by the same stages through
 `drive_family_value_in_place`, each read made where the walk stands. A
 walk released while it stands in a settlement's evaluation abandons that
 evaluation's recordings (`FamilyBuild::release_retained_accounting`); one
-standing at its wrapper or at a composition's result holds nothing on the
-dispatcher.
+standing at its wrapper, at a composition's result or at a parameter
+intersection holds nothing on the dispatcher.
 `a_signature_list_waiting_on_a_later_comparisons_result_resumes_without_comparing_again`
 holds the result of a three-member intersection's last signature and
 requires the list to yield there with its first pair decided and, resumed
@@ -1311,6 +1324,12 @@ elsewhere, to decide no pair and compare no position again;
 holds a union's later overload's result after its generic common match;
 `a_matching_result_named_in_an_epoch_that_retired_is_named_again_and_nothing_is_compared_twice`
 replaces the kernel epoch while a compared result is held.
+`a_union_synthesis_waiting_on_a_later_positions_intersection_resumes_without_composing_again`
+holds a synthesized union signature's second parameter intersection and
+requires the list to yield there with its first position composed and,
+resumed elsewhere, to compose, decide and compare nothing again;
+`a_parameter_intersection_delivered_after_the_walks_epoch_retired_is_composed_in_that_epoch`
+replaces the kernel epoch while that intersection is held.
 `a_signature_list_waiting_on_a_primitive_arms_wrapper_resumes_without_walking_again`
 holds the later arm's wrapper instantiation of an overload set over
 `string | number`, read under a request on the declaring file, and
@@ -2362,13 +2381,17 @@ conversion:
   walk's mapped source;
 - `SignaturesOfType` read synchronously or polled as a root: built in place
   through the same stages, its reads made where the walk stands;
-- a union synthesis's binder mapping and parameter intersection
-  (`map_binders`, `intersect`), read through the kernel callbacks from
-  the composition's synthesis stage (`combine_union_parameters`), in the
-  walk's epoch;
-- a composition's identity question under a correspondence that moves a
-  binder, answered where the stage stands through `substitute_canonical`:
-  its closure names no template reduction;
+- a composition's binder closure — an identity question under a
+  correspondence that moves a binder, a union synthesis's binder mapping —
+  answered where the stage stands (`closed_under_binders`, from
+  `advance_composition` and from the relation authority's comparison)
+  through `substitute_canonical`: its closure names no template
+  reduction (debug assertion), and the reads inside that substitution
+  belong to the substitution walk below;
+- the ordered intersection built when a parameter intersection's
+  reduction read fails (`intersection_of_reduction`, from the walk's
+  delivery, in place and on a frame): graph construction, charged, with
+  no dependency read;
 - the relation authority's exact signature identity
   (`signature_types_identical`), one comparison stepped in place: its
   identities through `relate_type_identity`, its results through the

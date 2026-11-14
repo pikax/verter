@@ -112,5 +112,6 @@ static_assertions::assert_not_impl_any!(SignatureComparison: Clone, Copy);
 const _: () = assert!(std::mem::size_of::<TypeRequest>() <= 24);
 const _: () = assert!(std::mem::size_of::<TypeAnswer>() <= 56);
 const _: () = assert!(std::mem::size_of::<KernelStep<Vec<SignatureCandidate>>>() <= 32);
+const _: () = assert!(std::mem::size_of::<KernelStep<SignatureCandidate>>() <= 32);
 // The relation authority holds one comparison on its native stack.
 const _: () = assert!(std::mem::size_of::<SignatureComparison>() <= 200);
