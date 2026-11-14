@@ -243,6 +243,23 @@ impl DeferredCallable {
         mapped
     }
 
+    /// Visit the values [`Self::map_source_values`] maps, in the order it
+    /// maps them: a deferred return's lexical images, then the predicate
+    /// target.
+    pub(crate) fn for_each_source_value(&self, mut visit: impl FnMut(SemanticNodeId)) {
+        if let SignatureReturnCarrier::DeferredFlow(source) = &self.return_carrier {
+            for (_, image) in source.bindings() {
+                visit(*image);
+            }
+            if let Some(receiver) = source.receiver() {
+                visit(receiver);
+            }
+        }
+        if let Some(target) = self.predicate.and_then(|predicate| predicate.ty) {
+            visit(target);
+        }
+    }
+
     /// Normalize inferred parameter initializers without demanding the return
     /// or changing the callable's occurrence, binders or lexical images.
     pub(crate) fn map_parameter_types(

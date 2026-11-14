@@ -2464,6 +2464,19 @@ impl SignatureReturnCarrier {
         }
     }
 
+    /// Visit the images [`Self::map_source_images`] maps, in the order it
+    /// maps them: each lexical binding's image, then the receiver.
+    pub(crate) fn for_each_source_image(&self, mut visit: impl FnMut(SemanticNodeId)) {
+        if let Self::DeferredFlow(source) | Self::EvaluatedFlow(source) = self {
+            for (_, image) in source.bindings() {
+                visit(*image);
+            }
+            if let Some(receiver) = source.receiver() {
+                visit(receiver);
+            }
+        }
+    }
+
     pub(crate) fn flow_identity(
         &self,
     ) -> Option<&verter_type_expr::facts::FlowFunctionReturnIdentity> {
@@ -6657,6 +6670,24 @@ pub struct SemanticGraphStats {
     /// and its rollback. A step computed again — an evaluation restarted
     /// from its root, or re-entered with its answers cached — counts again.
     pub deferred_steps_evaluated: u64,
+    /// Candidates overload sets with explicit type arguments began
+    /// instantiating, wherever they ran: one per candidate whose clause the
+    /// set begins binding. Counted where the candidate begins, outside every
+    /// charge and its rollback, so a candidate begun again — a set resumed
+    /// from its list instead of from the candidate it stood in — counts
+    /// again.
+    pub explicit_candidates_instantiated: u64,
+    /// Substitutions explicit instantiations began, wherever they ran: one
+    /// per binder occurrence, declared default, deferred-callable parameter
+    /// or source image an instantiation substitutes an argument into.
+    /// Counted where the substitution begins, outside every charge and its
+    /// rollback, so a substitution begun again counts again.
+    pub binder_substitutions: u64,
+    /// Children substitution walks visited, wherever they ran: one per
+    /// child a walk's level hands on, counted before any shortcut answers
+    /// it, outside every charge and its rollback. A walk restarted and
+    /// served by the substitution memo counts its children again.
+    pub substitution_child_visits: u64,
     /// Cross products of an intersection over union arms built, by any
     /// construction of it — a reduction, a distribution, a weighing: one
     /// per product whose constituents are constructed, counted where its
@@ -13050,7 +13081,8 @@ mod tests {
     ///   evaluate_deferred_memo_misses, continuation_builds_begun,
     ///   continuation_stages_resumed, projection_hops_walked,
     ///   admission_stages_walked, deferred_steps_evaluated,
-    ///   intersection_products_built.
+    ///   intersection_products_built, explicit_candidates_instantiated,
+    ///   binder_substitutions, substitution_child_visits.
     /// - Exceptional-path: same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
@@ -13097,6 +13129,9 @@ mod tests {
             "admission_stages_walked",
             "deferred_steps_evaluated",
             "intersection_products_built",
+            "explicit_candidates_instantiated",
+            "binder_substitutions",
+            "substitution_child_visits",
         ];
         for field in expected_to_fire {
             assert!(

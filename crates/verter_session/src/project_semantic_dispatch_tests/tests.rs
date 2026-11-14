@@ -28440,6 +28440,77 @@ fn resolve_overload_set_applies_explicit_type_args_per_candidate() {
     );
 }
 
+/// The read-free clause test a call's raw candidates are filtered with
+/// agrees with instantiating each candidate under the same explicit type
+/// arguments, for every way a clause takes or refuses them: supplied,
+/// filled from a default, too many, a parameter neither supplied nor
+/// defaulted, and no clause at all.
+#[test]
+fn explicit_clause_fit_agrees_with_instantiating_the_candidate() {
+    const FILE: &str = "/w/clause_fit.ts";
+    let host = host();
+    upsert_ts(
+        &host,
+        FILE,
+        "export declare function one<T>(x: T): T;\n\
+         export declare function defaulted<T, U = T>(x: T, y: U): U;\n\
+         export declare function required<T, U>(x: T, y: U): U;\n\
+         export declare function plain(x: string): string;\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let _scope = dispatch.enter_construction_scope();
+    let graph = host.project_type_store().semantic_graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(
+        verter_type_engine::semantic_query::PrimitiveKind::String,
+    ));
+    let number = graph.intern_node(SemanticNodeData::Primitive(
+        verter_type_engine::semantic_query::PrimitiveKind::Number,
+    ));
+    let candidate = |name: &str| {
+        let callee = typeof_value_node(&host, &dispatch, FILE, name);
+        let key = overload_set_key_for(&host, FILE, callee, Vec::new());
+        let refs = execute_overload_set(&dispatch, key)
+            .unwrap_or_else(|err| panic!("`{name}` has a call signature, got {err:?}"));
+        assert_eq!(refs.len(), 1, "`{name}` declares one signature");
+        refs[0].node
+    };
+    for (name, args, binds) in [
+        ("one", vec![string], true),
+        ("one", vec![string, number], false),
+        ("defaulted", vec![string], true),
+        ("required", vec![string], false),
+        ("required", vec![string, number], true),
+        ("plain", vec![string], false),
+    ] {
+        let signature = candidate(name);
+        assert_eq!(
+            dispatch.explicit_clause_fit_for_tests(signature, args.len()),
+            Some(binds),
+            "`{name}` with {} argument(s): the clause decides from itself",
+            args.len()
+        );
+        assert_eq!(
+            dispatch
+                .instantiate_call_candidate_for_tests(signature, &args)
+                .is_some(),
+            binds,
+            "`{name}` with {} argument(s): instantiating takes the same drop",
+            args.len()
+        );
+    }
+    assert_eq!(
+        dispatch.explicit_clause_fit_for_tests(string, 1),
+        Some(false),
+        "a node with no clause drops without reading anything"
+    );
+    assert!(
+        dispatch
+            .instantiate_call_candidate_for_tests(string, &[string])
+            .is_none(),
+        "and instantiating it drops it"
+    );
+}
+
 /// A callee with no signature group (a primitive node) is an honest Miss
 /// that admits nothing — never a fabricated empty `OverloadSet`.
 #[test]
@@ -28790,8 +28861,8 @@ fn subtree_references_node_descends_merged_decl_contributors() {
 }
 
 /// `subtree_references_node` must descend `ObjectSpreadProgram` effects
-/// exactly as `substitute_with_change_tracking` does (substitute's
-/// `map_child_nodes` arm): a program-valued `value_expr` holding the
+/// exactly as the substitution walk does (its
+/// `ObjectSpreadProgram` level): a program-valued `value_expr` holding the
 /// mapper binder IS K-dependent — the `build_mapped_type` hoist must not
 /// collapse it to one shared unsubstituted materialisation.
 #[test]

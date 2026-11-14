@@ -1745,20 +1745,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
-    /// [`Self::shared_signature_nodes`] in the order call resolution tries
-    /// them: the kernel's [`crate::signature_kernel::resolution_order`]
-    /// (TypeScript's `reorderCandidates`) over the same candidates. Only
-    /// call resolution reads this order; conditional inference, which reads
-    /// the LAST signature, reads declaration order.
-    pub(super) fn shared_signature_nodes_in_resolution_order(
-        &self,
-        subject: SemanticNodeId,
-        kind: GraphSignatureKind,
-    ) -> SharedSignatureNodes {
-        let first = self.signature_set_value(subject, kind);
-        self.shared_signature_nodes_ordered(subject, kind, first, true)
-    }
-
     construction_ordinal_seam! {
         /// [`Self::shared_signature_nodes`] over an already-dispatched first
         /// read.
@@ -1768,37 +1754,24 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             kind: GraphSignatureKind,
             first: Result<crate::signature_kernel::SignatureSetValue, IncompleteReason>,
         ) -> SharedSignatureNodes {
-            self.shared_signature_nodes_ordered(subject, kind, first, false)
-        }
-    }
-
-    /// The shared read in declaration order, or with `resolution` in the
-    /// order call resolution tries the candidates.
-    fn shared_signature_nodes_ordered(
-        &self,
-        subject: SemanticNodeId,
-        kind: GraphSignatureKind,
-        first: Result<crate::signature_kernel::SignatureSetValue, IncompleteReason>,
-        resolution: bool,
-    ) -> SharedSignatureNodes {
-        match self.read_signature_set(subject, kind, first, |value| {
-            self.signature_nodes_of(kind, value, resolution)
-        }) {
-            Ok(nodes) => SharedSignatureNodes::Nodes(nodes),
-            Err(reason) => SharedSignatureNodes::Incomplete(reason),
+            match self.read_signature_set(subject, kind, first, |value| {
+                self.signature_nodes_of(kind, value)
+            }) {
+                Ok(nodes) => SharedSignatureNodes::Nodes(nodes),
+                Err(reason) => SharedSignatureNodes::Incomplete(reason),
+            }
         }
     }
 
     /// The node form of every candidate of one dispatched set, in candidate
-    /// order — or, with `resolution`, in the kernel's resolution order.
+    /// order.
     fn signature_nodes_of(
         &self,
         kind: GraphSignatureKind,
         value: &crate::signature_kernel::SignatureSetValue,
-        resolution: bool,
     ) -> Result<Vec<SemanticNodeId>, SignatureSetReadFailure> {
         let store = self.graph().store().signature_store();
-        let mut pinned = self.pin_signature_list(kind, value, resolution)?;
+        let mut pinned = self.pin_signature_list(kind, value, false)?;
         while let Some(key) = self.prepare_next_composite(&mut pinned)? {
             let applied = match self.read_signature_result(
                 store,

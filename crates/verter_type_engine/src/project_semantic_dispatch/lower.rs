@@ -1674,7 +1674,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // spelling, so consumers rendering the needle with
                 // `i64::to_string()` are correct by construction.
                 // `evaluate::normalized_index_key_node` (and through it
-                // `substitute::substitute_index_key_with_change_tracking`)
+                // the substitution walk's index-key rebuild)
                 // applies the same predicate; recovery is the symmetric
                 // exact `as f64` raise (`raise::raise_index_key_to_type_expr`,
                 // the walker's `Index(Number)` arm). Non-integer

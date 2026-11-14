@@ -141,6 +141,10 @@ mod port_continuations;
 mod helper_continuation;
 // The stages of those family builds, written against the stage capability.
 mod continuation_stages;
+// Explicit instantiation of a callable's own clause as one owned machine,
+// and an overload set's candidates instantiated under explicit type
+// arguments.
+mod explicit_instantiation;
 pub mod locator_shape;
 pub mod locator_view;
 pub mod locator_view_worklist;
@@ -734,6 +738,11 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// walk's caller keeps on the binder.
     substitution_binder:
         verter_execution::sync_cell::SyncRefCell<Option<(SemanticNodeId, substitute::BinderKind)>>,
+    /// One emptied substitution walk kept for the capacity of its buffers:
+    /// the public entry takes it and puts it back, so a cold substitution
+    /// allocates nothing once warmed up. It carries no semantic state.
+    substitution_spare:
+        verter_execution::sync_cell::SyncRefCell<Option<substitute::SubstitutionWalk>>,
     /// How many of this dispatcher's operations are open on its thread
     /// ([`DispatchOperation`]). When the outermost one ends, the receipts
     /// the dispatcher held for it are released, whatever owner stays open.
@@ -1380,6 +1389,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             decision_seam: verter_execution::sync_cell::SyncRefCell::new(None),
             flow_seam: verter_execution::sync_cell::SyncRefCell::new(None),
             substitution_binder: verter_execution::sync_cell::SyncRefCell::new(None),
+            substitution_spare: verter_execution::sync_cell::SyncRefCell::new(None),
             operation_depth: verter_execution::sync_cell::SyncU32::new(0),
         }
     }
@@ -1454,6 +1464,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             decision_seam,
             flow_seam,
             substitution_binder,
+            // Buffers only: a lent task keeps the spare walk it finds.
+            substitution_spare: _,
             operation_depth,
         } = self;
         instantiate_active.swap(&other.instantiate_active);

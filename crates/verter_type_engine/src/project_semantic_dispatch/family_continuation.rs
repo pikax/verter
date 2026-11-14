@@ -231,22 +231,6 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
     ) -> Result<(), super::signature_discovery::SignatureSetReadFailure> {
         self.dispatch.settle_composite_signature(list, applied)
     }
-
-    /// The overload set over `callee`'s settled candidates, without explicit
-    /// type arguments.
-    pub(super) fn overload_set_output(
-        &self,
-        callee: SemanticNodeId,
-        kind: crate::semantic_query::SignatureKind,
-        sigs: Vec<SemanticNodeId>,
-    ) -> QueryBuildOutput {
-        self.dispatch.overload_set_output(
-            callee,
-            kind,
-            sigs,
-            &Arc::from(Vec::new().into_boxed_slice()),
-        )
-    }
 }
 
 /// A family build between two of its stages: what the stages before the
@@ -310,10 +294,16 @@ impl FamilyBuild {
 
     /// Record `key`, a read this build names, in the test dispatch trace
     /// as the read a synchronous build makes is recorded: a path walk's
-    /// hop reads are recorded wherever its driver reads them.
+    /// hop reads, and the template reductions an overload set's candidate
+    /// substitutions read, are recorded wherever their driver reads them.
     #[cfg(any(test, feature = "test-support"))]
     pub(super) fn trace_need(&self, key: &SemanticQueryKey) {
-        if matches!(self, Self::ProjectPath(_)) {
+        let traced = match self {
+            Self::ProjectPath(_) => true,
+            Self::OverloadSet(build) => build.instantiates_candidates(),
+            _ => false,
+        };
+        if traced {
             super::raise::DISPATCH_TRACE.with(|t| {
                 t.borrow_mut()
                     .push(super::raise::query_key_discriminant(key))
@@ -329,13 +319,17 @@ impl FamilyBuild {
     /// evaluation abandons the recordings that evaluation opened above the
     /// build's own, and its open prefix recording puts back what the build
     /// charged before its first prefix, so the frame abandoning that
-    /// recording leaves those charges its consumer's.
+    /// recording leaves those charges its consumer's. An overload set's
+    /// candidate standing in a substitution abandons the recordings its
+    /// walk's levels opened, top first.
     pub(super) fn release_retained_accounting<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
         dispatch: &ProjectSemanticDispatch<'_, C>,
     ) {
-        if let Self::ProjectPath(build) = self {
-            build.walk.release(dispatch);
+        match self {
+            Self::ProjectPath(build) => build.walk.release(dispatch),
+            Self::OverloadSet(build) => build.release(dispatch),
+            _ => {}
         }
     }
 
@@ -409,20 +403,18 @@ static_assertions::assert_not_impl_any!(FamilyStep: Clone, Copy);
 /// Whether `key`'s family builds as a continuation
 /// ([`ProjectSemanticDispatch::begin_family_build`]).
 pub(super) fn builds_as_continuation(key: &SemanticQueryKey) -> bool {
-    match key {
+    matches!(
+        key,
         SemanticQueryKey::TemplateLiteralReduce { .. }
-        | SemanticQueryKey::ResolveMacroPayload { .. }
-        | SemanticQueryKey::ResolveDecl(_)
-        | SemanticQueryKey::ReduceIntersection { .. }
-        | SemanticQueryKey::ApparentType { .. }
-        | SemanticQueryKey::ResolveClassSurface { .. }
-        | SemanticQueryKey::ClassifyMaterializationCycleGate(_)
-        | SemanticQueryKey::ProjectPath { .. } => true,
-        // Explicit type arguments instantiate each candidate through the
-        // substitution engine, which still reads in place.
-        SemanticQueryKey::ResolveOverloadSet { type_args, .. } => type_args.is_empty(),
-        _ => false,
-    }
+            | SemanticQueryKey::ResolveMacroPayload { .. }
+            | SemanticQueryKey::ResolveDecl(_)
+            | SemanticQueryKey::ReduceIntersection { .. }
+            | SemanticQueryKey::ApparentType { .. }
+            | SemanticQueryKey::ResolveClassSurface { .. }
+            | SemanticQueryKey::ClassifyMaterializationCycleGate(_)
+            | SemanticQueryKey::ResolveOverloadSet { .. }
+            | SemanticQueryKey::ProjectPath { .. }
+    )
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
@@ -477,10 +469,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 kind,
                 type_args,
                 ..
-            } if type_args.is_empty() => Some(
-                self.continuation_stage()
-                    .begin_resolve_overload_set(*callee, *kind),
-            ),
+            } => Some(self.continuation_stage().begin_resolve_overload_set(
+                *callee,
+                *kind,
+                Arc::clone(type_args),
+            )),
             SemanticQueryKey::ApparentType { base, context } => Some(
                 self.continuation_stage()
                     .begin_apparent_type(*base, context),
@@ -511,7 +504,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The next stage of `build`, given the read of the query it named:
     /// `deliver` makes or delivers that read. A build consumes it as its
     /// stage begins, except a path walk whose hop stands inside a deferred
-    /// evaluation, which has it delivered inside the evaluation's stage.
+    /// evaluation, which has it delivered inside the evaluation's stage,
+    /// and an overload set whose candidate stands inside a substitution,
+    /// which has it delivered inside the level that named it.
     #[inline(never)]
     pub(super) fn resume_family_build(
         &self,
@@ -519,10 +514,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         deliver: &mut dyn FnMut() -> CacheRead<QueryResult<SemanticQueryValue>>,
     ) -> FamilyStep {
         // A path walk counts its own work, hop by hop, where each hop is
-        // computed (`projection_hops_walked`).
+        // computed (`projection_hops_walked`). An overload set's stages
+        // instantiate candidates through the substitution walk, whose
+        // in-place reads a dispatcher stage makes.
         let build = match build {
             FamilyBuild::ProjectPath(build) => {
                 return self.resume_project_path(*build, deliver);
+            }
+            FamilyBuild::OverloadSet(build) => {
+                self.graph().record_continuation_resumed();
+                return self.resume_overload_set(build, deliver);
             }
             build => build,
         };
@@ -551,9 +552,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             FamilyBuild::ReduceIntersection(build) => self
                 .continuation_stage()
                 .resume_reduce_intersection(build, super::narrow_value_cache_read(read)),
-            FamilyBuild::OverloadSet(build) => self
-                .continuation_stage()
-                .resume_resolve_overload_set(build, read),
+            FamilyBuild::OverloadSet(_) => unreachable!("an overload set resumed above"),
             FamilyBuild::ApparentType(build) => {
                 self.continuation_stage().resume_apparent_type(build, read)
             }
