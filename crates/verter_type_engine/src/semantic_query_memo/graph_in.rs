@@ -385,6 +385,13 @@ impl<M: ObserveExec> GraphIn<'_, M> {
     }
     /// Record optional telemetry for this execution.
     #[inline(always)]
+    pub fn record_discovery_signature_published(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_discovery_signature_published();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
     pub fn record_signature_position_compared(self) {
         if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
             self.store.record_signature_position_compared();

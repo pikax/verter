@@ -6692,6 +6692,11 @@ pub struct SemanticGraphStats {
     /// one per node a walk enters, counted before any shortcut answers it,
     /// outside every charge. A subject walked again counts again.
     pub discovery_nodes_walked: u64,
+    /// Signatures discovery walks published, wherever they ran: one per
+    /// leaf a walk publishes, counted once its record is interned, whether
+    /// or not that record already existed, outside every charge. A
+    /// signature published again counts again.
+    pub discovery_signatures_published: u64,
     /// Type positions signature matching compared, wherever it ran: one per
     /// pair of types the kernel's identity comparison decides, counted
     /// before the pair is read. A comparison run again counts again.
@@ -13100,7 +13105,8 @@ mod tests {
     ///   admission_stages_walked, deferred_steps_evaluated,
     ///   intersection_products_built, explicit_candidates_instantiated,
     ///   binder_substitutions, substitution_child_visits,
-    ///   discovery_nodes_walked, signature_positions_compared,
+    ///   discovery_nodes_walked, discovery_signatures_published,
+    ///   signature_positions_compared,
     ///   signature_results_forced, signature_rebinds,
     ///   signature_descriptors_rebound.
     /// - Exceptional-path: same_path_sentinel_returns,
@@ -13153,6 +13159,7 @@ mod tests {
             "binder_substitutions",
             "substitution_child_visits",
             "discovery_nodes_walked",
+            "discovery_signatures_published",
             "signature_positions_compared",
             "signature_results_forced",
             "signature_rebinds",

@@ -1197,6 +1197,27 @@ order — a declared base's own `Static` surface read as a query, a value
 base's constructor surface composed in place — and the composed surface
 with its `prototype` property and type-argument specialization) are written
 this way.
+Signature discovery (`SignaturesOfType`; `DiscoveryWalk` in
+`signature_discovery.rs`) is written this way too, as
+`FamilyBuild::Discovery`. The walk is an owned stack of levels
+(`DiscoveryFrame`: a settled node in the visiting set, a union's arms, an
+intersection type's flattening, a composite's members, one signature
+list, a merged declaration's own lists, a concatenation of bases or of a
+runtime nominal's contributors), advanced by out-of-line stages of the
+dispatcher, so what it walks is heap depth, never native stack depth.
+Every node it enters, every intersection member it flattens and every
+signature-list entry settles through its carrier chain as the owned
+`SourceCarrierRead` over the shared deferred evaluation: the read the
+chain names — an instantiation, or a read inside the settlement's
+evaluation, delivered inside that evaluation — is the build's need. The
+walk counts its own work (`discovery_nodes_walked` per node entered,
+`discovery_signatures_published` per signature published) and moves no
+stage counter. A frame drives it when a frame needs the list (an overload
+set's, an apparent type's, a call's); read synchronously, or polled as a
+root, `SignaturesOfType` is built in place by the same stages through
+`drive_family_value_in_place`, each read made where the walk stands. A
+walk released while it stands in a settlement's evaluation abandons that
+evaluation's recordings (`FamilyBuild::release_retained_accounting`).
 Substitution (`substitute.rs`) is one owned walk, `SubstitutionWalk`: a
 flat stack of the cold levels it has opened, each with the node's payload,
 its children in visit order, the children substituted so far, its cost
@@ -1490,7 +1511,9 @@ are.
   results are never read again. A walk whose epoch retired before it
   published copies its found set into the current epoch; the identity
   comparison of two sets read in different epochs copies the source's
-  candidate into the target's.
+  candidate into the target's. A discovery walk keeps its binding across
+  its suspensions: a walk suspended while the kernel replaces its epoch
+  finishes in the epoch it began in, and a stage never binds again.
 - **Owned, exclusively advanced state.** `FamilyBuild` and `FamilyStep` are
   asserted `Send` and neither `Clone` nor `Copy`: a build is moved into each
   stage and out again, never shared between drivers. A polled root lends its
@@ -2229,9 +2252,19 @@ asked in. Two needs keep their frame's scope instead:
 Signature discovery and the kernel still read in place, inventoried for
 conversion:
 
-- the whole discovery walk and every read it makes: `SignaturesOfType`
-  builds in one step; the handles it publishes are safe to retain across
-  a suspension;
+- a walk's apparent-wrapper lookup and instantiation, read in place by
+  the stage standing at a primitive, literal, template, symbol, array or
+  tuple (`global_wrapper_surface`): the lookup's owned form is not yet
+  the walk's need;
+- a runtime nominal's augmentation fold (`collect_augmentation_contributions`),
+  a class expression's instance surface (`class_expression_read_surface`)
+  and a rest parameter's carrier unwrap (`unwrap_identity_carrier_for_relation`),
+  each read in place by the stage that needs it;
+- a generic carrier's arguments, evaluated in place before its
+  instantiation is named (`source_carrier_instantiation`), as for the path
+  walk's mapped source;
+- `SignaturesOfType` read synchronously or polled as a root: built in place
+  through the same stages, its reads made where the walk stands;
 - the kernel callbacks that reach the dispatch from inside matching and
   union composition (`identical`, `intersect`, `map_binders`,
   `forced_result`), in the walk's epoch;
@@ -2257,7 +2290,7 @@ carriers, the evaluator, path walks and flow returns) drives the same
 walk in place.
 
 Every other family a frame or cold build reaches still builds in one
-synchronous step: mapped types, `keyof`, template literals, signature discovery,
+synchronous step: mapped types, `keyof`, template literals,
 object-spread projection, locator lowering, a relation's reduction below
 its operand demands, flow returns and the call walk below a suspension
 point. Their nested query reads and resolver

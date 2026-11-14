@@ -305,8 +305,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> GraphTypes<'_, '_, C> {
     }
 }
 
-type Found = Result<Vec<SignatureCandidate>, DiscoveryError>;
-
 fn unsettled<T>() -> Result<T, DiscoveryError> {
     Err(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput))
 }
@@ -315,21 +313,181 @@ fn unsupported<T>() -> Result<T, DiscoveryError> {
     Err(DiscoveryError::Incomplete(IncompleteReason::Unsupported))
 }
 
-struct Walk<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> {
-    types: &'w GraphTypes<'a, 'd, C>,
+/// A walk that ends because a node does not settle.
+fn failed_unsettled() -> DiscoveryFlow {
+    DiscoveryFlow::Failed(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput))
+}
+
+/// The signature discovery of one subject between two of its stages:
+/// everything the walk holds but its dispatcher.
+///
+/// The walk is an owned stack of levels ([`DiscoveryFrame`]), each waiting
+/// on what is below it, so the depth of what it walks — aliases, union
+/// arms, intersection members, merged declarations' bases — is heap depth,
+/// never native stack depth. A level that settles a node through its
+/// carrier chain stands at the read the chain names ([`DiscoveryRead`]):
+/// a frame driver suspends there and resumes the walk on whichever thread
+/// delivers the read, the in-place driver reads it where it stands. No
+/// stage that completed runs again.
+pub(super) struct DiscoveryWalk {
+    subject: SemanticNodeId,
     kind: GraphSignatureKind,
     context: SemanticContextId,
+    fence: crate::semantic_query::DepSignature,
+    /// The epoch everything the walk interns lands in, from its first
+    /// stage to its publication, whatever the store makes current since.
+    binding: EpochBinding,
     visiting: FxHashSet<SemanticNodeId>,
     /// The authored node each leaf candidate was published from, first
     /// publication wins within this walk.
     authored: rustc_hash::FxHashMap<SignatureDescriptorId, SemanticNodeId>,
+    frames: Vec<DiscoveryFrame>,
+    /// The read the walk stands at.
+    standing: Option<DiscoveryRead>,
+    /// The query that read names, until its driver takes it.
+    need: Option<crate::semantic_query::SemanticQueryKey>,
 }
 
-impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd, C> {
-    fn dispatch(&self) -> &'a ProjectSemanticDispatch<'d, C> {
-        self.types.dispatch
-    }
+/// One level of a discovery walk waiting on what is below it.
+enum DiscoveryFrame {
+    /// A settled subject node, in the visiting set until its candidates
+    /// are found.
+    Node(SemanticNodeId),
+    /// A union's arms in their stable order; `lists.len()` arms are done.
+    Arms {
+        arms: Arc<[SemanticNodeId]>,
+        lists: Vec<Vec<SignatureCandidate>>,
+    },
+    /// An intersection type's members being flattened.
+    Flattening(Box<IntersectionFlattening>),
+    /// A composite's members in order, combined by its origin's rule;
+    /// `lists.len()` members are done.
+    Members {
+        category: CompositeOriginCategory,
+        members: Vec<SemanticNodeId>,
+        lists: Vec<Vec<SignatureCandidate>>,
+    },
+    /// One ordered signature list; `found.len()` entries are published.
+    Signatures {
+        list: Arc<[SemanticNodeId]>,
+        first_ordinal: u32,
+        found: Vec<SignatureCandidate>,
+    },
+    /// A merged declaration's contributors' own lists.
+    MergedOwn(Box<MergedDeclarationLists>),
+    /// Nodes whose candidates are concatenated in order: a merged
+    /// declaration's bases, a runtime nominal's contributors.
+    Concatenation {
+        nodes: Vec<SemanticNodeId>,
+        at: usize,
+        found: Vec<SignatureCandidate>,
+    },
+}
 
+/// The members of an intersection type with every member that is itself an
+/// intersection type — written, or named by an alias or a value's type —
+/// spread in place, as the checker's `getIntersectionType` flattens them:
+/// `A & (B & K)` has the members `A`, `B` and `K`, so the mixin rule reads
+/// each constructor (`typeof M1(M0(Base))` mixes both layers into `Base`'s
+/// construct signature). Each member is settled once, in order.
+struct IntersectionFlattening {
+    category: CompositeOriginCategory,
+    /// The members left to settle, the next one last.
+    pending: Vec<SemanticNodeId>,
+    seen: FxHashSet<SemanticNodeId>,
+    flattened: Vec<SemanticNodeId>,
+    /// The member being settled.
+    member: Option<SemanticNodeId>,
+}
+
+/// A merged declaration's own signature lists, one per contributor in
+/// contributor order, then its `extends` bases in clause order, each once.
+struct MergedDeclarationLists {
+    own: Vec<Arc<[SemanticNodeId]>>,
+    bases: Vec<SemanticNodeId>,
+    lists: Vec<Vec<SignatureCandidate>>,
+    /// The ordinal of the next contributor's first signature.
+    ordinal: u32,
+}
+
+/// The read a discovery walk stands at.
+enum DiscoveryRead {
+    /// A carrier chain at the read it named, and the stage its node is for.
+    Carrier {
+        chain: Box<super::build::SourceCarrierRead>,
+        settling: Settling,
+    },
+}
+
+/// What a node a walk settles is for.
+#[derive(Clone, Copy)]
+enum Settling {
+    /// A node the walk entered.
+    Subject,
+    /// An intersection type's member being flattened.
+    Member,
+    /// An entry of a signature list.
+    Signature,
+}
+
+/// What a discovery walk does next.
+enum DiscoveryFlow {
+    Enter(SemanticNodeId),
+    Settled(Settling, SemanticNodeId),
+    /// The candidates the top level waits on.
+    Found(Vec<SignatureCandidate>),
+    /// The top level has every list: combine it.
+    Combine,
+    /// The subject's candidates: no level is left.
+    Complete(Vec<SignatureCandidate>),
+    /// The walk stands at the read it named.
+    Stand,
+    Failed(DiscoveryError),
+}
+
+/// Where a discovery walk stands after its latest stage.
+pub(super) enum DiscoveryStep {
+    Done(Box<DiscoveredSignatures>),
+    /// The walk reads the query it names next, holding everything it
+    /// computed.
+    Read(Box<DiscoveryWalk>),
+}
+
+/// What a finished walk found, with what its output is fenced and rooted
+/// by.
+pub(super) struct DiscoveredSignatures {
+    subject: SemanticNodeId,
+    fence: crate::semantic_query::DepSignature,
+    outcome: QueryOutcome<crate::signature_kernel::SignatureSetValue>,
+}
+
+// A suspended walk is owned state its frame carries to whichever thread
+// resumes it, never shared by copy.
+static_assertions::assert_impl_all!(DiscoveryWalk: Send);
+static_assertions::assert_not_impl_any!(DiscoveryWalk: Clone, Copy);
+static_assertions::assert_impl_all!(DiscoveryStep: Send);
+static_assertions::assert_not_impl_any!(DiscoveryStep: Clone, Copy);
+// A level of the walk is a heap frame of at most one cache line; what it
+// retains beyond that is boxed.
+const _: () = assert!(std::mem::size_of::<DiscoveryFrame>() <= 64);
+const _: () = assert!(std::mem::size_of::<IntersectionFlattening>() <= 112);
+const _: () = assert!(std::mem::size_of::<MergedDeclarationLists>() <= 80);
+// What the stage loop and its drivers hold on the native stack.
+const _: () = assert!(std::mem::size_of::<DiscoveryFlow>() <= 32);
+const _: () = assert!(std::mem::size_of::<DiscoveryStep>() <= 16);
+const _: () = assert!(std::mem::size_of::<DiscoveryRead>() <= 16);
+// The walk itself lives behind one box: its fixed fields and the one need
+// it names.
+const _: () = assert!(
+    std::mem::size_of::<DiscoveryWalk>()
+        <= 192 + std::mem::size_of::<crate::semantic_query::SemanticQueryKey>()
+);
+const _: () = assert!(
+    std::mem::size_of::<DiscoveredSignatures>()
+        <= 32 + std::mem::size_of::<QueryOutcome<crate::signature_kernel::SignatureSetValue>>()
+);
+
+impl DiscoveryWalk {
     fn strict_null(&self) -> bool {
         self.context
             .context()
@@ -337,111 +495,370 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
             .strict_null_checks
     }
 
-    /// The members of an intersection type with every member that is itself
-    /// an intersection type — written, or named by an alias or a value's
-    /// type — spread in place, as the checker's `getIntersectionType`
-    /// flattens them: `A & (B & K)` has the members `A`, `B` and `K`, so the
-    /// mixin rule reads each constructor (`typeof M1(M0(Base))` mixes both
-    /// layers into `Base`'s construct signature). Iterative, so an
-    /// intersection nested N deep is N member reads.
-    fn flattened_intersection_members(&self, members: Vec<SemanticNodeId>) -> Vec<SemanticNodeId> {
-        let graph = self.dispatch().graph();
-        let mut flattened = Vec::with_capacity(members.len());
-        let mut seen = FxHashSet::default();
-        let mut pending: Vec<SemanticNodeId> = members.into_iter().rev().collect();
-        while let Some(member) = pending.pop() {
-            if !seen.insert(member) {
-                continue;
-            }
-            let mut settled = self.dispatch().resolve_signature_source_carrier(
-                member,
-                ProjectionReductionContext::structural_transit(),
-            );
-            let mut aliases = FxHashSet::default();
-            while let Some(SemanticNodeData::Alias(target)) = graph.node_data(settled).as_deref() {
-                if !aliases.insert(*target) {
-                    break;
-                }
-                settled = *target;
-            }
-            match graph.node_data(settled).as_deref() {
-                Some(SemanticNodeData::Intersection(nested))
-                    if intersection_type_category(nested.origin_category()) =>
-                {
-                    pending.extend(nested.iter().rev().copied());
-                }
-                _ => flattened.push(member),
-            }
-        }
-        flattened
+    /// Stand at `read`, which names `key`.
+    fn stand(
+        &mut self,
+        read: DiscoveryRead,
+        key: crate::semantic_query::SemanticQueryKey,
+    ) -> DiscoveryFlow {
+        self.standing = Some(read);
+        self.need = Some(key);
+        DiscoveryFlow::Stand
     }
 
-    fn discover(&mut self, node: SemanticNodeId) -> Found {
-        self.dispatch().graph().record_discovery_node_walked();
+    /// The query the walk reads next, taken by its driver.
+    fn take_need(&mut self) -> crate::semantic_query::SemanticQueryKey {
+        self.need
+            .take()
+            .expect("a walk standing at a read names its query")
+    }
+
+    /// Whether the read the walk stands at is its settlement's carrier
+    /// resolution's, counted as its consumers count those reads.
+    fn reads_for_carrier(&self) -> bool {
+        match &self.standing {
+            Some(DiscoveryRead::Carrier { chain, .. }) => chain.reads_for_carrier(),
+            None => false,
+        }
+    }
+
+    /// Whether `key`, the read the walk stands at, is counted as the walk's
+    /// own dispatch intent where a driver reads it in place: a carrier
+    /// resolution's reads but its `typeof` value's, as the settlement's
+    /// in-place evaluation always counted them.
+    pub(super) fn counts_awaited_intent(
+        &self,
+        key: &crate::semantic_query::SemanticQueryKey,
+    ) -> bool {
+        self.reads_for_carrier()
+            && !matches!(key, crate::semantic_query::SemanticQueryKey::TypeOf { .. })
+    }
+
+    /// Release what the walk holds on its computation's recording: a
+    /// settlement standing in a deferred evaluation abandons the recordings
+    /// that evaluation opened, top first.
+    pub(super) fn release<C: crate::resolver_core::ResolverCapabilities>(
+        &mut self,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+    ) {
+        if let Some(DiscoveryRead::Carrier { chain, .. }) = self.standing.take() {
+            dispatch.abandon_source_carrier_read(*chain);
+        }
+    }
+}
+
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// `SignaturesOfType(subject, kind, context)`: the ordered call or
+    /// construct candidates of `subject`. An empty set is a complete
+    /// negative; every failure to settle the subject is an explicit
+    /// incomplete reason. The set alone; see
+    /// [`Self::signatures_of_type_with_authored`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn signatures_of_type(
+        &self,
+        store: &SignatureStore,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+        context: SemanticContextId,
+    ) -> QueryOutcome<crate::signature_kernel::SignatureSetRef> {
+        match self.signatures_of_type_with_authored(store, subject, kind, context) {
+            QueryOutcome::Ready(Ready { value, evidence }) => QueryOutcome::Ready(Ready {
+                value: value.set,
+                evidence,
+            }),
+            QueryOutcome::Incomplete(reason) => QueryOutcome::Incomplete(reason),
+        }
+    }
+
+    /// [`Self::signatures_of_type`] with, per candidate, the authored node
+    /// the walk published it from: the walk run outside the memo, each read
+    /// made where it stands, under one connected demand, and its outcome
+    /// with the incomplete reason the query's output keeps only as a miss.
+    ///
+    /// The walk works in the epoch current as it begins, for its whole life:
+    /// everything it interns lands there. When a replacement retired that
+    /// epoch before the set is published, the found candidates are copied
+    /// into the current epoch and published there, never walked again.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn signatures_of_type_with_authored(
+        &self,
+        store: &SignatureStore,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+        context: SemanticContextId,
+    ) -> QueryOutcome<crate::signature_kernel::SignatureSetValue> {
+        let (_connected, _) = self.enter_connected_demand(false);
+        let mut step = self.begin_signature_discovery(store, subject, kind, context);
+        loop {
+            let mut walk = match step {
+                DiscoveryStep::Done(done) => return done.outcome,
+                DiscoveryStep::Read(walk) => walk,
+            };
+            let key = walk.take_need();
+            let counts = walk.reads_for_carrier();
+            let mut key = Some(key);
+            let mut read = || {
+                let key = key.take().expect("a read is made once");
+                if counts {
+                    self.carrier_read_in_place(key)
+                } else {
+                    self.execute_read(key)
+                }
+            };
+            let flow = self.deliver_discovery_read(&mut walk, &mut read);
+            step = self.run_signature_discovery(walk, flow);
+        }
+    }
+
+    /// The first stage of `SignaturesOfType(subject, kind, context)` as a
+    /// family build: its output, or the read its walk names, the walk
+    /// retained.
+    #[inline(never)]
+    pub(super) fn begin_discovery_family(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+        context: SemanticContextId,
+    ) -> super::family_continuation::FamilyStep {
+        let step = self.begin_signature_discovery(
+            self.graph().store().signature_store(),
+            subject,
+            kind,
+            context,
+        );
+        self.discovery_family_step(step)
+    }
+
+    /// The next stage of a discovery family's build, given `deliver`, the
+    /// read its walk stands at.
+    #[inline(never)]
+    pub(super) fn resume_discovery_family(
+        &self,
+        mut walk: Box<DiscoveryWalk>,
+        deliver: &mut dyn FnMut() -> crate::semantic_query::CacheRead<
+            crate::semantic_query::QueryResult<crate::semantic_query::SemanticQueryValue>,
+        >,
+    ) -> super::family_continuation::FamilyStep {
+        let flow = {
+            let mut node_read = || super::narrow_value_cache_read(deliver());
+            self.deliver_discovery_read(&mut walk, &mut node_read)
+        };
+        let step = self.run_signature_discovery(walk, flow);
+        self.discovery_family_step(step)
+    }
+
+    /// A walk's step as its family's.
+    fn discovery_family_step(&self, step: DiscoveryStep) -> super::family_continuation::FamilyStep {
+        use super::family_continuation::{FamilyBuild, FamilyStep};
+        match step {
+            DiscoveryStep::Done(done) => {
+                FamilyStep::Value(Box::new(self.signature_set_output(*done)))
+            }
+            DiscoveryStep::Read(mut walk) => {
+                let key = walk.take_need();
+                FamilyStep::Need(key, Box::new(FamilyBuild::Discovery(walk)))
+            }
+        }
+    }
+
+    /// The walk's first stage: its fence, then its subject entered in the
+    /// epoch current now, which it keeps for its whole life.
+    fn begin_signature_discovery(
+        &self,
+        store: &SignatureStore,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+        context: SemanticContextId,
+    ) -> DiscoveryStep {
+        let fence = self.project_generation_signature();
+        let walk = Box::new(DiscoveryWalk {
+            subject,
+            kind,
+            context,
+            fence,
+            binding: store.bind_current(),
+            visiting: FxHashSet::default(),
+            authored: rustc_hash::FxHashMap::default(),
+            frames: Vec::new(),
+            standing: None,
+            need: None,
+        });
+        self.run_signature_discovery(walk, DiscoveryFlow::Enter(subject))
+    }
+
+    /// Carry `walk` on from `flow` until it finishes or stands at a read.
+    /// The loop holds only the walk's pointer and one flow: every stage is
+    /// out of line, so nothing of a stage stays beneath the next.
+    #[inline(never)]
+    fn run_signature_discovery(
+        &self,
+        mut walk: Box<DiscoveryWalk>,
+        mut flow: DiscoveryFlow,
+    ) -> DiscoveryStep {
+        loop {
+            flow = match flow {
+                DiscoveryFlow::Enter(node) => self.enter_discovery_node(&mut walk, node),
+                DiscoveryFlow::Settled(settling, node) => {
+                    self.discovery_settled(&mut walk, settling, node)
+                }
+                DiscoveryFlow::Found(list) => self.discovery_child_found(&mut walk, list),
+                DiscoveryFlow::Combine => self.combine_discovery_frame(&mut walk),
+                DiscoveryFlow::Stand => return DiscoveryStep::Read(walk),
+                DiscoveryFlow::Complete(list) => {
+                    return self.finish_signature_discovery(walk, Ok(list))
+                }
+                DiscoveryFlow::Failed(error) => {
+                    return self.finish_signature_discovery(walk, Err(error))
+                }
+            };
+        }
+    }
+
+    /// The walk standing at a query, given `node_read`, that read: the
+    /// settlement's evaluation has it delivered inside the evaluation, the
+    /// chain's instantiation to the chain.
+    #[inline(never)]
+    fn deliver_discovery_read(
+        &self,
+        walk: &mut DiscoveryWalk,
+        node_read: &mut dyn FnMut() -> crate::semantic_query::CacheRead<
+            crate::semantic_query::QueryResult<SemanticNodeId>,
+        >,
+    ) -> DiscoveryFlow {
+        let Some(DiscoveryRead::Carrier { chain, settling }) = walk.standing.take() else {
+            unreachable!("a delivery answers the read the walk stands at")
+        };
+        match self.resume_source_carrier_read(*chain, node_read) {
+            super::build::SourceCarrierStep::Read(key, chain) => {
+                walk.stand(DiscoveryRead::Carrier { chain, settling }, key)
+            }
+            super::build::SourceCarrierStep::Done(node) => DiscoveryFlow::Settled(settling, node),
+        }
+    }
+
+    /// Settle `node` through its carrier chain for `settling`: the node it
+    /// settles on, or the read the chain names, the walk standing there.
+    #[inline(never)]
+    fn settle_for_discovery(
+        &self,
+        walk: &mut DiscoveryWalk,
+        node: SemanticNodeId,
+        settling: Settling,
+    ) -> DiscoveryFlow {
+        match self.begin_source_carrier_read(node, ProjectionReductionContext::structural_transit())
+        {
+            super::build::SourceCarrierStep::Done(settled) => {
+                DiscoveryFlow::Settled(settling, settled)
+            }
+            super::build::SourceCarrierStep::Read(key, chain) => {
+                walk.stand(DiscoveryRead::Carrier { chain, settling }, key)
+            }
+        }
+    }
+
+    /// Enter `node`: counted once, then — unless it is a lib runtime
+    /// nominal — settled.
+    #[inline(never)]
+    fn enter_discovery_node(
+        &self,
+        walk: &mut DiscoveryWalk,
+        node: SemanticNodeId,
+    ) -> DiscoveryFlow {
+        self.graph().record_discovery_node_walked();
         // A lib runtime nominal's builtin-sentinel carrier is TERMINAL: it
         // names a global interface, not a declaration with a body, so the
         // global population answers for it BEFORE the settlement rail —
-        // which would resolve it to its unresolvable-declaration miss.
-        if let Some(found) = self.runtime_nominal_carrier(node) {
-            return found;
+        // which would resolve it to its unresolvable-declaration miss. The
+        // nominal's type ARGUMENTS travel with it: a generic augmentation
+        // (`interface Promise<T> { (value: T): void }`) is instantiated with
+        // them.
+        let nominal = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity })
+                if self.runtime_nominal_identity(identity).is_some() =>
+            {
+                Some((identity.decl_name.clone(), Vec::new()))
+            }
+            Some(SemanticNodeData::InstantiationRef { base, args })
+                if self.runtime_nominal_identity(base).is_some() =>
+            {
+                Some((base.decl_name.clone(), args.iter().copied().collect()))
+            }
+            _ => None,
+        };
+        if let Some((name, args)) = nominal {
+            return self.discover_runtime_nominal(walk, &name, &args);
         }
-        let node = self.dispatch().resolve_signature_source_carrier(
-            node,
-            ProjectionReductionContext::structural_transit(),
-        );
-        if !self.visiting.insert(node) {
-            return unsettled();
-        }
-        let out = self.discover_settled(node);
-        self.visiting.remove(&node);
-        out
+        self.settle_for_discovery(walk, node, Settling::Subject)
     }
 
-    fn discover_settled(&mut self, node: SemanticNodeId) -> Found {
-        let graph = self.dispatch().graph();
+    fn discovery_settled(
+        &self,
+        walk: &mut DiscoveryWalk,
+        settling: Settling,
+        node: SemanticNodeId,
+    ) -> DiscoveryFlow {
+        match settling {
+            Settling::Subject => self.discover_settled_node(walk, node),
+            Settling::Member => self.flattened_member_settled(walk, node),
+            Settling::Signature => self.signature_entry_settled(walk, node),
+        }
+    }
+
+    /// A settled subject node: its candidates found at once, or the level
+    /// that waits on what it walks next.
+    #[inline(never)]
+    fn discover_settled_node(
+        &self,
+        walk: &mut DiscoveryWalk,
+        node: SemanticNodeId,
+    ) -> DiscoveryFlow {
+        if !walk.visiting.insert(node) {
+            return failed_unsettled();
+        }
+        walk.frames.push(DiscoveryFrame::Node(node));
+        let graph = self.graph();
         let Some(data) = graph.node_data(node) else {
-            return unsettled();
+            return failed_unsettled();
         };
         match &*data {
             SemanticNodeData::Alias(target) => {
                 let target = *target;
                 drop(data);
-                self.discover(target)
+                DiscoveryFlow::Enter(target)
             }
             // A class expression's INSTANCE carries the signatures of its
             // instance surface.
             SemanticNodeData::ClassExpressionInstance { surface, .. } => {
                 let surface = *surface;
                 drop(data);
-                let surface = self
-                    .dispatch()
-                    .class_expression_read_surface(node)
-                    .unwrap_or(surface);
-                self.discover(surface)
+                DiscoveryFlow::Enter(self.class_expression_read_surface(node).unwrap_or(surface))
             }
             SemanticNodeData::MergedDecl { contributors } => {
                 let contributors = Arc::clone(contributors.as_arc());
                 drop(data);
-                self.discover_merged_declaration(&contributors)
+                self.begin_merged_declaration(walk, &contributors)
             }
             SemanticNodeData::Signature { .. } | SemanticNodeData::DeferredCallable(_) => {
                 drop(data);
-                Ok(self.leaf(node, 0)?.into_iter().collect())
+                match self.publish_discovered_leaf(walk, node, 0) {
+                    Ok(candidate) => DiscoveryFlow::Found(candidate.into_iter().collect()),
+                    Err(error) => DiscoveryFlow::Failed(error),
+                }
             }
             SemanticNodeData::Object(surface) => {
-                let list = match self.kind {
+                let list = match walk.kind {
                     GraphSignatureKind::Call => Arc::clone(&surface.call_signatures),
                     GraphSignatureKind::Construct => Arc::clone(&surface.construct_signatures),
                 };
                 drop(data);
-                self.signature_list(&list, 0)
+                self.begin_signature_list(walk, list, 0)
             }
             SemanticNodeData::TypeParam { constraint, .. } => {
                 let constraint = *constraint;
                 drop(data);
                 match constraint {
-                    Some(c) => self.discover(c),
-                    None => Ok(Vec::new()),
+                    Some(constraint) => DiscoveryFlow::Enter(constraint),
+                    None => DiscoveryFlow::Found(Vec::new()),
                 }
             }
             SemanticNodeData::Union(_) => {
@@ -449,56 +866,35 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                 let arms = crate::semantic_query::stable_key::semantic_union_members(
                     graph.store(),
                     node,
-                    self.context.context(),
+                    walk.context.context(),
                 );
-                let mut lists = Vec::with_capacity(arms.len());
-                for arm in arms.iter() {
-                    lists.push(self.discover(*arm)?);
+                let first = arms.first().copied();
+                walk.frames.push(DiscoveryFrame::Arms {
+                    lists: Vec::with_capacity(arms.len()),
+                    arms,
+                });
+                match first {
+                    Some(arm) => DiscoveryFlow::Enter(arm),
+                    None => DiscoveryFlow::Combine,
                 }
-                union_signatures(self.types.binding, self.types, &lists)
             }
             SemanticNodeData::Intersection(members) => {
                 let category = members.origin_category();
                 let members: Vec<SemanticNodeId> = members.iter().copied().collect();
                 drop(data);
-                let members = if intersection_type_category(category) {
-                    self.flattened_intersection_members(members)
+                if intersection_type_category(category) {
+                    walk.frames.push(DiscoveryFrame::Flattening(Box::new(
+                        IntersectionFlattening {
+                            category,
+                            flattened: Vec::with_capacity(members.len()),
+                            pending: members.into_iter().rev().collect(),
+                            seen: FxHashSet::default(),
+                            member: None,
+                        },
+                    )));
+                    self.next_flattened_member(walk)
                 } else {
-                    members
-                };
-                let mut lists = Vec::with_capacity(members.len());
-                for member in members {
-                    lists.push(self.discover(member)?);
-                }
-                match category {
-                    // An interface or class body with heritage is a
-                    // declaration, not an intersection type: it inherits
-                    // its bases' signatures by concatenation, own first.
-                    CompositeOriginCategory::Heritage => Ok(heritage_signatures(&lists)),
-                    // One method's overloads are its signature list, every
-                    // declaration's kept.
-                    CompositeOriginCategory::OverloadGroup => Ok(lists.concat()),
-                    CompositeOriginCategory::MergedOverloadGroup => {
-                        merged_declaration_signatures(self.types.binding, &lists)
-                    }
-                    CompositeOriginCategory::Canonical(_)
-                    | CompositeOriginCategory::CanonicalUnproven
-                    | CompositeOriginCategory::AuthoredShell
-                    | CompositeOriginCategory::OrderedCarrier
-                    | CompositeOriginCategory::PreservingRebuild
-                    | CompositeOriginCategory::QuerySubject => intersection_signatures(
-                        self.types.binding,
-                        self.types,
-                        kernel_kind(self.kind),
-                        &lists,
-                    ),
-                    #[cfg(any(test, feature = "test-support"))]
-                    CompositeOriginCategory::TestFixture => intersection_signatures(
-                        self.types.binding,
-                        self.types,
-                        kernel_kind(self.kind),
-                        &lists,
-                    ),
+                    Self::begin_discovery_members(walk, category, members)
                 }
             }
             SemanticNodeData::Primitive(primitive) => {
@@ -518,8 +914,8 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                 };
                 drop(data);
                 match name {
-                    Some(name) => self.apparent(name, &[]),
-                    None => Ok(Vec::new()),
+                    Some(name) => self.discover_apparent(name, &[]),
+                    None => DiscoveryFlow::Found(Vec::new()),
                 }
             }
             SemanticNodeData::Literal(value) => {
@@ -530,44 +926,48 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                     LiteralValue::BigInt(_) => "BigInt",
                 };
                 drop(data);
-                self.apparent(name, &[])
+                self.discover_apparent(name, &[])
             }
             SemanticNodeData::TemplateLiteral { .. } => {
                 drop(data);
-                self.apparent("String", &[])
+                self.discover_apparent("String", &[])
             }
             // An enum member's apparent type is its value's.
             SemanticNodeData::EnumLiteral(literal) => {
                 let base = literal.base;
                 drop(data);
-                self.discover(base)
+                DiscoveryFlow::Enter(base)
             }
             SemanticNodeData::TypeOfNominal(_) => {
                 drop(data);
-                self.apparent("Symbol", &[])
+                self.discover_apparent("Symbol", &[])
             }
             SemanticNodeData::Array { element, readonly } => {
                 let (element, readonly) = (*element, *readonly);
                 drop(data);
-                self.apparent(if readonly { "ReadonlyArray" } else { "Array" }, &[element])
+                self.discover_apparent(if readonly { "ReadonlyArray" } else { "Array" }, &[element])
             }
             SemanticNodeData::Tuple { readonly, .. } => {
                 let readonly = *readonly;
                 drop(data);
                 let unknown =
                     graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
-                self.apparent(if readonly { "ReadonlyArray" } else { "Array" }, &[unknown])
+                self.discover_apparent(if readonly { "ReadonlyArray" } else { "Array" }, &[unknown])
             }
-            SemanticNodeData::KeyOf { .. } | SemanticNodeData::Mapped { .. } => Ok(Vec::new()),
+            SemanticNodeData::KeyOf { .. } | SemanticNodeData::Mapped { .. } => {
+                DiscoveryFlow::Found(Vec::new())
+            }
             // The checker's error type reads as `any`, which has no signatures.
             SemanticNodeData::Opaque(error) if super::build::is_certified_recovery(error) => {
-                Ok(Vec::new())
+                DiscoveryFlow::Found(Vec::new())
             }
-            SemanticNodeData::Opaque(error) => Err(DiscoveryError::Incomplete(
+            SemanticNodeData::Opaque(error) => DiscoveryFlow::Failed(DiscoveryError::Incomplete(
                 IncompleteReason::from_query_error(error),
             )),
             SemanticNodeData::ObjectSpreadProgram(_)
-            | SemanticNodeData::SyntheticBinding { .. } => unsupported(),
+            | SemanticNodeData::SyntheticBinding { .. } => {
+                DiscoveryFlow::Failed(DiscoveryError::Incomplete(IncompleteReason::Unsupported))
+            }
             SemanticNodeData::IntrinsicApplication { .. }
             | SemanticNodeData::IndexedAccess { .. }
             | SemanticNodeData::TypeOf(_)
@@ -578,31 +978,241 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
             | SemanticNodeData::InstantiationRef { .. }
             | SemanticNodeData::BareRef(_)
             | SemanticNodeData::ImportType(_)
-            | SemanticNodeData::RawFallback { .. } => unsettled(),
+            | SemanticNodeData::RawFallback { .. } => failed_unsettled(),
         }
     }
 
-    /// [`Self::runtime_nominal`] over `node` when it IS a lib runtime
-    /// nominal's builtin-sentinel carrier, `None` for every other node. The
-    /// nominal's type ARGUMENTS travel with it: a generic augmentation
-    /// (`interface Promise<T> { (value: T): void }`) is instantiated with
-    /// them.
-    fn runtime_nominal_carrier(&mut self, node: SemanticNodeId) -> Option<Found> {
-        let d = self.dispatch();
-        let nominal = match d.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::DeclRef { identity })
-                if d.runtime_nominal_identity(identity).is_some() =>
-            {
-                (identity.decl_name.clone(), Vec::new())
-            }
-            Some(SemanticNodeData::InstantiationRef { base, args })
-                if d.runtime_nominal_identity(base).is_some() =>
-            {
-                (base.decl_name.clone(), args.iter().copied().collect())
-            }
-            _ => return None,
+    /// A composite's members, read in order and combined by `category`'s
+    /// rule once each is found.
+    fn begin_discovery_members(
+        walk: &mut DiscoveryWalk,
+        category: CompositeOriginCategory,
+        members: Vec<SemanticNodeId>,
+    ) -> DiscoveryFlow {
+        let first = members.first().copied();
+        walk.frames.push(DiscoveryFrame::Members {
+            category,
+            lists: Vec::with_capacity(members.len()),
+            members,
+        });
+        match first {
+            Some(member) => DiscoveryFlow::Enter(member),
+            None => DiscoveryFlow::Combine,
+        }
+    }
+
+    /// The flattening on top of the walk settles its next member not yet
+    /// seen; with none left it becomes the members it flattened to.
+    #[inline(never)]
+    fn next_flattened_member(&self, walk: &mut DiscoveryWalk) -> DiscoveryFlow {
+        let Some(DiscoveryFrame::Flattening(flattening)) = walk.frames.last_mut() else {
+            unreachable!("a member is settled under its flattening")
         };
-        Some(self.runtime_nominal(&nominal.0, &nominal.1))
+        while let Some(member) = flattening.pending.pop() {
+            if !flattening.seen.insert(member) {
+                continue;
+            }
+            flattening.member = Some(member);
+            return self.settle_for_discovery(walk, member, Settling::Member);
+        }
+        let Some(DiscoveryFrame::Flattening(flattening)) = walk.frames.pop() else {
+            unreachable!("the flattening is the top level")
+        };
+        let IntersectionFlattening {
+            category,
+            flattened,
+            ..
+        } = *flattening;
+        Self::begin_discovery_members(walk, category, flattened)
+    }
+
+    /// The member being flattened settled on `settled`: a nested
+    /// intersection type, seen through its aliases, spreads its members in
+    /// place; any other member is kept as written.
+    #[inline(never)]
+    fn flattened_member_settled(
+        &self,
+        walk: &mut DiscoveryWalk,
+        settled: SemanticNodeId,
+    ) -> DiscoveryFlow {
+        let graph = self.graph();
+        let mut settled = settled;
+        let mut aliases = FxHashSet::default();
+        while let Some(SemanticNodeData::Alias(target)) = graph.node_data(settled).as_deref() {
+            if !aliases.insert(*target) {
+                break;
+            }
+            settled = *target;
+        }
+        let nested: Option<Vec<SemanticNodeId>> = match graph.node_data(settled).as_deref() {
+            Some(SemanticNodeData::Intersection(nested))
+                if intersection_type_category(nested.origin_category()) =>
+            {
+                Some(nested.iter().rev().copied().collect())
+            }
+            _ => None,
+        };
+        let Some(DiscoveryFrame::Flattening(flattening)) = walk.frames.last_mut() else {
+            unreachable!("a member settles under its flattening")
+        };
+        let member = flattening
+            .member
+            .take()
+            .expect("a settled member is the one being flattened");
+        match nested {
+            Some(nested) => flattening.pending.extend(nested),
+            None => flattening.flattened.push(member),
+        }
+        self.next_flattened_member(walk)
+    }
+
+    /// `list` read from `first_ordinal`: each entry settled, then published.
+    fn begin_signature_list(
+        &self,
+        walk: &mut DiscoveryWalk,
+        list: Arc<[SemanticNodeId]>,
+        first_ordinal: u32,
+    ) -> DiscoveryFlow {
+        walk.frames.push(DiscoveryFrame::Signatures {
+            found: Vec::with_capacity(list.len()),
+            list,
+            first_ordinal,
+        });
+        self.next_signature_entry(walk)
+    }
+
+    /// The signature list on top of the walk settles its next entry, or —
+    /// every entry published — is found.
+    #[inline(never)]
+    fn next_signature_entry(&self, walk: &mut DiscoveryWalk) -> DiscoveryFlow {
+        let Some(DiscoveryFrame::Signatures { list, found, .. }) = walk.frames.last() else {
+            unreachable!("an entry is settled under its list")
+        };
+        if let Some(entry) = list.get(found.len()).copied() {
+            return self.settle_for_discovery(walk, entry, Settling::Signature);
+        }
+        let Some(DiscoveryFrame::Signatures { found, .. }) = walk.frames.pop() else {
+            unreachable!("the list is the top level")
+        };
+        DiscoveryFlow::Found(found)
+    }
+
+    /// The list's next entry settled on `signature`: published at its
+    /// ordinal, or the walk fails when it is not a signature.
+    #[inline(never)]
+    fn signature_entry_settled(
+        &self,
+        walk: &mut DiscoveryWalk,
+        signature: SemanticNodeId,
+    ) -> DiscoveryFlow {
+        let Some(DiscoveryFrame::Signatures {
+            first_ordinal,
+            found,
+            ..
+        }) = walk.frames.last()
+        else {
+            unreachable!("an entry settles under its list")
+        };
+        let ordinal = *first_ordinal + found.len() as u32;
+        match self.publish_discovered_leaf(walk, signature, ordinal) {
+            Ok(Some(candidate)) => {
+                let Some(DiscoveryFrame::Signatures { found, .. }) = walk.frames.last_mut() else {
+                    unreachable!("the list is the top level")
+                };
+                found.push(candidate);
+                self.next_signature_entry(walk)
+            }
+            Ok(None) => {
+                DiscoveryFlow::Failed(DiscoveryError::Incomplete(IncompleteReason::Unsupported))
+            }
+            Err(error) => DiscoveryFlow::Failed(error),
+        }
+    }
+
+    /// The signatures of a merged declaration: every contributor's own
+    /// signatures in contributor order — one symbol, each contributor its
+    /// own declaration ([`merged_declaration_signatures`]) — then its
+    /// `extends` bases in clause order, each base once (the heritage rule
+    /// over the peer-merged body `reduce_merged_decl_with_graph` builds).
+    #[inline(never)]
+    fn begin_merged_declaration(
+        &self,
+        walk: &mut DiscoveryWalk,
+        contributors: &[SemanticNodeId],
+    ) -> DiscoveryFlow {
+        let graph = self.graph();
+        let kind = walk.kind;
+        let mut own: Vec<Arc<[SemanticNodeId]>> = Vec::with_capacity(contributors.len());
+        let mut bases: Vec<SemanticNodeId> = Vec::new();
+        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        for contributor in contributors {
+            let mut surfaces = Vec::new();
+            super::walk::collect_merged_contributor_arms(
+                graph.store(),
+                *contributor,
+                &mut surfaces,
+                &mut bases,
+            );
+            own.push(
+                surfaces
+                    .iter()
+                    .flat_map(|surface| match kind {
+                        GraphSignatureKind::Call => surface.call_signatures.iter(),
+                        GraphSignatureKind::Construct => surface.construct_signatures.iter(),
+                    })
+                    .copied()
+                    .filter(|signature| seen.insert(*signature))
+                    .collect(),
+            );
+        }
+        walk.frames.push(DiscoveryFrame::MergedOwn(Box::new(
+            MergedDeclarationLists {
+                lists: Vec::with_capacity(own.len()),
+                own,
+                bases,
+                ordinal: 0,
+            },
+        )));
+        self.next_merged_contributor(walk)
+    }
+
+    /// The merged declaration on top of the walk reads its next
+    /// contributor's own list; with every list read, its signatures are
+    /// merged and its bases read after them.
+    #[inline(never)]
+    fn next_merged_contributor(&self, walk: &mut DiscoveryWalk) -> DiscoveryFlow {
+        let Some(DiscoveryFrame::MergedOwn(merged)) = walk.frames.last() else {
+            unreachable!("a contributor is read under its merged declaration")
+        };
+        if let Some(list) = merged.own.get(merged.lists.len()) {
+            let (list, ordinal) = (Arc::clone(list), merged.ordinal);
+            return self.begin_signature_list(walk, list, ordinal);
+        }
+        let Some(DiscoveryFrame::MergedOwn(merged)) = walk.frames.pop() else {
+            unreachable!("the merged declaration is the top level")
+        };
+        let MergedDeclarationLists { lists, bases, .. } = *merged;
+        match merged_declaration_signatures(&walk.binding, &lists) {
+            Ok(found) => Self::concatenate_discovered(walk, bases, found),
+            Err(error) => DiscoveryFlow::Failed(error),
+        }
+    }
+
+    /// `found`, then the candidates of each of `nodes` in order.
+    fn concatenate_discovered(
+        walk: &mut DiscoveryWalk,
+        nodes: Vec<SemanticNodeId>,
+        found: Vec<SignatureCandidate>,
+    ) -> DiscoveryFlow {
+        let Some(first) = nodes.first().copied() else {
+            return DiscoveryFlow::Found(found);
+        };
+        walk.frames.push(DiscoveryFrame::Concatenation {
+            nodes,
+            at: 0,
+            found,
+        });
+        DiscoveryFlow::Enter(first)
     }
 
     /// The signatures of a lib runtime nominal interface applied to
@@ -618,15 +1228,20 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
     /// intersection / alias / overload shape is read exactly once, by the
     /// one authority. A torn contributor is served but folds the no-warm
     /// rail, exactly as the external augmentation path does.
-    fn runtime_nominal(&mut self, name: &str, type_arguments: &[SemanticNodeId]) -> Found {
-        let d = self.dispatch();
+    #[inline(never)]
+    fn discover_runtime_nominal(
+        &self,
+        walk: &mut DiscoveryWalk,
+        name: &str,
+        type_arguments: &[SemanticNodeId],
+    ) -> DiscoveryFlow {
         // Contributor discovery for `declare global` is the ingestion-time
         // population: a program-root `.d.ts` that nothing imports is
         // recorded when its artifact publishes, so lookup does not scan
         // program membership. Compiler options (noLib / lib) come from the
         // request's owning project, not the first workspace file.
         let request_canonical = crate::request_context::current_request_canonical();
-        let Some(contributions) = d.collect_augmentation_contributions(
+        let Some(contributions) = self.collect_augmentation_contributions(
             super::build::AugmentationContribution::TypeBody,
             verter_session_query::resolution::AugmentationTargetKind::GlobalAugmentation,
             name,
@@ -635,26 +1250,24 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
             request_canonical.as_deref().unwrap_or(""),
             None,
         ) else {
-            return Ok(Vec::new());
+            return DiscoveryFlow::Found(Vec::new());
         };
         if contributions.source_env_unobservable {
-            d.fold_into_top_build_local_taint(false, true);
+            self.fold_into_top_build_local_taint(false, true);
             crate::fact_tracing::note_non_cacheable_read_fan_out(
                 verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
             );
         }
-        let mut out = Vec::new();
-        for contributor in contributions.contributor_nodes {
-            out.extend(self.discover(contributor)?);
-        }
-        Ok(out)
+        let nodes: Vec<SemanticNodeId> = contributions.contributor_nodes.into_iter().collect();
+        Self::concatenate_discovered(walk, nodes, Vec::new())
     }
 
     /// Apparent-type signatures of a global wrapper interface: the wrapper
     /// the demanding project declares
-    /// ([`ProjectSemanticDispatch::global_wrapper_surface`]). An absent
-    /// global (`noLib`) is the checker's empty apparent type: a complete
-    /// negative, which a declaration appearing later invalidates.
+    /// ([`ProjectSemanticDispatch::global_wrapper_surface`]), whose surface
+    /// the walk enters. An absent global (`noLib`) is the checker's empty
+    /// apparent type: a complete negative, which a declaration appearing
+    /// later invalidates.
     ///
     /// A read of a primitive subject arrives with its key already rewritten
     /// to that wrapper
@@ -662,87 +1275,150 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
     /// reached here — a union arm, an unscoped or wrapper-less read — depends
     /// on the demanding project, which its key does not name, so the answer
     /// stays out of the shared memo with every entry that reads it.
-    fn apparent(&mut self, name: &str, args: &[SemanticNodeId]) -> Found {
-        let d = self.dispatch();
-        let Some(canonical) = d.wrapper_demand_canonical() else {
-            return unsettled();
+    ///
+    /// The wrapper's lookup and instantiation are read in place, where the
+    /// stage stands.
+    #[inline(never)]
+    fn discover_apparent(&self, name: &str, args: &[SemanticNodeId]) -> DiscoveryFlow {
+        let Some(canonical) = self.wrapper_demand_canonical() else {
+            return failed_unsettled();
         };
-        d.fold_into_top_build_local_taint(false, true);
-        match d.global_wrapper_surface(name, args, canonical.as_ref()) {
-            super::apparent_type::GlobalWrapper::Surface(surface) => self.discover(surface),
-            super::apparent_type::GlobalWrapper::Absent => Ok(Vec::new()),
-            super::apparent_type::GlobalWrapper::Unsettled => unsettled(),
+        self.fold_into_top_build_local_taint(false, true);
+        match self.global_wrapper_surface(name, args, canonical.as_ref()) {
+            super::apparent_type::GlobalWrapper::Surface(surface) => DiscoveryFlow::Enter(surface),
+            super::apparent_type::GlobalWrapper::Absent => DiscoveryFlow::Found(Vec::new()),
+            super::apparent_type::GlobalWrapper::Unsettled => failed_unsettled(),
         }
     }
 
-    /// The candidates of an ordered list of signature nodes — one object's
-    /// call or construct list — whose ordinals start at `first_ordinal`.
-    fn signature_list(&mut self, list: &[SemanticNodeId], first_ordinal: u32) -> Found {
-        let mut out = Vec::with_capacity(list.len());
-        for (offset, sig) in list.iter().enumerate() {
-            let sig = self.dispatch().resolve_signature_source_carrier(
-                *sig,
-                ProjectionReductionContext::structural_transit(),
-            );
-            match self.leaf(sig, first_ordinal + offset as u32)? {
-                Some(candidate) => out.push(candidate),
-                None => return unsupported(),
+    /// The level on top of the walk takes `list`, the candidates of what it
+    /// waited on (the return of the walk's recursion).
+    #[inline(never)]
+    fn discovery_child_found(
+        &self,
+        walk: &mut DiscoveryWalk,
+        list: Vec<SignatureCandidate>,
+    ) -> DiscoveryFlow {
+        let Some(frame) = walk.frames.pop() else {
+            return DiscoveryFlow::Complete(list);
+        };
+        match frame {
+            DiscoveryFrame::Node(settled) => {
+                walk.visiting.remove(&settled);
+                DiscoveryFlow::Found(list)
+            }
+            DiscoveryFrame::Arms { arms, mut lists } => {
+                lists.push(list);
+                let next = arms.get(lists.len()).copied();
+                walk.frames.push(DiscoveryFrame::Arms { arms, lists });
+                match next {
+                    Some(arm) => DiscoveryFlow::Enter(arm),
+                    None => DiscoveryFlow::Combine,
+                }
+            }
+            DiscoveryFrame::Members {
+                category,
+                members,
+                mut lists,
+            } => {
+                lists.push(list);
+                let next = members.get(lists.len()).copied();
+                walk.frames.push(DiscoveryFrame::Members {
+                    category,
+                    members,
+                    lists,
+                });
+                match next {
+                    Some(member) => DiscoveryFlow::Enter(member),
+                    None => DiscoveryFlow::Combine,
+                }
+            }
+            DiscoveryFrame::MergedOwn(mut merged) => {
+                merged.ordinal += merged.own[merged.lists.len()].len() as u32;
+                merged.lists.push(list);
+                walk.frames.push(DiscoveryFrame::MergedOwn(merged));
+                self.next_merged_contributor(walk)
+            }
+            DiscoveryFrame::Concatenation {
+                nodes,
+                at,
+                mut found,
+            } => {
+                found.extend(list);
+                let at = at + 1;
+                match nodes.get(at).copied() {
+                    Some(next) => {
+                        walk.frames
+                            .push(DiscoveryFrame::Concatenation { nodes, at, found });
+                        DiscoveryFlow::Enter(next)
+                    }
+                    None => DiscoveryFlow::Found(found),
+                }
+            }
+            DiscoveryFrame::Flattening(_) | DiscoveryFrame::Signatures { .. } => {
+                unreachable!("a level settling a node waits on its settlement, never on a list")
             }
         }
-        Ok(out)
     }
 
-    /// The signatures of a merged declaration: every contributor's own
-    /// signatures in contributor order — one symbol, each contributor its
-    /// own declaration ([`merged_declaration_signatures`]) — then its
-    /// `extends` bases in clause order, each base once (the heritage rule
-    /// over the peer-merged body `reduce_merged_decl_with_graph` builds).
-    fn discover_merged_declaration(&mut self, contributors: &[SemanticNodeId]) -> Found {
-        let graph = self.dispatch().graph();
-        let mut own: Vec<Vec<SemanticNodeId>> = Vec::with_capacity(contributors.len());
-        let mut bases: Vec<SemanticNodeId> = Vec::new();
-        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        for contributor in contributors {
-            let mut surfaces = Vec::new();
-            super::walk::collect_merged_contributor_arms(
-                graph.store(),
-                *contributor,
-                &mut surfaces,
-                &mut bases,
-            );
-            own.push(
-                surfaces
-                    .iter()
-                    .flat_map(|surface| match self.kind {
-                        GraphSignatureKind::Call => surface.call_signatures.iter(),
-                        GraphSignatureKind::Construct => surface.construct_signatures.iter(),
-                    })
-                    .copied()
-                    .filter(|signature| seen.insert(*signature))
-                    .collect(),
-            );
+    /// The completed level on top of the walk combined by the kernel rule
+    /// it stands for.
+    #[inline(never)]
+    fn combine_discovery_frame(&self, walk: &mut DiscoveryWalk) -> DiscoveryFlow {
+        let frame = walk.frames.pop();
+        let types = GraphTypes {
+            dispatch: self,
+            binding: &walk.binding,
+            semantic_identity: false,
+        };
+        let combined = match frame {
+            Some(DiscoveryFrame::Arms { lists, .. }) => {
+                union_signatures(&walk.binding, &types, &lists)
+            }
+            Some(DiscoveryFrame::Members {
+                category, lists, ..
+            }) => match category {
+                // An interface or class body with heritage is a
+                // declaration, not an intersection type: it inherits its
+                // bases' signatures by concatenation, own first.
+                CompositeOriginCategory::Heritage => Ok(heritage_signatures(&lists)),
+                // One method's overloads are its signature list, every
+                // declaration's kept.
+                CompositeOriginCategory::OverloadGroup => Ok(lists.concat()),
+                CompositeOriginCategory::MergedOverloadGroup => {
+                    merged_declaration_signatures(&walk.binding, &lists)
+                }
+                CompositeOriginCategory::Canonical(_)
+                | CompositeOriginCategory::CanonicalUnproven
+                | CompositeOriginCategory::AuthoredShell
+                | CompositeOriginCategory::OrderedCarrier
+                | CompositeOriginCategory::PreservingRebuild
+                | CompositeOriginCategory::QuerySubject => {
+                    intersection_signatures(&walk.binding, &types, kernel_kind(walk.kind), &lists)
+                }
+                #[cfg(any(test, feature = "test-support"))]
+                CompositeOriginCategory::TestFixture => {
+                    intersection_signatures(&walk.binding, &types, kernel_kind(walk.kind), &lists)
+                }
+            },
+            _ => unreachable!("only a union's arms or a composite's members combine"),
+        };
+        match combined {
+            Ok(found) => DiscoveryFlow::Found(found),
+            Err(error) => DiscoveryFlow::Failed(error),
         }
-        let mut lists = Vec::with_capacity(own.len());
-        let mut ordinal = 0u32;
-        for signatures in &own {
-            lists.push(self.signature_list(signatures, ordinal)?);
-            ordinal += signatures.len() as u32;
-        }
-        let mut out = merged_declaration_signatures(self.types.binding, &lists)?;
-        for base in bases {
-            out.extend(self.discover(base)?);
-        }
-        Ok(out)
     }
 
     /// One authored signature node as a published candidate, or `None` when
     /// the node is not a signature at all.
-    fn leaf(
-        &mut self,
+    #[inline(never)]
+    fn publish_discovered_leaf(
+        &self,
+        walk: &mut DiscoveryWalk,
         node: SemanticNodeId,
         ordinal: u32,
     ) -> Result<Option<SignatureCandidate>, DiscoveryError> {
-        let graph = self.dispatch().graph();
+        let graph = self.graph();
         let Some(data) = graph.node_data(node) else {
             return unsettled();
         };
@@ -780,10 +1456,10 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
             _ => return Ok(None),
         };
         drop(data);
-        if kind != self.kind {
+        if kind != walk.kind {
             return Ok(None);
         }
-        let strict = self.strict_null();
+        let strict = walk.strict_null();
         let (receiver, positional) = crate::semantic_query::split_this_receiver(&params);
         let to_param = |p: &crate::semantic_query::FunctionParam| ParamInput {
             name: p.name.as_deref().map(Arc::<str>::from),
@@ -798,10 +1474,7 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                 fixed.push(to_param(param));
                 continue;
             }
-            let settled = match self
-                .dispatch()
-                .unwrap_identity_carrier_for_relation(param.ty)
-            {
+            let settled = match self.unwrap_identity_carrier_for_relation(param.ty) {
                 super::relation::IdentityCarrierUnwrap::Concrete(n) => Some(n),
                 super::relation::IdentityCarrierUnwrap::Unresolvable => None,
             };
@@ -939,65 +1612,30 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                 SourceLocatorId::from_raw(locator),
             ),
         };
-        let candidate = publish_signature(self.types.binding, &input)?;
-        self.authored.entry(candidate.signature).or_insert(node);
+        let candidate = publish_signature(&walk.binding, &input)?;
+        self.graph().record_discovery_signature_published();
+        walk.authored.entry(candidate.signature).or_insert(node);
         Ok(Some(candidate))
     }
-}
 
-impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
-    /// `SignaturesOfType(subject, kind, context)`: the ordered call or
-    /// construct candidates of `subject`. An empty set is a complete
-    /// negative; every failure to settle the subject is an explicit
-    /// incomplete reason. The set alone; production reads
-    /// [`Self::signatures_of_type_with_authored`].
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn signatures_of_type(
+    /// The finished walk's set, published: in the walk's epoch while it is
+    /// current, otherwise copied once into the current one.
+    #[inline(never)]
+    fn finish_signature_discovery(
         &self,
-        store: &SignatureStore,
-        subject: SemanticNodeId,
-        kind: GraphSignatureKind,
-        context: SemanticContextId,
-    ) -> QueryOutcome<crate::signature_kernel::SignatureSetRef> {
-        match self.signatures_of_type_with_authored(store, subject, kind, context) {
-            QueryOutcome::Ready(Ready { value, evidence }) => QueryOutcome::Ready(Ready {
-                value: value.set,
-                evidence,
-            }),
-            QueryOutcome::Incomplete(reason) => QueryOutcome::Incomplete(reason),
-        }
-    }
-
-    /// [`Self::signatures_of_type`] with, per candidate, the authored node
-    /// this walk published it from.
-    ///
-    /// The walk works in the epoch current as it begins, for its whole life:
-    /// everything it interns lands there. When a replacement retired that
-    /// epoch before the set is published, the found candidates are copied
-    /// into the current epoch and published there, never walked again.
-    pub fn signatures_of_type_with_authored(
-        &self,
-        store: &SignatureStore,
-        subject: SemanticNodeId,
-        kind: GraphSignatureKind,
-        context: SemanticContextId,
-    ) -> QueryOutcome<crate::signature_kernel::SignatureSetValue> {
-        let binding = store.bind_current();
-        let types = GraphTypes {
-            dispatch: self,
-            binding: &binding,
-            semantic_identity: false,
-        };
-        let mut walk = Walk {
-            types: &types,
-            kind,
-            context,
-            visiting: FxHashSet::default(),
-            authored: rustc_hash::FxHashMap::default(),
-        };
-        let found = walk.discover(subject);
+        walk: Box<DiscoveryWalk>,
+        found: Result<Vec<SignatureCandidate>, DiscoveryError>,
+    ) -> DiscoveryStep {
         #[cfg(any(test, feature = "test-support"))]
         signatures_of_type_build_point(SignaturesOfTypeBuildPoint::Discovered);
+        let DiscoveryWalk {
+            subject,
+            fence,
+            binding,
+            authored,
+            ..
+        } = *walk;
+        let store = self.graph().store().signature_store();
         let published = found.and_then(|list| {
             let view = binding.view();
             let mut nodes_of: Vec<crate::signature_kernel::SignatureCandidateNodes> =
@@ -1007,13 +1645,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     Some(sequence) => sequence
                         .edges
                         .iter()
-                        .map(|edge| walk.authored.get(&edge.declaration).copied())
+                        .map(|edge| authored.get(&edge.declaration).copied())
                         .collect::<Option<Vec<_>>>()
                         .unwrap_or_default(),
                     None => Vec::new(),
                 };
                 nodes_of.push(crate::signature_kernel::SignatureCandidateNodes {
-                    authored: walk.authored.get(&candidate.signature).copied(),
+                    authored: authored.get(&candidate.signature).copied(),
                     constituents: verter_type_expr::OwnedSlice::from(nodes.into_boxed_slice()),
                 });
             }
@@ -1027,7 +1665,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
             Ok((set, nodes_of, version))
         });
-        match published {
+        let outcome = match published {
             Ok((set, nodes_of, version)) => QueryOutcome::Ready(Ready {
                 value: crate::signature_kernel::SignatureSetValue::new(
                     self.graph().store(),
@@ -1038,7 +1676,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 evidence: CONTEXT_FREE_EVIDENCE,
             }),
             Err(error) => QueryOutcome::Incomplete(error.incomplete_reason()),
-        }
+        };
+        DiscoveryStep::Done(Box::new(DiscoveredSignatures {
+            subject,
+            fence,
+            outcome,
+        }))
     }
 
     /// The candidates a walk found in `binding`'s epoch, which a replacement
@@ -2822,19 +3465,32 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
-    /// The `execute(SignaturesOfType)` producer.
+    /// The `execute(SignaturesOfType)` producer: the discovery walk, a
+    /// family continuation, driven in place by the synchronous producer's
+    /// driver, each read it names made where the walk stands.
     pub(super) fn build_signatures_of_type(
         &self,
         subject: SemanticNodeId,
         kind: GraphSignatureKind,
         context: SemanticContextId,
     ) -> super::walk::QueryBuildOutput<crate::semantic_query::SemanticQueryValue> {
+        self.drive_family_value_in_place(self.begin_discovery_family(subject, kind, context))
+    }
+
+    /// A finished walk's output: its set, rooted on the files its subject
+    /// was lowered from, or its incomplete reason as a miss.
+    fn signature_set_output(
+        &self,
+        done: DiscoveredSignatures,
+    ) -> super::walk::QueryBuildOutput<crate::semantic_query::SemanticQueryValue> {
         use crate::semantic_query::{QueryError, QueryResult, SemanticQueryValue};
-        let fence = self.project_generation_signature();
-        let store = self.graph().store().signature_store();
-        let outcome = self.signatures_of_type_with_authored(store, subject, kind, context);
         #[cfg(any(test, feature = "test-support"))]
         signatures_of_type_build_point(SignaturesOfTypeBuildPoint::Settled);
+        let DiscoveredSignatures {
+            subject,
+            fence,
+            outcome,
+        } = done;
         match outcome {
             QueryOutcome::Ready(Ready { value, .. }) => {
                 let (roots, complete) =

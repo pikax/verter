@@ -1705,3 +1705,113 @@ mod nightly_scale {
         });
     }
 }
+
+/// The declarations a callable heritage chain of `depth` levels is read
+/// from: `H0` declares one call signature, and each `H<i>` extends the one
+/// below and declares one of its own.
+fn heritage_chain(depth: usize) -> String {
+    let mut source = String::from("interface H0 { (): \"ok\" }\n");
+    for level in 1..=depth {
+        source.push_str(&format!(
+            "interface H{level} extends H{} {{ (level: {level}): {level} }}\n",
+            level - 1
+        ));
+    }
+    source
+}
+
+/// The call signatures of the top of a heritage chain of `depth` levels,
+/// rendered, and the subject nodes discovery entered to list them.
+fn heritage_chain_signatures(depth: usize) -> (Vec<String>, u64) {
+    use verter_type_engine::semantic_query::{DeclIdentity, NodeScopeId, SignatureKind};
+    const FILE: &str = "/semantic-task/heritage-chain.ts";
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(&heritage_chain(depth)),
+        crate::FileLanguage::script_ts(),
+    );
+    host.ensure_indexed_ready(FILE)
+        .expect("the chain has indexed input");
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let _scope = dispatch.enter_construction_scope();
+    let whole_hash = || {
+        host.shallow_file_state(FILE)
+            .expect("the chain is indexed")
+            .whole_hash
+    };
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file;
+    let subject = dispatch.graph_arc().intern_node_with_scope(
+        SemanticNodeData::DeclRef {
+            identity: DeclIdentity {
+                canonical_id: FILE.into(),
+                owner: owner(),
+                whole_hash: whole_hash(),
+                decl_name: format!("H{depth}").as_str().into(),
+            },
+        },
+        NodeScopeId::File {
+            canonical_id: FILE.into(),
+            owner: owner(),
+            whole_hash: whole_hash(),
+            local_scope: None,
+        },
+    );
+    let walked = || {
+        host.project_type_store()
+            .semantic_graph()
+            .stats_snapshot()
+            .discovery_nodes_walked
+    };
+    let before = walked();
+    let read = dispatch.shared_signature_nodes(subject, SignatureKind::Call);
+    let walked = walked() - before;
+    use verter_type_engine::project_semantic_dispatch::signature_discovery::SharedSignatureNodes;
+    let nodes = match read {
+        SharedSignatureNodes::Nodes(nodes) => nodes,
+        SharedSignatureNodes::Incomplete(reason) => {
+            panic!("H{depth}'s call signatures settle: {reason:?}")
+        }
+    };
+    let rendered = nodes
+        .iter()
+        .map(|node| {
+            crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                &dispatch, *node, 0,
+            )
+        })
+        .collect();
+    (rendered, walked)
+}
+
+/// A callable declaration inheriting through 400 declarations, each
+/// adding a call signature, lists all 401 signatures — its own first, then
+/// each base's in clause order, `H0`'s last — on one small-stack thread in
+/// a process of its own: discovery holds the levels it walks on the heap,
+/// so the depth of the chain is never native stack depth. It enters each
+/// declaration's body and each declaration's own surface once: the 401
+/// bodies and the 400 own surfaces of the declarations that extend one.
+///
+/// The order is TypeScript's `resolveObjectTypeMembers`, own signatures
+/// before the bases' (measured on TypeScript 7.0.2 in
+/// `heritage_signature_tests`).
+#[test]
+fn a_callable_inheriting_through_400_declarations_lists_its_signatures_on_a_small_stack() {
+    in_a_fresh_process(test_path!(), || {
+        let (signatures, walked) = on_a_small_stack(|| heritage_chain_signatures(400));
+        assert_eq!(signatures.len(), 401, "{signatures:?}");
+        assert!(
+            signatures[0].contains("400"),
+            "H400's own signature comes first: {}",
+            signatures[0]
+        );
+        assert!(
+            signatures[400].contains("\"ok\""),
+            "H0's signature comes last: {}",
+            signatures[400]
+        );
+        assert_eq!(walked, 801, "each body and each own surface entered once");
+    });
+}
