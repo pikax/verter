@@ -1965,6 +1965,25 @@ impl SemanticGraphStore {
             .intersection_products_built
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped once per candidate an explicit overload set begins
+    /// instantiating.
+    pub fn record_explicit_candidate(&self) {
+        self.stats
+            .explicit_candidates_instantiated
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Bumped once per substitution an explicit instantiation begins.
+    pub fn record_binder_substitution(&self) {
+        self.stats
+            .binder_substitutions
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Bumped once per child a substitution walk visits.
+    pub fn record_substitution_child_visit(&self) {
+        self.stats
+            .substitution_child_visits
+            .fetch_add(1, Ordering::Relaxed);
+    }
     pub fn record_conditional_decided(&self) {
         self.stats
             .conditional_decided_count

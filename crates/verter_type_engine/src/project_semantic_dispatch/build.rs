@@ -4112,37 +4112,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         kind: crate::semantic_query::SignatureKind,
         type_args: &Arc<[SemanticNodeId]>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        // Without explicit type arguments the set is a family continuation
-        // whose reads are its stages' transitions.
-        if type_args.is_empty() {
-            return self.drive_family_in_place(
-                self.continuation_stage()
-                    .begin_resolve_overload_set(callee, kind),
-            );
-        }
-        // The candidates ARE the shared signature list of the callee's
-        // requested bucket, in the order call resolution tries them. The
-        // list owns carrier settlement, alias and constraint hops, apparent
-        // globals, and the union and intersection procedures, and the kernel
-        // owns the resolution order; this reducer chooses nothing.
-        let sigs = match self.shared_signature_nodes_in_resolution_order(callee, kind) {
-            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => nodes,
-            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => {
-                // An unsettled list is never a proven-empty one: the miss
-                // is not admitted, so the next read settles it again.
-                let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
-                    (QueryResult::Error(QueryError::Miss), empty_signature()).into();
-                output.cache_suppress = true;
-                return output;
-            }
-        };
-        self.overload_set_output(callee, kind, sigs, type_args)
+        // The set is a family continuation whose reads are its stages'
+        // transitions: the callee's list, then — under explicit type
+        // arguments — the template reductions its candidates'
+        // substitutions read.
+        self.drive_family_in_place(self.continuation_stage().begin_resolve_overload_set(
+            callee,
+            kind,
+            Arc::clone(type_args),
+        ))
     }
 
-    /// The overload set over `callee`'s settled candidates `sigs`, each
-    /// instantiated with `type_args` when there are any. An empty bucket,
-    /// or one whose every candidate drops under the explicit arguments, is
-    /// an honest `Miss`.
+    /// The overload set over `callee`'s final candidates `sigs` — the
+    /// settled list, or under explicit `type_args` its candidates that took
+    /// them, instantiated. An empty bucket, or one whose every candidate
+    /// dropped under the explicit arguments, is an honest `Miss`.
     pub(super) fn overload_set_output(
         &self,
         callee: SemanticNodeId,
@@ -4150,20 +4134,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         sigs: Vec<SemanticNodeId>,
         type_args: &Arc<[SemanticNodeId]>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        let miss = || -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-            (QueryResult::Error(QueryError::Miss), empty_signature()).into()
-        };
         if sigs.is_empty() {
-            return miss();
+            return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         }
-        let result_node = if type_args.is_empty() {
-            self.overload_group_node(kind, sigs)
-        } else {
-            match self.instantiate_overload_group(kind, &sigs, type_args) {
-                Some(node) => node,
-                None => return miss(),
-            }
-        };
+        let result_node = self.overload_group_node(kind, sigs);
 
         let (observed_self_roots, proof_complete) = match self.transitive_self_roots_from_nodes(
             std::iter::once(callee)
@@ -4210,25 +4184,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 has_index_signature: false,
             },
         ))
-    }
-
-    /// Apply explicit type arguments to an ordered overload group of
-    /// `kind`: instantiate per candidate; a candidate that cannot accept
-    /// the argument list DROPS from the set; all-dropped is `None`.
-    fn instantiate_overload_group(
-        &self,
-        kind: crate::semantic_query::SignatureKind,
-        sigs: &[SemanticNodeId],
-        type_args: &Arc<[SemanticNodeId]>,
-    ) -> Option<SemanticNodeId> {
-        let instantiated: Vec<SemanticNodeId> = sigs
-            .iter()
-            .filter_map(|sig| self.instantiate_call_candidate(*sig, type_args))
-            .collect();
-        if instantiated.is_empty() {
-            return None;
-        }
-        Some(self.overload_group_node(kind, instantiated))
     }
 
     /// Lower the class's OWN constructor-object surface — the prepared
@@ -13820,84 +13775,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         result
     }
 
-    /// Apply instantiation type arguments to the sealed index-composed
-    /// callable carrier. Substitution runs over the carrier's OWN
-    /// parameters and binder constraints/defaults; the consumed type
-    /// parameters are stripped, and both the occurrence and the deferred
-    /// return carrier are preserved — an instantiated candidate is the
-    /// same occurrence with the same equation edge. An unsatisfiable
-    /// argument list is an honest miss.
-    fn instantiate_deferred_callable(
-        &self,
-        callable: &crate::semantic_query::DeferredCallable,
-        args: &[SemanticNodeId],
-    ) -> SemanticNodeId {
-        let parts = callable.parts(&crate::semantic_query::ResolveCallConsumer::witness());
-        let type_parameters = Arc::clone(parts.type_parameters);
-        if type_parameters.is_empty() || args.len() > type_parameters.len() {
-            return self.opaque(QueryError::Miss);
-        }
-        let mut params: Vec<crate::semantic_query::FunctionParam> = parts
-            .params
-            .iter()
-            .map(crate::semantic_query::FunctionParam::copy)
-            .collect::<Vec<_>>();
-        let mut bound: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
-        for (index, decl) in type_parameters.iter().enumerate() {
-            let arg = match self.instantiation_argument(args, index, decl.default, &bound) {
-                Some(arg) => arg,
-                None => return self.opaque(QueryError::Miss),
-            };
-            for param in &mut params {
-                param.ty = self.substitute_semantic_type_param(param.ty, decl.param, arg);
-            }
-            bound.push((decl.param, arg));
-        }
-        let source = callable.map_source_values(|mut image| {
-            for (binder, argument) in &bound {
-                image = self.substitute_semantic_type_param(image, *binder, *argument);
-            }
-            image
-        });
-        let source = source.with_instantiated_clause(
-            type_parameters
-                .iter()
-                .zip(bound.iter())
-                .map(|(decl, (_, argument))| (Arc::<str>::from(&decl.name), *argument)),
-        );
-        self.graph()
-            .intern_node(SemanticNodeData::DeferredCallable(source.with_substituted(
-                Arc::from(params.into_boxed_slice()),
-                Arc::from(Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice()),
-            )))
-    }
-
-    /// The type argument binding the type parameter at `index`: the
-    /// supplied argument, otherwise its declared default.
-    ///
-    /// A default may REFERENCE an earlier parameter (`<T, U = T>`), and by
-    /// the time it is read those earlier parameters have already been
-    /// substituted away — reading the declared node verbatim would leave a
-    /// binder with no binding. `bound` carries the bindings fixed so far,
-    /// in declaration order, and the default is instantiated under them.
-    /// `None` means the parameter is neither supplied nor defaulted.
-    fn instantiation_argument(
-        &self,
-        args: &[SemanticNodeId],
-        index: usize,
-        default: Option<SemanticNodeId>,
-        bound: &[(SemanticNodeId, SemanticNodeId)],
-    ) -> Option<SemanticNodeId> {
-        if let Some(arg) = args.get(index).copied() {
-            return Some(arg);
-        }
-        let mut default = default?;
-        for (param, arg) in bound {
-            default = self.substitute_semantic_type_param(default, *param, *arg);
-        }
-        Some(default)
-    }
-
     /// Apply instantiation-expression type arguments to a signature-bearing
     /// OBJECT (`typeof f<string>` over a function declaration, `typeof
     /// C<string>` over a generic class): every call and construct signature
@@ -13908,7 +13785,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// instantiates the same way. An object with no signature that accepts
     /// the arguments is the same honest `Opaque(Miss)` a lone signature
     /// answers, so every caller's drop contract holds.
-    fn instantiate_object_signatures(
+    pub(super) fn instantiate_object_signatures(
         &self,
         node: SemanticNodeId,
         surface: &crate::semantic_query::SurfaceView,
@@ -13972,138 +13849,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 surface.closed().has_index_signature(),
             )),
         )
-    }
-
-    /// Apply a call site's explicit type arguments to ONE candidate
-    /// signature. `None` when the candidate cannot accept the argument
-    /// list, which drops it from that call site's ordered bucket.
-    ///
-    /// The single authority for that drop: the ordered bucket a call site
-    /// sees and the raw bucket its executor pairs each candidate back to
-    /// must be filtered identically, or a surviving candidate is paired
-    /// with a dropped candidate's binders.
-    pub(super) fn instantiate_call_candidate(
-        &self,
-        signature: SemanticNodeId,
-        type_args: &[SemanticNodeId],
-    ) -> Option<SemanticNodeId> {
-        let instantiated = self.apply_typeof_instantiation_args(signature, type_args);
-        let dropped = matches!(
-            self.graph().node_data(instantiated).as_deref(),
-            Some(SemanticNodeData::Opaque(_))
-        );
-        (!dropped).then_some(instantiated)
-    }
-
-    /// Apply instantiation-expression type arguments
-    /// (`typeof C.make<string>`) to a resolved generic signature node:
-    /// each of the function's OWN type parameters substitutes positionally
-    /// to the matching argument (an unfilled trailing parameter takes its
-    /// declared default when present), and the instantiated signature is
-    /// re-interned WITHOUT the consumed type parameters — an instantiation
-    /// expression yields a non-generic signature. A signature-bearing
-    /// object instantiates every signature it carries
-    /// ([`Self::instantiate_object_signatures`]). Returns the deferred
-    /// `Opaque(Miss)` shell when the node is not a generic function or the
-    /// arguments cannot satisfy the parameter list (an honest miss, never
-    /// a partially-substituted signature).
-    pub(super) fn apply_typeof_instantiation_args(
-        &self,
-        node: SemanticNodeId,
-        args: &[SemanticNodeId],
-    ) -> SemanticNodeId {
-        let Some(data) = self.graph().node_data(node) else {
-            return self.opaque(QueryError::Miss);
-        };
-        // The sealed index-composed carrier instantiates in place: its
-        // parameters and binders substitute, the occurrence and the
-        // deferral are preserved.
-        if let SemanticNodeData::DeferredCallable(callable) = &*data {
-            let callable = callable.clone();
-            drop(data);
-            return self.instantiate_deferred_callable(&callable, args);
-        }
-        if let SemanticNodeData::Object(surface) = &*data {
-            let surface = surface.clone();
-            drop(data);
-            return self.instantiate_object_signatures(node, &surface, args);
-        }
-        let SemanticNodeData::Signature {
-            type_parameters, ..
-        } = &*data
-        else {
-            return self.opaque(QueryError::Miss);
-        };
-        let type_parameters = Arc::clone(type_parameters.as_arc());
-        drop(data);
-        if type_parameters.is_empty() || args.len() > type_parameters.len() {
-            return self.opaque(QueryError::Miss);
-        }
-        let mut result = node;
-        let mut bound: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
-        for (index, decl) in type_parameters.iter().enumerate() {
-            let arg = match self.instantiation_argument(args, index, decl.default, &bound) {
-                Some(arg) => arg,
-                // Unsatisfied non-defaulted parameter — honest miss.
-                None => return self.opaque(QueryError::Miss),
-            };
-            bound.push((decl.param, arg));
-            // The walked root IS the signature whose own parameters are being
-            // instantiated — its own `type_parameters` entry for `decl.name`
-            // must not shadow; NESTED functions re-declaring the name do.
-            for binder in self.collect_type_param_nodes_by_name(
-                result,
-                decl.name.as_ref(),
-                /* root_is_own_signature */ true,
-                crate::semantic_query::ClauseSpelling::Bound,
-            ) {
-                result = self.substitute_semantic_type_param(result, binder, arg);
-            }
-        }
-        // Strip the consumed type parameters — the instantiated signature
-        // is non-generic. Instantiation PRESERVES the occurrence; a
-        // declared carrier retargets the instantiated return.
-        match self.graph().node_data(result).as_deref() {
-            Some(SemanticNodeData::Signature {
-                kind,
-                params,
-                return_type,
-                occurrence,
-                return_carrier,
-                signature_span,
-                return_type_span,
-                predicate,
-                is_abstract,
-                ..
-            }) => self.graph().intern_node(SemanticNodeData::Signature {
-                kind: *kind,
-                params: params.share(),
-                return_type: *return_type,
-                type_parameters: crate::semantic_query::PayloadArray::from(
-                    Vec::<crate::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
-                ),
-                occurrence: occurrence.clone(),
-                return_carrier: match return_carrier {
-                    crate::semantic_query::SignatureReturnCarrier::Declared(_) => {
-                        crate::semantic_query::SignatureReturnCarrier::Declared(*return_type)
-                    }
-                    crate::semantic_query::SignatureReturnCarrier::Function(source) => {
-                        crate::semantic_query::SignatureReturnCarrier::Function(source.clone())
-                    }
-                    crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
-                    | crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(_) => {
-                        return_carrier.clone()
-                    }
-                },
-                signature_span: *signature_span,
-                return_type_span: *return_type_span,
-                // The substituted predicate target rides through: an
-                // instantiated `x is T` narrows to the argument.
-                predicate: *predicate,
-                is_abstract: *is_abstract,
-            }),
-            _ => result,
-        }
     }
 
     construction_ordinal_seam! {
@@ -17562,8 +17307,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Key-space-independent value hoist. When the mapper's binder
         // (`mapper.parameter_node`) is not structurally reachable
         // inside `mapper.value_expr`, the per-K substitution collapses
-        // to the identity (`substitute_with_change_tracking` returns
-        // `(node, false)` for the whole subtree), so every K's
+        // to the identity (the substitution walk answers the whole
+        // subtree unchanged), so every K's
         // substituted carrier IS `value_expr` itself. Reduce
         // `value_expr` ONCE under the caller's context and reuse the
         // result for every enumerated key. Skipping this hoist is

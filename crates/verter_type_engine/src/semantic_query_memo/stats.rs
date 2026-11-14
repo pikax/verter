@@ -223,6 +223,12 @@ pub(crate) struct AtomicSemanticGraphStats {
     pub(super) admission_stages_walked: Tally,
     /// Steps deferred evaluations computed, once per step.
     pub(super) deferred_steps_evaluated: Tally,
+    /// Candidates explicit overload sets began instantiating.
+    pub(super) explicit_candidates_instantiated: Tally,
+    /// Substitutions explicit instantiations began.
+    pub(super) binder_substitutions: Tally,
+    /// Children substitution walks visited.
+    pub(super) substitution_child_visits: Tally,
     /// Cross products of intersections over unions built, once per product.
     pub(super) intersection_products_built: Tally,
     #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
@@ -307,6 +313,9 @@ impl Default for AtomicSemanticGraphStats {
             call_arguments_related: Tally::default(),
             call_walks_begun: Tally::default(),
             relation_members_related: Tally::default(),
+            explicit_candidates_instantiated: Tally::default(),
+            binder_substitutions: Tally::default(),
+            substitution_child_visits: Tally::default(),
             admission_stages_walked: Tally::default(),
             deferred_steps_evaluated: Tally::default(),
             intersection_products_built: Tally::default(),
@@ -523,6 +532,11 @@ impl SemanticGraphStore {
             call_candidates_begun: stats.call_candidates_begun.load(Ordering::Relaxed),
             call_arguments_related: stats.call_arguments_related.load(Ordering::Relaxed),
             call_walks_begun: stats.call_walks_begun.load(Ordering::Relaxed),
+            explicit_candidates_instantiated: stats
+                .explicit_candidates_instantiated
+                .load(Ordering::Relaxed),
+            binder_substitutions: stats.binder_substitutions.load(Ordering::Relaxed),
+            substitution_child_visits: stats.substitution_child_visits.load(Ordering::Relaxed),
             relation_members_related: stats.relation_members_related.load(Ordering::Relaxed),
             admission_stages_walked: stats.admission_stages_walked.load(Ordering::Relaxed),
             deferred_steps_evaluated: stats.deferred_steps_evaluated.load(Ordering::Relaxed),

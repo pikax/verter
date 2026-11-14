@@ -194,8 +194,8 @@ pub enum AuditEvent {
     SemanticQueryProjectPathWarm,
     /// One call to
     /// `ProjectSemanticDispatch::substitute_semantic_type_param`.
-    /// Bumped at the entry of substitute (NOT the recursive
-    /// `substitute_with_change_tracking`) so the count is per top-level
+    /// Bumped at a public substitution's arrival (NOT a walk's child
+    /// arrivals) so the count is per top-level
     /// substitution. Pairs with the cache-hit counter below to
     /// distinguish a fresh substitute walk from a memo hit.
     SubstituteTopLevelCall,
@@ -204,18 +204,18 @@ pub enum AuditEvent {
     /// an identical `(value_expr, parameter_node, arg)` triple.
     SubstituteMemoHit,
     /// One return of `(node, false)` from
-    /// `substitute_with_change_tracking`'s `SemanticNodeData::TypeOf`
-    /// arm — the substitute did NOT descend into the TypeOf, treating
+    /// the substitution walk's `SemanticNodeData::TypeOf`
+    /// level — the substitute did NOT descend into the TypeOf, treating
     /// it as opaque. This is the site for the "opaque TypeOf returns"
     /// counter.
     SubstituteTypeOfOpaque,
-    /// One return from `substitute_with_change_tracking`'s
-    /// `Conditional` arm that descended into the conditional branches
+    /// One visit of the substitution walk's
+    /// `Conditional` level that descended into the conditional branches
     /// (a non-identity recursive walk). Distinguishes
     /// "Conditional touched" from "Conditional rebuilt".
     SubstituteConditionalDescend,
-    /// One return from `substitute_with_change_tracking`'s
-    /// `MappedType` arm that descended into the mapper's
+    /// One visit of the substitution walk's
+    /// `MappedType` level that descended into the mapper's
     /// constraint / source / value_expr (a non-identity recursive
     /// walk). This is the site for the "Mapped descents" counter.
     SubstituteMappedTypeDescend,
@@ -287,23 +287,21 @@ pub enum AuditEvent {
     MappedBinderOrdinalCollision,
     /// Focused recursive-substitution counters
     /// ----------------------------------------
-    /// Key insight: the recursive helper at
-    /// `substitute.rs:99-104`
-    /// (`substitute_with_change_tracking`) BYPASSES the top-level
+    /// Key insight: the substitution walk's child arrivals once
+    /// BYPASSED the top-level
     /// `substitute_memo` even though `(node, parameter_node, arg)`
     /// is a complete identity. Measurement refuted Hypothesis A (the
     /// per-K mapped-member helpers are NOT the bottleneck — they
     /// run 0-1 times). The true cost is
-    /// `substitute_with_change_tracking` rebuilding `Mapped` and
-    /// `Conditional` nodes (`substitute.rs:408-467` and
-    /// `:482-520`) from substituted sub-trees that ARE structurally
+    /// the substitution walk rebuilding `Mapped` and
+    /// `Conditional` nodes from substituted sub-trees that ARE structurally
     /// identical across calls but carry NEW `SemanticNodeId`s.
     /// These counters classify the recursive entries to confirm
     /// the bottleneck shape BEFORE wiring a recursive memo, and
     /// quantify the memo's hit-rate AFTER.
     /// One recursive-helper entry whose `(node, parameter_node,
     /// arg)` triple was FIRST-SEEN in the active request. Producer
-    /// at `substitute_with_change_tracking` entry; before the
+    /// at a substitution walk's child arrival; before the
     /// recursive memo lands a high `_unique` count is expected.
     /// After the recursive memo lands `_unique` measures the
     /// distinct triple count for the request — the lower bound on
@@ -314,11 +312,10 @@ pub enum AuditEvent {
     /// recursive memo SHOULD short-circuit this entry. The memo's
     /// effectiveness on the active request is
     /// `_repeated / (_unique + _repeated)`. Producer at
-    /// `substitute_with_change_tracking` entry.
+    /// a substitution walk's child arrival.
     RecursiveSubstituteRepeated,
     /// One rebuild of a `Mapped` semantic node in
-    /// `substitute_with_change_tracking`
-    /// (`substitute.rs:408-467`) after one or more descendant
+    /// the substitution walk after one or more descendant
     /// sub-trees actually changed. Distinguishes the "Mapped
     /// rebuilt" hot path from the upstream "Mapped descended"
     /// (`SubstituteMappedTypeDescend`) which counts every visit
@@ -326,8 +323,7 @@ pub enum AuditEvent {
     /// `(self.graph().intern_preserving_scope(..., Mapped { ... }))`.
     SubstituteMappedRebuild,
     /// One rebuild of a `Conditional` semantic node in
-    /// `substitute_with_change_tracking`
-    /// (`substitute.rs:482-520`) after one or more of the
+    /// the substitution walk after one or more of the
     /// `check`/`extends`/`true_branch_ref`/`false_branch_ref`
     /// sub-trees actually changed. Distinguishes the "Conditional
     /// rebuilt" hot path from the upstream "Conditional descended"
@@ -335,8 +331,8 @@ pub enum AuditEvent {
     /// branch.
     SubstituteConditionalRebuild,
     /// One hit on the RECURSIVE-helper hash-cons memo (the
-    /// memo lookup at the entry of
-    /// `substitute_with_change_tracking`, not the top-level
+    /// memo lookup at a substitution walk's child arrival, not
+    /// the top-level
     /// `SubstituteMemoHit` which counts hits at the public
     /// surface). When the recursive memo is engaged this counter
     /// reports its hit count; before the memo wires this counter

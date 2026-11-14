@@ -1533,13 +1533,13 @@ pub struct RequestContext {
     /// Hits on the `substitute_memo_get` fast path.
     pub substitute_memo_hits: ObservedU64,
     /// `TypeOf` opaque returns from
-    /// `substitute_with_change_tracking`.
+    /// the substitution walk.
     pub substitute_typeof_opaque: ObservedU64,
     /// `Conditional` descents in
-    /// `substitute_with_change_tracking`.
+    /// the substitution walk.
     pub substitute_conditional_descend: ObservedU64,
     /// `MappedType` descents in
-    /// `substitute_with_change_tracking`.
+    /// the substitution walk.
     pub substitute_mapped_type_descend: ObservedU64,
     /// Calls to `build_typeof`.
     pub build_typeof_calls: ObservedU64,
@@ -1573,9 +1573,8 @@ pub struct RequestContext {
     pub mapped_binder_ordinal_collision: ObservedU64,
     // Recursive-substitution counters
     // -------------------------------
-    // Key insight: the recursive helper
-    // `substitute_with_change_tracking` (substitute.rs:99-104)
-    // BYPASSES the top-level `substitute_memo` even though
+    // Key insight: the substitution walk's child arrivals once
+    // BYPASSED the top-level `substitute_memo` even though
     // `(node, parameter_node, arg)` is a complete identity. These
     // counters classify recursive entries so the implementer can
     // confirm Path A (high repeat rate → wire memo) vs Path B (high
@@ -1584,23 +1583,22 @@ pub struct RequestContext {
     // memo wires, `_repeated` measures saved work and
     // `RecursiveSubstituteMemoHit` measures the memo's actual hit
     // count (which may differ under FIFO eviction).
-    /// Recursive `substitute_with_change_tracking` entries whose
+    /// Substitution-walk child arrivals whose
     /// `(node, parameter_node, arg)` triple is FIRST-SEEN in the
     /// active request.
     pub recursive_substitute_unique: ObservedU64,
-    /// Recursive `substitute_with_change_tracking` entries whose
+    /// Substitution-walk child arrivals whose
     /// `(node, parameter_node, arg)` triple was already seen in
     /// the active request — the recursive memo SHOULD short-circuit.
     pub recursive_substitute_repeated: ObservedU64,
-    /// `Mapped`-arm rebuilds in `substitute_with_change_tracking`
+    /// `Mapped` rebuilds in the substitution walk
     /// after at least one descendant sub-tree changed.
     pub substitute_mapped_rebuild: ObservedU64,
-    /// `Conditional`-arm rebuilds in `substitute_with_change_tracking`
+    /// `Conditional` rebuilds in the substitution walk
     /// after at least one descendant sub-tree changed.
     pub substitute_conditional_rebuild: ObservedU64,
-    /// Recursive-helper hash-cons memo hits (at the
-    /// `substitute_with_change_tracking` entry, not the public
-    /// surface).
+    /// Hash-cons memo hits at a substitution walk's child
+    /// arrivals, not the public surface.
     pub recursive_substitute_memo_hits: ObservedU64,
     /// Typed-IR macro-surface projection accessor invocations.
     /// Bumped exactly once per public `resolve_root`,
@@ -1705,7 +1703,7 @@ pub struct MapperSourceIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RecursiveSubstituteIdentity {
     /// The `SemanticNodeId` of the recursive substitution input
-    /// (`node` parameter of `substitute_with_change_tracking`).
+    /// (the node a substitution walk's child arrival visits).
     pub node: u64,
     /// The binder SemanticNodeId (`parameter_node` parameter).
     pub parameter_node: u64,
@@ -2293,8 +2291,8 @@ impl RequestContext {
         }
     }
 
-    /// Classify one recursive `substitute_with_change_tracking`
-    /// entry as unique-or-repeated. The identity tuple
+    /// Classify one substitution-walk arrival
+    /// as unique-or-repeated. The identity tuple
     /// `(node, parameter_node, arg)` matches the existing top-level
     /// `substitute_memo` key composition so the classifier output
     /// is a direct predictor of the recursive memo's hit rate when
