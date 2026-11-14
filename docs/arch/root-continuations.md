@@ -1286,8 +1286,22 @@ Every node it enters, every intersection member it flattens and every
 signature-list entry settles through its carrier chain as the owned
 `SourceCarrierRead` over the shared deferred evaluation: the read the
 chain names — an instantiation, or a read inside the settlement's
-evaluation, delivered inside that evaluation — is the build's need. A
-primitive, literal, template, symbol, array or tuple reads its apparent
+evaluation, delivered inside that evaluation — is the build's need.
+A leaf's rest parameters are unwrapped before the leaf is published, as a
+boxed level of the walk (`DiscoveryFrame::RestParameters`). Its owned
+`IdentityCarrierRead` retains the node, declaration depth and visited set;
+each declaration instantiation and each read inside either deferred
+evaluation (the instantiation's answer at `Shell`, an indexed access at
+`Navigate`) is the build's need. Delivery records the answer and returns
+`DiscoveryFlow::Unwrap` to the walk loop, so later graph hops run beneath
+neither delivery frames nor the leaf's header temporaries. The walk counts
+`carrier_declarations_unwrapped` once per declaration step after admission,
+whichever driver runs it. The later-signature rest-declaration regression
+pins one step and two publications, with one publication before the wait;
+the deferred rest-access regression holds a conditional read inside the
+evaluation, pins its five steps (two before the wait), and proves delivery
+resumes there. Both seams cover release and cancellation with nothing open.
+A primitive, literal, template, symbol, array or tuple reads its apparent
 wrapper as the path walk does: the global declaration lookup
 (`GlobalLookup`, begun in the demand site the stage stands in) is stepped
 as the build's ports, loads and indexes, and the instantiation of the
@@ -1835,7 +1849,9 @@ When those leave the pair undecided, the dispatch's first reads — the
 unwraps of both operands' identity carriers — are demanded
 (`OperandDemand`): each operand's first instantiation, the read its carrier
 walk makes first when it reaches it through graph-only steps
-(`relation_operand_first_instantiation`, computed without reading), is
+(`relation_operand_first_instantiation`, computed without reading through
+the unwrap's shared, inlined `carrier_hops` and `carrier_declaration_key`;
+the graph-only probe takes no step and records no declaration count), is
 entered once as the walk would enter it; a warm result answers at once and
 one that must be computed is a request. With every demanded instantiation
 answered, the dispatch runs over the deliveries. Nothing is demanded that
@@ -2394,9 +2410,23 @@ Signature discovery and the kernel still read in place, inventoried for
 conversion:
 
 - a runtime nominal's augmentation fold (`collect_augmentation_contributions`),
-  a class expression's instance surface (`class_expression_read_surface`)
-  and a rest parameter's carrier unwrap (`unwrap_identity_carrier_for_relation`),
-  each read in place by the stage that needs it;
+  read in place by its discovery stage; contributor loading and planned-body
+  projection remain the fold owner's work;
+- a class expression's or object literal's instance surface
+  (`class_expression_read_surface`), from discovery and the carrier walk:
+  its substitution replaces a `this` binder by the instance and a deferred
+  signature by a signature. Those images cannot fold a template literal,
+  so this substitution names no template reduction. Reads inside the
+  substitution remain the substitution walk's;
+- a carrier walk's other reads (`carrier_hops`): a bare or import-type
+  subject's resolution (carrier admission, the projection owner), a deferred
+  callable's materialization (flow), a `keyof` key set (key enumeration),
+  an authored intersection's reduction (relation), and a mapped type's
+  object (mapped types). These stay where the owned or in-place walk stands;
+- the identity-carrier unwraps of callers outside discovery
+  (`unwrap_identity_carrier_walk`): relation, flow, call and projection
+  consumers drive the same stages in one native frame. The hops, declaration
+  key and access-answer stages are inlined into that walk;
 - a generic carrier's arguments, evaluated in place before its
   instantiation is named (`source_carrier_instantiation`), as for the path
   walk's mapped source;

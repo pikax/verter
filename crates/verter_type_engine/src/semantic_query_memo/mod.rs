@@ -2014,6 +2014,13 @@ impl SemanticGraphStore {
             .signature_parameters_composed
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped once per declaration an identity-carrier walk instantiates.
+    #[inline(always)]
+    pub fn record_carrier_declaration_unwrapped(&self) {
+        self.stats
+            .carrier_declarations_unwrapped
+            .fetch_add(1, Ordering::Relaxed);
+    }
     /// Bumped once per signature result read begun.
     pub fn record_signature_result_forced(&self) {
         self.stats

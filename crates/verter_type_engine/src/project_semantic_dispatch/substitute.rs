@@ -1960,7 +1960,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// literal) instance `instance` reads through. An object literal's
     /// `this` is the literal itself, never the reference it is read
     /// through, so its surface reads with that `this` bound to the
-    /// instance.
+    /// instance. The substitution replaces a binder by that instance and a
+    /// deferred signature by a signature: neither image can fold a template
+    /// literal, so it names no template reduction. Reads inside the
+    /// substitution belong to the substitution walk.
     pub(super) fn class_expression_read_surface(
         &self,
         instance: SemanticNodeId,
