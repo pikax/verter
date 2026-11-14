@@ -56,9 +56,6 @@ pub fn ffi_config_to_host(input: FfiHostConfig) -> Result<host::HostConfig, FfiC
     if let Some(footprint) = input.footprint_capture {
         out.footprint_capture = footprint;
     }
-    if let Some(cap) = input.typeinfo_scratch_cache_capacity {
-        out.typeinfo_scratch_cache_capacity = Some(cap as usize);
-    }
     if let Some(threads) = input.host_cpu_threads {
         out.host_cpu_threads = Some(threads as usize);
     }

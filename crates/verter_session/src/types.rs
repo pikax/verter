@@ -622,7 +622,7 @@ pub struct HostConfig {
     /// mutating the global default budget.
     pub recursion_budget_overrides: RecursionBudgetOverrides,
     /// Capacity of the host-owned typeinfo scratch cache used by
-    /// [`crate::VerterHost::evaluate_type_expression_with_audit`].
+    /// `evaluate_type_expression_with_audit`.
     ///
     /// `None` selects the default capacity (64 per
     /// `crate::typeinfo::scratch_cache::DEFAULT_CAPACITY`).

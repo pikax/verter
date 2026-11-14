@@ -31,8 +31,6 @@ pub use graph::TypeInfoGraphRequest as TypeInfoRequest;
 /// [`TypeInfoRequest`] for the alias contract.
 pub use graph::TypeInfoGraphResponse as TypeInfoResult;
 
-use serde::{Deserialize, Serialize};
-
 /// Stringly-tagged projection mode. Canonical values are
 /// `"identity" | "navigate" | "shallow" | "expanded" | "skeleton"`.
 /// Other values surface as `Unknown(String)` at the FFI boundary.
@@ -45,53 +43,3 @@ pub const MODE_SHALLOW: &str = "shallow";
 pub const MODE_EXPANDED: &str = "expanded";
 /// Skeleton mode tag.
 pub const MODE_SKELETON: &str = "skeleton";
-
-/// FFI-boundary mirror of `EvaluateTypeExpressionRequest`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FfiEvaluateTypeExpressionRequest {
-    /// Canonical id of the file the expression evaluates against.
-    pub scope: String,
-    /// The TypeScript type expression body.
-    pub expression: String,
-    /// Optional extra imports to inject into the synthesised scratch.
-    #[serde(default)]
-    pub extra_imports: Vec<FfiImportSpec>,
-    /// Stringly-tagged projection mode (see the `MODE_*` constants).
-    pub mode: String,
-    /// Whether the request publishes to the host's scratch cache.
-    pub cacheable: bool,
-}
-
-/// FFI-boundary mirror of `ImportSpec`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FfiImportSpec {
-    /// Raw import specifier.
-    pub specifier: String,
-    /// Per-binding payloads.
-    pub bindings: Vec<FfiNamedImport>,
-}
-
-/// FFI-boundary mirror of `NamedImport`. The `kind` discriminator
-/// names the variant; the union fields are populated per-variant.
-/// Consumers branch on `kind` to decode.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FfiNamedImport {
-    /// Variant tag — `"default" | "named" | "namespace"`.
-    pub kind: String,
-    /// `default`: local binding name. `namespace`: local namespace name.
-    /// `named`: ignored.
-    #[serde(default)]
-    pub local_name: String,
-    /// `named`: original exported name. Ignored for other variants.
-    #[serde(default)]
-    pub exported_name: String,
-    /// `named`: optional rename. Empty string means "no alias".
-    #[serde(default)]
-    pub local_alias: String,
-    /// `named`: `true` for `import { type X }`. Ignored for other variants.
-    #[serde(default)]
-    pub type_only: bool,
-}

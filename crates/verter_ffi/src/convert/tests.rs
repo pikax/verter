@@ -1218,7 +1218,6 @@ fn config_all_fields() {
         analysis_level: Some("essential".to_string()),
         audit_enabled: None,
         footprint_capture: None,
-        typeinfo_scratch_cache_capacity: None,
         host_cpu_threads: None,
         metrics_enabled: None,
     };

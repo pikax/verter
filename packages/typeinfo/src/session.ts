@@ -8,8 +8,6 @@
  * 1. {@link TypeInfoSession.listSymbols} — shallow-state symbol inventory.
  * 2. {@link TypeInfoSession.resolveSymbol} — audited resolution of a
  *    named declaration with optional generic instantiation.
- * 3. {@link TypeInfoSession.evaluateTypeExpression} — audited
- *    evaluation of a synthetic type expression in a file scope.
  *
  * The session does not own a project graph, only a `VerterHost` —
  * consumers populate the host (`upsert`, `withWorkspace`) before
@@ -32,8 +30,6 @@ import type { TypeDescriptor } from "@verter/type-ir";
 import { decodeResolveResult } from "./decode.js";
 import { descriptorToNative } from "./descriptor-to-native.js";
 import type {
-  EvaluateTypeExpressionRequest,
-  EvaluateTypeExpressionResult,
   ResolveSymbolOpts,
   ResolveSymbolResult,
   SymbolEntry,
@@ -51,7 +47,6 @@ export class TypeInfoSession {
     const auditEnabled = config.auditEnabled !== false;
     this.host = new VerterHost({
       auditEnabled,
-      typeinfoScratchCacheCapacity: config.evaluateTypeExpressionCacheSize,
     });
   }
 
@@ -97,53 +92,6 @@ export class TypeInfoSession {
     const typeArgsBuf = encodeTypeArgs(opts?.typeArgs);
     const mode = opts?.mode ?? null;
     const result = this.host.resolveSymbolWithAudit(canonicalId, name, typeArgsBuf, mode);
-    return decodeResolveResult(result);
-  }
-
-  /**
-   * Evaluate a synthetic type expression in a file scope and return
-   * the resolved type descriptor plus the per-request audit record.
-   */
-  evaluateTypeExpression(req: EvaluateTypeExpressionRequest): EvaluateTypeExpressionResult {
-    const wire = {
-      scope: req.scope,
-      expression: req.expression,
-      extraImports: (req.extraImports ?? []).map((spec) => ({
-        specifier: spec.specifier,
-        bindings: spec.bindings.map((b) => {
-          switch (b.kind) {
-            case "default":
-              return {
-                kind: "default",
-                localName: b.localName,
-                exportedName: "",
-                localAlias: "",
-                typeOnly: false,
-              };
-            case "named":
-              return {
-                kind: "named",
-                localName: "",
-                exportedName: b.exportedName,
-                localAlias: b.localAlias ?? "",
-                typeOnly: b.typeOnly ?? false,
-              };
-            case "namespace":
-              return {
-                kind: "namespace",
-                localName: b.localName,
-                exportedName: "",
-                localAlias: "",
-                typeOnly: false,
-              };
-          }
-        }),
-      })),
-      mode: req.mode ?? "expanded",
-      cacheable: req.cacheable ?? true,
-    };
-    const requestBuf = Buffer.from(JSON.stringify(wire), "utf-8");
-    const result = this.host.evaluateTypeExpressionWithAudit(requestBuf);
     return decodeResolveResult(result);
   }
 }

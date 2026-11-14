@@ -61,9 +61,7 @@ pub(crate) fn project_resolved_root(
     }
 }
 
-/// Combined response shape for `resolveSymbolWithAudit` /
-/// `evaluateTypeExpressionWithAudit`. Both JSON Buffers — the consumer
-/// decodes whichever it needs.
+/// Response shape for `resolveSymbolWithAudit`: JSON Buffers.
 ///
 /// `typeExpr` carries a serde-JSON `TypeExpr` payload. `null` when
 /// resolution produced no node — either a non-fault miss (`Ok(None)`)
@@ -133,27 +131,6 @@ pub(crate) fn decode_type_expr_list(buf: Option<Buffer>) -> Result<Vec<TypeExpr>
         )
     })?;
     Ok(exprs)
-}
-
-/// Decode a `Buffer` containing a JSON
-/// `verter_protocol::typeinfo::FfiEvaluateTypeExpressionRequest` into
-/// the host substrate type.
-pub(crate) fn decode_evaluate_request(
-    buf: Buffer,
-) -> Result<verter_session::typeinfo::types::EvaluateTypeExpressionRequest> {
-    use verter_protocol::typeinfo::FfiEvaluateTypeExpressionRequest;
-    let ffi: FfiEvaluateTypeExpressionRequest = serde_json::from_slice(&buf).map_err(|e| {
-        Error::new(
-            Status::InvalidArg,
-            format!("evaluate-request decode error: {e}"),
-        )
-    })?;
-    verter_ffi::convert::ffi_to_host_evaluate_request(ffi).map_err(|e| {
-        Error::new(
-            Status::InvalidArg,
-            format!("evaluate-request lowering error: {e}"),
-        )
-    })
 }
 
 /// Convert an FFI/JS-supplied projection-mode string to the host enum.

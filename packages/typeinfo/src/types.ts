@@ -10,13 +10,11 @@ export interface TypeInfoSessionConfig {
   tsconfig?: string;
   /** Workspace folder canonical paths. */
   workspaceFolders?: string[];
-  /** LRU cap for the host's evaluate-type-expression scratch cache. */
-  evaluateTypeExpressionCacheSize?: number;
   /**
    * Enable per-request audit. Default `true`. When `false`, or when
    * the loaded `@verter/native` binding was built without audit capture
    * (`captureAvailability() === "Unavailable"`), the `auditRecord`
-   * field on `ResolveSymbolResult` / `EvaluateTypeExpressionResult` is
+   * field on `ResolveSymbolResult` is
    * `undefined` (the resolution still runs).
    */
   auditEnabled?: boolean;
@@ -56,30 +54,6 @@ export type SymbolKind =
 export type ProjectionMode = "identity" | "navigate" | "shallow" | "expanded" | "skeleton";
 
 /**
- * Single import to inject into a synthesised scratch file evaluated
- * by {@link TypeInfoSession.evaluateTypeExpression}.
- */
-export interface ImportSpec {
-  /** Raw import specifier (e.g. `"./types"`, `"reka-ui"`). */
-  specifier: string;
-  /** Per-binding shape. */
-  bindings: NamedImport[];
-}
-
-/** One binding in an {@link ImportSpec}. */
-export type NamedImport =
-  | { kind: "default"; localName: string }
-  | {
-      kind: "named";
-      exportedName: string;
-      /** Optional rename. `undefined` / empty means "no alias". */
-      localAlias?: string;
-      /** `true` for `import { type X }`. */
-      typeOnly?: boolean;
-    }
-  | { kind: "namespace"; localName: string };
-
-/**
  * Options for {@link TypeInfoSession.resolveSymbol}.
  */
 export interface ResolveSymbolOpts {
@@ -98,24 +72,6 @@ export interface ResolveSymbolOpts {
  * native `TypeExpr` values.
  */
 export type TypeRef = TypeDescriptor;
-
-/**
- * Request shape for {@link TypeInfoSession.evaluateTypeExpression}.
- *
- * Mirrors `verter_session::typeinfo::types::EvaluateTypeExpressionRequest`.
- */
-export interface EvaluateTypeExpressionRequest {
-  /** File scope the expression evaluates against. */
-  scope: string;
-  /** TypeScript type expression body. */
-  expression: string;
-  /** Imports to inject into the synthesised scratch. */
-  extraImports?: ImportSpec[];
-  /** Projection mode for the terminal evaluation. Default `"expanded"`. */
-  mode?: ProjectionMode;
-  /** When `true` (default) the scratch URI publishes to the host's LRU. */
-  cacheable?: boolean;
-}
 
 /**
  * Audit record. Mirrors the snake_case wire shape produced by
@@ -145,17 +101,6 @@ export interface AuditRecord {
 
 /** Result of {@link TypeInfoSession.resolveSymbol}. */
 export interface ResolveSymbolResult {
-  /** Resolved type descriptor; `undefined` when resolution failed. */
-  type?: TypeDescriptor;
-  /**
-   * Per-request audit record; `undefined` when audit is disabled or the
-   * native binding was built without audit capture.
-   */
-  auditRecord?: AuditRecord;
-}
-
-/** Result of {@link TypeInfoSession.evaluateTypeExpression}. */
-export interface EvaluateTypeExpressionResult {
   /** Resolved type descriptor; `undefined` when resolution failed. */
   type?: TypeDescriptor;
   /**

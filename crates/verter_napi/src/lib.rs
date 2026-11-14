@@ -1016,11 +1016,6 @@ pub struct NapiHostConfig {
     /// `auditEnabled = true` — necessary for
     /// `getComponentMetaWithAudit` to return a populated bundle.
     pub footprintCapture: Option<bool>,
-    /// Capacity of the host-owned typeinfo scratch cache used by
-    /// `evaluateTypeExpressionWithAudit`. `None` (default) selects
-    /// 64 entries; `Some(0)` disables the cache; other values cap
-    /// the LRU at the chosen size.
-    pub typeinfoScratchCacheCapacity: Option<u32>,
     /// Worker count for the host-owned CPU pool used by every host batch
     /// API's outer coordinator — `compile_many` and the component-meta
     /// batch. `None` (default) resolves to
@@ -1065,7 +1060,6 @@ impl From<NapiHostConfig> for FfiHostConfig {
             analysis_level: n.analysisLevel,
             audit_enabled: n.auditEnabled,
             footprint_capture: n.footprintCapture,
-            typeinfo_scratch_cache_capacity: n.typeinfoScratchCacheCapacity,
             host_cpu_threads: n.hostCpuThreads,
             metrics_enabled: n.metricsEnabled,
         }
@@ -4150,15 +4144,14 @@ impl NapiVerterHost {
     // =========================================================================
     // Typeinfo entry-points (typeinfo public host substrate)
     //
-    // Wrap the host substrate methods
-    // (`resolve_named_symbol_with_audit`,
-    // `evaluate_type_expression_with_audit`) and project the host
-    // outputs back across the FFI boundary. The symbol inventory is served
-    // by `typeInfoWithAudit` (the list-symbols operation).
+    // Wrap the host substrate method `resolve_named_symbol_wire_with_audit`
+    // and project its output back across the FFI boundary. The symbol
+    // inventory is served by `typeInfoWithAudit` (the list-symbols
+    // operation).
     //
-    // - `resolveSymbolWithAudit` and `evaluateTypeExpressionWithAudit`
-    //   return a `NapiTypeInfoResolveResult { typeExpr, auditRecord }`
-    //   — both are JSON Buffers; consumers decode whichever they need.
+    // - `resolveSymbolWithAudit` returns a
+    //   `NapiTypeInfoResolveResult { typeExpr, auditRecord }` — both are
+    //   JSON Buffers.
     //
     // Audit emission follows the typeinfo contract: when
     // `auditEnabled = true` the underlying host method publishes
@@ -4214,41 +4207,6 @@ impl NapiVerterHost {
             // The session-owned bytes facade encodes the `TypeExpr` to wire
             // JSON internally (the reverse materialization runs through the
             // sealed output capability inside `verter_session`); the FFI
-            // adapter only wraps the bytes in a `Buffer`.
-            let (type_expr_bytes, projection_error) =
-                typeinfo::project_resolved_root(&host, resolved);
-            let type_expr_buf = type_expr_bytes.map(Buffer::from);
-            let error = error.or(projection_error);
-            let audit_buf = typeinfo::encode_stored_audit_record(&record)?;
-            Ok(typeinfo::NapiTypeInfoResolveResult {
-                typeExpr: type_expr_buf,
-                auditRecord: audit_buf,
-                error,
-            })
-        }))?
-    }
-
-    /// Evaluate a synthetic type expression in a file scope and return
-    /// the raised `TypeExpr` plus the produced `RequestAuditRecord`.
-    ///
-    /// `request` is a JSON Buffer carrying a
-    /// `verter_protocol::typeinfo::FfiEvaluateTypeExpressionRequest`.
-    /// See `EvaluateTypeExpressionRequest` for the host shape.
-    ///
-    /// `typeExpr` is `null` when the expression could not be resolved.
-    /// `auditRecord` is `null` when audit is disabled.
-    #[napi(js_name = "evaluateTypeExpressionWithAudit")]
-    pub fn evaluate_type_expression_with_audit(
-        &self,
-        request: Buffer,
-    ) -> Result<typeinfo::NapiTypeInfoResolveResult> {
-        let req = typeinfo::decode_evaluate_request(request)?;
-        let host = std::sync::Arc::clone(&self.inner);
-        catch_panic(std::panic::AssertUnwindSafe(move || {
-            let (outcome, record) = host.evaluate_type_expression_with_audit(req).into_parts();
-            let (resolved, error) = typeinfo::split_resolve_outcome(outcome);
-            // Bytes facade: the `TypeExpr` is wire-encoded inside
-            // `verter_session` through the sealed output capability; the FFI
             // adapter only wraps the bytes in a `Buffer`.
             let (type_expr_bytes, projection_error) =
                 typeinfo::project_resolved_root(&host, resolved);

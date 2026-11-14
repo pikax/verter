@@ -152,11 +152,6 @@ pub struct FfiHostConfig {
     /// Enable per-request semantic footprint capture. Requires
     /// `audit_enabled = true`.
     pub footprint_capture: Option<bool>,
-    /// Capacity of the host-owned typeinfo scratch cache. `None`
-    /// (default) selects 64 entries; `Some(0)` disables the cache;
-    /// other values cap the LRU at the chosen size — used by the
-    /// `@verter/typeinfo` LRU eviction tests.
-    pub typeinfo_scratch_cache_capacity: Option<u32>,
     /// Worker count for the host-owned CPU pool used by every host
     /// batch API's outer coordinator — `compile_many` and the
     /// component-meta batch

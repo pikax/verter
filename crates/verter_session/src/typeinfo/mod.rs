@@ -15,7 +15,7 @@
 //!    [`crate::VerterHost::resolve_named_symbol_with_audit`] —
 //!    audited resolution of a named declaration with optional
 //!    generic instantiation.
-//! 3. [`crate::VerterHost::evaluate_type_expression_with_audit`] —
+//! 3. `evaluate_type_expression_with_audit` (a `test-support` harness) —
 //!    audited evaluation of a synthetic type expression in a
 //!    file scope, with an optional host-owned scratch cache.
 //! 4. [`crate::VerterHost::resolve_shallow_surface`] — resolves a
@@ -33,14 +33,17 @@
 //! - [`types`] — public DTOs (`SymbolEntry`, `EvaluateTypeExpressionRequest`, …).
 //! - [`symbol_inventory`] — `list_file_symbols` impl.
 //! - [`resolve_named_symbol`] — `resolve_named_symbol_with_audit` impl.
-//! - [`evaluate_type_expression`] — `evaluate_type_expression_with_audit` impl.
+//! - `evaluate_type_expression` — the string-expression test harness (`test-support`).
 //! - [`shallow_surface`] — `resolve_shallow_surface` impl.
 //! - [`capabilities`] — the TypeInfo capability handshake (`typeinfo_capabilities`).
 //! - [`surface`] — the span-rich [`surface::TypeInfoSurface`] projection.
-//! - [`scratch_cache`] — host-owned LRU for typeinfo scratch URIs.
+//! - `scratch_cache` — the harness's LRU of scratch URIs (`test-support`).
 
 pub mod adapters;
 pub mod capabilities;
+// The string-expression evaluator is a test harness: the public API no
+// longer evaluates arbitrary expressions.
+#[cfg(any(test, feature = "test-support"))]
 pub mod evaluate_type_expression;
 #[cfg(feature = "semantic-observe")]
 pub(crate) mod footprint_attach;
@@ -51,6 +54,7 @@ pub(crate) mod node_refs;
 pub mod raise;
 pub mod request_validation;
 pub mod resolve_named_symbol;
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod scratch_cache;
 pub(crate) mod selector;
 pub mod shallow_surface;

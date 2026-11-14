@@ -137,7 +137,7 @@ pub enum SymbolKind {
 // Type-expression evaluation request
 // ---------------------------------------------------------------------------
 
-/// Request for [`crate::VerterHost::evaluate_type_expression_with_audit`].
+/// Request for the `evaluate_type_expression_with_audit` test harness.
 ///
 /// Encodes the full inputs needed to synthesise a scratch TypeScript
 /// file, evaluate one trailing `type __VerterScratch = <expression>`

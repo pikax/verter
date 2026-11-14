@@ -888,7 +888,7 @@ pub(crate) fn classify_dispatch_error(
 /// This is the SINGLE canonical materializer for every typeinfo
 /// resolution entry-point — both the named-resolve path
 /// ([`resolve_named_symbol_with_audit`]) and the FFI evaluate path
-/// ([`crate::VerterHost::evaluate_type_expression_with_audit`]) route
+/// (`evaluate_type_expression_with_audit`) route
 /// through it, so an operator alias reduces IDENTICALLY regardless of
 /// which surface requested it (the one-resolver mandate — no
 /// per-surface fork).

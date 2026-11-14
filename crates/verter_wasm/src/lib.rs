@@ -1353,8 +1353,7 @@ impl WasmVerterHost {
     // =========================================================================
     // Typeinfo entry-points (typeinfo public host substrate) — WASM
     //
-    // Mirror the NAPI surface (`resolveSymbolWithAudit`,
-    // `evaluateTypeExpressionWithAudit`).
+    // Mirror the NAPI surface (`resolveSymbolWithAudit`).
     // The encoding shape is JSON strings rather than `Buffer` blobs to
     // match the existing WASM convention; the wire schema is identical.
     // =========================================================================
@@ -1410,44 +1409,6 @@ impl WasmVerterHost {
                     resolve_mode,
                 )
                 .into_parts();
-            let (resolved, error) = crate::typeinfo::split_resolve_outcome(outcome);
-            // Bytes facade: `verter_session` wire-encodes the `TypeExpr` to
-            // UTF-8 JSON internally (through the sealed output capability);
-            // the WASM adapter only decodes the bytes to a `String`.
-            let (type_expr_bytes, projection_error) =
-                crate::typeinfo::project_resolved_root(&host, resolved);
-            let type_expr_json = type_expr_bytes
-                .map(|bytes| {
-                    String::from_utf8(bytes).map_err(|e| {
-                        JsValue::from_str(&format!("type-expr utf-8 decode error: {e}"))
-                    })
-                })
-                .transpose()?;
-            let error = error.or(projection_error);
-            let audit_json = crate::typeinfo::encode_stored_audit_record(&record)?;
-            let result = crate::typeinfo::WasmTypeInfoResolveResult {
-                type_expr: type_expr_json,
-                audit_record: audit_json,
-                error,
-            };
-            to_wasm_value(&result)
-        }))?
-    }
-
-    /// Evaluate a synthetic type expression in a file scope. Returns
-    /// `{ typeExpr, auditRecord }` per the typeinfo contract.
-    ///
-    /// `request_json` is a JSON string carrying a
-    /// `verter_protocol::typeinfo::FfiEvaluateTypeExpressionRequest`.
-    #[wasm_bindgen(js_name = "evaluateTypeExpressionWithAudit")]
-    pub fn evaluate_type_expression_with_audit(
-        &self,
-        request_json: &str,
-    ) -> Result<JsValue, JsValue> {
-        let req = crate::typeinfo::decode_evaluate_request(request_json)?;
-        let host = std::sync::Arc::clone(&self.inner);
-        catch_panic(AssertUnwindSafe(move || {
-            let (outcome, record) = host.evaluate_type_expression_with_audit(req).into_parts();
             let (resolved, error) = crate::typeinfo::split_resolve_outcome(outcome);
             // Bytes facade: `verter_session` wire-encodes the `TypeExpr` to
             // UTF-8 JSON internally (through the sealed output capability);

@@ -812,10 +812,11 @@ pub struct VerterHost {
     #[cfg(test)]
     pub(crate) parse_env_override: parking_lot::Mutex<Option<verter_session_query::analysis::types::Hash16>>,
     /// Host-owned LRU cache for the typeinfo `evaluate_type_expression`
-    /// scratch URIs. See `typeinfo::scratch_cache` for the LRU policy
+    /// test harness's scratch URIs. See `typeinfo::scratch_cache` for the LRU policy
     /// and §5.3 of the typeinfo plan for the deterministic-URI
     /// derivation. Capacity defaults to
     /// `typeinfo::scratch_cache::DEFAULT_CAPACITY` (64).
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) typeinfo_scratch_cache:
         parking_lot::Mutex<crate::typeinfo::scratch_cache::ScratchCache>,
     /// The host's composed framework services — the capability catalog that

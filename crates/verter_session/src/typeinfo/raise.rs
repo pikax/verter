@@ -4,7 +4,7 @@
 //! `VerterHost::project_node_to_type_expr_json_bytes` is the FFI substrate
 //! the native adapters (NAPI / WASM) call to project a `SemanticNodeId`
 //! (returned by [`crate::VerterHost::resolve_named_symbol_with_audit`] or
-//! [`crate::VerterHost::evaluate_type_expression_with_audit`]) into the
+//! `evaluate_type_expression_with_audit`) into the
 //! wire payload that carries the typeinfo "TypeExpr at the boundary"
 //! contract.
 //!

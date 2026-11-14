@@ -696,6 +696,7 @@ impl VerterHost {
             audit_timing_capture: config.audit_timing_capture,
             ..verter_audit::AuditConfig::default()
         };
+        #[cfg(any(test, feature = "test-support"))]
         let scratch_cache_capacity = config.typeinfo_scratch_cache_capacity;
         // Source the live session query profile from the config (NOT a
         // hardcoded value) and capture the resource-policy-driven pool
@@ -810,6 +811,7 @@ impl VerterHost {
             compile_blockers_serve_seam_hook: parking_lot::Mutex::new(None),
             #[cfg(test)]
             parse_env_override: parking_lot::Mutex::new(None),
+            #[cfg(any(test, feature = "test-support"))]
             typeinfo_scratch_cache: parking_lot::Mutex::new(match scratch_cache_capacity {
                 Some(cap) => crate::typeinfo::scratch_cache::ScratchCache::with_capacity(cap),
                 None => crate::typeinfo::scratch_cache::ScratchCache::with_default_capacity(),
@@ -1492,10 +1494,11 @@ impl VerterHost {
     }
 
     /// Host-owned scratch cache for the typeinfo
-    /// `evaluate_type_expression` entry-point. Used internally by
-    /// [`Self::evaluate_type_expression_with_audit`] to memoise the
+    /// `evaluate_type_expression` test harness. Used internally by
+    /// `evaluate_type_expression_with_audit` to memoise the
     /// `(scratch_uri → SemanticNodeId)` mapping for cacheable
     /// requests.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn scratch_cache(
         &self,
     ) -> &parking_lot::Mutex<crate::typeinfo::scratch_cache::ScratchCache> {
