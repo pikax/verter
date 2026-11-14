@@ -10880,7 +10880,10 @@ mod rails;
 mod read;
 use branches::{BranchStep, DeadPath, Entered};
 use nested::{NestedChildParts, NestedDemand, NestedSignatureStep};
-pub(super) use rails::{ClosedObservation, ClosedRecording, ObservationRail, RecordingRail};
+pub(super) use rails::{
+    ClosedObservation, ClosedRecording, CompletenessRailId, ObservationRail, RailExtent, ReadRails,
+    RecordingRail,
+};
 use read::{ReadDelivery, ReadNesting, ReadStep, ReadWait};
 #[path = "flow_return_operators.rs"]
 mod operators;

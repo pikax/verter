@@ -113,6 +113,36 @@ where
     (value, finalise_compute_scope(source, read_set))
 }
 
+/// [`install_fact_tracer`] over a compute that advances by poll. The compute
+/// owns its tracer and its completeness scopes (`rails`); each poll puts them
+/// on the polling thread for that poll alone, and takes them off again
+/// whether the poll answered or not. The tracer fans out to the scopes below
+/// it on the polling thread, as [`install_fact_tracer`]'s does, and its read
+/// set is finalised once, when the compute answers.
+pub async fn install_fact_tracer_pollable<R, W>(
+    source: &FactTracerBasisSource<'_, W>,
+    rails: &crate::project_semantic_dispatch::compute_rails::ComputeRails,
+    compute: impl std::future::Future<Output = R>,
+) -> (R, FactReadSetFinalise)
+where
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+{
+    let mut tracer = OwnedStepwiseFactTracer::fanning_out(source);
+    let mut compute = std::pin::pin!(compute);
+    // The tracer is lent to each poll exclusively, so a compute that moves
+    // between threads moves it with it.
+    let tracer_lent = &mut tracer;
+    let value = std::future::poll_fn(move |cx| {
+        let _tracer = tracer_lent.install(source);
+        let attached = rails.attach();
+        let polled = std::future::Future::poll(compute.as_mut(), cx);
+        rails.detach(attached, polled.is_ready());
+        polled
+    })
+    .await;
+    (value, tracer.finish(source))
+}
+
 /// [`install_fact_tracer`] for a compute whose owner delivers the
 /// finalised read set — as a carrier holding at least those facts — to the
 /// tracers active when it completes. Observations made inside it then stop

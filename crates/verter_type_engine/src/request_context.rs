@@ -383,7 +383,7 @@ impl Drop for ColdComputeCompletenessScope {
 
 /// Fold a partial completeness into the active per-cold-compute scope (if
 /// any). No-op when no scope is active.
-fn fold_cold_compute_completeness(completeness: ResultCompleteness) {
+pub(crate) fn fold_cold_compute_completeness(completeness: ResultCompleteness) {
     COLD_COMPUTE_COMPLETENESS.with(|s| {
         if let Some(top) = s.borrow_mut().last_mut() {
             *top = top.merge(completeness);
@@ -563,7 +563,7 @@ impl ThreadRailMark {
 
     /// This thread's validity, completeness and sticky-deferral depths
     /// (test-only).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn depths_for_tests() -> (usize, usize, usize) {
         (
             EXECUTION_ABORTS.with(|stack| stack.borrow().len()),
@@ -594,6 +594,22 @@ impl Drop for ThreadRailMark {
             DEFERRED_PARTIAL_STICKY_DEPTH.with(|depth| depth.set(self.sticky_depth));
         }
     }
+}
+
+/// This thread's execution-validity, cold-compute completeness and
+/// sticky-deferral depths, and how many fact tracers it has installed
+/// (test-only): what a compute that advances by poll must leave as it found
+/// it at the end of each poll.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn thread_observation_depths_for_tests() -> [usize; 4] {
+    let (aborts, completeness, sticky) = ThreadRailMark::depths_for_tests();
+    [
+        aborts,
+        completeness,
+        sticky,
+        crate::fact_tracing::tracing::tracer_depth(),
+    ]
 }
 
 /// A semantic task's cold-compute completeness and sticky-partial deferral.

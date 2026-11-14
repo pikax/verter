@@ -224,8 +224,14 @@ The producer submits exactly one interactive scoped cache-node job per
 content-free; resolver epoch and external-validity fingerprint live only in the
 job's input pin, so an edit preserves the key while moving the pin. Every macro,
 member, owner, runtime classifier, and TSC materialization stays inside that one
-scheduled closure. The scoped rendezvous disappears at terminal state and is
-not a second cache authority.
+scheduled closure. The closure drives one pollable traversal in place
+(`complete_now`). The traversal owns its fact tracer and its completeness
+scopes and puts them on the thread for each poll
+(`install_fact_tracer_pollable`); a new completeness scope in the traversal
+is opened through its `ComputeRails` (`enter_completeness`, `observe`), never
+with `ColdComputeCompletenessScope::enter()`. Its construction lane and
+builder stay thread-bound for the drive. The scoped rendezvous disappears at
+terminal state and is not a second cache authority.
 
 The producer records one fact footprint, returns typed
 completeness/cacheability, and reports the sorted transitive canonicals observed

@@ -303,6 +303,11 @@ fn active_recorders() -> SmallVec<[*const FactReadRecorder; 4]> {
     })
 }
 
+/// How many fact tracers are installed on this thread.
+pub(crate) fn tracer_depth() -> usize {
+    ACTIVE_TRACERS.with(|slot| slot.borrow().len())
+}
+
 /// Push `cell` onto the tracer stack.
 ///
 /// Nesting is intentional: a nested `with_fact_tracer` scope adds its

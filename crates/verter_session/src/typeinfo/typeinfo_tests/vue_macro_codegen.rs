@@ -21,6 +21,10 @@ mod part2;
 #[path = "vue_macro_codegen_expose.rs"]
 mod expose;
 
+// The traversal driven one poll at a time, against the same run in place.
+#[path = "vue_macro_traversal_steps.rs"]
+mod traversal_steps;
+
 fn upsert(host: &VerterHost, canonical_id: &str, source: &str) {
     let _ = host
         .upsert(UpsertRequest {
