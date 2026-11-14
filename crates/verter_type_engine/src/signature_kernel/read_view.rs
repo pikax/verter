@@ -75,6 +75,18 @@ impl SemanticReadView {
         Self { inner }
     }
 
+    /// The pinned epoch's tables, for a binding that interns into them.
+    #[inline]
+    pub(super) fn epoch_inner(&self) -> &EpochInner {
+        &self.inner
+    }
+
+    /// The logical identity that claimed binder-space `key` in the pinned
+    /// epoch, if one did.
+    pub(super) fn space_key_owner(&self, key: u64) -> Option<u128> {
+        self.inner.space_key_owner(key)
+    }
+
     pub fn applied_result(
         &self,
         id: super::records::AppliedResultId,

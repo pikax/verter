@@ -85,16 +85,19 @@ pub(super) struct SignatureListRead {
     /// Whether the candidates are pinned in the order call resolution tries
     /// them rather than in declaration order.
     resolution: bool,
-    /// Whether the list is being read again after a kernel-epoch replacement
-    /// retired the first read's handles: a second retirement leaves the list
-    /// unsettled.
-    reread: bool,
-    /// The list once read, with the set value whose lease keeps its
-    /// handles readable.
-    list: Option<(
-        crate::signature_kernel::SignatureSetValue,
-        super::signature_discovery::PinnedSignatureList,
-    )>,
+    /// The list once read: the set value, which owns its candidates' nodes,
+    /// and the candidates pinned in reading order.
+    list: Option<Box<ReadSignatureList>>,
+}
+
+/// A signature list once its `SignaturesOfType` read is consumed.
+struct ReadSignatureList {
+    /// The delivered set: held, never read again, so the graph nodes its
+    /// candidates were published from stay owned while the list settles.
+    _value: crate::signature_kernel::SignatureSetValue,
+    /// The candidates in reading order, in the epoch their unsettled
+    /// composites are named in.
+    pinned: super::signature_discovery::PinnedSignatureList,
 }
 
 /// Where a [`SignatureListRead`] stands after its latest read.
@@ -119,7 +122,6 @@ impl SignatureListRead {
             subject,
             kind,
             resolution,
-            reread: false,
             list: None,
         };
         let read = list.list_key();
@@ -135,17 +137,18 @@ impl SignatureListRead {
         }
     }
 
-    /// Whether the composite result read this list waits on names handles
-    /// of the list a kernel-epoch replacement has retired since it was
-    /// pinned: no read of it answers the list, which is read again instead.
-    /// A list not yet read waits on its own read, which never goes stale.
+    /// Whether the composite result read this list waits on was named in
+    /// an epoch a kernel-epoch replacement has retired since: no read of it
+    /// is made for the list, which names the composite again, rebound into
+    /// the current epoch. A list not yet read waits on its own read, which
+    /// never goes stale.
     fn awaits_retired_result<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         stage: &ContinuationStage<'_, '_, C>,
     ) -> bool {
         self.list
             .as_ref()
-            .is_some_and(|(value, _)| !stage.serves_signature_list(value))
+            .is_some_and(|read| !stage.signature_list_epoch_is_current(&read.pinned))
     }
 }
 
@@ -911,11 +914,15 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
     /// Carry a signature list on with the read it waited on: its
     /// `SignaturesOfType` read, or the result its prepared composite
     /// candidate applies. The next composite's result is read next, and once
-    /// every candidate is a node the list is done. A list whose handles a
-    /// kernel-epoch replacement retired — met as it is pinned, as a
-    /// composite settles, or as a composite's result read for the retired
-    /// descriptors fails — is read once more, in the current epoch; any
-    /// other failure, or a second retirement, leaves the list unsettled.
+    /// every candidate is a node the list is done.
+    ///
+    /// The list is read once. Delivered in an epoch a replacement retired,
+    /// it is read through that epoch; a result forced before its epoch
+    /// retired is consumed where it was published. A composite whose result
+    /// read was named in a retired epoch, and refused, is named again,
+    /// rebound into the current one: the list, the composites it settled
+    /// and their results are never read again. Any other failure leaves the
+    /// list unsettled.
     pub(super) fn advance_signature_list(
         &self,
         list: &mut SignatureListRead,
@@ -924,45 +931,52 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
         >,
     ) -> ListProgress {
         use crate::semantic_query::SemanticQueryValue;
-        let settled = match list.list.as_mut() {
+        match list.list.as_mut() {
             None => match read.value {
                 QueryResult::Value(SemanticQueryValue::SignatureSet(value))
                     if read.fact_status.is_complete() =>
                 {
-                    self.pin_signature_list(list.kind, &value, list.resolution)
-                        .map(|pinned| list.list = Some((value, pinned)))
+                    match self.pin_signature_list(list.kind, &value, list.resolution) {
+                        Ok(pinned) => {
+                            list.list = Some(Box::new(ReadSignatureList {
+                                _value: value,
+                                pinned,
+                            }))
+                        }
+                        Err(_) => return ListProgress::Unsettled,
+                    }
                 }
                 _ => return ListProgress::Unsettled,
             },
-            Some((value, pinned)) => match read.value {
+            Some(read_list) => match read.value {
                 QueryResult::Value(SemanticQueryValue::SignatureResult(result)) => {
-                    self.settle_composite_signature(pinned, result.result)
+                    if self
+                        .settle_composite_signature(&mut read_list.pinned, &result)
+                        .is_err()
+                    {
+                        return ListProgress::Unsettled;
+                    }
                 }
-                // A replacement since the composite was prepared retired the
-                // descriptors its result is read for: the list is retired.
-                _ if !self.serves_signature_list(value) => {
-                    Err(super::signature_discovery::SignatureSetReadFailure::Retired)
+                // The read was named in an epoch a replacement retired, and
+                // refused: the composite is named again, rebound.
+                // PLANTED(restart): read the list again on a refused read.
+                _ if !self.signature_list_epoch_is_current(&read_list.pinned) => {
+                    list.list = None;
+                    return ListProgress::Read(list.list_key());
                 }
+                _ if !self.signature_list_epoch_is_current(&read_list.pinned) => {}
                 _ => return ListProgress::Unsettled,
             },
-        };
-        let next = settled.and_then(|()| {
-            let (_, pinned) = list
-                .list
-                .as_mut()
-                .expect("a list settles its candidates once it is read");
-            self.prepare_next_composite(pinned)
-        });
-        match next {
+        }
+        let read_list = list
+            .list
+            .as_mut()
+            .expect("a list settles its candidates once it is read");
+        match self.name_next_composite_result(&mut read_list.pinned) {
             Ok(Some(key)) => ListProgress::Read(SemanticQueryKey::ReadSignatureResult(key)),
             Ok(None) => {
-                let (_, pinned) = list.list.take().expect("the list was read");
-                ListProgress::Nodes(pinned.into_nodes())
-            }
-            Err(super::signature_discovery::SignatureSetReadFailure::Retired) if !list.reread => {
-                list.reread = true;
-                list.list = None;
-                ListProgress::Read(list.list_key())
+                let read_list = list.list.take().expect("the list was read");
+                ListProgress::Nodes(read_list.pinned.into_nodes())
             }
             Err(_) => ListProgress::Unsettled,
         }

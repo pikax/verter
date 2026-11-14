@@ -37,7 +37,7 @@ use crate::semantic_query::{
 
 use super::continuation_stages::{
     ApparentTypeBuild, ClassInstanceSurfaceBuild, ClassStaticSurfaceBuild, MacroPayloadBuild,
-    OverloadSetBuild, ReduceIntersectionBuild,
+    OverloadSetBuild, ReduceIntersectionBuild, SignatureListRead,
 };
 use super::port_continuations::{PortAnswer, PortRead, ResolveDeclBuild};
 use super::ProjectSemanticDispatch;
@@ -187,7 +187,7 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
 
     /// The candidates of a dispatched signature set, pinned in the order
     /// call resolution tries them, or with `resolution` off in declaration
-    /// order.
+    /// order, read in the set's own epoch.
     pub(super) fn pin_signature_list(
         &self,
         kind: crate::semantic_query::SignatureKind,
@@ -195,41 +195,43 @@ impl<'s, 'a: 's, C: crate::resolver_core::ResolverCapabilities> ContinuationStag
         resolution: bool,
     ) -> Result<
         super::signature_discovery::PinnedSignatureList,
-        super::signature_discovery::SignatureSetReadFailure,
+        crate::semantic_query::IncompleteReason,
     > {
         self.dispatch.pin_signature_list(kind, value, resolution)
     }
 
-    /// Whether a signature list read earlier may still be read: it names no
-    /// retired kernel epoch, the gate every warm read of it applies.
-    pub(super) fn serves_signature_list(
+    /// Whether the epoch a pinned list's unsettled composites are named in
+    /// is still the current one: a result read named there can answer.
+    pub(super) fn signature_list_epoch_is_current(
         &self,
-        value: &crate::signature_kernel::SignatureSetValue,
+        list: &super::signature_discovery::PinnedSignatureList,
     ) -> bool {
-        self.graph_store().serves_stored_value(&QueryResult::Value(
-            SemanticQueryValue::SignatureSet(value.clone()),
-        ))
+        list.epoch() == self.graph_store().signature_store().epoch()
     }
 
     /// The result read the node form of `list`'s next composite candidate
-    /// waits on, or `None` once every candidate is a node.
-    pub(super) fn prepare_next_composite(
+    /// waits on, named in the current epoch — the list's composites copied
+    /// there first when a replacement retired its own — or `None` once
+    /// every candidate is a node. A copy is a metadata copy: it reads no
+    /// other query and waits on nothing.
+    pub(super) fn name_next_composite_result(
         &self,
         list: &mut super::signature_discovery::PinnedSignatureList,
     ) -> Result<
         Option<crate::signature_kernel::ReadSignatureResultKey>,
-        super::signature_discovery::SignatureSetReadFailure,
+        crate::semantic_query::IncompleteReason,
     > {
-        self.dispatch.prepare_next_composite(list)
+        self.dispatch.name_next_composite_result(list)
     }
 
-    /// Settle `list`'s prepared composite candidate with its applied result.
+    /// Settle `list`'s prepared composite candidate with the result its
+    /// read delivered, read where that result was published.
     pub(super) fn settle_composite_signature(
         &self,
         list: &mut super::signature_discovery::PinnedSignatureList,
-        applied: crate::signature_kernel::AppliedResultId,
-    ) -> Result<(), super::signature_discovery::SignatureSetReadFailure> {
-        self.dispatch.settle_composite_signature(list, applied)
+        result: &crate::signature_kernel::SignatureResultValue,
+    ) -> Result<(), crate::semantic_query::IncompleteReason> {
+        self.dispatch.settle_composite_signature(list, result)
     }
 }
 
@@ -270,10 +272,12 @@ impl FamilyBuild {
 
     /// Whether the read this build waits on was named from kernel handles a
     /// replacement retired while it waited — a composite candidate's result,
-    /// prepared from a signature list the replacement retired. No read of it
-    /// answers the build, whichever driver makes it: the build is resumed
-    /// with [`retired_read`] instead, never with the read, whose rails the
-    /// staleness alone would taint, and it reads its list again.
+    /// prepared in a signature list's epoch the replacement retired. Only a
+    /// result that was forced before the retirement answers the build: the
+    /// in-place driver does not make the read, and the frame drops any
+    /// other delivery unread, whose rails the staleness alone would taint.
+    /// Either resumes the build with [`retired_read`], and the list names
+    /// the composite's read again, rebound into the current epoch.
     pub(super) fn awaits_retired_read<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         stage: &ContinuationStage<'_, '_, C>,
@@ -399,6 +403,15 @@ static_assertions::assert_impl_all!(FamilyBuild: Send);
 static_assertions::assert_impl_all!(FamilyStep: Send);
 static_assertions::assert_not_impl_any!(FamilyBuild: Clone, Copy);
 static_assertions::assert_not_impl_any!(FamilyStep: Clone, Copy);
+static_assertions::assert_impl_all!(SignatureListRead: Send);
+static_assertions::assert_not_impl_any!(SignatureListRead: Clone, Copy);
+
+// A frame carries its family build inline on every resume, so the build
+// stays small: a signature list keeps what it read behind one box, and no
+// variant grows the build past the ceiling.
+const FAMILY_BUILD_MAX_BYTES: usize = 264;
+const _: () = assert!(std::mem::size_of::<SignatureListRead>() <= 24);
+const _: () = assert!(std::mem::size_of::<FamilyBuild>() <= FAMILY_BUILD_MAX_BYTES);
 
 /// Whether `key`'s family builds as a continuation
 /// ([`ProjectSemanticDispatch::begin_family_build`]).

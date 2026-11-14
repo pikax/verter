@@ -1098,7 +1098,7 @@ fn an_abandoned_semantic_task_returns_the_summaries_it_inherited() {
 }
 
 /// Another task's producer of `key`, held until the lease drops.
-fn hold_producer<'g>(
+pub(super) fn hold_producer<'g>(
     host: &crate::VerterHost,
     graph: &'g verter_type_engine::semantic_query_memo::SemanticGraphStore,
     key: SemanticQueryKey,
@@ -2010,6 +2010,18 @@ fn round_call_answer(
 /// and the call work that did. Its premise: the round the last callback's
 /// typing completes executes the call again, so two walks begin.
 fn synchronous_round_call(case: RoundCall) -> (String, [u64; 3]) {
+    let (answer, work, _) = synchronous_round_call_with_signatures(case);
+    (answer, work)
+}
+
+/// [`synchronous_round_call`], with the signature work the call did.
+fn synchronous_round_call_with_signatures(
+    case: RoundCall,
+) -> (
+    String,
+    [u64; 3],
+    super::signature_epoch_tests::SignatureWork,
+) {
     let host = callback_rounds_host();
     let _request =
         verter_type_engine::request_context::install_test_request_for(CALLBACK_ROUNDS_FILE);
@@ -2017,8 +2029,10 @@ fn synchronous_round_call(case: RoundCall) -> (String, [u64; 3]) {
     let _scope = dispatch.enter_construction_scope();
     let (frame, call, typed) = round_call(&dispatch, case);
     let before = call_round_work(&host);
+    let before_signatures = super::signature_epoch_tests::signature_work(&host);
     let step = dispatch.drive_contextual_call_in_place_for_tests(frame, call, typed);
     let work = call_round_work_since(call_round_work(&host), before);
+    let signatures = super::signature_epoch_tests::signature_work(&host).since(before_signatures);
     let verter_type_engine::project_semantic_dispatch::call_resolve::ResolveCallStep::Complete(
         result,
     ) = &step
@@ -2031,7 +2045,7 @@ fn synchronous_round_call(case: RoundCall) -> (String, [u64; 3]) {
         "premise: the call is executed again once its last callback is typed"
     );
     assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
-    (answer, work)
+    (answer, work, signatures)
 }
 
 /// The reads a call frame needs that are signature lists, once the
@@ -2066,6 +2080,10 @@ struct RoundCallRun {
     woken: bool,
     /// Work done over the whole polled read.
     work: [u64; 3],
+    /// Signature work done over the whole polled read.
+    signatures: super::signature_epoch_tests::SignatureWork,
+    /// Kernel epochs the read retired as a list was about to be pinned.
+    retirements: usize,
     answer: String,
 }
 
@@ -2097,6 +2115,17 @@ fn resume_round_call_elsewhere(
 /// selects; released, the frame's task resumes on another thread and the
 /// answer is delivered here.
 fn poll_round_call(case: RoundCall, held: Option<fn(&SemanticQueryKey) -> bool>) -> RoundCallRun {
+    poll_round_call_retiring(case, held, false)
+}
+
+/// [`poll_round_call`]; with `retire`, the signature kernel replaces its
+/// epoch once during the first poll, as the first signature list pinned
+/// after the consumer typed a callback is about to be pinned.
+fn poll_round_call_retiring(
+    case: RoundCall,
+    held: Option<fn(&SemanticQueryKey) -> bool>,
+    retire: bool,
+) -> RoundCallRun {
     use verter_type_engine::project_semantic_dispatch::{
         call_callbacks_typed_here_for_tests, drive_contextual_call_here_for_tests,
         hold_call_needs_here_for_tests, take_call_suspensions_for_tests, ContextualCallProbe,
@@ -2112,12 +2141,39 @@ fn poll_round_call(case: RoundCall, held: Option<fn(&SemanticQueryKey) -> bool>)
     let waker = Waker::from(Arc::clone(&counter));
     let _ = take_call_suspensions_for_tests();
     let before = call_round_work(&host);
+    let before_signatures = super::signature_epoch_tests::signature_work(&host);
+    let retirements = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut entry = dispatch.poll_query(SemanticQueryKey::ResolveCall(Box::new(frame)));
     drive_contextual_call_here_for_tests(Some(ContextualCallProbe { call, typed }));
     hold_call_needs_here_for_tests(held);
     let first = {
         let _forbid = verter_execution::blocking::WaitProbe::forbid();
-        entry.poll(&waker)
+        if retire {
+            let (graph, retirements) = (Arc::clone(graph), Arc::clone(&retirements));
+            super::signature_epoch_tests::with_build_hook(
+                verter_type_engine::project_semantic_dispatch::signature_discovery::SignaturesOfTypeBuildPoint::Pinning,
+                move || {
+                    if call_callbacks_typed_here_for_tests() >= 1
+                        && retirements
+                            .compare_exchange(
+                                0,
+                                1,
+                                std::sync::atomic::Ordering::SeqCst,
+                                std::sync::atomic::Ordering::SeqCst,
+                            )
+                            .is_ok()
+                    {
+                        graph
+                            .signature_store()
+                            .replace_epoch()
+                            .expect("the kernel replaces its epoch");
+                    }
+                },
+                || entry.poll(&waker),
+            )
+        } else {
+            entry.poll(&waker)
+        }
     };
     hold_call_needs_here_for_tests(None);
     let typed_at_hold = call_callbacks_typed_here_for_tests();
@@ -2177,6 +2233,8 @@ fn poll_round_call(case: RoundCall, held: Option<fn(&SemanticQueryKey) -> bool>)
         held,
         woken,
         work: call_round_work_since(call_round_work(&host), before),
+        signatures: super::signature_epoch_tests::signature_work(&host).since(before_signatures),
+        retirements: retirements.load(std::sync::atomic::Ordering::SeqCst),
         answer,
     };
     assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
@@ -2245,6 +2303,39 @@ fn a_contextual_call_waiting_on_a_signature_list_its_resumed_candidate_reads_kee
         "the call walks once across its rounds, with the synchronous candidate and argument work"
     );
     assert_eq!(run.answer, synchronous);
+}
+
+/// A contextual call driven on a frame, the signature list `g`'s mapping
+/// reads retired after the request delivered it, as the call is about to
+/// pin it: the call pins the delivered list in the epoch it was published
+/// in, dispatching nothing, and answers as the synchronous consumer does,
+/// with the synchronous consumer's discovery and result work and nothing
+/// left open.
+///
+/// Dispatching the retired list again in place instead walks its subject a
+/// second time.
+#[test]
+fn a_contextual_list_retired_before_it_is_pinned_is_read_once() {
+    let (synchronous, _, synchronous_signatures) =
+        synchronous_round_call_with_signatures(RoundCall::TwoCallbacks);
+    let run = poll_round_call_retiring(RoundCall::TwoCallbacks, None, true);
+    assert_eq!(
+        run.retirements, 1,
+        "premise: a list pinned after a typed callback was retired"
+    );
+    assert!(
+        !run.yielded,
+        "nothing is held: the frame answers on its first poll"
+    );
+    assert_eq!(run.answer, synchronous);
+    assert_eq!(
+        (run.signatures.discovery, run.signatures.forced),
+        (
+            synchronous_signatures.discovery,
+            synchronous_signatures.forced
+        ),
+        "the retired list is read in its own epoch, its subject never walked again"
+    );
 }
 
 /// A contextual call driven on a frame, nothing held, walks once across
@@ -2954,6 +3045,7 @@ fn a_polled_root_query_released_while_pending_leaves_nothing_open() {
 /// that producer out, keeps its claim across polls, and delivers in its own
 /// value domain what the synchronous full-value entry reads.
 mod semantic_poll_contract {
+    use super::super::signature_epoch_tests::{signature_work, SignatureWork};
     use super::*;
 
     /// The truthiness classification of `string`: a query off the
@@ -4096,10 +4188,22 @@ mod semantic_poll_contract {
         (summary.0, summary.1, summary.2, summary.3, summary.4)
     }
 
+    /// What a read decided and the work it did, polled across one kernel
+    /// epoch replacement, beside the synchronous entry's read with none.
+    struct RetiredRead {
+        polled: ReadDecision,
+        synchronous: ReadDecision,
+        /// Builds begun and stages resumed by the polled read.
+        stages: (u64, u64),
+        work: SignatureWork,
+        synchronous_work: SignatureWork,
+    }
+
     /// `key` polled at the production entry on a fresh `host` while the
     /// signature kernel replaces its epoch exactly once, at the first time a
-    /// list reaches `point` — as its build settles the list it publishes, or
-    /// as a consumer about to pin the completed list holds it — against
+    /// build or a list reaches `point` — as a list's build settles the list
+    /// it publishes, as a consumer about to pin the completed list holds it,
+    /// or as a composite candidate's result read has its result — against
     /// what the synchronous entry reads on a fresh host with no replacement.
     fn read_across_one_retirement(
         point: verter_type_engine::project_semantic_dispatch::signature_discovery::SignaturesOfTypeBuildPoint,
@@ -4108,15 +4212,15 @@ mod semantic_poll_contract {
             &crate::VerterHost,
             &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
         ) -> SemanticQueryKey,
-    ) -> (ReadDecision, ReadDecision, (u64, u64)) {
-        let synchronous = {
+    ) -> RetiredRead {
+        let (synchronous, synchronous_work) = {
             let host = host();
             let dispatch = ProjectSemanticDispatch::new(&*host);
             let key = key(&host, &dispatch);
-            decision(read_summary(
-                &dispatch,
-                &dispatch.execute_via_cold_build_helper(key),
-            ))
+            let before = signature_work(&host);
+            let read = dispatch.execute_via_cold_build_helper(key);
+            let work = signature_work(&host).since(before);
+            (decision(read_summary(&dispatch, &read)), work)
         };
         let host = host();
         let mut dispatch = ProjectSemanticDispatch::new(&*host);
@@ -4124,6 +4228,7 @@ mod semantic_poll_contract {
         let graph = Arc::clone(dispatch.graph_arc());
         let replacements = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let before = continuation_stages(&host);
+        let before_work = signature_work(&host);
         let read = {
             let (graph, replacements) = (Arc::clone(&graph), Arc::clone(&replacements));
             super::super::signature_epoch_tests::with_build_hook(
@@ -4153,33 +4258,38 @@ mod semantic_poll_contract {
         assert_eq!(
             replacements.load(std::sync::atomic::Ordering::SeqCst),
             1,
-            "premise: exactly one list is retired at {point:?}"
+            "premise: exactly one epoch is retired at {point:?}"
         );
         let after = continuation_stages(&host);
+        let work = signature_work(&host).since(before_work);
         let polled = decision(read_summary(&dispatch, &read));
         assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
-        (
+        RetiredRead {
             polled,
             synchronous,
-            (after.0 - before.0, after.1 - before.1),
-        )
+            stages: (after.0 - before.0, after.1 - before.1),
+            work,
+            synchronous_work,
+        }
     }
 
-    /// A signature list the kernel retired is no answer to a need of it:
-    /// retired as its build settles it, the request never keeps it; retired
-    /// after the request completed it — as its consumer holds it to pin —
-    /// the consumer that meets the retired list reads it once more, and that
-    /// read recomputes it in the current epoch instead of being handed the
-    /// completed retired list again. An overload set over authored leaves,
-    /// one over a composite candidate and an apparent type whose anchor list
-    /// is retired each read exactly what the synchronous entry reads with no
-    /// replacement, each reading the retired list exactly once more.
+    /// A signature list the kernel retired before its consumer read it —
+    /// as its build settled it, or after the request completed it, as its
+    /// consumer held it to pin — is read through the epoch it was published
+    /// in: the consumer pins the delivered list and never reads it again.
+    /// An overload set over authored leaves reads its list once; one over a
+    /// composite candidate reads its list once and names the composite's
+    /// result after one pass copies the composite into the current epoch;
+    /// an apparent type reads its anchor list once. Each reads what the
+    /// synchronous entry reads with no replacement, with the synchronous
+    /// entry's discovery, matching and result work.
     ///
-    /// Handed the completed retired list again, the consumer's one re-read
-    /// meets the same retired handles and answers `Error(Miss)`.
+    /// Reading the retired list once more instead runs one stage more per
+    /// read, and its overload sets walk their callee again.
     #[test]
-    fn completed_signature_list_is_revalidated_after_retirement() {
+    fn a_signature_list_retired_before_its_consumer_reads_it_is_read_through_its_own_epoch() {
         use verter_type_engine::project_semantic_dispatch::signature_discovery::SignaturesOfTypeBuildPoint;
+        let shape = |work: SignatureWork| (work.discovery, work.positions, work.forced);
         for point in [
             SignaturesOfTypeBuildPoint::Settled,
             SignaturesOfTypeBuildPoint::Pinning,
@@ -4188,17 +4298,28 @@ mod semantic_poll_contract {
                 overload_set_keys(host, dispatch).0
             });
             assert!(
-                overloads.1 .0.contains("OverloadSet"),
-                "premise: {overloads:?}"
+                overloads.synchronous.0.contains("OverloadSet"),
+                "premise: {:?}",
+                overloads.synchronous
             );
             assert_eq!(
-                overloads.0, overloads.1,
+                overloads.polled, overloads.synchronous,
                 "{point:?}: an overload set over authored leaves"
             );
             assert_eq!(
-                overloads.2,
-                (1, 2),
-                "{point:?}: the set reads its list, and once more after the retirement"
+                overloads.stages,
+                (1, 1),
+                "{point:?}: the set reads its list once"
+            );
+            assert_eq!(
+                (overloads.work.rebinds, overloads.work.descriptors),
+                (0, 0),
+                "{point:?}: authored leaves are graph nodes once pinned: nothing is copied"
+            );
+            assert_eq!(
+                shape(overloads.work),
+                shape(overloads.synchronous_work),
+                "{point:?}: the callee is walked once"
             );
 
             let composite =
@@ -4206,31 +4327,110 @@ mod semantic_poll_contract {
                     union_overload_set_keys(host, dispatch).0
                 });
             assert!(
-                composite.1 .0.contains("OverloadSet") && !composite.1 .3,
-                "premise: {composite:?}"
+                composite.synchronous.0.contains("OverloadSet") && !composite.synchronous.3,
+                "premise: {:?}",
+                composite.synchronous
+            );
+            // `pick`'s union and its two arms are walked, the arms' one
+            // parameter position is compared once each way, and the
+            // composite's result is read once.
+            assert_eq!(
+                shape(composite.synchronous_work),
+                (3, 2, 1),
+                "premise: the synchronous read's work"
             );
             assert_eq!(
-                composite.0, composite.1,
+                composite.polled, composite.synchronous,
                 "{point:?}: an overload set over a composite"
             );
             assert_eq!(
-                composite.2,
+                composite.stages,
+                (1, 2),
+                "{point:?}: the list, then the composite's result under its rebound descriptor"
+            );
+            assert_eq!(
+                (composite.work.rebinds, composite.work.descriptors),
                 (1, 3),
-                "{point:?}: the list, once more after the retirement, then the composite's result"
+                "{point:?}: one pass copies the composite and its two constituents"
+            );
+            assert_eq!(
+                shape(composite.work),
+                shape(composite.synchronous_work),
+                "{point:?}: nothing is walked, compared or forced again"
             );
 
             let apparent =
                 read_across_one_retirement(point, apparent_callee_host, |_, dispatch| {
                     apparent_type_keys(dispatch).0
                 });
-            assert!(apparent.1 .0.contains("marker"), "premise: {apparent:?}");
-            assert_eq!(apparent.0, apparent.1, "{point:?}: an apparent type");
+            assert!(
+                apparent.synchronous.0.contains("marker"),
+                "premise: {:?}",
+                apparent.synchronous
+            );
             assert_eq!(
-                apparent.2,
-                (1, 13),
-                "{point:?}: the apparent type's twelve reads, and its anchor list once more after the retirement"
+                apparent.polled, apparent.synchronous,
+                "{point:?}: an apparent type"
+            );
+            assert_eq!(
+                apparent.stages,
+                (1, 12),
+                "{point:?}: the apparent type's twelve reads, its anchor list read once"
+            );
+            assert_eq!(
+                (apparent.work.rebinds, apparent.work.descriptors),
+                (0, 0),
+                "{point:?}"
+            );
+            // The strict-interface choice reads the same call list again,
+            // as a later reader: the memo never serves it the retired value,
+            // so that reader walks `o`'s surface, one object node, once
+            // more. The anchor walk itself reads its list once.
+            assert_eq!(
+                shape(apparent.work),
+                (
+                    apparent.synchronous_work.discovery + 1,
+                    apparent.synchronous_work.positions,
+                    apparent.synchronous_work.forced
+                ),
+                "{point:?}: an apparent type"
             );
         }
+    }
+
+    /// A composite candidate's result forced before its epoch retired —
+    /// the replacement landing after the result read has its result, before
+    /// the overload set consumes it — is delivered to the set and consumed
+    /// where it was published: the result is not forced again, nothing is
+    /// copied, and the set reads what the synchronous entry reads.
+    ///
+    /// Dropping the delivered result for the retirement instead reads the
+    /// list again and forces the result a second time.
+    #[test]
+    fn a_composite_result_forced_before_its_epoch_retired_is_delivered_not_forced_again() {
+        use verter_type_engine::project_semantic_dispatch::signature_discovery::SignaturesOfTypeBuildPoint;
+        let run = read_across_one_retirement(
+            SignaturesOfTypeBuildPoint::ResultApplied,
+            union_callee_host,
+            |host, dispatch| union_overload_set_keys(host, dispatch).0,
+        );
+        assert!(
+            run.synchronous.0.contains("OverloadSet") && !run.synchronous.3,
+            "premise: {:?}",
+            run.synchronous
+        );
+        assert_eq!(run.polled, run.synchronous);
+        assert_eq!(
+            run.stages,
+            (1, 2),
+            "the list, then the composite's result, each read once"
+        );
+        assert_eq!(run.work.forced, 1, "the result is forced once");
+        assert_eq!(
+            (run.work.rebinds, run.work.descriptors),
+            (0, 0),
+            "the delivered result names nothing to copy"
+        );
     }
 
     /// A callable object surface and the global `Function` interface its
@@ -6753,6 +6953,7 @@ mod semantic_poll_contract {
             let (tasks, leases) = hold_seam(&host, graph, held, seam.expression_site);
             let counter = Arc::new(CountingWaker::default());
             let waker = Waker::from(Arc::clone(&counter));
+            let readers = graph.signature_store().live_reader_count();
             let (pending, stopped, flights) = while_held(leases, || {
                 if cancelled {
                     let _request =
@@ -6802,6 +7003,11 @@ mod semantic_poll_contract {
                 NOTHING_OPEN,
                 "{label}"
             );
+            assert_eq!(
+                graph.signature_store().live_reader_count(),
+                readers,
+                "{label}: no signature epoch stays pinned for the released root"
+            );
             assert_eq!(graph.wait_graph_counts_for_tests().1, 0, "{label}");
             drop(tasks);
             let read = dispatch.execute_via_cold_build_helper(root);
@@ -6815,54 +7021,178 @@ mod semantic_poll_contract {
 
     /// An overload set whose signature list the kernel retires while another
     /// task holds the result its composite candidate reads: once released,
-    /// that result cannot be read for a descriptor of the retired epoch, so
-    /// the set — its first stage never run again — reads its list once more,
-    /// in the current epoch, and its composite's result after it, then
-    /// answers exactly what the synchronous entry answers with no
+    /// that read — named in the retired epoch — is refused, and the set,
+    /// its first stage never run again, names its composite's read once more
+    /// after one pass copies the composite into the current epoch. It never
+    /// reads its list again. Retired a second time while the rebound read is
+    /// held, the set names it again from the epoch it was copied into. Each
+    /// way it answers exactly what the synchronous entry answers with no
     /// retirement, leaving nothing open.
     ///
-    /// Taking the failed result read as an unsettled list instead, the set
-    /// answers `Error(Miss)` for a valid overload set.
+    /// Reading the list once more instead walks the callee again; answering
+    /// the rebound read in place instead waits on the held producer.
     #[test]
-    fn an_overload_set_whose_list_retires_while_its_composite_result_is_held_reads_its_list_once_more(
+    fn an_overload_set_whose_list_retires_while_its_composite_result_is_held_rebinds_the_composite_and_reads_its_list_once(
     ) {
         let seam = &HELD_SEAMS[6];
         let (synchronous, _) = synchronous_across(seam);
-        let host = (seam.host)();
-        let mut dispatch = ProjectSemanticDispatch::new(&*host);
-        let _scope = dispatch.enter_construction_scope();
-        let graph = host.project_type_store().semantic_graph();
-        let (set, composite) = (seam.keys)(&host, &dispatch);
-        let (tasks, leases) = hold_seam(&host, graph, composite, seam.expression_site);
-        let mut entry = dispatch.poll_query(set);
-        let (read, stages) = stages_of(&host, || {
-            let pending = while_held(leases, || {
-                let pending = entry.poll(Waker::noop()).is_pending();
+
+        // One retirement. The work counts from before the keys, whose list
+        // read walks `pick`'s union and its two arms and compares the arms'
+        // one parameter position once each way; the set's own list read is
+        // warm.
+        {
+            let host = (seam.host)();
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let _scope = dispatch.enter_construction_scope();
+            let graph = host.project_type_store().semantic_graph();
+            let before = signature_work(&host);
+            let (set, composite) = (seam.keys)(&host, &dispatch);
+            let (tasks, leases) = hold_seam(&host, graph, composite, seam.expression_site);
+            let mut entry = dispatch.poll_query(set);
+            let (read, stages) = stages_of(&host, || {
+                let pending = while_held(leases, || {
+                    let pending = entry.poll(Waker::noop()).is_pending();
+                    graph
+                        .signature_store()
+                        .replace_epoch()
+                        .expect("the kernel replaces its epoch");
+                    pending
+                });
+                assert!(
+                    pending,
+                    "the set yields while its composite's result is held"
+                );
+                resume_elsewhere(&mut entry)
+            });
+            drop(entry);
+            assert_eq!(
+                stages,
+                (1, 3),
+                "the set begins once and reads its list, the refused read of its retired composite and the result under the rebound descriptor, each once"
+            );
+            assert_eq!(
+                signature_work(&host).since(before),
+                SignatureWork {
+                    discovery: 3,
+                    positions: 2,
+                    forced: 1,
+                    rebinds: 1,
+                    descriptors: 3,
+                },
+                "the callee is walked once, the composite copied once and its result forced once"
+            );
+            assert_eq!(
+                decision(read_summary(&dispatch, &read)),
+                decision(synchronous.clone())
+            );
+            assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+            assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+            drop(tasks);
+        }
+
+        // Two retirements. The work counts from after the first key; the
+        // second key's in-place list read walks the union again in the
+        // current epoch, the memo never serving the retired list.
+        {
+            let host = (seam.host)();
+            let mut dispatch = ProjectSemanticDispatch::new(&*host);
+            let _scope = dispatch.enter_construction_scope();
+            let graph = host.project_type_store().semantic_graph();
+            let (set, first) = (seam.keys)(&host, &dispatch);
+            let SemanticQueryKey::ResolveOverloadSet { callee, kind, .. } = &set else {
+                unreachable!("the seam's root is an overload set")
+            };
+            let (callee, kind) = (*callee, *kind);
+            let before = signature_work(&host);
+            let before_stages = continuation_stages(&host);
+            let (first_tasks, first_leases) =
+                hold_seam(&host, graph, first.clone(), seam.expression_site);
+            let mut entry = dispatch.poll_query(set);
+            let (second_tasks, second_leases) = while_held(first_leases, || {
+                assert!(
+                    entry.poll(Waker::noop()).is_pending(),
+                    "the set yields while its composite's result is held"
+                );
                 graph
                     .signature_store()
                     .replace_epoch()
                     .expect("the kernel replaces its epoch");
-                pending
+                // The entry holds its dispatcher; another dispatcher of the
+                // same host names the read in place.
+                let second = {
+                    let namer = ProjectSemanticDispatch::new(&*host);
+                    let _scope = namer.enter_construction_scope();
+                    namer
+                        .first_composite_result_read_for_tests(callee, kind)
+                        .expect("the current epoch names the composite's read")
+                };
+                let SemanticQueryKey::ReadSignatureResult(named) = &second else {
+                    panic!("a composite waits on its result: {second:?}")
+                };
+                assert_eq!(
+                    named.descriptor.epoch(),
+                    graph.signature_store().epoch(),
+                    "premise: the held read is named in the current epoch"
+                );
+                assert_ne!(second, first, "premise: the retired read is another key");
+                hold_seam(&host, graph, second, seam.expression_site)
+            });
+            let (pending, held_stages) = while_held(second_leases, || {
+                let pending = {
+                    let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                    entry.poll(Waker::noop()).is_pending()
+                };
+                let held_stages = continuation_stages(&host);
+                graph
+                    .signature_store()
+                    .replace_epoch()
+                    .expect("the kernel replaces its epoch again");
+                (pending, held_stages)
             });
             assert!(
                 pending,
-                "the set yields while its composite's result is held"
+                "the set waits on the held read its rebound composite names, without waiting it out"
             );
-            resume_elsewhere(&mut entry)
-        });
-        drop(entry);
-        assert_eq!(
-            stages,
-            (1, 4),
-            "the set begins once and reads its list, its retired composite's result, its list again and its composite's result again, each once"
-        );
-        assert_eq!(
-            decision(read_summary(&dispatch, &read)),
-            decision(synchronous)
-        );
-        assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
-        assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
-        drop(tasks);
+            assert_eq!(
+                (
+                    held_stages.0 - before_stages.0,
+                    held_stages.1 - before_stages.1
+                ),
+                (1, 2),
+                "the list and the refused read, each once"
+            );
+            let read = resume_elsewhere(&mut entry);
+            drop(entry);
+            let after_stages = continuation_stages(&host);
+            assert_eq!(
+                (
+                    after_stages.0 - before_stages.0,
+                    after_stages.1 - before_stages.1
+                ),
+                (1, 4),
+                "the list, both refused reads and the result under the twice rebound descriptor, each once"
+            );
+            assert_eq!(
+                signature_work(&host).since(before),
+                SignatureWork {
+                    discovery: 3,
+                    positions: 2,
+                    forced: 1,
+                    rebinds: 2,
+                    descriptors: 6,
+                },
+                "the set copies its composite once per retirement and forces its result once"
+            );
+            assert_eq!(
+                decision(read_summary(&dispatch, &read)),
+                decision(synchronous)
+            );
+            assert_eq!(dispatch.open_request_state_for_tests(), NOTHING_OPEN);
+            assert_eq!(graph.wait_graph_counts_for_tests().1, 0);
+            drop(second_tasks);
+            drop(first_tasks);
+        }
     }
 
     /// A class declared in a file the workspace holds, unloaded.

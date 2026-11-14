@@ -2146,7 +2146,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Ok(match delivered {
             Some((delivery, depth)) => {
                 let first = self.signature_set_of_read(self.read_helper_delivery(delivery, depth));
-                self.shared_signature_nodes_from(subject, SignatureKind::Call, first)
+                self.shared_signature_nodes_from(SignatureKind::Call, first)
             }
             None => self.shared_signature_nodes(subject, SignatureKind::Call),
         })

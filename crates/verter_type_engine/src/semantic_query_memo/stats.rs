@@ -229,6 +229,16 @@ pub(crate) struct AtomicSemanticGraphStats {
     pub(super) binder_substitutions: Tally,
     /// Children substitution walks visited.
     pub(super) substitution_child_visits: Tally,
+    /// Subject nodes signature discovery walks entered.
+    pub(super) discovery_nodes_walked: Tally,
+    /// Type positions signature matching compared.
+    pub(super) signature_positions_compared: Tally,
+    /// Signature result reads performed.
+    pub(super) signature_results_forced: Tally,
+    /// Passes copying signature records between kernel epochs.
+    pub(super) signature_rebinds: Tally,
+    /// Descriptors those passes copied.
+    pub(super) signature_descriptors_rebound: Tally,
     /// Cross products of intersections over unions built, once per product.
     pub(super) intersection_products_built: Tally,
     #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
@@ -316,6 +326,11 @@ impl Default for AtomicSemanticGraphStats {
             explicit_candidates_instantiated: Tally::default(),
             binder_substitutions: Tally::default(),
             substitution_child_visits: Tally::default(),
+            discovery_nodes_walked: Tally::default(),
+            signature_positions_compared: Tally::default(),
+            signature_results_forced: Tally::default(),
+            signature_rebinds: Tally::default(),
+            signature_descriptors_rebound: Tally::default(),
             admission_stages_walked: Tally::default(),
             deferred_steps_evaluated: Tally::default(),
             intersection_products_built: Tally::default(),
@@ -537,6 +552,15 @@ impl SemanticGraphStore {
                 .load(Ordering::Relaxed),
             binder_substitutions: stats.binder_substitutions.load(Ordering::Relaxed),
             substitution_child_visits: stats.substitution_child_visits.load(Ordering::Relaxed),
+            discovery_nodes_walked: stats.discovery_nodes_walked.load(Ordering::Relaxed),
+            signature_positions_compared: stats
+                .signature_positions_compared
+                .load(Ordering::Relaxed),
+            signature_results_forced: stats.signature_results_forced.load(Ordering::Relaxed),
+            signature_rebinds: stats.signature_rebinds.load(Ordering::Relaxed),
+            signature_descriptors_rebound: stats
+                .signature_descriptors_rebound
+                .load(Ordering::Relaxed),
             relation_members_related: stats.relation_members_related.load(Ordering::Relaxed),
             admission_stages_walked: stats.admission_stages_walked.load(Ordering::Relaxed),
             deferred_steps_evaluated: stats.deferred_steps_evaluated.load(Ordering::Relaxed),

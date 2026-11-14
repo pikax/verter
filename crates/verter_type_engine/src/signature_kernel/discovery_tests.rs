@@ -96,7 +96,7 @@ fn sig_with(
     ret: u64,
 ) -> SignatureCandidate {
     publish_signature(
-        store,
+        &store.bind_current(),
         &SignatureInput {
             kind: SignatureKind::Call,
             source: SemanticNodeId(source),
@@ -153,13 +153,13 @@ fn later_match_is_never_committed_while_an_earlier_candidate_is_unresolved() {
         .insert(ordered(token(string), token(number)));
 
     assert_eq!(
-        union_signatures(&store, &types, &lists),
+        union_signatures(&store.bind_current(), &types, &lists),
         Err(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput)),
         "the earlier unresolved overload blocks the later successful one"
     );
 
     types.unsettled.borrow_mut().clear();
-    let settled = union_signatures(&store, &types, &lists).unwrap();
+    let settled = union_signatures(&store.bind_current(), &types, &lists).unwrap();
     assert_eq!(settled.len(), 1);
 
     // Returns are not compared by a common match, so a delayed return pair
@@ -169,7 +169,7 @@ fn later_match_is_never_committed_while_an_earlier_candidate_is_unresolved() {
         unsettled: RefCell::new(BTreeSet::from([ordered(token(out_a), token(out_b))])),
     };
     assert_eq!(
-        union_signatures(&store, &return_delay, &lists).unwrap(),
+        union_signatures(&store.bind_current(), &return_delay, &lists).unwrap(),
         settled
     );
 }
@@ -195,7 +195,14 @@ fn absent_binder_default_is_not_identical_to_authored_unknown_default() {
     let none_b = sig_with(&store, 2, 2, 2, vec![binder(None)], 100, 200);
     let authored = sig_with(&store, 3, 3, 3, vec![binder(Some(9_000))], 100, 200);
     let same = |a, b| {
-        signatures_identical(&store, &types, a, b, MatchOptions::EXACT_IGNORING_RETURNS).unwrap()
+        signatures_identical(
+            &store.bind_current(),
+            &types,
+            a,
+            b,
+            MatchOptions::EXACT_IGNORING_RETURNS,
+        )
+        .unwrap()
     };
     assert!(same(none_a, none_b));
     assert!(!same(none_a, authored));
@@ -210,7 +217,7 @@ fn colliding_space_keys_of_distinct_identities_are_rejected() {
     sig_with(&store, 1, 7, 1, vec![binder(None)], 100, 200);
     sig_with(&store, 2, 7, 1, vec![binder(None)], 100, 200);
     let collided = publish_signature(
-        &store,
+        &store.bind_current(),
         &SignatureInput {
             kind: SignatureKind::Call,
             source: SemanticNodeId(3),
@@ -265,7 +272,7 @@ fn repeated_arm_contributors_are_retained() {
         unsettled: RefCell::new(BTreeSet::new()),
     };
     let a = sig(&store, 1, 100, 200);
-    let out = union_signatures(&store, &types, &[vec![a], vec![a]]).unwrap();
+    let out = union_signatures(&store.bind_current(), &types, &[vec![a], vec![a]]).unwrap();
     assert_eq!(out.len(), 1);
     assert_ne!(out[0], a);
 }
@@ -369,14 +376,19 @@ fn intersection_keeps_signatures_that_differ_only_in_their_result() {
     let fa_again = types.declared(3, param, returns_a);
 
     assert_eq!(
-        intersection_signatures(&store, &types, SignatureKind::Call, &[vec![fa], vec![fb]])
-            .unwrap(),
+        intersection_signatures(
+            &store.bind_current(),
+            &types,
+            SignatureKind::Call,
+            &[vec![fa], vec![fb]]
+        )
+        .unwrap(),
         vec![fa, fb],
         "signatures that differ only in their result are distinct overloads, in authored order"
     );
     assert_eq!(
         intersection_signatures(
-            &store,
+            &store.bind_current(),
             &types,
             SignatureKind::Call,
             &[vec![fa], vec![fa_again]]
@@ -408,7 +420,7 @@ fn a_union_of_overloaded_arms_without_a_common_signature_synthesizes_nothing() {
         vec![sig(&store, 3, boolean, 203), sig(&store, 4, symbol, 204)],
     ];
     assert_eq!(
-        union_signatures(&store, &types, &overloaded_arms).unwrap(),
+        union_signatures(&store.bind_current(), &types, &overloaded_arms).unwrap(),
         Vec::new(),
         "two overloaded arms with no common signature synthesize nothing"
     );
@@ -419,7 +431,7 @@ fn a_union_of_overloaded_arms_without_a_common_signature_synthesizes_nothing() {
         vec![sig(&store, 7, number_or_string, 203)],
     ];
     assert!(
-        !union_signatures(&store, &types, &one_overloaded_arm)
+        !union_signatures(&store.bind_current(), &types, &one_overloaded_arm)
             .unwrap()
             .is_empty(),
         "a single overloaded arm reaches the restricted synthesis"
@@ -451,7 +463,7 @@ fn union_synthesis_interns_one_provenance_per_candidate_whatever_the_arm_count()
             before.provenances.record_count(),
         );
         drop(before);
-        let synthesized = union_signatures(store, &types, &lists).unwrap();
+        let synthesized = union_signatures(&store.bind_current(), &types, &lists).unwrap();
         let after = store.pin();
         (
             synthesized.len(),
@@ -502,7 +514,8 @@ fn heritage_lists_own_signatures_first_and_drops_nothing() {
         "own signatures first, then every base's in clause order, the repeated root kept"
     );
     assert_eq!(
-        intersection_signatures(&store, &types, SignatureKind::Call, &members).unwrap(),
+        intersection_signatures(&store.bind_current(), &types, SignatureKind::Call, &members)
+            .unwrap(),
         vec![left, root, right, own],
         "an intersection over the same members keeps authored arm order and drops the \
          identical repeat"

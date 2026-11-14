@@ -168,7 +168,7 @@ fn read_effects(
 ) -> Option<PredicateEffect> {
     let store = dispatch.graph().store().signature_store();
     match dispatch.read_signature_result(
-        store,
+        &store.bind_current(),
         candidate.signature,
         call,
         ResultDemand::Effects,
