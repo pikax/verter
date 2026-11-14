@@ -396,6 +396,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// stopped at an executor route over a lowered argument, start that
     /// route.
     fn drive_call<'e>(&mut self, mut flight: CallInFlight<'e>) -> CallStep<'e> {
+        self.dispatch.graph().record_call_value_run();
         let enclosing = self.st.call_drive.replace(flight.drive);
         let driver = self.dispatch;
         let read = driver
