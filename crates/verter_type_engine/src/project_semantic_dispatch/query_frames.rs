@@ -5145,12 +5145,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// flow evaluation's next run.
     pub(super) fn hold_contextual_route(&self, route: super::flow_return::HeldContextualRoute) {
         #[cfg(any(test, feature = "test-support"))]
-        if let Some((session, collected)) = route.held_collector_for_tests() {
-            self.record_contextual_route_for_tests(ContextualRouteEventForTests::Held {
-                session,
-                collected,
-            });
-        }
+        let route = {
+            let mut route = route;
+            if let Some((session, collected)) = route.held_collector_for_tests() {
+                self.record_contextual_route_for_tests(ContextualRouteEventForTests::Held {
+                    session,
+                    collected,
+                });
+            }
+            route
+        };
         let mut installed = self.flow_seam.borrow_mut();
         match installed.as_mut() {
             Some(seam) => seam.routes.push(route),
@@ -5180,12 +5184,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             seam.routes.remove(position)
         };
         #[cfg(any(test, feature = "test-support"))]
-        if let Some((session, collected)) = route.held_collector_for_tests() {
-            self.record_contextual_route_for_tests(ContextualRouteEventForTests::Resumed {
-                session,
-                collected,
-            });
-        }
+        let route = {
+            let mut route = route;
+            if let Some((session, collected)) = route.held_collector_for_tests() {
+                self.record_contextual_route_for_tests(ContextualRouteEventForTests::Resumed {
+                    session,
+                    collected,
+                });
+            }
+            route
+        };
         Some(route)
     }
 
@@ -5197,12 +5205,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) {
         for route in routes {
             #[cfg(any(test, feature = "test-support"))]
-            if let Some((session, collected)) = route.held_collector_for_tests() {
-                self.record_contextual_route_for_tests(ContextualRouteEventForTests::Released {
-                    session,
-                    collected,
-                });
-            }
+            let route = {
+                let mut route = route;
+                if let Some((session, collected)) = route.held_collector_for_tests() {
+                    self.record_contextual_route_for_tests(
+                        ContextualRouteEventForTests::Released { session, collected },
+                    );
+                }
+                route
+            };
             route.release(self);
         }
     }

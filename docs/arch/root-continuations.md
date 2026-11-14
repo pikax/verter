@@ -1691,8 +1691,15 @@ the consumer types it (`CallRead::contextual_mut` lends the continuation
 for an object or array literal typed member by member), and the typed
 arguments (`HelperDelivery::callback`) resume that collector. The
 synchronous adapter (`drive_call_in_place`) answers the exchange as the
-executor's step naming the argument, as before. The synchronous entries
-already drive these computations in place:
+executor's step naming the argument, as before. The flow evaluator's
+executor route holds the call itself: it begins the `CallRead`
+(`FlowReadDriver::begin_call`), keeps it in its `FinishRoute` across the
+callback rounds, lends its continuation (`contextual_mut`) to an object or
+array literal typed in place, hands each round its typed arguments
+(`FlowReadDriver::resume_call`, the in-place round of `advance_call_read`)
+and releases it (`FlowReadDriver::release_call`, `release_call_read`) on
+every exit before it answered, a held route included. The synchronous
+entries already drive these computations in place:
 `execute_relate_pair`, `execute_relate_pair_kind`, the call walk's
 binding applicability relation and the flow evaluator's contextual call.
 The memoized callable reads stay ordinary query keys a consumer needs:
@@ -1838,19 +1845,22 @@ two mappers run once; the resumable contextual type walk keeps a callable
 leaf's substituted targets), and the walk records the waiting candidate
 (`CandidateWalk::preparing`) and re-enters its preparation with the
 delivery. Released while it waits, the call pops its executor frame
-undecided and abandons the held collector. Driven in place, a callback
-round still resumes through `resume_contextual_call` and executes the call
-again, unchanged.
+undecided and abandons the held collector. Driven in place, as the flow
+evaluator drives the `CallRead` its route holds, a callback round still
+resumes through `resume_contextual_call` and executes the call again,
+unchanged.
 
 Graph counters measure the physical work: `relation_roots_opened` (one per
 root obligation frame a machinery root opens), `relation_reductions`
 (one per structural reduction), `relation_members_related` (one per
 property pair an object comparison relates), `call_candidates_begun` (one
 per candidate check whose prologue runs), `call_arguments_related` (one
-per first-pass argument relation) and `call_walks_begun` (one per executor
+per first-pass argument relation), `call_walks_begun` (one per executor
 walk whose callee is substituted and whose plan is acquired, so a call
-executed again counts again), counted where the work runs, outside every
-charge and its rollback.
+executed again counts again) and `call_value_runs` (one per call whose
+value computation the flow evaluator begins, so a call's value computed
+again counts again), counted where the work runs, outside every charge and
+its rollback.
 
 The callback rounds are driven through a test-support probe on a call's
 frame and compared with the synchronous rounds:
@@ -2316,7 +2326,11 @@ body lowered on its owner shard — still loads or is lowered in place.
 Failed frame entry
 loads supply their terminal outcome to the frame's repeated reads without
 synchronous retries. A flow frame still drops and re-runs
-its evaluation when its body meets an unanswered read.
+its evaluation when its body meets an unanswered read. Within one run, a
+call's value is computed once: the computation is staged around the
+call's executor route (`CallStage`, `CallSuffix`), and the stage after
+the route takes its answer instead of the computation running again from
+its beginning.
 
 An ignored acceptance test in the session's `semantic_poll_contract` group
 states the polled entry's contract for the flow gap and fails today:
