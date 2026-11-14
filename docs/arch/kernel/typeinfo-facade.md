@@ -467,10 +467,20 @@ feature menu out of the descriptor set.
   `EngineBackend::query` returns `Answered` or `NoResultVersionMismatch`; the
   engine-native answer rides an out-of-band channel. `OP11` and `OP12` need a
   typed fact inside `TR23`, without a second backend contract.
-- **Multi-owner ambiguity is silent** (`TIF-F03`, TIF1).
-  `unique_local_type_declaration_owner_in` returns `None` on multi-owner
-  ambiguity and `resolve_named_symbol` falls back to the ordinary-file owner
-  without reporting it.
+- **A name declared by two owners resolves to the declaration its scope
+  sees** (`TIF-F03`, TIF1). Resolve-symbol reads the declaring owners from the
+  header inventory (`visible_local_type_declaration_owner_in`). One declaring
+  owner is the answer's owner. When an owner and its validated lexical parent
+  both declare the name, the inner owner's declaration shadows the parent's,
+  as in the engine's bare-name lookup: a Vue `<script setup>` or Svelte
+  instance declaration wins over the module one. A name no owner declares
+  resolves at the ordinary-file view (import-routed and ambient names). Owners
+  with no parent relation between them give a non-fault miss; no production
+  carrier produces them today. The typed `Ambiguous` of `TR12`/`TR27` is not
+  implemented for resolve-symbol: it needs an owner coordinate on the
+  selector, and it lands when a carrier with unrelated owners exists. Only
+  type headers are read, because a value does not shadow a type of the same
+  name.
 - **Facet normalizers correlate by first name match** (`TIF-F04`, TIF1). The
   Svelte `$bindable` and Vue slot normalizers use `iter().find` by name; the
   Svelte one synthesises a field when nothing matches. This sits in the

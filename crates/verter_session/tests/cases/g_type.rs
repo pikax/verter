@@ -39,5 +39,7 @@ mod type_resolution_audit_tls_propagation;
 mod typeinfo_graph_query_executor;
 #[path = "g_type/typeinfo_request_validation.rs"]
 mod typeinfo_request_validation;
+#[path = "g_type/typeinfo_two_owner_resolution.rs"]
+mod typeinfo_two_owner_resolution;
 #[path = "g_type/vue_macro_runtime_oracle.rs"]
 mod vue_macro_runtime_oracle;

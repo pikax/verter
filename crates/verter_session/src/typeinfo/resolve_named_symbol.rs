@@ -74,6 +74,7 @@ use verter_type_expr::TypeExpr;
 
 #[cfg(feature = "semantic-observe")]
 use crate::host_audit_runtime::AuditRequestRegistration;
+use crate::host_manage::eval_env::VisibleDeclarationOwner;
 use crate::host_resolve_type_audit::TypeResolutionRequestError;
 use crate::typeinfo::node_refs::DeclReplayLocator;
 use crate::VerterHost;
@@ -716,16 +717,27 @@ pub(crate) fn resolve_named_symbol_located<M: verter_audit::observe::ObserveExec
 
     // Owner-agnostic entry → exact authored owner. This public
     // named-symbol surface takes no owner, so the dispatch scope owner is
-    // selected through the SAME header-inventory rule the C1 consumer
-    // uses (`unique_local_type_declaration_owner_in`): the sole authored
-    // declaring owner when the canonical declares the name (a
-    // `<script setup>`-local declaration resolves under its Instance
-    // owner, where the script-setup `generic="T"` params bind), and the
-    // ordinary-file view otherwise (import-routed names, ambient names,
-    // multi-owner ambiguity — each fails closed exactly as before).
-    let entry_owner = RouteLookup::routed_shallow_state(ctx, canonical_id)
-        .and_then(|state| crate::VerterHost::unique_local_type_declaration_owner_in(&state, name))
-        .unwrap_or_else(verter_type_expr::TopLevelOwnerId::ordinary_file);
+    // the owner whose declaration the file's innermost scope sees, read
+    // from the header inventory:
+    // - the sole declaring owner (a `<script setup>`-local declaration
+    //   resolves under its Instance owner, where the script-setup
+    //   `generic="T"` params bind);
+    // - for a name declared by an owner and by its validated lexical
+    //   parent, the inner owner, whose declaration shadows the parent's
+    //   exactly as in the engine's bare-name lookup;
+    // - the ordinary-file view for a name no owner declares (import-routed
+    //   and ambient names);
+    // - a non-fault miss for owners with no parent relation between them,
+    //   where no single declaration is visible.
+    let declaring = RouteLookup::routed_shallow_state(ctx, canonical_id)
+        .map(|state| crate::VerterHost::visible_local_type_declaration_owner_in(&state, name));
+    let entry_owner = match declaring {
+        Some(VisibleDeclarationOwner::Owner(owner)) => owner,
+        Some(VisibleDeclarationOwner::Unrelated) => return unlocated(Ok(None)),
+        Some(VisibleDeclarationOwner::Undeclared) | None => {
+            verter_type_expr::TopLevelOwnerId::ordinary_file()
+        }
+    };
 
     // Resolve the bare declaration. The dispatch entry-point
     // memoises this through its `execute_cooperative` path. Note
