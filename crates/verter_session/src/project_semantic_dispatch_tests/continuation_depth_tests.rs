@@ -805,7 +805,7 @@ fn assert_alternating_chain_answers_on_the_line(length: usize) {
 /// exactly the work that chains of 4, 6 and 8 levels extend to 30: the gate
 /// version of the 150-level test in the nightly scale tier.
 ///
-/// TypeScript 7.0.2: `ReturnType<typeof g<n>>` is `"ok"`.
+/// The pinned TypeScript checker: `ReturnType<typeof g<n>>` is `"ok"`.
 #[test]
 fn alternating_projection_instantiation_flow_and_call_chains_answer_past_the_connected_query_depth()
 {
@@ -1683,7 +1683,7 @@ mod nightly_scale {
     /// a 150-level chain answers cold and warm alike on a 1 MiB thread,
     /// with exactly the work chains of 4, 6 and 8 levels extend to 150.
     ///
-    /// TypeScript 7.0.2: `ReturnType<typeof g150>` is `"ok"`.
+    /// The pinned TypeScript checker: `ReturnType<typeof g150>` is `"ok"`.
     #[test]
     fn alternating_projection_instantiation_flow_and_call_chains_answer_on_a_one_mebibyte_stack() {
         in_a_fresh_process(test_path!(), || {
