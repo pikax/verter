@@ -314,6 +314,7 @@ one poll that runs to the end — sees the scope exactly as it was before.
 | Construction lane | `SuspendableDispatch`: a dispatcher bound to no thread, whose lane is entered for each poll (a lane owns nothing, so no operation of it may span a suspension) | `SuspendableDispatch::run` |
 | Work attribution | the site | `attribute_polls` |
 | Parse-stack refusals | the recording | `refusals_within_pollable` |
+| Demand scope of a helper's requested read | `query_frames::DemandScope` on the frame that produces the read, inherited by the frames its needs start | `step_instantiate_frame` (each step) |
 
 Each converted computation has one implementation: the pollable form. Its
 synchronous form drives it — `drive_pending` under the caller's execution
@@ -1625,8 +1626,12 @@ computation it advances
   its output, or `HelperStep::Request` with the one dependency it reads
   next, holding everything it computed before the read.
 - A frame of the continuation runtime turns a request into its own need
-  (`helper_request_poll`, which keeps the request's entered claim for the
-  runtime) and hands the delivery back (`helper_delivery`). The
+  (`helper_request_poll` for a relation root, `call_request_poll` for a
+  call, each keeping the request's entered claim for the runtime; a call's
+  also keeps where the walk asked, and admits first a read whose entry
+  admits it) and hands the delivery back (`helper_delivery`,
+  `call_helper_delivery`, the latter with the admission the read was
+  admitted through). The
   synchronous driver (`HelperDrive::InPlace`) makes each read in place, so
   the helper never stops. A consumer that stops while its helper waits
   releases it (`release_relation_read`, `release_call_read`), closing what
@@ -1634,7 +1639,9 @@ computation it advances
 
 `HelperRequest`, `HelperAwait` and `HelperDelivery` are opaque, owned and
 `Send`; the helpers are `Send` and neither `Clone` nor `Copy`. A delivery
-is the complete `QueryDelivery`, never a node narrowed out of it. The
+is the complete `QueryDelivery`, never a node narrowed out of it, boxed
+with its key and any admission (`DeliveredRead`) so the delivery a helper
+is advanced with is a pointer. The
 request kinds grow as a helper's internal stages are converted, behind the
 same opaque types and frame glue, so its consumers keep driving it the same
 way. Besides query reads, a call has one request its consumer answers
@@ -1728,13 +1735,24 @@ recovery and the sole or recovered candidate, by position). A candidate's
 check reads its parameters, type parameters, receiver, rest shape and arity
 once, as it begins (`CandidatePrologue`). Driven by a frame
 (`HelperDrive::Frame`), the walk's candidate list is a request when the
-memo does not serve it warm and its entry admits no subject, its delivery
-read where it was asked. The runtime produces that read outside the
-demand scope the walk pushes for its call site, so the list is a request
-only when the scope beneath it (the enclosing demand site, else the
-request's file) is the call site's: a primitive or collection callee's
-list looks its apparent global up in that scope's project, and under any
-other scope the walk reads the list where it stands. Before each
+memo does not serve it warm, its delivery read where it was asked. The
+runtime produces that read outside the demand scope the walk pushes for
+its call site, so the request names the scope it was asked under
+(`RequestOrigin`): the frame that produces it keeps that site as a
+`DemandScope`, pushes it for each of its steps and hands it to every frame
+its needs start, so a primitive or collection callee's list looks its
+apparent global up in the call site's project whatever scope lies beneath
+the walk. A list whose entry admits its subject (a contextual mapping's
+list over a primitive, literal, template, array or tuple) is requested
+unentered: the call's frame admits it with the entry's own admission
+(`QueryEntryBuild`, held as `AdmissionHolder::Call` beside the call),
+under the scope and checking site the walk asked it at; each read the
+admission makes is the frame's need, the admitted key is the need last,
+and its delivery reaches the walk with the admission's prelude, attributed
+where the walk reads it. A set that did not come back as a set is
+classified by the callee's list, which is a request too: the slot that
+held the set holds the list while the walk waits on it, and its delivery
+enters the classification. Before each
 first-pass argument relation the operands' first instantiations are
 demanded (`OperandDemand`, as for a relation root). One that must be
 computed stops the candidate there,
@@ -1803,6 +1821,16 @@ frame and compared with the synchronous rounds:
 `a_contextual_call_released_while_its_resumed_candidate_waits_leaves_nothing_open`
 and
 `a_callback_beside_a_spread_argument_is_rechecked_over_the_retained_plan_without_walking_again`.
+A list admitted in the call's frame is held at its wrapper's instantiation
+and released while it waits:
+`a_contextual_list_over_an_array_parameter_suspends_at_its_admissions_wrapper_read`
+and `a_call_released_while_its_lists_admission_waits_leaves_nothing_open`.
+The call-site scope a list request carries and the list read after a missed
+set, in the session's `semantic_poll_contract` group:
+`a_primitive_callees_candidate_list_is_requested_under_its_call_sites_scope`,
+`a_frame_reading_for_a_scoped_request_hands_the_scope_to_the_frames_it_needs`
+and
+`a_candidate_list_read_after_a_missed_set_is_requested_and_classifies_the_miss`.
 
 Behaviour, in the session's `semantic_poll_contract` group:
 `a_relation_root_whose_source_operand_is_held_yields_with_its_root_frame_open`
@@ -2141,8 +2169,8 @@ made in place inside a stage:
   above), and what the evaluator still answers in place inside a step.
 
 A projection read through sugar or over a carrier or apparent-wrapper subject
-is admitted by its retained entry admission (above), from a polled root and
-from a frame's family need alike. What that admission still answers in place
+is admitted by its retained entry admission (above), from a polled root,
+from a frame's family need and from a helper's requested read alike. What that admission still answers in place
 is, as for families, confined to its ports and in-place resolver lookups: the
 carrier head's bare-name and import resolution over prepared declarations
 (`plan_bare_ref_head_steps`, `plan_import_type_head_steps`), the finish of a
@@ -2172,9 +2200,8 @@ inventoried for conversion by its owner:
 - the call executor below its walk's seams: argument acquisition (an
   argument's program expression evaluates in place), contextual candidate
   preparation below its signature lists (substitution, including its
-  intersection and template-literal reductions, fixation, the lists a
-  composite candidate's signature results read, and a list read under a
-  non-ambient scope or through an entry that admits its subject), the
+  intersection and template-literal reductions, fixation, and the lists a
+  composite candidate's signature results read), the
   relations both applicability passes make (inside each
   relation), fixation, the post-fixation checks, the selected candidate's
   return (its declared recipe or its body's flow return), diagnostics,
@@ -2188,6 +2215,17 @@ inventoried for conversion by its owner:
   a re-discharge) and a relation a seam joined below a drive's root, which
   demand nothing first.
 
+Only the signature lists a helper reads carry the demand scope they were
+asked in. Two needs keep their frame's scope instead:
+
+- a relation operand's first instantiation (`advance_operand_demand`) is
+  requested under the scope of the frame that needs it; in place it runs
+  under the call site, so carrying the scope it was asked in is the same
+  capture there, and changes every frame-driven call and relation root;
+- a flow or decision seam's need (`read_at_flow_seam`,
+  `read_at_decision_seam`) inherits its frame's scope only; its owner's
+  conversion decides what it carries.
+
 Signature discovery and the kernel still read in place, inventoried for
 conversion:
 
@@ -2200,8 +2238,6 @@ conversion:
 - a composite candidate's result forced by the in-place list readers
   (`signature_nodes_of`), including for a contextual list delivered on a
   frame: a result read in the list's own epoch, not a list read;
-- a list read under a non-ambient scope or through an admitting entry, and
-  the candidate list read after a missed overload set;
 - a retired value refused warm, by a joiner and by the request's kept
   completions: a later reader recomputes it, no continuation replays;
 - a result read named in a retired epoch whose read was refused or failed

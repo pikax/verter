@@ -667,7 +667,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         arguments: &[CallArgument],
         budget: &mut CallResolutionBudget<'_>,
         last_visible: bool,
-        delivery: Option<(SemanticQueryKey, super::super::query_frames::QueryDelivery)>,
+        delivery: Option<Box<super::super::helper_continuation::DeliveredRead>>,
         drive: HelperDrive,
     ) -> Result<Vec<CallArgument>, PreparationStop> {
         let mut state = self
@@ -699,7 +699,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         arguments: &[CallArgument],
         budget: &mut CallResolutionBudget<'_>,
         last_visible: bool,
-        mut delivery: Option<(SemanticQueryKey, super::super::query_frames::QueryDelivery)>,
+        mut delivery: Option<Box<super::super::helper_continuation::DeliveredRead>>,
         drive: HelperDrive,
         state: &mut ContextualCallState,
     ) -> Result<Vec<CallArgument>, PreparationStop> {
@@ -1313,7 +1313,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         target: SemanticNodeId,
         id: SessionId,
         budget: &mut CallResolutionBudget<'_>,
-        delivery: Option<(SemanticQueryKey, super::super::query_frames::QueryDelivery)>,
+        delivery: Option<Box<super::super::helper_continuation::DeliveredRead>>,
         drive: HelperDrive,
     ) -> Result<(SemanticNodeId, SemanticNodeId), MapperStop> {
         let mut mapping = match progress.mapping.take() {
@@ -1507,7 +1507,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     fn advance_candidate_mapping(
         &self,
         mapping: &mut CandidateMapping,
-        delivery: Option<(SemanticQueryKey, super::super::query_frames::QueryDelivery)>,
+        delivery: Option<Box<super::super::helper_continuation::DeliveredRead>>,
         drive: HelperDrive,
     ) -> Result<
         (
