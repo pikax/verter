@@ -524,6 +524,60 @@ export type Wrap<T> = { wrapped: T };
 // Reads optional audit capture: runs in the instrumentation lane.
 #[cfg(feature = "semantic-observe")]
 #[test]
+fn the_default_mode_follows_the_declaration_resolution_selects_in_a_carrier() {
+    // The generic-carrier default reads the declaration of the owner the
+    // resolution runs under: a `<script setup>` declaration, alone or
+    // shadowing the module one, decides it.
+    let rows: [(&str, &str, verter_audit::ProjectionModeTag); 3] = [
+        (
+            "/SetupGeneric.vue",
+            "<script setup lang=\"ts\">
+type Wrap<T> = { wrapped: T }
+</script>
+<template><div /></template>
+",
+            verter_audit::ProjectionModeTag::Navigate,
+        ),
+        (
+            "/ShadowingGeneric.vue",
+            "<script lang=\"ts\">
+type Wrap = { plain: string }
+</script>
+             <script setup lang=\"ts\">
+type Wrap<T> = { wrapped: T }
+</script>
+<template><div /></template>
+",
+            verter_audit::ProjectionModeTag::Navigate,
+        ),
+        (
+            "/ShadowingPlain.vue",
+            "<script lang=\"ts\">
+type Wrap<T> = { wrapped: T }
+</script>
+             <script setup lang=\"ts\">
+type Wrap = { plain: string }
+</script>
+<template><div /></template>
+",
+            verter_audit::ProjectionModeTag::Expanded,
+        ),
+    ];
+    for (canonical, source, expected) in rows {
+        let host = make_host_with_audit();
+        upsert_ts(&host, canonical, source);
+        let (_node, record) = parts(host.resolve_named_symbol_with_audit(canonical, "Wrap", None));
+        let r = assert_one_typeresolution_record(&record);
+        let RequestKindPayload::TypeResolution(payload) = &r.kind_payload else {
+            panic!("{canonical}: a type-resolution payload");
+        };
+        assert_eq!(payload.query_mode, expected, "{canonical}");
+    }
+}
+
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
+#[test]
 fn resolve_named_symbol_with_audit_emits_one_record() {
     let host = make_host_with_audit();
     upsert_ts(&host, "/single.ts", "export type T = number;\n");
