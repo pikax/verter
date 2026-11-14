@@ -1,15 +1,14 @@
 //! Record-level signature discovery: publishing candidates from neutral
-//! input, signature-equivalence comparison, union common-match then
-//! restricted synthesis, intersection dedup with constructor/mixin
-//! composition, and a declaration's heritage concatenation.
+//! input, the record helpers union and intersection composition build
+//! composites with, a union signature's parameter composition, and a
+//! declaration's heritage and merged-declaration concatenation. Signature
+//! comparison and the union and intersection compositions are owned
+//! machines in [`super::matching`].
 //!
 //! Everything here works over V2 records and is independent of the
 //! semantic graph; the graph-facing subject walk lives with the dispatcher
 //! and reaches the type graph only through [`DiscoveryTypes`]. Nothing in
 //! this module reads a body: a candidate's result is a closed recipe.
-//! Candidate precedence is authored order; comparison results are decided
-//! in order, so an undecided earlier comparison never lets a later
-//! candidate win.
 
 use std::sync::Arc;
 
@@ -64,22 +63,28 @@ impl DiscoveryError {
     }
 }
 
-type Res<T> = Result<T, DiscoveryError>;
+pub(super) type Res<T> = Result<T, DiscoveryError>;
 
-fn undecided<T>() -> Res<T> {
+pub(super) fn undecided<T>() -> Res<T> {
     Err(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput))
 }
 
-/// What discovery needs from the type graph.
+/// What discovery reads from the type graph without a dependency read.
+/// Matching asks its holder for anything else
+/// ([`super::matching::TypeRequest`]).
 pub trait DiscoveryTypes: SlotTypeFacts {
     /// Whether two types are identical under a binder correspondence
-    /// (`(a_binder, b_binder)` pairs). `None`: the graph cannot decide yet.
-    fn identical(
+    /// (`(a_binder, b_binder)` pairs), where the graph can tell without a
+    /// read. `None` leaves the question to the matching machine's holder
+    /// ([`super::matching::TypeRequest::Identical`]).
+    fn identical_at_rest(
         &self,
         a: TypeToken,
         b: TypeToken,
         corr: &[(SemanticNodeId, SemanticNodeId)],
     ) -> Option<bool>;
+    /// One signature pair was decided.
+    fn comparison_decided(&self);
     /// The intersection of parameter types, in order.
     fn intersect(&self, members: &[TypeToken]) -> Option<TypeToken>;
     /// Rewrite binder occurrences (`from -> to`) inside a type.
@@ -91,21 +96,6 @@ pub trait DiscoveryTypes: SlotTypeFacts {
     fn unknown(&self) -> Option<TypeToken>;
     fn any(&self) -> Option<TypeToken>;
     fn is_any(&self, ty: TypeToken) -> bool;
-    /// The result a candidate's recipe denotes: its return type and its
-    /// predicate effect. This FORCES a body recipe; discovery calls it
-    /// only when comparison semantics need a result (exact matching that
-    /// includes results).
-    fn forced_result(
-        &self,
-        candidate: &SignatureCandidate,
-    ) -> Result<ForcedResult, IncompleteReason>;
-}
-
-/// A candidate's forced result — see [`DiscoveryTypes::forced_result`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ForcedResult {
-    pub return_type: TypeToken,
-    pub effects: Option<super::records::PredicateEffect>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -338,18 +328,21 @@ pub fn set_from_candidates(
 }
 
 /// A candidate with its records loaded from a pinned view.
-struct Loaded<'v> {
-    candidate: SignatureCandidate,
-    shape: &'v SignatureInputShape,
-    layout: &'v ParameterLayout,
-    space: &'v BinderSpace,
-    env: &'v CanonicalTypeSubstitution,
-    recipe: &'v SignatureResultRecipe,
-    receiver: Option<ParameterSlot>,
-    descriptor: &'v SignatureDescriptor,
+pub(super) struct Loaded<'v> {
+    pub(super) candidate: SignatureCandidate,
+    pub(super) shape: &'v SignatureInputShape,
+    pub(super) layout: &'v ParameterLayout,
+    pub(super) space: &'v BinderSpace,
+    pub(super) env: &'v CanonicalTypeSubstitution,
+    pub(super) recipe: &'v SignatureResultRecipe,
+    pub(super) receiver: Option<ParameterSlot>,
+    pub(super) descriptor: &'v SignatureDescriptor,
 }
 
-fn load<'v>(view: &'v SemanticReadView, candidate: SignatureCandidate) -> Res<Loaded<'v>> {
+pub(super) fn load<'v>(
+    view: &'v SemanticReadView,
+    candidate: SignatureCandidate,
+) -> Res<Loaded<'v>> {
     let descriptor = view.descriptor(candidate.signature)?;
     let template = view.template(descriptor.template)?;
     let shape = view.shape(template.input_shape)?;
@@ -370,7 +363,7 @@ fn load<'v>(view: &'v SemanticReadView, candidate: SignatureCandidate) -> Res<Lo
 }
 
 impl Loaded<'_> {
-    fn positional<'a>(&'a self, facts: &'a dyn SlotTypeFacts) -> PositionalShape<'a> {
+    pub(super) fn positional<'a>(&'a self, facts: &'a dyn SlotTypeFacts) -> PositionalShape<'a> {
         PositionalShape::new(
             self.layout,
             self.receiver,
@@ -381,7 +374,7 @@ impl Loaded<'_> {
 
     /// Declared binder nodes in ordinal order (from the environment: each
     /// binder maps to `binder_token(space_key, ordinal)`).
-    fn binder_nodes(&self) -> Option<Vec<(u32, SemanticNodeId)>> {
+    pub(super) fn binder_nodes(&self) -> Option<Vec<(u32, SemanticNodeId)>> {
         let mut out: Vec<(u32, SemanticNodeId)> = self
             .env
             .bindings()
@@ -420,243 +413,7 @@ impl MatchOptions {
     };
 }
 
-fn ident(
-    types: &dyn DiscoveryTypes,
-    a: TypeToken,
-    b: TypeToken,
-    corr: &[(SemanticNodeId, SemanticNodeId)],
-) -> Res<bool> {
-    match types.identical(a, b, corr) {
-        Some(v) => Ok(v),
-        None => undecided(),
-    }
-}
-
-fn slot_type_identical(
-    types: &dyn DiscoveryTypes,
-    a: TypeAt<'_>,
-    b: TypeAt<'_>,
-    corr: &[(SemanticNodeId, SemanticNodeId)],
-) -> Res<bool> {
-    let any = types
-        .any()
-        .ok_or(DiscoveryError::Incomplete(IncompleteReason::Budget))?;
-    let one = |ty: TypeAt<'_>| match ty {
-        TypeAt::Absent => Some((any, false)),
-        TypeAt::One(s) => Some((s.ty, s.optionality.includes_undefined)),
-        _ => None,
-    };
-    match (a, b) {
-        (
-            TypeAt::Run {
-                element: ea,
-                tail: ta,
-            },
-            TypeAt::Run {
-                element: eb,
-                tail: tb,
-            },
-        ) => {
-            if ta.len() != tb.len() || !ident(types, ea, eb, corr)? {
-                return Ok(false);
-            }
-            for (x, y) in ta.iter().zip(tb) {
-                if !ident(types, x.ty, y.ty, corr)? {
-                    return Ok(false);
-                }
-            }
-            Ok(true)
-        }
-        (
-            TypeAt::GenericRest {
-                rest: ra,
-                index: ia,
-            },
-            TypeAt::GenericRest {
-                rest: rb,
-                index: ib,
-            },
-        ) => Ok(ia == ib && ident(types, ra, rb, corr)?),
-        (a, b) => match (one(a), one(b)) {
-            (Some((ta, ua)), Some((tb, ub))) => Ok(ua == ub && ident(types, ta, tb, corr)?),
-            _ => Ok(false),
-        },
-    }
-}
-
-/// Binder-space equality: the same count, and every constraint and default
-/// identical under the positional correspondence. Returns the correspondence
-/// (source binder node, target binder node) when the spaces match.
-fn binders_identical(
-    types: &dyn DiscoveryTypes,
-    s: &Loaded<'_>,
-    t: &Loaded<'_>,
-) -> Res<Option<Vec<(SemanticNodeId, SemanticNodeId)>>> {
-    if s.space.binders.len() != t.space.binders.len() {
-        return Ok(None);
-    }
-    let Some(source_binders) = s.binder_nodes() else {
-        return undecided();
-    };
-    let Some(target_binders) = t.binder_nodes() else {
-        return undecided();
-    };
-    let corr: Vec<(SemanticNodeId, SemanticNodeId)> = source_binders
-        .iter()
-        .zip(target_binders.iter())
-        .map(|((_, a), (_, b))| (*a, *b))
-        .collect();
-    for (a, b) in s.space.binders.iter().zip(t.space.binders.iter()) {
-        // Absence is not `unknown`: an omitted default and an authored
-        // `unknown` default behave differently for omitted type arguments.
-        for (x, y) in [(a.constraint, b.constraint), (a.default, b.default)] {
-            match (x, y) {
-                (None, None) => {}
-                (Some(x), Some(y)) => {
-                    if !ident(types, x, y, &corr)? {
-                        return Ok(None);
-                    }
-                }
-                _ => return Ok(None),
-            }
-        }
-    }
-    Ok(Some(corr))
-}
-
-/// `compareSignaturesIdentical`: arity match (or partial), binder
-/// constraint/default equality under a positional binder correspondence,
-/// receiver, every target position, and (unless ignored) the result.
-pub fn signatures_identical(
-    store: &EpochBinding,
-    types: &dyn DiscoveryTypes,
-    source: SignatureCandidate,
-    target: SignatureCandidate,
-    options: MatchOptions,
-) -> Res<bool> {
-    if source.signature == target.signature {
-        return Ok(true);
-    }
-    let view = store.view();
-    let s = load(view, source)?;
-    let t = load(view, target)?;
-    let sp = s.positional(types);
-    let tp = t.positional(types);
-    let mode = PositionalMode::Comparison;
-    let arity_same = sp.parameter_count() == tp.parameter_count()
-        && sp.effective_minimum(mode) == tp.effective_minimum(mode)
-        && sp.has_rest() == tp.has_rest();
-    if !arity_same
-        && !(options.partial_match && sp.effective_minimum(mode) <= tp.effective_minimum(mode))
-    {
-        return Ok(false);
-    }
-    let Some(corr) = binders_identical(types, &s, &t)? else {
-        return Ok(false);
-    };
-    if !options.ignore_this_types {
-        match (s.receiver, t.receiver) {
-            (None, None) => {}
-            (Some(a), Some(b)) => {
-                if !ident(types, a.ty, b.ty, &corr)? {
-                    return Ok(false);
-                }
-            }
-            _ => return Ok(false),
-        }
-    }
-    for pos in 0..tp.parameter_count() {
-        if !slot_type_identical(types, sp.type_at(pos), tp.type_at(pos), &corr)? {
-            return Ok(false);
-        }
-    }
-    if !options.ignore_return_types {
-        let same_body = matches!(
-            (s.recipe, t.recipe),
-            (
-                SignatureResultRecipe::Body { return_obligation_key: a },
-                SignatureResultRecipe::Body { return_obligation_key: b },
-            ) if a == b && corr.is_empty()
-        );
-        if !same_body {
-            let a = types
-                .forced_result(&source)
-                .map_err(DiscoveryError::Incomplete)?;
-            let b = types
-                .forced_result(&target)
-                .map_err(DiscoveryError::Incomplete)?;
-            // A predicate replaces the return in the comparison, as the
-            // checker's `compareTypePredicatesIdentical` does: two
-            // predicates of the same kind about the same subject with
-            // identical targets, or none on either side and identical
-            // returns.
-            let identical = match (a.effects, b.effects) {
-                (None, None) => ident(types, a.return_type, b.return_type, &corr)?,
-                (Some(a), Some(b)) => {
-                    a.subject == b.subject
-                        && a.asserts == b.asserts
-                        && match (a.ty, b.ty) {
-                            (None, None) => true,
-                            (Some(a), Some(b)) => ident(types, a, b, &corr)?,
-                            _ => false,
-                        }
-                }
-                _ => false,
-            };
-            if !identical {
-                return Ok(false);
-            }
-        }
-    }
-    Ok(true)
-}
-
-fn find_matching(
-    store: &EpochBinding,
-    types: &dyn DiscoveryTypes,
-    list: &[SignatureCandidate],
-    sig: SignatureCandidate,
-    options: MatchOptions,
-) -> Res<Option<SignatureCandidate>> {
-    // Ordered: an undecided earlier comparison surfaces as an error; a later
-    // match is never taken past it.
-    for &candidate in list {
-        if signatures_identical(store, types, candidate, sig, options)? {
-            return Ok(Some(candidate));
-        }
-    }
-    Ok(None)
-}
-
-/// Append `new` signatures to `existing`, skipping any signature IDENTICAL
-/// to one already present (the first stays the representative).
-///
-/// Identity here INCLUDES the result: this is the checker's
-/// `appendSignatures`, which compares with `ignoreReturnTypes: false`. Two
-/// signatures that differ only in what they return are different overloads
-/// of the intersection and are both kept — `(() => A) & (() => B)` carries
-/// both, so conditional inference (`ReturnType`, `InstanceType`), which reads
-/// the LAST signature, answers `B`. Comparing parameters alone would collapse
-/// them onto the first and answer `A`. Signatures identical including the
-/// result still collapse.
-///
-/// Union synthesis is the opposite rule and deliberately does not use this:
-/// it matches arms by parameters and unions their results.
-pub fn append_signatures(
-    store: &EpochBinding,
-    types: &dyn DiscoveryTypes,
-    existing: &mut Vec<SignatureCandidate>,
-    new: &[SignatureCandidate],
-) -> Res<()> {
-    for &sig in new {
-        if find_matching(store, types, existing, sig, MatchOptions::EXACT)?.is_none() {
-            existing.push(sig);
-        }
-    }
-    Ok(())
-}
-
-fn source_token(store: &EpochBinding, c: SignatureCandidate) -> Res<TypeToken> {
+pub(super) fn source_token(store: &EpochBinding, c: SignatureCandidate) -> Res<TypeToken> {
     match store.descriptor_source(c.signature)? {
         Some(token) => Ok(token),
         None => undecided(),
@@ -740,7 +497,7 @@ enum SignatureDescriptorIdOrSame {
     Other(super::records::SignatureDescriptorId),
 }
 
-fn edges_for(
+pub(super) fn edges_for(
     store: &EpochBinding,
     view: &SemanticReadView,
     rep: SignatureCandidate,
@@ -771,7 +528,7 @@ fn edges_for(
     )?)
 }
 
-fn composite_candidate(
+pub(super) fn composite_candidate(
     store: &EpochBinding,
     view: &SemanticReadView,
     rep: SignatureCandidate,
@@ -803,206 +560,20 @@ fn composite_candidate(
     Ok(store.candidate(descriptor, provenance)?)
 }
 
-/// Union call/construct signatures over the per-arm candidate lists (arms
-/// in `VerterStableV1` order, each list in authored order).
-///
-/// Phase 1 — common matches: a signature from any arm that has a match in
-/// every other arm (exact for generic signatures, exact-then-partial with
-/// returns ignored otherwise) becomes one union candidate whose
-/// constituents are the matches. Phase 2 — restricted synthesis: only when
-/// phase 1 found nothing and at most one arm has several signatures, the
-/// single signatures combine with each of that arm's signatures. There is
-/// never a Cartesian product of overload choices.
-pub fn union_signatures(
+/// `combineSignaturesOfUnionMembers`, after the two signatures' binder
+/// spaces matched: parameter types intersect position by position, the
+/// minimum is the larger of the two, an extra rest element is added when
+/// only the shorter side has a rest. `map_right` maps the right side's
+/// binders onto the left's (empty unless both are generic). Binder mapping
+/// and parameter intersection are read through `types`.
+pub(super) fn combine_union_parameters(
     store: &EpochBinding,
     types: &dyn DiscoveryTypes,
-    lists: &[Vec<SignatureCandidate>],
-) -> Res<Vec<SignatureCandidate>> {
-    if lists.is_empty() || lists.iter().any(Vec::is_empty) {
-        return Ok(Vec::new());
-    }
-    if lists.len() == 1 {
-        return Ok(lists[0].clone());
-    }
-    let over_one: Vec<usize> = lists
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| l.len() > 1)
-        .map(|(i, _)| i)
-        .collect();
-    let view = store.view();
-    let mut result: Vec<SignatureCandidate> = Vec::new();
-    let mut representatives: Vec<SignatureCandidate> = Vec::new();
-    for (list_index, list) in lists.iter().enumerate() {
-        for &sig in list {
-            if find_matching(
-                store,
-                types,
-                &representatives,
-                sig,
-                MatchOptions::EXACT_IGNORING_RETURNS,
-            )?
-            .is_some()
-            {
-                continue;
-            }
-            let sig_loaded = load(view, sig)?;
-            let matches = if !sig_loaded.space.binders.is_empty() {
-                // Generic signatures require an exact match, and only the
-                // first list may start one.
-                if list_index > 0 {
-                    None
-                } else {
-                    let mut ms = vec![(0u32, sig)];
-                    let mut ok = true;
-                    for (i, other) in lists.iter().enumerate().skip(1) {
-                        match find_matching(store, types, other, sig, MatchOptions::EXACT)? {
-                            Some(m) => ms.push((i as u32, m)),
-                            None => {
-                                ok = false;
-                                break;
-                            }
-                        }
-                    }
-                    ok.then_some(ms)
-                }
-            } else {
-                let mut ms: Vec<(u32, SignatureCandidate)> = Vec::new();
-                let mut ok = true;
-                for (i, other) in lists.iter().enumerate() {
-                    let m = if i == list_index {
-                        Some(sig)
-                    } else {
-                        match find_matching(
-                            store,
-                            types,
-                            other,
-                            sig,
-                            MatchOptions::EXACT_IGNORING_RETURNS,
-                        )? {
-                            Some(m) => Some(m),
-                            None => find_matching(
-                                store,
-                                types,
-                                other,
-                                sig,
-                                MatchOptions::PARTIAL_IGNORING_RETURNS,
-                            )?,
-                        }
-                    };
-                    match m {
-                        // Every arm keeps its own edge, even when several arms
-                        // settle to the same callable.
-                        Some(m) => ms.push((i as u32, m)),
-                        None => {
-                            ok = false;
-                            break;
-                        }
-                    }
-                }
-                ok.then_some(ms)
-            };
-            let Some(matches) = matches else { continue };
-            representatives.push(sig);
-            if matches.len() == 1 {
-                result.push(sig);
-                continue;
-            }
-            let sequence = edges_for(store, view, sig, &matches)?;
-            let rep_source = source_token(store, sig)?;
-            let candidate = composite_candidate(
-                store,
-                view,
-                sig,
-                view.template(sig_loaded.descriptor.template)?.input_shape,
-                SignatureResultRecipe::UnionCommon {
-                    representative: rep_source,
-                    constituents: sequence,
-                },
-                result.len() as u32,
-            )?;
-            result.push(candidate);
-        }
-    }
-    if !result.is_empty() || over_one.len() > 1 {
-        return Ok(result);
-    }
-    synthesize_union(store, types, lists, over_one.first().copied())
-}
-
-fn synthesize_union(
-    store: &EpochBinding,
-    types: &dyn DiscoveryTypes,
-    lists: &[Vec<SignatureCandidate>],
-    master_index: Option<usize>,
-) -> Res<Vec<SignatureCandidate>> {
-    let master = master_index.unwrap_or(0);
-    let mut out = Vec::new();
-    'masters: for &m in &lists[master] {
-        let mut acc = m;
-        let mut constituents: Vec<(u32, SignatureCandidate)> = vec![(master as u32, m)];
-        for (i, list) in lists.iter().enumerate() {
-            if i == master {
-                continue;
-            }
-            let Some(other) = list.first().copied() else {
-                continue 'masters;
-            };
-            match combine_union_signatures(store, types, acc, other)? {
-                Some(next) => acc = next,
-                None => continue 'masters,
-            }
-            constituents.push((i as u32, other));
-        }
-        if constituents.len() == 1 {
-            out.push(m);
-            continue;
-        }
-        let view = store.view();
-        let m_loaded = load(view, m)?;
-        let acc_loaded = load(view, acc)?;
-        let sequence = edges_for(store, view, m, &constituents)?;
-        let master_source = source_token(store, m)?;
-        let candidate = composite_candidate(
-            store,
-            view,
-            m,
-            view.template(acc_loaded.descriptor.template)?.input_shape,
-            SignatureResultRecipe::UnionSynthesized {
-                master: master_source,
-                constituents: sequence,
-            },
-            out.len() as u32,
-        )?;
-        let _ = m_loaded;
-        out.push(candidate);
-    }
-    Ok(out)
-}
-
-/// `combineSignaturesOfUnionMembers`: parameter types intersect position by
-/// position, the minimum is the larger of the two, an extra rest element is
-/// added when only the shorter side has a rest.
-fn combine_union_signatures(
-    store: &EpochBinding,
-    types: &dyn DiscoveryTypes,
+    l: &Loaded<'_>,
+    r: &Loaded<'_>,
     left: SignatureCandidate,
-    right: SignatureCandidate,
-) -> Res<Option<SignatureCandidate>> {
-    let view = store.view();
-    let l = load(view, left)?;
-    let r = load(view, right)?;
-    let map_right: Vec<(SemanticNodeId, SemanticNodeId)> =
-        if !l.space.binders.is_empty() && !r.space.binders.is_empty() {
-            // Both generic: the binder spaces must be identical, and the
-            // right side's binders map onto the left's.
-            match binders_identical(types, &l, &r)? {
-                Some(corr) => corr.into_iter().map(|(a, b)| (b, a)).collect(),
-                None => return Ok(None),
-            }
-        } else {
-            Vec::new()
-        };
+    map_right: &[(SemanticNodeId, SemanticNodeId)],
+) -> Res<SignatureCandidate> {
     let lp = l.positional(types);
     let rp = r.positional(types);
     let (longest, shorter, right_is_longest) = if lp.parameter_count() >= rp.parameter_count() {
@@ -1015,7 +586,7 @@ fn combine_union_signatures(
     let needs_extra_rest = either_rest && !longest.has_rest();
     let mapped = |ty: TypeToken, from_right: bool| -> Res<TypeToken> {
         if from_right && !map_right.is_empty() {
-            match types.map_binders(ty, &map_right) {
+            match types.map_binders(ty, map_right) {
                 Some(t) => Ok(t),
                 None => undecided(),
             }
@@ -1135,7 +706,7 @@ fn combine_union_signatures(
         },
         None,
     )?;
-    let base = if l.space.binders.is_empty() { &r } else { &l };
+    let base = if l.space.binders.is_empty() { r } else { l };
     let recipe = store.intern_recipe(*l.recipe, None)?;
     let template = store.intern_template(
         SignatureTemplate {
@@ -1155,14 +726,14 @@ fn combine_union_signatures(
     if let Some(source) = store.descriptor_source(left.signature)? {
         store.record_descriptor_source(descriptor, source)?;
     }
-    Ok(Some(store.candidate(descriptor, left.provenance)?))
+    Ok(store.candidate(descriptor, left.provenance)?)
 }
 
 /// Whether a member's construct list is a MIXIN constructor: exactly one
 /// non-generic signature whose only parameter is an `any`-element array
 /// rest (`new (...args: any[]) => X`). A `this` receiver is not a
 /// parameter and does not take part (TypeScript's `isMixinConstructorType`).
-fn is_mixin_constructor(
+pub(super) fn is_mixin_constructor(
     view: &SemanticReadView,
     types: &dyn DiscoveryTypes,
     list: &[SignatureCandidate],
@@ -1184,7 +755,8 @@ fn is_mixin_constructor(
 /// order.
 ///
 /// A declaration is not an intersection type, so nothing is dropped and
-/// nothing is composed ([`intersection_signatures`] does both): a
+/// nothing is composed (an intersection's composition,
+/// [`super::matching::SignatureComposition::intersection`], does both): a
 /// signature identical to one already present stays, a base reached twice
 /// through a diamond contributes twice, and a mixin constructor base keeps
 /// its own construct signature. Call resolution therefore tries the own
@@ -1299,81 +871,4 @@ pub fn resolution_order(
         order.insert(splice.min(order.len()), position);
     }
     Ok(order)
-}
-
-/// Intersection signatures for one kind. `members` are the per-member
-/// candidate lists in authored order.
-///
-/// Call signatures concatenate, dropping only a signature IDENTICAL to one
-/// already present — result included ([`append_signatures`]); signatures
-/// that differ only in their result are distinct overloads and both stay.
-///
-/// Construct signatures follow TypeScript's mixin rule
-/// (`resolveIntersectionTypeMembers`): a member that is a mixin constructor
-/// (`new (...args: any[]) => X`) contributes NO construct signature of its
-/// own — its instance type is mixed into every other member's construct
-/// result instead (`IntersectionConstruct`, the results intersected in
-/// member order). When every constructor member is a mixin, the first one
-/// is not counted as a mixin, so it keeps its signature and the others mix
-/// into it: `typeof CtorB & typeof MixA` constructs `B & A` from `CtorB`'s
-/// parameters, and two mixins construct from the first one's.
-pub fn intersection_signatures(
-    store: &EpochBinding,
-    types: &dyn DiscoveryTypes,
-    kind: SignatureKind,
-    members: &[Vec<SignatureCandidate>],
-) -> Res<Vec<SignatureCandidate>> {
-    let view = store.view();
-    let mut mixin_flags = vec![false; members.len()];
-    if kind == SignatureKind::Construct {
-        for (i, list) in members.iter().enumerate() {
-            mixin_flags[i] = is_mixin_constructor(view, types, list)?;
-        }
-        let constructor_count = members.iter().filter(|list| !list.is_empty()).count();
-        let mixins = mixin_flags.iter().filter(|f| **f).count();
-        if constructor_count > 0 && constructor_count == mixins {
-            if let Some(first) = mixin_flags.iter().position(|f| *f) {
-                mixin_flags[first] = false;
-            }
-        }
-    }
-    let mixin_count = mixin_flags.iter().filter(|f| **f).count();
-    let mut out: Vec<SignatureCandidate> = Vec::new();
-    for (index, list) in members.iter().enumerate() {
-        if list.is_empty() || mixin_flags[index] {
-            continue;
-        }
-        let mapped: Vec<SignatureCandidate> = if mixin_count > 0 {
-            let mut composed = Vec::with_capacity(list.len());
-            for &sig in list {
-                let mut constituents: Vec<(u32, SignatureCandidate)> = Vec::new();
-                for (i, other) in members.iter().enumerate() {
-                    if i == index {
-                        constituents.push((i as u32, sig));
-                    } else if mixin_flags[i] {
-                        constituents.push((i as u32, other[0]));
-                    }
-                }
-                let loaded = load(view, sig)?;
-                let sequence = edges_for(store, view, sig, &constituents)?;
-                let base = source_token(store, sig)?;
-                composed.push(composite_candidate(
-                    store,
-                    view,
-                    sig,
-                    view.template(loaded.descriptor.template)?.input_shape,
-                    SignatureResultRecipe::IntersectionConstruct {
-                        base_constructor: base,
-                        mixins: sequence,
-                    },
-                    composed.len() as u32,
-                )?);
-            }
-            composed
-        } else {
-            list.clone()
-        };
-        append_signatures(store, types, &mut out, &mapped)?;
-    }
-    Ok(out)
 }
