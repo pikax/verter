@@ -248,7 +248,6 @@ enum DeliveryKind {
     Query(Box<DeliveredRead>),
     /// The call's arguments with the one its callback exchange named typed
     /// by the consumer.
-    #[allow(dead_code)] // interface for the flow evaluator's retained call frames
     Callback(Arc<[CallArgKey]>),
 }
 
@@ -303,7 +302,6 @@ impl HelperDelivery {
 
     /// The answer to a callback exchange: the call's arguments, the one the
     /// exchange named now typed under its contextual type.
-    #[allow(dead_code)] // interface for the flow evaluator's retained call frames
     pub(super) fn callback(args: Arc<[CallArgKey]>) -> Self {
         Self {
             kind: DeliveryKind::Callback(args),
@@ -543,7 +541,6 @@ impl CallRead {
     /// The contextual continuation the call holds while its consumer types
     /// the argument its callback exchange named: an object or array literal
     /// is typed member by member into the candidate's collector.
-    #[allow(dead_code)] // interface for the flow evaluator's retained call frames
     pub(super) fn contextual_mut(&mut self) -> &mut ContextualCallState {
         verter_debug_assert!(
             matches!(self.state, CallState::Callback { .. }),
@@ -1113,7 +1110,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// waited releases its candidate's collector and pops its executor
     /// frame undecided; a contextual collector waiting on its callback, or
     /// on a signature list its candidate's mapping reads, is abandoned.
-    #[allow(dead_code)] // interface for the flow evaluator's retained call frames
     pub(super) fn release_call_read(&self, mut read: CallRead) {
         match std::mem::replace(&mut read.state, CallState::Finished) {
             CallState::Walk { key, frame, walk } => {
