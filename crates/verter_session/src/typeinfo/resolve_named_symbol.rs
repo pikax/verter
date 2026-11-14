@@ -439,14 +439,25 @@ fn compute_effective_mode(
     }
 }
 
-/// Whether `state` declares `name` with declaration-site type parameters.
+/// Whether the declaration of `name` that resolution selects in `state`
+/// has declaration-site type parameters. The owner is the one
+/// [`resolve_named_symbol_located`] resolves under, so an instance-owned
+/// generic declaration (sole or shadowing the module one) is a generic
+/// carrier; a name no owner declares reads the ordinary-file header, and
+/// owners with no visible declaration are not a carrier.
 fn declares_generic_carrier(
     state: &verter_session_query::inputs::shallow::ShallowInputAssembly,
     name: &str,
 ) -> bool {
+    let owner = match crate::VerterHost::visible_local_type_declaration_owner_in(state, name) {
+        VisibleDeclarationOwner::Owner(owner) => owner,
+        VisibleDeclarationOwner::Undeclared => verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        VisibleDeclarationOwner::Unrelated => return false,
+    };
     state
-        .symbol(name)
-        .is_some_and(|symbol| !symbol.type_param_names.is_empty())
+        .headers
+        .type_header_in(owner, name)
+        .is_some_and(|header| !header.type_params.is_empty())
 }
 
 /// Package a resolve-named-symbol outcome and its audit record into the
