@@ -321,7 +321,55 @@ enum DiscoveryFrame {
     },
     /// A union's or an intersection's lists being composed by the kernel.
     Composing(Box<CompositionStage>),
+    /// A leaf whose rest types settle before its publication.
+    RestParameters(Box<LeafRest>),
 }
+
+/// One authored signature's owned header, as publication reads it.
+struct LeafSignature {
+    kind: GraphSignatureKind,
+    params: Arc<[crate::semantic_query::FunctionParam]>,
+    type_parameters: Arc<[crate::semantic_query::TypeParamDecl]>,
+    occurrence: Option<crate::semantic_query::SignatureNodeOccurrence>,
+    carrier: crate::semantic_query::SignatureReturnCarrier,
+    span: Option<verter_span::Span>,
+    predicate: Option<crate::semantic_query::SignaturePredicate>,
+}
+
+impl LeafSignature {
+    fn rest_type(&self, index: usize) -> Option<SemanticNodeId> {
+        crate::semantic_query::split_this_receiver(&self.params)
+            .1
+            .iter()
+            .filter(|param| param.rest)
+            .nth(index)
+            .map(|param| param.ty)
+    }
+}
+
+/// A leaf between rest unwraps, retaining each completed answer once.
+struct LeafRest {
+    node: SemanticNodeId,
+    leaf: LeafSignature,
+    settled: smallvec::SmallVec<[super::relation::IdentityCarrierUnwrap; 1]>,
+    unwrap: Option<super::relation::IdentityCarrierRead>,
+}
+
+static_assertions::assert_impl_all!(LeafRest: Send);
+static_assertions::assert_not_impl_any!(LeafRest: Clone, Copy);
+const _: () = assert!(
+    std::mem::size_of::<LeafSignature>()
+        <= 48
+            + std::mem::size_of::<Option<crate::semantic_query::SignatureNodeOccurrence>>()
+            + std::mem::size_of::<crate::semantic_query::SignatureReturnCarrier>()
+            + std::mem::size_of::<Option<crate::semantic_query::SignaturePredicate>>()
+);
+const _: () = assert!(
+    std::mem::size_of::<LeafRest>()
+        <= 48
+            + std::mem::size_of::<LeafSignature>()
+            + std::mem::size_of::<Option<super::relation::IdentityCarrierRead>>()
+);
 
 /// A kernel composition, between two of its questions, and the read the
 /// walk stands at for it.
@@ -390,6 +438,9 @@ enum DiscoveryRead {
     /// reduction of the operands the composition stands at
     /// ([`ProjectSemanticDispatch::deliver_parameter_intersection`]).
     ParameterIntersection,
+    /// A declaration instantiation or evaluation read of the rest unwrap
+    /// held by the top level, delivered inside that unwrap.
+    RestCarrier,
 }
 
 /// The read of the global wrapper `name` over `args` while its declaration
@@ -423,6 +474,8 @@ enum DiscoveryFlow {
     /// intersection was delivered: advance it from its start, or with
     /// that intersection.
     Compose,
+    /// The top level is a leaf whose rest unwrap the walk carries on.
+    Unwrap,
     /// The subject's candidates: no level is left.
     Complete(Vec<SignatureCandidate>),
     /// The walk stands at the read it named.
@@ -512,6 +565,8 @@ impl DiscoveryWalk {
     fn reads_for_carrier(&self) -> bool {
         match &self.standing {
             Some(DiscoveryRead::Carrier { chain, .. }) => chain.reads_for_carrier(),
+            Some(DiscoveryRead::RestCarrier) => matches!(self.frames.last(),
+                Some(DiscoveryFrame::RestParameters(rest)) if rest.unwrap.as_ref().is_some_and(|unwrap| unwrap.reads_for_carrier())),
             Some(
                 DiscoveryRead::WrapperLookup(_)
                 | DiscoveryRead::Wrapper
@@ -589,16 +644,26 @@ impl DiscoveryWalk {
     }
 
     /// Release what the walk holds on its computation's recording: a
-    /// settlement standing in a deferred evaluation abandons the recordings
-    /// that evaluation opened, top first. A wrapper's lookup or
+    /// settlement or rest unwrap standing in a deferred evaluation abandons
+    /// the recordings that evaluation opened, top first. A wrapper's lookup or
     /// instantiation, a composition's result read and a union synthesis's
     /// parameter intersection hold nothing on the dispatcher.
     pub(super) fn release<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
         dispatch: &ProjectSemanticDispatch<'_, C>,
     ) {
-        if let Some(DiscoveryRead::Carrier { chain, .. }) = self.standing.take() {
-            dispatch.abandon_source_carrier_read(*chain);
+        match self.standing.take() {
+            Some(DiscoveryRead::Carrier { chain, .. }) => {
+                dispatch.abandon_source_carrier_read(*chain)
+            }
+            Some(DiscoveryRead::RestCarrier) => {
+                if let Some(DiscoveryFrame::RestParameters(rest)) = self.frames.last_mut() {
+                    if let Some(unwrap) = rest.unwrap.take() {
+                        dispatch.abandon_identity_carrier_read(unwrap);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -831,6 +896,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 DiscoveryFlow::Found(list) => self.discovery_child_found(&mut walk, list),
                 DiscoveryFlow::Combine => self.combine_discovery_frame(&mut walk),
                 DiscoveryFlow::Compose => self.advance_composition(&mut walk, None),
+                DiscoveryFlow::Unwrap => self.advance_leaf_rest(&mut walk),
                 DiscoveryFlow::Stand => return DiscoveryStep::Read(walk),
                 DiscoveryFlow::Complete(list) => {
                     return self.finish_signature_discovery(walk, Ok(list))
@@ -845,7 +911,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// The walk standing at a query, given `node_read`, that read: the
     /// settlement's evaluation has it delivered inside the evaluation, the
     /// chain's instantiation to the chain, a wrapper's instantiation is the
-    /// surface the walk enters, and a parameter intersection is kept for
+    /// surface the walk enters, a rest read is delivered to its unwrap,
+    /// and a parameter intersection is kept for
     /// the composition the walk loop advances next.
     #[inline(never)]
     fn deliver_discovery_read(
@@ -867,6 +934,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                 }
             }
+            Some(DiscoveryRead::RestCarrier) => self.deliver_rest_carrier(walk, node_read),
             Some(DiscoveryRead::Wrapper) => wrapper_flow(
                 super::apparent_type::GlobalWrapper::of_read(node_read().value),
             ),
@@ -962,7 +1030,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         match settling {
             Settling::Subject => self.discover_settled_node(walk, node),
             Settling::Member => self.flattened_member_settled(walk, node),
-            Settling::Signature => self.signature_entry_settled(walk, node),
+            Settling::Signature => self.discover_leaf(walk, node),
         }
     }
 
@@ -1002,10 +1070,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             SemanticNodeData::Signature { .. } | SemanticNodeData::DeferredCallable(_) => {
                 drop(data);
-                match self.publish_discovered_leaf(walk, node, 0) {
-                    Ok(candidate) => DiscoveryFlow::Found(candidate.into_iter().collect()),
-                    Err(error) => DiscoveryFlow::Failed(error),
-                }
+                self.discover_leaf(walk, node)
             }
             SemanticNodeData::Object(surface) => {
                 let list = match walk.kind {
@@ -1265,38 +1330,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             unreachable!("the list is the top level")
         };
         DiscoveryFlow::Found(found)
-    }
-
-    /// The list's next entry settled on `signature`: published at its
-    /// ordinal, or the walk fails when it is not a signature.
-    #[inline(never)]
-    fn signature_entry_settled(
-        &self,
-        walk: &mut DiscoveryWalk,
-        signature: SemanticNodeId,
-    ) -> DiscoveryFlow {
-        let Some(DiscoveryFrame::Signatures {
-            first_ordinal,
-            found,
-            ..
-        }) = walk.frames.last()
-        else {
-            unreachable!("an entry settles under its list")
-        };
-        let ordinal = *first_ordinal + found.len() as u32;
-        match self.publish_discovered_leaf(walk, signature, ordinal) {
-            Ok(Some(candidate)) => {
-                let Some(DiscoveryFrame::Signatures { found, .. }) = walk.frames.last_mut() else {
-                    unreachable!("the list is the top level")
-                };
-                found.push(candidate);
-                self.next_signature_entry(walk)
-            }
-            Ok(None) => {
-                DiscoveryFlow::Failed(DiscoveryError::Incomplete(IncompleteReason::Unsupported))
-            }
-            Err(error) => DiscoveryFlow::Failed(error),
-        }
     }
 
     /// The signatures of a merged declaration: every contributor's own
@@ -1562,7 +1595,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     None => DiscoveryFlow::Found(found),
                 }
             }
-            DiscoveryFrame::Flattening(_) | DiscoveryFrame::Signatures { .. } => {
+            DiscoveryFrame::Flattening(_)
+            | DiscoveryFrame::Signatures { .. }
+            | DiscoveryFrame::RestParameters(_) => {
                 unreachable!("a level settling a node waits on its settlement, never on a list")
             }
             DiscoveryFrame::Composing(_) => {
@@ -1877,15 +1912,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
-    /// One authored signature node as a published candidate, or `None` when
-    /// the node is not a signature at all.
+    /// The owned header a leaf publishes, before any rest type is read.
     #[inline(never)]
-    fn publish_discovered_leaf(
+    fn discovered_leaf(
         &self,
-        walk: &mut DiscoveryWalk,
         node: SemanticNodeId,
-        ordinal: u32,
-    ) -> Result<Option<SignatureCandidate>, DiscoveryError> {
+    ) -> Result<Option<LeafSignature>, DiscoveryError> {
         let graph = self.graph();
         let Some(data) = graph.node_data(node) else {
             return unsettled();
@@ -1924,11 +1956,39 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             _ => return Ok(None),
         };
         drop(data);
-        if kind != walk.kind {
-            return Ok(None);
-        }
+        Ok(Some(LeafSignature {
+            kind,
+            params,
+            type_parameters,
+            occurrence,
+            carrier,
+            span,
+            predicate,
+        }))
+    }
+
+    /// Publish a leaf whose rest parameters have all been unwrapped.
+    #[inline(never)]
+    fn publish_leaf(
+        &self,
+        walk: &mut DiscoveryWalk,
+        node: SemanticNodeId,
+        ordinal: u32,
+        leaf: &LeafSignature,
+        rests: &[super::relation::IdentityCarrierUnwrap],
+    ) -> Result<SignatureCandidate, DiscoveryError> {
+        let graph = self.graph();
+        let LeafSignature {
+            kind,
+            params,
+            type_parameters,
+            occurrence,
+            carrier,
+            span,
+            predicate,
+        } = leaf;
         let strict = walk.strict_null();
-        let (receiver, positional) = crate::semantic_query::split_this_receiver(&params);
+        let (receiver, positional) = crate::semantic_query::split_this_receiver(params);
         let to_param = |p: &crate::semantic_query::FunctionParam| ParamInput {
             name: p.name.as_deref().map(Arc::<str>::from),
             ty: p.ty,
@@ -1937,15 +1997,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         };
         let mut fixed: Vec<ParamInput> = Vec::new();
         let mut rest: Option<RestInput> = None;
+        let mut next_rest = 0;
         for param in positional {
             if !param.rest {
                 fixed.push(to_param(param));
                 continue;
             }
-            let settled = match self.unwrap_identity_carrier_for_relation(param.ty) {
+            let settled = match rests[next_rest] {
                 super::relation::IdentityCarrierUnwrap::Concrete(n) => Some(n),
                 super::relation::IdentityCarrierUnwrap::Unresolvable => None,
             };
+            next_rest += 1;
             let shape = settled.and_then(|n| graph.node_data(n));
             match shape.as_deref() {
                 Some(SemanticNodeData::Array { element, .. }) => {
@@ -2011,14 +2073,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             crate::semantic_query::SignatureResultSource::Declared(return_type) => {
                 ResultInput::Declared {
                     return_type: *return_type,
-                    predicate_or_assertion: predicate,
+                    predicate_or_assertion: *predicate,
                 }
             }
             crate::semantic_query::SignatureResultSource::Function(source) => ResultInput::Body {
                 locator: hash_u64(source),
             },
         };
-        let (space_key, space_identity, group, parent, source_ordinal) = match &occurrence {
+        let (space_key, space_identity, group, parent, source_ordinal) = match occurrence {
             Some(occ) => (
                 space_key_of(&(&occ.function, occ.signature_ordinal)),
                 identity_u128(&(&occ.function, occ.signature_ordinal)),
@@ -2056,7 +2118,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let specialized = params.iter().any(|param| param.declared_literal);
         let locator = span.map_or(0, |s| hash_u64(&(s.start, s.end)));
         let input = SignatureInput {
-            kind: kernel_kind(kind),
+            kind: kernel_kind(*kind),
             source: node,
             space_key,
             space_identity,
@@ -2083,7 +2145,139 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let candidate = publish_signature(&walk.binding, &input)?;
         self.graph().record_discovery_signature_published();
         walk.authored.entry(candidate.signature).or_insert(node);
-        Ok(Some(candidate))
+        Ok(candidate)
+    }
+
+    /// The leaf's publication is added to the list on top, or answers the
+    /// subject node. A list entry must be a signature of the requested kind.
+    #[inline(never)]
+    fn finish_leaf(
+        &self,
+        walk: &mut DiscoveryWalk,
+        node: SemanticNodeId,
+        leaf: Option<&LeafSignature>,
+        rests: &[super::relation::IdentityCarrierUnwrap],
+    ) -> DiscoveryFlow {
+        let ordinal = match walk.frames.last() {
+            Some(DiscoveryFrame::Signatures {
+                first_ordinal,
+                found,
+                ..
+            }) => *first_ordinal + found.len() as u32,
+            _ => 0,
+        };
+        let candidate = match leaf {
+            Some(leaf) => match self.publish_leaf(walk, node, ordinal, leaf, rests) {
+                Ok(candidate) => Some(candidate),
+                Err(error) => return DiscoveryFlow::Failed(error),
+            },
+            None => None,
+        };
+        if let Some(DiscoveryFrame::Signatures { found, .. }) = walk.frames.last_mut() {
+            match candidate {
+                Some(candidate) => {
+                    found.push(candidate);
+                    self.next_signature_entry(walk)
+                }
+                None => {
+                    DiscoveryFlow::Failed(DiscoveryError::Incomplete(IncompleteReason::Unsupported))
+                }
+            }
+        } else {
+            DiscoveryFlow::Found(candidate.into_iter().collect())
+        }
+    }
+
+    /// Put a rest-bearing leaf's header on the heap before its first unwrap
+    /// runs. A leaf without rest parameters publishes without another level.
+    #[inline(never)]
+    fn discover_leaf(&self, walk: &mut DiscoveryWalk, node: SemanticNodeId) -> DiscoveryFlow {
+        let leaf = match self.discovered_leaf(node) {
+            Ok(Some(leaf)) if leaf.kind == walk.kind => leaf,
+            Ok(_) => return self.finish_leaf(walk, node, None, &[]),
+            Err(error) => return DiscoveryFlow::Failed(error),
+        };
+        if leaf.rest_type(0).is_none() {
+            return self.finish_leaf(walk, node, Some(&leaf), &[]);
+        }
+        walk.frames
+            .push(DiscoveryFrame::RestParameters(Box::new(LeafRest {
+                node,
+                leaf,
+                settled: smallvec::SmallVec::new(),
+                unwrap: None,
+            })));
+        DiscoveryFlow::Unwrap
+    }
+
+    /// Unwrap the leaf's rest parameters in order, then publish it. Each
+    /// read an unwrap names is a need of the discovery walk.
+    #[inline(never)]
+    fn advance_leaf_rest(&self, walk: &mut DiscoveryWalk) -> DiscoveryFlow {
+        use super::relation::{CarrierWalkPoint, IdentityCarrierRead, IdentityCarrierStep};
+        let named = {
+            let Some(DiscoveryFrame::RestParameters(rest)) = walk.frames.last_mut() else {
+                unreachable!("a rest parameter is unwrapped on top of the walk")
+            };
+            loop {
+                if rest.unwrap.is_none() {
+                    let Some(ty) = rest.leaf.rest_type(rest.settled.len()) else {
+                        break None;
+                    };
+                    rest.unwrap = Some(IdentityCarrierRead::at(CarrierWalkPoint {
+                        node: ty,
+                        depth: 0,
+                    }));
+                }
+                let unwrap = rest.unwrap.as_mut().expect("the unwrap was begun above");
+                match self.advance_identity_carrier_read(unwrap) {
+                    IdentityCarrierStep::Done(settled) => {
+                        rest.settled.push(settled);
+                        rest.unwrap = None;
+                    }
+                    IdentityCarrierStep::Read(key) => break Some(key),
+                }
+            }
+        };
+        if let Some(key) = named {
+            return walk.stand(
+                DiscoveryRead::RestCarrier,
+                super::walk::WalkNeed::Query(key),
+            );
+        }
+        let Some(DiscoveryFrame::RestParameters(rest)) = walk.frames.pop() else {
+            unreachable!()
+        };
+        self.finish_leaf(walk, rest.node, Some(&rest.leaf), &rest.settled)
+    }
+
+    /// Deliver to the standing unwrap, then return to the walk loop before
+    /// taking another graph hop. Delivery frames stay out of later reads.
+    #[inline(never)]
+    fn deliver_rest_carrier(
+        &self,
+        walk: &mut DiscoveryWalk,
+        node_read: &mut dyn FnMut() -> crate::semantic_query::CacheRead<
+            crate::semantic_query::QueryResult<SemanticNodeId>,
+        >,
+    ) -> DiscoveryFlow {
+        let named = {
+            let Some(DiscoveryFrame::RestParameters(rest)) = walk.frames.last_mut() else {
+                unreachable!("a rest parameter's read is delivered on top of the walk")
+            };
+            let unwrap = rest
+                .unwrap
+                .as_mut()
+                .expect("a standing rest read holds its unwrap");
+            self.deliver_identity_carrier_read(unwrap, node_read)
+        };
+        match named {
+            Some(key) => walk.stand(
+                DiscoveryRead::RestCarrier,
+                super::walk::WalkNeed::Query(key),
+            ),
+            None => DiscoveryFlow::Unwrap,
+        }
     }
 
     /// The finished walk's set, published: in the walk's epoch while it is

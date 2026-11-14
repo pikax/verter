@@ -254,8 +254,9 @@ pub(super) enum FamilyBuild {
     ProjectPath(Box<super::walk::ProjectPathBuild>),
     /// A signature discovery's walk, standing at the read a settlement
     /// named, in its apparent wrapper's lookup or instantiation, at a
-    /// result its matching compares, or at a parameter intersection its
-    /// union synthesis composes.
+    /// result its matching compares, at a parameter intersection its
+    /// union synthesis composes, or at a rest unwrap's declaration or
+    /// deferred-evaluation read before the leaf is published.
     Discovery(Box<super::signature_discovery::DiscoveryWalk>),
 }
 
@@ -268,7 +269,8 @@ impl FamilyBuild {
     /// `typeof` value's, and a callable's apparent-type probe
     /// ([`super::walk::WalkState::counts_awaited_intent`]). A signature
     /// discovery counts its settlement evaluation's carrier reads, as that
-    /// evaluation made in place always counted them.
+    /// evaluation made in place always counted them, and a rest unwrap's
+    /// declaration instantiations and evaluation carrier reads.
     fn counts_need_intent(&self, key: &SemanticQueryKey) -> bool {
         match self {
             Self::ApparentType(_) => true,
@@ -312,7 +314,7 @@ impl FamilyBuild {
     /// Record `key`, a read this build names, in the test dispatch trace
     /// as the read a synchronous build makes is recorded: a path walk's
     /// hop reads, a signature discovery's settlement, compared-result and
-    /// parameter-intersection reads, and the template reductions an
+    /// parameter-intersection and rest-unwrap reads, and the template reductions an
     /// overload set's candidate substitutions read, are recorded wherever
     /// their driver reads them.
     #[cfg(any(test, feature = "test-support"))]
@@ -341,8 +343,9 @@ impl FamilyBuild {
     /// recording leaves those charges its consumer's. An overload set's
     /// candidate standing in a substitution abandons the recordings its
     /// walk's levels opened, top first. A signature discovery standing in
-    /// its settlement's deferred evaluation abandons that evaluation's
-    /// recordings; one standing at its apparent wrapper holds nothing.
+    /// its settlement's or rest unwrap's deferred evaluation abandons that
+    /// evaluation's recordings; one standing at a declaration or apparent
+    /// wrapper holds nothing.
     pub(super) fn release_retained_accounting<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
         dispatch: &ProjectSemanticDispatch<'_, C>,
