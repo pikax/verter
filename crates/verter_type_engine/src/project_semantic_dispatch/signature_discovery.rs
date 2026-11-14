@@ -318,6 +318,18 @@ fn failed_unsettled() -> DiscoveryFlow {
     DiscoveryFlow::Failed(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput))
 }
 
+/// What the walk does with the global wrapper a primitive, literal,
+/// template, symbol, array or tuple reads: enter its surface; find nothing
+/// when the project declares no such global (`noLib`), the checker's empty
+/// apparent type; fail when it does not settle.
+fn wrapper_flow(wrapper: super::apparent_type::GlobalWrapper) -> DiscoveryFlow {
+    match wrapper {
+        super::apparent_type::GlobalWrapper::Surface(surface) => DiscoveryFlow::Enter(surface),
+        super::apparent_type::GlobalWrapper::Absent => DiscoveryFlow::Found(Vec::new()),
+        super::apparent_type::GlobalWrapper::Unsettled => failed_unsettled(),
+    }
+}
+
 /// The signature discovery of one subject between two of its stages:
 /// everything the walk holds but its dispatcher.
 ///
@@ -325,10 +337,12 @@ fn failed_unsettled() -> DiscoveryFlow {
 /// on what is below it, so the depth of what it walks — aliases, union
 /// arms, intersection members, merged declarations' bases — is heap depth,
 /// never native stack depth. A level that settles a node through its
-/// carrier chain stands at the read the chain names ([`DiscoveryRead`]):
-/// a frame driver suspends there and resumes the walk on whichever thread
-/// delivers the read, the in-place driver reads it where it stands. No
-/// stage that completed runs again.
+/// carrier chain stands at the read the chain names, and a level reading a
+/// global wrapper stands at each port and file its declaration lookup
+/// reads and then at its instantiation ([`DiscoveryRead`]): a frame driver
+/// suspends there and resumes the walk on whichever thread delivers the
+/// read, the in-place driver reads it where it stands. No stage that
+/// completed runs again.
 pub(super) struct DiscoveryWalk {
     subject: SemanticNodeId,
     kind: GraphSignatureKind,
@@ -344,8 +358,9 @@ pub(super) struct DiscoveryWalk {
     frames: Vec<DiscoveryFrame>,
     /// The read the walk stands at.
     standing: Option<DiscoveryRead>,
-    /// The query that read names, until its driver takes it.
-    need: Option<crate::semantic_query::SemanticQueryKey>,
+    /// What that read names — a query, or a wrapper lookup's port or file
+    /// — until its driver takes it.
+    need: Option<super::walk::WalkNeed>,
 }
 
 /// One level of a discovery walk waiting on what is below it.
@@ -417,6 +432,20 @@ enum DiscoveryRead {
         chain: Box<super::build::SourceCarrierRead>,
         settling: Settling,
     },
+    /// A global wrapper's declaration lookup, at the port or file it reads
+    /// next.
+    WrapperLookup(Box<WrapperLookup>),
+    /// A global wrapper's instantiation, whose answer is the surface the
+    /// walk enters ([`super::apparent_type::GlobalWrapper::of_read`]).
+    Wrapper,
+}
+
+/// The read of the global wrapper `name` over `args` while its declaration
+/// lookup steps: the lookup, which holds the demand site it was begun in.
+struct WrapperLookup {
+    name: &'static str,
+    args: Vec<SemanticNodeId>,
+    lookup: super::port_continuations::GlobalLookup,
 }
 
 /// What a node a walk settles is for.
@@ -448,8 +477,8 @@ enum DiscoveryFlow {
 /// Where a discovery walk stands after its latest stage.
 pub(super) enum DiscoveryStep {
     Done(Box<DiscoveredSignatures>),
-    /// The walk reads the query it names next, holding everything it
-    /// computed.
+    /// The walk reads what it names next — a query, a port or a file —
+    /// holding everything it computed.
     Read(Box<DiscoveryWalk>),
 }
 
@@ -476,11 +505,17 @@ const _: () = assert!(std::mem::size_of::<MergedDeclarationLists>() <= 80);
 const _: () = assert!(std::mem::size_of::<DiscoveryFlow>() <= 32);
 const _: () = assert!(std::mem::size_of::<DiscoveryStep>() <= 16);
 const _: () = assert!(std::mem::size_of::<DiscoveryRead>() <= 16);
+// A wrapper's lookup is retained behind the read's box: its name and
+// arguments beside the lookup.
+const _: () = assert!(
+    std::mem::size_of::<WrapperLookup>()
+        <= 40 + std::mem::size_of::<super::port_continuations::GlobalLookup>()
+);
 // The walk itself lives behind one box: its fixed fields and the one need
 // it names.
 const _: () = assert!(
     std::mem::size_of::<DiscoveryWalk>()
-        <= 192 + std::mem::size_of::<crate::semantic_query::SemanticQueryKey>()
+        <= 192 + std::mem::size_of::<Option<super::walk::WalkNeed>>()
 );
 const _: () = assert!(
     std::mem::size_of::<DiscoveredSignatures>()
@@ -495,22 +530,18 @@ impl DiscoveryWalk {
             .strict_null_checks
     }
 
-    /// Stand at `read`, which names `key`.
-    fn stand(
-        &mut self,
-        read: DiscoveryRead,
-        key: crate::semantic_query::SemanticQueryKey,
-    ) -> DiscoveryFlow {
+    /// Stand at `read`, which names `need`.
+    fn stand(&mut self, read: DiscoveryRead, need: super::walk::WalkNeed) -> DiscoveryFlow {
         self.standing = Some(read);
-        self.need = Some(key);
+        self.need = Some(need);
         DiscoveryFlow::Stand
     }
 
-    /// The query the walk reads next, taken by its driver.
-    fn take_need(&mut self) -> crate::semantic_query::SemanticQueryKey {
+    /// What the walk reads next, taken by its driver.
+    fn take_need(&mut self) -> super::walk::WalkNeed {
         self.need
             .take()
-            .expect("a walk standing at a read names its query")
+            .expect("a walk standing at a read names what it reads")
     }
 
     /// Whether the read the walk stands at is its settlement's carrier
@@ -518,7 +549,16 @@ impl DiscoveryWalk {
     fn reads_for_carrier(&self) -> bool {
         match &self.standing {
             Some(DiscoveryRead::Carrier { chain, .. }) => chain.reads_for_carrier(),
-            None => false,
+            Some(DiscoveryRead::WrapperLookup(_) | DiscoveryRead::Wrapper) | None => false,
+        }
+    }
+
+    /// The resolver port the walk stands at ([`super::walk::WalkNeed::Port`]):
+    /// its global wrapper's lookup's.
+    pub(super) fn port_read(&self) -> super::port_continuations::PortRead<'_> {
+        match &self.standing {
+            Some(DiscoveryRead::WrapperLookup(read)) => read.lookup.port(),
+            _ => unreachable!("only a wrapper's lookup reads a port"),
         }
     }
 
@@ -536,7 +576,8 @@ impl DiscoveryWalk {
 
     /// Release what the walk holds on its computation's recording: a
     /// settlement standing in a deferred evaluation abandons the recordings
-    /// that evaluation opened, top first.
+    /// that evaluation opened, top first. A wrapper's lookup or
+    /// instantiation holds nothing on the dispatcher.
     pub(super) fn release<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
         dispatch: &ProjectSemanticDispatch<'_, C>,
@@ -587,6 +628,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         kind: GraphSignatureKind,
         context: SemanticContextId,
     ) -> QueryOutcome<crate::signature_kernel::SignatureSetValue> {
+        use super::walk::{LookupAnswer, WalkNeed};
         let (_connected, _) = self.enter_connected_demand(false);
         let mut step = self.begin_signature_discovery(store, subject, kind, context);
         loop {
@@ -594,18 +636,35 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 DiscoveryStep::Done(done) => return done.outcome,
                 DiscoveryStep::Read(walk) => walk,
             };
-            let key = walk.take_need();
-            let counts = walk.reads_for_carrier();
-            let mut key = Some(key);
-            let mut read = || {
-                let key = key.take().expect("a read is made once");
-                if counts {
-                    self.carrier_read_in_place(key)
-                } else {
-                    self.execute_read(key)
+            let flow = match walk.take_need() {
+                WalkNeed::Query(key) => {
+                    let counts = walk.reads_for_carrier();
+                    let mut key = Some(key);
+                    let mut read = || {
+                        let key = key.take().expect("a read is made once");
+                        if counts {
+                            self.carrier_read_in_place(key)
+                        } else {
+                            self.execute_read(key)
+                        }
+                    };
+                    self.deliver_discovery_read(&mut walk, &mut read)
+                }
+                // A wrapper lookup's port and files, answered as the family
+                // driver answers them in place.
+                WalkNeed::Port => {
+                    let answer = self.answer_port_in_place(&walk.port_read());
+                    self.deliver_discovery_lookup(&mut walk, LookupAnswer::Port(answer))
+                }
+                WalkNeed::Load(file) => {
+                    let serve = self.ctx.ensure_indexed_ready_serve(&file);
+                    self.deliver_discovery_lookup(&mut walk, LookupAnswer::Source(serve))
+                }
+                WalkNeed::Index(file) => {
+                    self.ctx.materialize_pending_contributor(&file);
+                    self.deliver_discovery_lookup(&mut walk, LookupAnswer::Source(None))
                 }
             };
-            let flow = self.deliver_discovery_read(&mut walk, &mut read);
             step = self.run_signature_discovery(walk, flow);
         }
     }
@@ -647,17 +706,39 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.discovery_family_step(step)
     }
 
+    /// The next stage of a discovery family's build whose walk stands in a
+    /// wrapper's lookup, given that lookup's port answer or file.
+    #[inline(never)]
+    pub(super) fn resume_discovery_lookup(
+        &self,
+        mut walk: Box<DiscoveryWalk>,
+        answer: super::walk::LookupAnswer,
+    ) -> super::family_continuation::FamilyStep {
+        let flow = self.deliver_discovery_lookup(&mut walk, answer);
+        let step = self.run_signature_discovery(walk, flow);
+        self.discovery_family_step(step)
+    }
+
     /// A walk's step as its family's.
     fn discovery_family_step(&self, step: DiscoveryStep) -> super::family_continuation::FamilyStep {
         use super::family_continuation::{FamilyBuild, FamilyStep};
+        use super::walk::WalkNeed;
         match step {
             DiscoveryStep::Done(done) => {
                 FamilyStep::Value(Box::new(self.signature_set_output(*done)))
             }
-            DiscoveryStep::Read(mut walk) => {
-                let key = walk.take_need();
-                FamilyStep::Need(key, Box::new(FamilyBuild::Discovery(walk)))
-            }
+            DiscoveryStep::Read(mut walk) => match walk.take_need() {
+                WalkNeed::Query(key) => {
+                    FamilyStep::Need(key, Box::new(FamilyBuild::Discovery(walk)))
+                }
+                WalkNeed::Port => FamilyStep::Port(Box::new(FamilyBuild::Discovery(walk))),
+                WalkNeed::Load(file) => {
+                    FamilyStep::Load(file, Box::new(FamilyBuild::Discovery(walk)))
+                }
+                WalkNeed::Index(file) => {
+                    FamilyStep::Index(file, Box::new(FamilyBuild::Discovery(walk)))
+                }
+            },
         }
     }
 
@@ -716,7 +797,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// The walk standing at a query, given `node_read`, that read: the
     /// settlement's evaluation has it delivered inside the evaluation, the
-    /// chain's instantiation to the chain.
+    /// chain's instantiation to the chain, and a wrapper's instantiation is
+    /// the surface the walk enters.
     #[inline(never)]
     fn deliver_discovery_read(
         &self,
@@ -725,15 +807,43 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             crate::semantic_query::QueryResult<SemanticNodeId>,
         >,
     ) -> DiscoveryFlow {
-        let Some(DiscoveryRead::Carrier { chain, settling }) = walk.standing.take() else {
-            unreachable!("a delivery answers the read the walk stands at")
-        };
-        match self.resume_source_carrier_read(*chain, node_read) {
-            super::build::SourceCarrierStep::Read(key, chain) => {
-                walk.stand(DiscoveryRead::Carrier { chain, settling }, key)
+        match walk.standing.take() {
+            Some(DiscoveryRead::Carrier { chain, settling }) => {
+                match self.resume_source_carrier_read(*chain, node_read) {
+                    super::build::SourceCarrierStep::Read(key, chain) => walk.stand(
+                        DiscoveryRead::Carrier { chain, settling },
+                        super::walk::WalkNeed::Query(key),
+                    ),
+                    super::build::SourceCarrierStep::Done(node) => {
+                        DiscoveryFlow::Settled(settling, node)
+                    }
+                }
             }
-            super::build::SourceCarrierStep::Done(node) => DiscoveryFlow::Settled(settling, node),
+            Some(DiscoveryRead::Wrapper) => wrapper_flow(
+                super::apparent_type::GlobalWrapper::of_read(node_read().value),
+            ),
+            Some(DiscoveryRead::WrapperLookup(_)) | None => {
+                unreachable!("a delivery answers the query the walk stands at")
+            }
         }
+    }
+
+    /// The walk standing in a wrapper's lookup, given `answer`, the port's
+    /// answer or the file's indexed input.
+    #[inline(never)]
+    fn deliver_discovery_lookup(
+        &self,
+        walk: &mut DiscoveryWalk,
+        answer: super::walk::LookupAnswer,
+    ) -> DiscoveryFlow {
+        let Some(DiscoveryRead::WrapperLookup(mut read)) = walk.standing.take() else {
+            unreachable!("only a wrapper's lookup reads a port or a file")
+        };
+        let step = match answer {
+            super::walk::LookupAnswer::Port(answer) => read.lookup.resume_port(answer),
+            super::walk::LookupAnswer::Source(serve) => read.lookup.resume_source(serve),
+        };
+        self.advance_wrapper_lookup(walk, read, step)
     }
 
     /// Settle `node` through its carrier chain for `settling`: the node it
@@ -750,9 +860,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             super::build::SourceCarrierStep::Done(settled) => {
                 DiscoveryFlow::Settled(settling, settled)
             }
-            super::build::SourceCarrierStep::Read(key, chain) => {
-                walk.stand(DiscoveryRead::Carrier { chain, settling }, key)
-            }
+            super::build::SourceCarrierStep::Read(key, chain) => walk.stand(
+                DiscoveryRead::Carrier { chain, settling },
+                super::walk::WalkNeed::Query(key),
+            ),
         }
     }
 
@@ -914,7 +1025,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 };
                 drop(data);
                 match name {
-                    Some(name) => self.discover_apparent(name, &[]),
+                    Some(name) => self.discover_apparent(walk, name, Vec::new()),
                     None => DiscoveryFlow::Found(Vec::new()),
                 }
             }
@@ -926,11 +1037,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     LiteralValue::BigInt(_) => "BigInt",
                 };
                 drop(data);
-                self.discover_apparent(name, &[])
+                self.discover_apparent(walk, name, Vec::new())
             }
             SemanticNodeData::TemplateLiteral { .. } => {
                 drop(data);
-                self.discover_apparent("String", &[])
+                self.discover_apparent(walk, "String", Vec::new())
             }
             // An enum member's apparent type is its value's.
             SemanticNodeData::EnumLiteral(literal) => {
@@ -940,19 +1051,27 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             SemanticNodeData::TypeOfNominal(_) => {
                 drop(data);
-                self.discover_apparent("Symbol", &[])
+                self.discover_apparent(walk, "Symbol", Vec::new())
             }
             SemanticNodeData::Array { element, readonly } => {
                 let (element, readonly) = (*element, *readonly);
                 drop(data);
-                self.discover_apparent(if readonly { "ReadonlyArray" } else { "Array" }, &[element])
+                self.discover_apparent(
+                    walk,
+                    if readonly { "ReadonlyArray" } else { "Array" },
+                    vec![element],
+                )
             }
             SemanticNodeData::Tuple { readonly, .. } => {
                 let readonly = *readonly;
                 drop(data);
                 let unknown =
                     graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown));
-                self.discover_apparent(if readonly { "ReadonlyArray" } else { "Array" }, &[unknown])
+                self.discover_apparent(
+                    walk,
+                    if readonly { "ReadonlyArray" } else { "Array" },
+                    vec![unknown],
+                )
             }
             SemanticNodeData::KeyOf { .. } | SemanticNodeData::Mapped { .. } => {
                 DiscoveryFlow::Found(Vec::new())
@@ -1263,9 +1382,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     /// Apparent-type signatures of a global wrapper interface: the wrapper
-    /// the demanding project declares
-    /// ([`ProjectSemanticDispatch::global_wrapper_surface`]), whose surface
-    /// the walk enters. An absent global (`noLib`) is the checker's empty
+    /// `name` over `args` the demanding project declares, whose surface the
+    /// walk enters. An absent global (`noLib`) is the checker's empty
     /// apparent type: a complete negative, which a declaration appearing
     /// later invalidates.
     ///
@@ -1276,19 +1394,57 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// on the demanding project, which its key does not name, so the answer
     /// stays out of the shared memo with every entry that reads it.
     ///
-    /// The wrapper's lookup and instantiation are read in place, where the
-    /// stage stands.
+    /// The wrapper is the walk's dependency: its declaration lookup is begun
+    /// here, in the demand site the stage stands in, and each port and file
+    /// it reads and then the interface's instantiation is a read the walk
+    /// stands at. The wrapper is in tail position: its surface is entered
+    /// under the subject's level, with no level of its own.
     #[inline(never)]
-    fn discover_apparent(&self, name: &str, args: &[SemanticNodeId]) -> DiscoveryFlow {
+    fn discover_apparent(
+        &self,
+        walk: &mut DiscoveryWalk,
+        name: &'static str,
+        args: Vec<SemanticNodeId>,
+    ) -> DiscoveryFlow {
         let Some(canonical) = self.wrapper_demand_canonical() else {
             return failed_unsettled();
         };
         self.fold_into_top_build_local_taint(false, true);
-        match self.global_wrapper_surface(name, args, canonical.as_ref()) {
-            super::apparent_type::GlobalWrapper::Surface(surface) => DiscoveryFlow::Enter(surface),
-            super::apparent_type::GlobalWrapper::Absent => DiscoveryFlow::Found(Vec::new()),
-            super::apparent_type::GlobalWrapper::Unsettled => failed_unsettled(),
+        match self.begin_global_wrapper_lookup(name, canonical.as_ref()) {
+            Ok((lookup, step)) => self.advance_wrapper_lookup(
+                walk,
+                Box::new(WrapperLookup { name, args, lookup }),
+                step,
+            ),
+            Err(settled) => wrapper_flow(settled),
         }
+    }
+
+    /// Carry a wrapper's lookup on from `step`: the port or file it reads
+    /// next, or — the lookup answered — the interface's instantiation, or
+    /// the wrapper settled unread.
+    fn advance_wrapper_lookup(
+        &self,
+        walk: &mut DiscoveryWalk,
+        read: Box<WrapperLookup>,
+        step: super::port_continuations::GlobalStep,
+    ) -> DiscoveryFlow {
+        use super::port_continuations::GlobalStep;
+        use super::walk::WalkNeed;
+        let need = match step {
+            GlobalStep::Found(found) => {
+                return match self.global_wrapper_answered(found, read.name, &read.args) {
+                    super::apparent_type::WrapperRead::Read(key) => {
+                        walk.stand(DiscoveryRead::Wrapper, WalkNeed::Query(key))
+                    }
+                    super::apparent_type::WrapperRead::Settled(settled) => wrapper_flow(settled),
+                };
+            }
+            GlobalStep::Port => WalkNeed::Port,
+            GlobalStep::Load(file) => WalkNeed::Load(file),
+            GlobalStep::Index(file) => WalkNeed::Index(file),
+        };
+        walk.stand(DiscoveryRead::WrapperLookup(read), need)
     }
 
     /// The level on top of the walk takes `list`, the candidates of what it
