@@ -42,7 +42,7 @@ Ordering and composite reduction live beside the kernel, in the dispatch crate:
 | `semantic_query/stable_key.rs` | `VerterStableV1` encoding and `StableKey::cmp`. |
 | `project_semantic_dispatch/canonical_algebra.rs` | `intern_ordered_union_charged` / `intern_ordered_intersection_charged` — the two crate-private canonical builders production constructions call, each paying a `ConstructionMeter`; `admit_cross_product`, the one cross-product admission; plus `compare_structural` and `CanonicalEvidence`. |
 | `project_semantic_dispatch/build.rs` | `build_reduce_union` / `build_reduce_intersection` — the query builders behind `SemanticQueryKey::ReduceUnion` / `ReduceIntersection`. |
-| `project_semantic_dispatch/signature_discovery.rs` | The cutover consumer: it drives discovery, positional matching and instantiation through the kernel records. Discovery is `DiscoveryWalk`, an owned stack of levels advanced by out-of-line stages: a frame drives it as the `FamilyBuild::Discovery` continuation, suspending at each carrier read its settlements name, and the synchronous producer drives the same stages in place (`drive_family_value_in_place`). |
+| `project_semantic_dispatch/signature_discovery.rs` | The cutover consumer: it drives discovery, positional matching and instantiation through the kernel records. Discovery is `DiscoveryWalk`, an owned stack of levels advanced by out-of-line stages: a frame drives it as the `FamilyBuild::Discovery` continuation, suspending at each carrier read its settlements name and at a primitive's or collection's apparent wrapper (its global lookup's ports and loads, then its instantiation), and the synchronous producer drives the same stages in place (`drive_family_value_in_place`). |
 
 ---
 

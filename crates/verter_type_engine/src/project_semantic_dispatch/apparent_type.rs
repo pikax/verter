@@ -35,9 +35,11 @@
 //! universal read boundary. The primitive-to-wrapper widening (`string` →
 //! `String`, `number` → `Number`, `T[]` → `Array<T>`, …) is not this
 //! family's: those bases return `Miss` here, and signature discovery and the
-//! path walker read the wrapper through
-//! [`ProjectSemanticDispatch::global_wrapper_surface`], scoped by the
-//! request's project.
+//! path walker read the wrapper scoped by the request's project — its
+//! declaration lookup stepped as their own ports and loads, then its
+//! instantiation as their need ([`ProjectSemanticDispatch::global_wrapper_key`]);
+//! other readers read it in place through
+//! [`ProjectSemanticDispatch::global_wrapper_surface`].
 
 use std::sync::Arc;
 
@@ -115,6 +117,15 @@ pub(super) enum WrapperRead {
     Read(SemanticQueryKey),
 }
 
+/// The context a global wrapper's apparent surface is instantiated under:
+/// a member read through the interface, as through any interface
+/// reference — carrier-preserving transit, so the interface's references to
+/// itself (`then(...): Promise<TResult1 | TResult2>`) stay references to
+/// it. The apparent surface supplies members and signature carriers; their
+/// interiors are demanded only by a selected member or signature read.
+const WRAPPER_SURFACE_CONTEXT: ProjectionReductionContext =
+    ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Shallow);
+
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     construction_ordinal_seam! {
         /// The global wrapper interface `name` (`String`, `Number`, `Array`, …)
@@ -132,19 +143,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             args: &[SemanticNodeId],
             canonical: &str,
         ) -> GlobalWrapper {
-            self.global_wrapper_surface_in(
-                name,
-                args,
-                canonical,
-                // A member read through the interface, as through any
-                // interface reference: carrier-preserving transit, so the
-                // interface's references to itself
-                // (`then(...): Promise<TResult1 | TResult2>`) stay
-                // references to it. The apparent surface supplies members
-                // and signature carriers; their interiors are demanded only
-                // by a selected member or signature read.
-                ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Shallow),
-            )
+            self.global_wrapper_surface_in(name, args, canonical, WRAPPER_SURFACE_CONTEXT)
         }
     }
 
@@ -176,12 +175,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         args: &[SemanticNodeId],
         canonical: &str,
     ) -> Option<SemanticQueryKey> {
-        match self.global_wrapper_read_in(
-            name,
-            args,
-            canonical,
-            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Shallow),
-        ) {
+        match self.global_wrapper_read_in(name, args, canonical, WRAPPER_SURFACE_CONTEXT) {
             WrapperRead::Read(key) => Some(key),
             WrapperRead::Settled(_) => None,
         }
@@ -194,13 +188,64 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         canonical: &str,
         context: ProjectionReductionContext,
     ) -> WrapperRead {
-        if self.project_stable_key_for_canonical(canonical).is_none() {
-            return WrapperRead::Settled(GlobalWrapper::Unsettled);
-        }
-        let Some(declaration) = self.first_global_declaration(canonical, name) else {
-            return WrapperRead::Settled(GlobalWrapper::Absent);
+        let (lookup, step) = match self.begin_global_wrapper_lookup(name, canonical) {
+            Ok(begun) => begun,
+            Err(settled) => return WrapperRead::Settled(settled),
         };
-        WrapperRead::Read(self.global_wrapper_key_in(&declaration, name, args, context))
+        let found = self.drive_global_lookup_in_place(lookup, step);
+        self.global_wrapper_answered_in(found, name, args, context)
+    }
+
+    /// Begin the read of the global wrapper `name` in `canonical`'s project:
+    /// its declaration lookup ([`super::port_continuations::GlobalLookup`]),
+    /// which a reader drives in place or steps as its own ports and loads,
+    /// or the read settled unread when the canonical names no project.
+    pub(super) fn begin_global_wrapper_lookup(
+        &self,
+        name: &str,
+        canonical: &str,
+    ) -> Result<
+        (
+            super::port_continuations::GlobalLookup,
+            super::port_continuations::GlobalStep,
+        ),
+        GlobalWrapper,
+    > {
+        if self.project_stable_key_for_canonical(canonical).is_none() {
+            return Err(GlobalWrapper::Unsettled);
+        }
+        Ok(super::port_continuations::GlobalLookup::begin(
+            Arc::from(canonical),
+            Arc::from(name),
+        ))
+    }
+
+    /// Where a read of the global wrapper `name` over `args` stands once its
+    /// declaration lookup answered `found`: the instantiation of the
+    /// declaration it found, or — the project declaring no such global —
+    /// settled as the checker's empty apparent type.
+    pub(super) fn global_wrapper_answered(
+        &self,
+        found: Option<verter_session_query::type_solver::host::ResolvedRootIdentity>,
+        name: &str,
+        args: &[SemanticNodeId],
+    ) -> WrapperRead {
+        self.global_wrapper_answered_in(found, name, args, WRAPPER_SURFACE_CONTEXT)
+    }
+
+    fn global_wrapper_answered_in(
+        &self,
+        found: Option<verter_session_query::type_solver::host::ResolvedRootIdentity>,
+        name: &str,
+        args: &[SemanticNodeId],
+        context: ProjectionReductionContext,
+    ) -> WrapperRead {
+        match found {
+            Some(declaration) => {
+                WrapperRead::Read(self.global_wrapper_key_in(&declaration, name, args, context))
+            }
+            None => WrapperRead::Settled(GlobalWrapper::Absent),
+        }
     }
 
     /// The instantiation of the global wrapper `name` over `args` that
@@ -214,12 +259,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         name: &str,
         args: &[SemanticNodeId],
     ) -> SemanticQueryKey {
-        self.global_wrapper_key_in(
-            declaration,
-            name,
-            args,
-            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Shallow),
-        )
+        self.global_wrapper_key_in(declaration, name, args, WRAPPER_SURFACE_CONTEXT)
     }
 
     fn global_wrapper_key_in(

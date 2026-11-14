@@ -253,7 +253,7 @@ pub(super) enum FamilyBuild {
     /// A path projection's walk, standing at the read a hop named.
     ProjectPath(Box<super::walk::ProjectPathBuild>),
     /// A signature discovery's walk, standing at the read a settlement
-    /// named.
+    /// named, or in its apparent wrapper's lookup or instantiation.
     Discovery(Box<super::signature_discovery::DiscoveryWalk>),
 }
 
@@ -335,7 +335,7 @@ impl FamilyBuild {
     /// candidate standing in a substitution abandons the recordings its
     /// walk's levels opened, top first. A signature discovery standing in
     /// its settlement's deferred evaluation abandons that evaluation's
-    /// recordings.
+    /// recordings; one standing at its apparent wrapper holds nothing.
     pub(super) fn release_retained_accounting<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
         dispatch: &ProjectSemanticDispatch<'_, C>,
@@ -357,13 +357,13 @@ impl FamilyBuild {
             Self::ApparentType(build) => build.global_port(),
             Self::ResolveDecl(build) => build.port_read(),
             Self::ProjectPath(build) => build.walk.port_read(),
+            Self::Discovery(walk) => walk.port_read(),
             Self::MacroPayload(_)
             | Self::ReduceIntersection(_)
             | Self::OverloadSet(_)
             | Self::ClassInstanceSurface(_)
             | Self::CycleGate(_)
-            | Self::TemplateUnion(..)
-            | Self::Discovery(_) => unreachable!("this family reads no resolver port"),
+            | Self::TemplateUnion(..) => unreachable!("this family reads no resolver port"),
         }
     }
 }
@@ -619,12 +619,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         build: FamilyBuild,
         serve: Option<IndexedInputServe>,
     ) -> FamilyStep {
-        // A path walk's file reads are its wrapper lookup's; its stages are
-        // not counted.
+        // A path walk's and a signature discovery's file reads are their
+        // wrapper lookups'; their stages are not counted.
         let build = match build {
             FamilyBuild::ProjectPath(build) => {
                 return self
                     .resume_project_path_lookup(*build, super::walk::LookupAnswer::Source(serve));
+            }
+            FamilyBuild::Discovery(walk) => {
+                return self
+                    .resume_discovery_lookup(walk, super::walk::LookupAnswer::Source(serve));
             }
             build => build,
         };
@@ -645,7 +649,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 unreachable!("an intersection reduction reads no file")
             }
             FamilyBuild::OverloadSet(_) => unreachable!("an overload set reads no file"),
-            FamilyBuild::Discovery(_) => unreachable!("a signature discovery reads no file"),
+            FamilyBuild::Discovery(_) => unreachable!("a signature discovery resumed above"),
             FamilyBuild::ApparentType(build) => self
                 .continuation_stage()
                 .resume_apparent_global_source(build, serve),
@@ -666,6 +670,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             FamilyBuild::ProjectPath(build) => {
                 return self
                     .resume_project_path_lookup(*build, super::walk::LookupAnswer::Port(answer));
+            }
+            FamilyBuild::Discovery(walk) => {
+                return self.resume_discovery_lookup(walk, super::walk::LookupAnswer::Port(answer));
             }
             build => build,
         };
@@ -689,11 +696,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 | FamilyBuild::OverloadSet(_)
                 | FamilyBuild::ClassInstanceSurface(_)
                 | FamilyBuild::CycleGate(_)
-                | FamilyBuild::TemplateUnion(..)
-                | FamilyBuild::Discovery(_),
+                | FamilyBuild::TemplateUnion(..),
                 _,
             ) => unreachable!("this family reads no resolver port"),
             (FamilyBuild::ProjectPath(_), _) => unreachable!("a path walk resumed above"),
+            (FamilyBuild::Discovery(_), _) => unreachable!("a signature discovery resumed above"),
         }
     }
 

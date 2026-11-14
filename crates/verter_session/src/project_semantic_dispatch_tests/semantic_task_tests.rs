@@ -1138,9 +1138,17 @@ fn hold_producer_with<'g>(
 
 /// A request of its own, with an operation budget its spend is charged to.
 fn budgeted_request(id: u64) -> Arc<verter_type_engine::request_context::RequestContext> {
+    budgeted_request_for(id, TASK_FILE)
+}
+
+/// [`budgeted_request`] for a request on `file`.
+fn budgeted_request_for(
+    id: u64,
+    file: &str,
+) -> Arc<verter_type_engine::request_context::RequestContext> {
     verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
         id,
-        Arc::from(TASK_FILE),
+        Arc::from(file),
         verter_audit::RequestKind::ComponentMeta,
         false,
         false,
@@ -7366,21 +7374,53 @@ mod semantic_poll_contract {
     /// reads it as the synchronous entry does.
     fn assert_seam_releases(seam: &HeldSeam) {
         let (synchronous, _) = synchronous_across(seam);
+        assert_root_releases(
+            seam.seam,
+            seam.host,
+            seam.keys,
+            seam.expression_site,
+            None,
+            &synchronous,
+        );
+    }
+
+    /// The root `keys` names on a fresh host `host` makes, released while
+    /// another task holds the dependency `keys` names — dropped, or stopped
+    /// by its request's cancellation — leaves nothing open, and the
+    /// dispatcher then reads it as the synchronous entry read it
+    /// (`synchronous`). A root whose reads are scoped by the request it is
+    /// read for (`request_file`) is keyed, polled and read again under a
+    /// request on that file; any other is polled outside a request unless
+    /// cancelled.
+    fn assert_root_releases(
+        seam: &str,
+        host: fn() -> Arc<crate::VerterHost>,
+        keys: fn(&crate::VerterHost, &HostDispatch<'_>) -> (SemanticQueryKey, SemanticQueryKey),
+        expression_site: bool,
+        request_file: Option<&str>,
+        synchronous: &ReadSummary,
+    ) {
         for cancelled in [false, true] {
-            let host = (seam.host)();
+            let host = host();
             let mut dispatch = ProjectSemanticDispatch::new(&*host);
             let _scope = dispatch.enter_construction_scope();
             let graph = host.project_type_store().semantic_graph();
-            let request = budgeted_request(1);
+            let request = request_file
+                .map_or_else(|| budgeted_request(1), |file| budgeted_request_for(1, file));
+            let leg_request = request_file.map(|_| {
+                verter_type_engine::request_context::RequestContextGuard::install(Arc::clone(
+                    &request,
+                ))
+            });
             let (root, held) = if cancelled {
                 let _request = verter_type_engine::request_context::RequestContextGuard::install(
                     Arc::clone(&request),
                 );
-                (seam.keys)(&host, &dispatch)
+                keys(&host, &dispatch)
             } else {
-                (seam.keys)(&host, &dispatch)
+                keys(&host, &dispatch)
             };
-            let (tasks, leases) = hold_seam(&host, graph, held, seam.expression_site);
+            let (tasks, leases) = hold_seam(&host, graph, held, expression_site);
             let counter = Arc::new(CountingWaker::default());
             let waker = Waker::from(Arc::clone(&counter));
             let readers = graph.signature_store().live_reader_count();
@@ -7418,7 +7458,7 @@ mod semantic_poll_contract {
                     (pending, true, graph.resident_flight_keys_for_tests().len())
                 }
             });
-            let label = format!("{}, cancelled={cancelled}", seam.seam);
+            let label = format!("{seam}, cancelled={cancelled}");
             assert!(pending, "{label}: the root yields at the seam");
             assert!(
                 stopped,
@@ -7440,6 +7480,9 @@ mod semantic_poll_contract {
             );
             assert_eq!(graph.wait_graph_counts_for_tests().1, 0, "{label}");
             drop(tasks);
+            drop(leg_request);
+            let _reference_request =
+                request_file.map(verter_type_engine::request_context::install_test_request_for);
             let read = dispatch.execute_via_cold_build_helper(root);
             assert_eq!(
                 decision(read_summary(&dispatch, &read)),
@@ -12789,6 +12832,17 @@ mod semantic_poll_contract {
         subject: verter_type_engine::semantic_query::SemanticNodeId,
         reads: Vec<SemanticQueryKey>,
     ) -> CallableKeys {
+        callable_keys_in(host, CALLABLE_FILE, subject, reads)
+    }
+
+    /// [`callable_keys`] for a subject whose overload set is read under
+    /// `file`'s resolution environment.
+    fn callable_keys_in(
+        host: &crate::VerterHost,
+        file: &str,
+        subject: verter_type_engine::semantic_query::SemanticNodeId,
+        reads: Vec<SemanticQueryKey>,
+    ) -> CallableKeys {
         let kind = verter_type_engine::semantic_query::SignatureKind::Call;
         CallableKeys {
             set: SemanticQueryKey::ResolveOverloadSet {
@@ -12796,9 +12850,7 @@ mod semantic_poll_contract {
                 kind,
                 type_args: Arc::from(Vec::new().into_boxed_slice()),
                 context: verter_type_engine::semantic_query::OverloadSetContext {
-                    resolve_env_hash: host
-                        .host_view_env_hashes_for(CALLABLE_FILE)
-                        .resolve_env_hash,
+                    resolve_env_hash: host.host_view_env_hashes_for(file).resolve_env_hash,
                     ..Default::default()
                 },
             },
@@ -12958,7 +13010,16 @@ mod semantic_poll_contract {
     /// names the fixture's reads first: the premise every held read rests
     /// on.
     fn assert_list_reads(fixture: CallableFixture, label: &str) {
-        let host = callable_host();
+        assert_list_reads_on(callable_host, fixture, label);
+    }
+
+    /// The same, on a fresh host `host` makes.
+    fn assert_list_reads_on(
+        host: fn() -> Arc<crate::VerterHost>,
+        fixture: CallableFixture,
+        label: &str,
+    ) {
+        let host = host();
         let dispatch = ProjectSemanticDispatch::new(&*host);
         let _scope = dispatch.enter_construction_scope();
         let keys = fixture(&host, &dispatch);
@@ -12973,7 +13034,15 @@ mod semantic_poll_contract {
     /// The fixture's overload set read through the synchronous entry on a
     /// fresh host: its summary and the walks' work.
     fn synchronous_list(fixture: CallableFixture) -> (ReadSummary, DiscoveryWork) {
-        let host = callable_host();
+        synchronous_list_on(callable_host, fixture)
+    }
+
+    /// The same, on a fresh host `host` makes.
+    fn synchronous_list_on(
+        host: fn() -> Arc<crate::VerterHost>,
+        fixture: CallableFixture,
+    ) -> (ReadSummary, DiscoveryWork) {
+        let host = host();
         let dispatch = ProjectSemanticDispatch::new(&*host);
         let _scope = dispatch.enter_construction_scope();
         let keys = fixture(&host, &dispatch);
@@ -12998,23 +13067,54 @@ mod semantic_poll_contract {
         total: DiscoveryWork,
         label: &str,
     ) -> HeldRead {
-        let (synchronous, synchronous_discovery) = synchronous_list(fixture);
+        assert_list_suspends_on(callable_host, fixture, held, total, label)
+    }
+
+    /// The same, on a fresh host `host` makes.
+    fn assert_list_suspends_on(
+        host: fn() -> Arc<crate::VerterHost>,
+        fixture: CallableFixture,
+        held: usize,
+        total: DiscoveryWork,
+        label: &str,
+    ) -> HeldRead {
+        let (synchronous, synchronous_discovery) = synchronous_list_on(host, fixture);
         assert!(
             !synchronous.3 && synchronous.5.is_some(),
             "{label}: premise: a complete, priced answer: {synchronous:?}"
         );
-        assert_eq!(
-            synchronous_discovery, total,
-            "{label}: the synchronous entry walks each node and publishes each signature once"
-        );
-        let (host, run) = poll_root_holding_at(
-            callable_host,
+        assert_root_list_suspends(
+            host,
             |host, dispatch| {
                 let keys = fixture(host, dispatch);
                 (keys.set, keys.reads[held].clone())
             },
-            false,
+            (synchronous, synchronous_discovery),
+            total,
+            label,
+        )
+    }
+
+    /// The root `keys` names, polled on a fresh host `host` makes while
+    /// another task produces the read `keys` holds, which a signature list
+    /// the root needs names: the list yields there instead of waiting the
+    /// producer out, a repoll and a poll elsewhere compute nothing, and
+    /// released, the root resumes on another thread to exactly the
+    /// synchronous entry's `synchronous` read, having entered each node and
+    /// published each signature once (absolute counts, `total`, which the
+    /// synchronous entry's walks also did).
+    fn assert_root_list_suspends(
+        host: fn() -> Arc<crate::VerterHost>,
+        keys: impl FnOnce(&crate::VerterHost, &HostDispatch<'_>) -> (SemanticQueryKey, SemanticQueryKey),
+        (synchronous, synchronous_discovery): (ReadSummary, DiscoveryWork),
+        total: DiscoveryWork,
+        label: &str,
+    ) -> HeldRead {
+        assert_eq!(
+            synchronous_discovery, total,
+            "{label}: the synchronous entry walks each node and publishes each signature once"
         );
+        let (host, run) = poll_root_holding_at(host, keys, false);
         // No dependency of the walk is joined or driven in place. Only a
         // `DeclLowering` wait is allowed: an instantiation frame's begin
         // lowers its declaration in place.
@@ -13025,10 +13125,7 @@ mod semantic_poll_contract {
             "{label}: the first poll joins no dependency in place: {:?}",
             run.first_waits
         );
-        assert!(
-            run.yielded,
-            "{label}: the list yields at its held read {held}"
-        );
+        assert!(run.yielded, "{label}: the list yields at its held read");
         assert!(
             run.repolled_pending,
             "{label}: a repoll while held enters no wait"
@@ -13043,7 +13140,7 @@ mod semantic_poll_contract {
             DiscoveryWork::default(),
             "{label}: a pending repoll walks nothing"
         );
-        assert!(run.woken, "{label}: the producer going away wakes the set");
+        assert!(run.woken, "{label}: the producer going away wakes the root");
         assert_eq!(
             run.discovery_total, total,
             "{label}: no node is entered and no signature published again across the wait"
@@ -13364,6 +13461,118 @@ mod semantic_poll_contract {
     ) -> (SemanticQueryKey, SemanticQueryKey) {
         let keys = callable_placeholder(host, dispatch);
         (keys.set, keys.reads[0].clone())
+    }
+
+    /// The overload set over `string | number`, read under the primitive
+    /// union call's resolution environment, its signature list, and the
+    /// instantiations of the arms' apparent wrappers its walk names: `String`
+    /// and `Number` as that file's project declares them, in the order the
+    /// walk reads the arms — the union's stable member order, which no test
+    /// assumes. The set has no demand site of its own, so its wrappers are
+    /// scoped by the request it is read for: every read of it is made under
+    /// a request on the call's file.
+    fn primitive_union_wrappers(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> CallableKeys {
+        let graph = dispatch.graph_arc();
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let subject = graph.intern_node(SemanticNodeData::Union(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                [string, number],
+            )),
+        ));
+        let order = verter_type_engine::semantic_query::stable_key::canonicalize_union_members(
+            graph,
+            &[string, number],
+        );
+        let names = match order.as_ref() {
+            [first, second] if *first == string && *second == number => ["String", "Number"],
+            [first, second] if *first == number && *second == string => ["Number", "String"],
+            other => panic!("premise: `string | number` has two arms: {other:?}"),
+        };
+        let reads = names
+            .iter()
+            .map(|name| {
+                dispatch
+                    .global_wrapper_read_for_tests(name, &[], PRIMITIVE_UNION_CALL_FILE)
+                    .expect("premise: the call's project declares both wrappers")
+            })
+            .collect();
+        callable_keys_in(host, PRIMITIVE_UNION_CALL_FILE, subject, reads)
+    }
+
+    /// The overload set over `string | number` and the instantiation of the
+    /// wrapper its list's walk reads second.
+    fn primitive_union_wrapper_seam_keys(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
+        let keys = primitive_union_wrappers(host, dispatch);
+        (keys.set, keys.reads[1].clone())
+    }
+
+    /// An overload set over `string | number` whose list waits on its later
+    /// arm's apparent wrapper — the instantiation of `String` or `Number`
+    /// the request's project declares — produced by another task: the list's
+    /// frame steps the wrapper's declaration lookup as its own ports and
+    /// loads, yields at the instantiation with the earlier arm's signature
+    /// published instead of waiting the producer out, and resumed on another
+    /// thread finishes the walk without entering a node or publishing a
+    /// signature again, reading exactly what the synchronous entry reads. The
+    /// union, each arm and each arm's wrapper surface are entered; each
+    /// surface publishes its one call signature.
+    #[test]
+    fn a_signature_list_waiting_on_a_primitive_arms_wrapper_resumes_without_walking_again() {
+        let label = "a primitive arm's wrapper";
+        let _request = verter_type_engine::request_context::install_test_request_for(
+            PRIMITIVE_UNION_CALL_FILE,
+        );
+        assert_list_reads_on(primitive_union_call_host, primitive_union_wrappers, label);
+        let run = assert_list_suspends_on(
+            primitive_union_call_host,
+            primitive_union_wrappers,
+            1,
+            DiscoveryWork {
+                nodes: 5,
+                published: 2,
+            },
+            label,
+        );
+        assert_eq!(
+            run.discovery_at_hold,
+            DiscoveryWork {
+                nodes: 4,
+                published: 1
+            },
+            "{label}: the union, both arms and the earlier arm's wrapper surface entered, that surface's signature published"
+        );
+    }
+
+    /// An overload set over `string | number` whose list waits on its later
+    /// arm's apparent wrapper, released there — dropped by its consumer, or
+    /// stopped by its request's cancellation with the producer still held —
+    /// leaves nothing open: no recording, no wait, no flight but the
+    /// holder's and no signature epoch pinned. The dispatcher then reads the
+    /// set as the synchronous entry does.
+    #[test]
+    fn a_signature_list_released_or_cancelled_at_a_primitive_arms_wrapper_leaves_nothing_open() {
+        let label = "a primitive arm's wrapper";
+        let synchronous = {
+            let _request = verter_type_engine::request_context::install_test_request_for(
+                PRIMITIVE_UNION_CALL_FILE,
+            );
+            synchronous_list_on(primitive_union_call_host, primitive_union_wrappers).0
+        };
+        assert_root_releases(
+            label,
+            primitive_union_call_host,
+            primitive_union_wrapper_seam_keys,
+            false,
+            Some(PRIMITIVE_UNION_CALL_FILE),
+            &synchronous,
+        );
     }
 }
 
