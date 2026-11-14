@@ -88,6 +88,9 @@ pub fn project_response(response: &TypeInfoGraphResponse) -> serde_json::Value {
         Some(type_info_graph_response::Kind::Graph(_)) => serde_json::json!({
             "error": "unexpected graph arm for a framework-surface request",
         }),
+        Some(type_info_graph_response::Kind::SymbolList(_)) => serde_json::json!({
+            "error": "unexpected symbol-list arm for a framework-surface request",
+        }),
         None => serde_json::json!({ "error": "empty response" }),
     }
 }

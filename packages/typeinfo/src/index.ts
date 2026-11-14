@@ -14,7 +14,7 @@
  * dependency.
  */
 
-export { TypeInfoSession } from "./session.js";
+export { TypeInfoRequestFailure, TypeInfoSession } from "./session.js";
 export { decodeResolveResult, TypeResolutionFaultError } from "./decode.js";
 export { decodeFrameworkSurfaceResponse } from "./framework-surface.js";
 

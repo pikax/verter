@@ -69,13 +69,13 @@ message NamespaceImportDto {
 }
 
 // SymbolEntryDto — wire-form mirror of
-// `verter_session::typeinfo::types::SymbolEntry`. Returned by
-// `list_file_symbols` over the FFI boundary.
+// `verter_session::typeinfo::types::SymbolEntry`: one entry of the
+// list-symbols answer (`TypeInfoGraphResponse.symbol_list`).
 message SymbolEntryDto {
   string name = 1;
   // Stringly-tagged kind. Canonical values:
-  // "type_alias", "interface", "class", "const", "let", "var",
-  // "function", "async_function", "class_value", "enum".
+  // "typeAlias", "interface", "class", "const", "let", "var",
+  // "function", "asyncFunction", "classValue", "enum".
   string kind = 2;
   // SFC-absolute span. Encoded as `(start, end)`; absent when the
   // host had no analysis-snapshot span for this symbol. UTF-8 byte
@@ -91,10 +91,16 @@ message SymbolEntryDto {
   bool is_exported = 6;
 }
 
-// SymbolEntryListDto — repeated wrapper used by FFI consumers that
-// want a single message at the boundary.
+// SymbolEntryListDto — the list-symbols answer: the file's own top-level
+// declarations, sorted by name then kind.
 message SymbolEntryListDto {
   repeated SymbolEntryDto entries = 1;
+}
+
+// ListSymbolsRequest — the list-symbols operation's payload: the file
+// whose top-level declarations are listed (schema 12).
+message ListSymbolsRequest {
+  string canonical_id = 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -878,16 +884,15 @@ message TypeInfoGraphResponse {
     SemanticTypeGraph graph = 1;
     TypeInfoRequestError error = 2;
     FrameworkSurfacePayload framework_surface = 3;
+    SymbolEntryListDto symbol_list = 4;
   }
 }
 
-// TypeInfoGraphRequest — generic envelope covering the seven graph
-// operations that share the structured-projection payload shape.
-// The two scalar / projection-bypass operations (`listSymbols` and
-// `relate`) have dedicated request types declared separately. The
-// closed `operation` discriminator decides which payload arm
-// carries the call. The host serves resolve-symbol, expand-around and
-// framework-surfaces; a request for any other operation is answered with
+// TypeInfoGraphRequest — generic envelope covering every typeinfo
+// operation. The closed `operation` discriminator decides which payload
+// arm carries the call; `relate` has no payload arm. The host serves
+// resolve-symbol, expand-around, framework-surfaces and list-symbols; a
+// request for any other operation is answered with
 // `TypeInfoRequestError.unsupported_operation` whatever its payload.
 message TypeInfoGraphRequest {
   uint32 schema_version = 1;
@@ -900,6 +905,7 @@ message TypeInfoGraphRequest {
     ContextualTypeRequest contextual_type = 7;
     ExpandGraphAroundRequest expand_around = 8;
     FrameworkSurfaceRequest framework_surface = 9;
+    ListSymbolsRequest list_symbols = 10;
   }
 }
 
@@ -1330,6 +1336,7 @@ enum GraphOperation {
   GRAPH_OPERATION_EXPAND_AROUND = 5;
   GRAPH_OPERATION_FLOW_NARROWING_AT = 6;
   GRAPH_OPERATION_CONTEXTUAL_TYPE_AT = 7;
+  GRAPH_OPERATION_LIST_SYMBOLS = 8;
 }
 
 enum GraphProjectionMode {

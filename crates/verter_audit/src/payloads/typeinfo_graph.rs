@@ -44,6 +44,8 @@ pub enum GraphOperationTag {
     FlowNarrowingAt,
     /// `evaluate_contextual_type_at_with_audit`.
     ContextualTypeAt,
+    /// The list-symbols operation of `type_info_with_audit`.
+    ListSymbols,
 }
 
 /// Closed mirror of the reduction-demand axis on

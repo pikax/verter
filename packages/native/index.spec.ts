@@ -1381,7 +1381,6 @@ describe("VerterHost type declarations in sync with native binary", () => {
       "getPublicApi",
       "getVirtualFile",
       "lint",
-      "listSymbols",
       "listVirtualFiles",
       "matchCssSelectors",
       "remove",

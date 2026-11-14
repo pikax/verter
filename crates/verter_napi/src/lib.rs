@@ -4151,11 +4151,11 @@ impl NapiVerterHost {
     // Typeinfo entry-points (typeinfo public host substrate)
     //
     // Wrap the host substrate methods
-    // (`list_file_symbols`, `resolve_named_symbol_with_audit`,
+    // (`resolve_named_symbol_with_audit`,
     // `evaluate_type_expression_with_audit`) and project the host
-    // outputs back across the FFI boundary.
+    // outputs back across the FFI boundary. The symbol inventory is served
+    // by `typeInfoWithAudit` (the list-symbols operation).
     //
-    // - `listSymbols` returns a JSON Buffer carrying a `Vec<FfiSymbolEntry>`.
     // - `resolveSymbolWithAudit` and `evaluateTypeExpressionWithAudit`
     //   return a `NapiTypeInfoResolveResult { typeExpr, auditRecord }`
     //   — both are JSON Buffers; consumers decode whichever they need.
@@ -4168,25 +4168,6 @@ impl NapiVerterHost {
     // record without polling the audit store; the store-based
     // `getLastAuditRecord` continues to work too.
     // =========================================================================
-
-    /// Return the top-level symbol inventory for `canonical_id`.
-    ///
-    /// JSON Buffer carrying a `Vec<FfiSymbolEntry>` per the FFI mirror
-    /// in `verter_protocol::typeinfo`. The call is bounded by the
-    /// shallow-state size and does not emit an audit record (per §17
-    /// "no audit; pure shallow read").
-    #[napi(js_name = "listSymbols")]
-    pub fn list_symbols(&self, canonical_id: String) -> Result<Buffer> {
-        let host = std::sync::Arc::clone(&self.inner);
-        catch_panic(std::panic::AssertUnwindSafe(move || {
-            let entries = host.list_file_symbols(&canonical_id);
-            let ffi: Vec<verter_protocol::typeinfo::FfiSymbolEntry> = entries
-                .into_iter()
-                .map(verter_ffi::convert::host_to_ffi_symbol_entry)
-                .collect();
-            typeinfo::encode_symbol_list(&ffi)
-        }))?
-    }
 
     /// Resolve `name` in `canonical_id`'s top-level scope and return
     /// the raised `TypeExpr` plus the produced `RequestAuditRecord`.

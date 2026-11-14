@@ -154,6 +154,13 @@ pub const FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION: u32 = 11;
 /// 2..=11 stay globally supported for the other operations).
 pub const EXPAND_AROUND_MIN_SCHEMA_VERSION: u32 = 12;
 
+/// Minimum schema version the list-symbols operation accepts: 12, the
+/// version that added its payload arm and its `symbol_list` answer. A
+/// list-symbols request below 12 is rejected with
+/// [`TypeInfoRequestError::MalformedPayload`], by the rule every served
+/// operation below its floor follows.
+pub const LIST_SYMBOLS_MIN_SCHEMA_VERSION: u32 = 12;
+
 /// First schema version whose framework-surface request carries the facet
 /// demand (`FrameworkSurfaceRequest.requested_kinds`): non-empty, no
 /// duplicate, no UNSPECIFIED value, answered with exactly the requested
@@ -188,6 +195,8 @@ pub enum ServedOperation {
     ExpandAround,
     /// `GRAPH_OPERATION_FRAMEWORK_SURFACES`.
     FrameworkSurfaces,
+    /// `GRAPH_OPERATION_LIST_SYMBOLS`.
+    ListSymbols,
 }
 
 /// The one table of served operations. Exhaustive with no wildcard, so a
@@ -198,6 +207,7 @@ fn served_operation(operation: WireOperation) -> Option<ServedOperation> {
         WireOperation::ResolveSymbol => Some(ServedOperation::ResolveSymbol),
         WireOperation::ExpandAround => Some(ServedOperation::ExpandAround),
         WireOperation::FrameworkSurfaces => Some(ServedOperation::FrameworkSurfaces),
+        WireOperation::ListSymbols => Some(ServedOperation::ListSymbols),
         WireOperation::EvaluateExpression
         | WireOperation::ProjectPath
         | WireOperation::Relate
@@ -278,6 +288,11 @@ pub fn validate_type_info_graph_request(
             }
             validate_framework_surface_request(r)?;
         }
+        (ServedOperation::ListSymbols, wire_request::Payload::ListSymbols(r)) => {
+            if r.canonical_id.is_empty() {
+                return Err(missing_project_path_error());
+            }
+        }
         (_, _) => {
             // A served operation whose payload arm belongs to another
             // operation is a client bug, not an unserved request.
@@ -331,6 +346,7 @@ pub fn validate_schema_version_for_operation(
         | WireOperation::FlowNarrowingAt
         | WireOperation::ContextualTypeAt => MIN_TYPEINFO_GRAPH_SCHEMA_VERSION,
         WireOperation::ExpandAround => EXPAND_AROUND_MIN_SCHEMA_VERSION,
+        WireOperation::ListSymbols => LIST_SYMBOLS_MIN_SCHEMA_VERSION,
         WireOperation::FrameworkSurfaces => FRAMEWORK_SURFACE_MIN_SCHEMA_VERSION,
     };
     if version < minimum {
@@ -1337,6 +1353,7 @@ fn decode_operation(value: i32) -> Option<WireOperation> {
         5 => Some(WireOperation::ExpandAround),
         6 => Some(WireOperation::FlowNarrowingAt),
         7 => Some(WireOperation::ContextualTypeAt),
+        8 => Some(WireOperation::ListSymbols),
         _ => None,
     }
 }

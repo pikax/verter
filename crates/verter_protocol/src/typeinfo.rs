@@ -95,28 +95,3 @@ pub struct FfiNamedImport {
     #[serde(default)]
     pub type_only: bool,
 }
-
-/// FFI-boundary mirror of `SymbolEntry`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FfiSymbolEntry {
-    /// Local declaration name.
-    pub name: String,
-    /// Stringly-tagged kind — `"typeAlias" | "interface" | "class" |
-    /// "const" | "let" | "var" | "function" | "asyncFunction" |
-    /// "classValue" | "enum"`.
-    pub kind: String,
-    /// Encoding of `spanStart`/`spanEnd` (always `utf8.v1`).
-    pub span_encoding: crate::types::SpanEncodingTag,
-    /// SFC-absolute span start. Set when `hasSpan = true`.
-    #[serde(default)]
-    pub span_start: u32,
-    /// SFC-absolute span end. Set when `hasSpan = true`.
-    #[serde(default)]
-    pub span_end: u32,
-    /// Discriminator — `false` when no analysis-snapshot span was
-    /// available for the symbol.
-    pub has_span: bool,
-    /// `true` when the symbol is exported.
-    pub is_exported: bool,
-}
