@@ -12757,95 +12757,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         operand: SemanticNodeId,
     ) -> Option<SemanticQueryKey> {
-        let graph = self.graph();
-        let mut current = operand;
-        let mut seen = crate::semantic_query::small_node_set::SmallNodeSet::default();
-        let (identity, args) = loop {
-            if !seen.insert(current) {
-                return None;
-            }
-            let data = graph.node_data(current)?;
-            match &*data {
-                SemanticNodeData::Alias(inner) => current = *inner,
-                SemanticNodeData::MergedDecl { contributors } => {
-                    let contributors = Arc::clone(contributors.as_arc());
-                    drop(data);
-                    current = super::walk::reduce_merged_decl_with_graph(graph, &contributors);
-                }
-                SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
-                    canonical_id,
-                    owner,
-                    name,
-                    whole_hash,
-                }) => {
-                    break (
-                        DeclIdentity {
-                            canonical_id: canonical_id.clone(),
-                            owner: *owner,
-                            whole_hash: *whole_hash,
-                            decl_name: name.clone(),
-                        },
-                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    )
-                }
-                SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args }) => {
-                    let Some(crate::semantic_query::NodeScopeId::File {
-                        canonical_id,
-                        owner,
-                        whole_hash,
-                        ..
-                    }) = graph.node_scope(current)
-                    else {
-                        return None;
-                    };
-                    break (
-                        DeclIdentity {
-                            canonical_id,
-                            owner,
-                            whole_hash,
-                            decl_name: name.clone(),
-                        },
-                        Arc::from(args.operands()),
-                    );
-                }
-                SemanticNodeData::DeclRef { identity } => {
-                    break (
-                        identity.clone(),
-                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    )
-                }
-                SemanticNodeData::InstantiationRef { base, args } => {
-                    break (base.clone(), Arc::clone(args.as_arc()))
-                }
-                _ => return None,
-            }
-        };
-        let identity = self.relation_declaration_identity(identity, current);
-        if self.runtime_nominal_identity(&identity)
-            == Some(crate::intrinsic_registry::RuntimeNominal::Function)
-            || self.string_mapping_of(current).is_some()
-            || self.cancellation.is_cancelled()
-            || crate::semantic_query::checker_policy::instantiation_budget(
-                self.connected_demand.instantiation_within_budget(1),
-            )
-            .is_err()
-        {
-            return None;
+        let mut state = CarrierWalkState::at(CarrierWalkPoint {
+            node: operand,
+            depth: 0,
+        });
+        match self.carrier_hops(&mut state, &mut |_| {}, true) {
+            CarrierHop::Declaration(identity, args) => self
+                .carrier_declaration_key(&mut state, identity, args, true)
+                .ok(),
+            CarrierHop::Done(_) | CarrierHop::Access { .. } => None,
         }
-        Some(SemanticQueryKey::Instantiate(
-            crate::semantic_query::InstantiateKey::new(
-                self.type_slot_for(
-                    identity.canonical_id.clone(),
-                    identity.owner,
-                    identity.decl_name.clone(),
-                ),
-                args,
-                self.instantiate_context_for(
-                    &identity.canonical_id,
-                    ProjectionReductionContext::structural_transit(),
-                ),
-            ),
-        ))
     }
 
     /// [`Self::unwrap_identity_carrier_for_relation`] from `start`, reporting
@@ -12864,52 +12785,134 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         start: CarrierWalkPoint,
         on_step: &mut dyn FnMut(CarrierWalkPoint),
     ) -> IdentityCarrierUnwrap {
+        let transit = ProjectionReductionContext::structural_transit();
+        let mut state = CarrierWalkState::at(start);
+        loop {
+            match self.carrier_hops(&mut state, on_step, false) {
+                CarrierHop::Done(done) => return done,
+                CarrierHop::Access { of_type_param } => {
+                    let read = self
+                        .evaluate_deferred_semantic_node_with_context(
+                            state.current,
+                            ProjectionReductionContext::structural_transit_with_mode(
+                                crate::semantic_query::ProjectionMode::Navigate,
+                            ),
+                        )
+                        .into_active_query_build_node(self);
+                    if let Some(done) = self.carrier_access_read(&mut state, read, of_type_param) {
+                        return done;
+                    }
+                }
+                CarrierHop::Declaration(identity, args) => {
+                    let key = match self.carrier_declaration_key(&mut state, identity, args, false)
+                    {
+                        Ok(key) => key,
+                        Err(done) => return done,
+                    };
+                    // `execute_type_node` IS the shared read boundary (dispatch
+                    // counters + the universal build-local taint fold); a bespoke
+                    // re-fold here would double-count the same read.
+                    let unwrapped = match self.execute_type_node(key) {
+                        QueryResult::Value(SemanticQueryOutput {
+                            value: unwrapped, ..
+                        }) => {
+                            // A nominal `typeof` carrier IS the type it denotes, so
+                            // the deferred evaluator must not be handed it: that
+                            // evaluator's job is to resolve a shell to its content,
+                            // and this carrier's content is the widened `symbol`
+                            // primitive, which is exactly the declaring identity the
+                            // relation is about to read.
+                            if self.node_is_nominal_typeof(unwrapped) {
+                                unwrapped
+                            } else {
+                                self.evaluate_deferred_semantic_node_with_context(
+                                    unwrapped, transit,
+                                )
+                                .into_active_query_build_node(self)
+                            }
+                        }
+                        _ => return IdentityCarrierUnwrap::Unresolvable,
+                    };
+
+                    if !state.arrive(unwrapped) {
+                        return IdentityCarrierUnwrap::Unresolvable;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Take graph hops to the next declaration or evaluation. A graph-only
+    /// probe stops before an arm reads anything, sharing the walk's hops.
+    /// Inlined so the in-place walk keeps one native frame under its reads.
+    #[inline(always)]
+    fn carrier_hops(
+        &self,
+        state: &mut CarrierWalkState,
+        on_step: &mut dyn FnMut(CarrierWalkPoint),
+        graph_only: bool,
+    ) -> CarrierHop {
         let graph = self.graph();
         let transit = ProjectionReductionContext::structural_transit();
-        let mut current = start.node;
-        let mut depth = start.depth;
-        let mut seen = crate::semantic_query::small_node_set::SmallNodeSet::default();
-        while seen.insert(current) {
+        loop {
+            if !state.seen.insert(state.current) {
+                return CarrierHop::Done(IdentityCarrierUnwrap::Unresolvable);
+            }
             on_step(CarrierWalkPoint {
-                node: current,
-                depth,
+                node: state.current,
+                depth: state.depth,
             });
-            let Some(data) = graph.node_data(current) else {
-                return IdentityCarrierUnwrap::Unresolvable;
+            let Some(data) = graph.node_data(state.current) else {
+                return CarrierHop::Done(IdentityCarrierUnwrap::Unresolvable);
             };
-            let (identity, args): (DeclIdentity, Arc<[SemanticNodeId]>) = match &*data {
+            if graph_only
+                && !matches!(
+                    &*data,
+                    SemanticNodeData::Alias(_)
+                        | SemanticNodeData::MergedDecl { .. }
+                        | SemanticNodeData::Opaque(
+                            QueryError::DeclPlaceholder { .. } | QueryError::RecursiveRef { .. }
+                        )
+                        | SemanticNodeData::DeclRef { .. }
+                        | SemanticNodeData::InstantiationRef { .. }
+                )
+            {
+                return CarrierHop::Done(IdentityCarrierUnwrap::Unresolvable);
+            }
+            return match &*data {
                 SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
                     drop(data);
                     let resolved = self.resolve_carrier_subject_fact(
-                        current,
+                        state.current,
                         transit.with_mode(crate::semantic_query::ProjectionMode::Navigate),
                     );
                     if !resolved.status.is_complete() {
-                        return IdentityCarrierUnwrap::Unresolvable;
+                        return CarrierHop::Done(IdentityCarrierUnwrap::Unresolvable);
                     }
-                    if resolved.node == current {
-                        return IdentityCarrierUnwrap::Concrete(current);
+                    if resolved.node == state.current {
+                        return CarrierHop::Done(IdentityCarrierUnwrap::Concrete(state.current));
                     }
-                    current = resolved.node;
+                    state.current = resolved.node;
                     continue;
                 }
                 SemanticNodeData::Alias(inner) => {
-                    current = *inner;
+                    state.current = *inner;
                     continue;
                 }
                 // A class expression's instance relates through its surface.
                 SemanticNodeData::ClassExpressionInstance { surface, .. } => {
                     let surface = *surface;
                     drop(data);
-                    current = self
-                        .class_expression_read_surface(current)
+                    state.current = self
+                        .class_expression_read_surface(state.current)
                         .unwrap_or(surface);
                     continue;
                 }
                 SemanticNodeData::MergedDecl { contributors } => {
                     let contributors = Arc::clone(contributors.as_arc());
                     drop(data);
-                    current = super::walk::reduce_merged_decl_with_graph(graph, &contributors);
+                    state.current =
+                        super::walk::reduce_merged_decl_with_graph(graph, &contributors);
                     continue;
                 }
                 SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
@@ -12917,7 +12920,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     owner,
                     name,
                     whole_hash,
-                }) => (
+                }) => CarrierHop::Declaration(
                     DeclIdentity {
                         canonical_id: canonical_id.clone(),
                         owner: *owner,
@@ -12943,11 +12946,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         owner,
                         whole_hash,
                         ..
-                    }) = graph.node_scope(current)
+                    }) = graph.node_scope(state.current)
                     else {
-                        return IdentityCarrierUnwrap::Concrete(current);
+                        return CarrierHop::Done(IdentityCarrierUnwrap::Concrete(state.current));
                     };
-                    (
+                    CarrierHop::Declaration(
                         DeclIdentity {
                             canonical_id,
                             owner,
@@ -12957,12 +12960,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         Arc::from(args.operands()),
                     )
                 }
-                SemanticNodeData::DeclRef { identity } => (
+                SemanticNodeData::DeclRef { identity } => CarrierHop::Declaration(
                     identity.clone(),
                     Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                 ),
                 SemanticNodeData::InstantiationRef { base, args } => {
-                    (base.clone(), Arc::clone(args.as_arc()))
+                    CarrierHop::Declaration(base.clone(), Arc::clone(args.as_arc()))
                 }
                 // An indexed access over a type that is not generic is the
                 // property type it reads (`Box['lit']` IS `2`, and an
@@ -12978,11 +12981,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // relation reads it through the parameter's constraint.
                 SemanticNodeData::DeferredCallable(_) => {
                     drop(data);
-                    let materialized = self.materialize_returned_callable(current);
-                    if materialized == current {
-                        return IdentityCarrierUnwrap::Unresolvable;
+                    let materialized = self.materialize_returned_callable(state.current);
+                    if materialized == state.current {
+                        return CarrierHop::Done(IdentityCarrierUnwrap::Unresolvable);
                     }
-                    current = materialized;
+                    state.current = materialized;
                     continue;
                 }
                 SemanticNodeData::IndexedAccess { object, .. } => {
@@ -12997,24 +13000,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         Some(SemanticNodeData::TypeParam { .. })
                     );
                     drop(data);
-                    let read = self
-                        .evaluate_deferred_semantic_node_with_context(
-                            current,
-                            ProjectionReductionContext::structural_transit_with_mode(
-                                crate::semantic_query::ProjectionMode::Navigate,
-                            ),
-                        )
-                        .into_active_query_build_node(self);
-                    let missed = of_type_param
-                        && matches!(
-                            graph.node_data(read).as_deref(),
-                            Some(SemanticNodeData::Opaque(QueryError::Miss))
-                        );
-                    if read == current || missed {
-                        return IdentityCarrierUnwrap::Concrete(current);
-                    }
-                    current = read;
-                    continue;
+                    CarrierHop::Access { of_type_param }
                 }
                 // `keyof` over a type whose keys settle is that key set
                 // (`keyof Face` IS `"a" | "b"`), whichever carrier prints it.
@@ -13022,23 +13008,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let base = *base;
                     drop(data);
                     match self.key_set_of(base) {
-                        Some(keys) if keys != current => {
-                            current = keys;
+                        Some(keys) if keys != state.current => {
+                            state.current = keys;
                             continue;
                         }
-                        _ => return IdentityCarrierUnwrap::Concrete(current),
+                        _ => CarrierHop::Done(IdentityCarrierUnwrap::Concrete(state.current)),
                     }
                 }
                 // A written intersection is the type the checker constructs
                 // from it (`1 & (1 | 2)` IS `1`) when that differs from it.
                 SemanticNodeData::Intersection(_) => {
                     drop(data);
-                    match self.reduced_authored_relation_pair(current, current) {
-                        Some((reduced, _)) if reduced != current => {
-                            current = reduced;
+                    match self.reduced_authored_relation_pair(state.current, state.current) {
+                        Some((reduced, _)) if reduced != state.current => {
+                            state.current = reduced;
                             continue;
                         }
-                        _ => return IdentityCarrierUnwrap::Concrete(current),
+                        _ => CarrierHop::Done(IdentityCarrierUnwrap::Concrete(state.current)),
                     }
                 }
                 // A homomorphic mapped type over a closed object is the
@@ -13052,56 +13038,78 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let (source, mapper) = (*source, mapper.clone());
                     drop(data);
                     match self.mapped_object_for_relation(source, &mapper, transit) {
-                        Some(object) if object != current => {
-                            current = object;
+                        Some(object) if object != state.current => {
+                            state.current = object;
                             continue;
                         }
-                        _ => return IdentityCarrierUnwrap::Concrete(current),
+                        _ => CarrierHop::Done(IdentityCarrierUnwrap::Concrete(state.current)),
                     }
                 }
-                _ => return IdentityCarrierUnwrap::Concrete(current),
+                _ => CarrierHop::Done(IdentityCarrierUnwrap::Concrete(state.current)),
             };
-            drop(data);
-            // Another runtime nominal's carrier is the project's global
-            // interface of that name applied to its arguments, and
-            // expands to that interface's members.
-            let identity = self.relation_declaration_identity(identity, current);
-            // The lib `Function` global's carrier is its own terminal
-            // identity for relations: the `__builtin__` base names no
-            // declaration the Instantiate dispatch can serve, so the
-            // dispatch would MISS non-cacheably and taint every
-            // enclosing build's warm admission for a carrier the
-            // checker publishes as an ordinary type (`typeof x ===
-            // "function"` over `object` narrows to `Function`). Relations
-            // decide it by identity / tag, never by a body it does not
-            // have. Every OTHER non-file base (a runtime nominal the
-            // project declares no interface for, the global sentinel)
-            // keeps dispatching — its Unresolvable verdict is the
-            // measured relation behavior those carriers' consumers pin.
-            if self.runtime_nominal_identity(&identity)
-                == Some(crate::intrinsic_registry::RuntimeNominal::Function)
-            {
-                return IdentityCarrierUnwrap::Concrete(current);
-            }
-            // A string mapping the reducer keeps (`Uppercase<string>`) is
-            // the checker's string mapping type itself: relations decide it
-            // by the mapping ([`Self::string_mapping_relation`]), never by a
-            // body it does not have.
-            if self.string_mapping_of(current).is_some() {
-                return IdentityCarrierUnwrap::Concrete(current);
-            }
-            if self.cancellation.is_cancelled() {
-                return IdentityCarrierUnwrap::Unresolvable;
-            }
-            depth += 1;
-            if let Err(refusal) = crate::semantic_query::checker_policy::instantiation_budget(
-                self.connected_demand.instantiation_within_budget(depth),
-            ) {
-                return IdentityCarrierUnwrap::Concrete(
-                    self.recover_at_operation_budget(refusal, Some(current)),
-                );
-            }
-            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+        }
+    }
+
+    /// Admit and name the declaration step. A graph-only probe performs no
+    /// recovery and records no physical step: it does not take the step.
+    #[inline(always)]
+    fn carrier_declaration_key(
+        &self,
+        state: &mut CarrierWalkState,
+        identity: DeclIdentity,
+        args: Arc<[SemanticNodeId]>,
+        graph_only: bool,
+    ) -> Result<SemanticQueryKey, IdentityCarrierUnwrap> {
+        let transit = ProjectionReductionContext::structural_transit();
+        // Another runtime nominal's carrier is the project's global
+        // interface of that name applied to its arguments, and
+        // expands to that interface's members.
+        let identity = self.relation_declaration_identity(identity, state.current);
+        // The lib `Function` global's carrier is its own terminal
+        // identity for relations: the `__builtin__` base names no
+        // declaration the Instantiate dispatch can serve, so the
+        // dispatch would MISS non-cacheably and taint every
+        // enclosing build's warm admission for a carrier the
+        // checker publishes as an ordinary type (`typeof x ===
+        // "function"` over `object` narrows to `Function`). Relations
+        // decide it by identity / tag, never by a body it does not
+        // have. Every OTHER non-file base (a runtime nominal the
+        // project declares no interface for, the global sentinel)
+        // keeps dispatching — its Unresolvable verdict is the
+        // measured relation behavior those carriers' consumers pin.
+        if self.runtime_nominal_identity(&identity)
+            == Some(crate::intrinsic_registry::RuntimeNominal::Function)
+        {
+            return Err(IdentityCarrierUnwrap::Concrete(state.current));
+        }
+        // A string mapping the reducer keeps (`Uppercase<string>`) is
+        // the checker's string mapping type itself: relations decide it
+        // by the mapping ([`Self::string_mapping_relation`]), never by a
+        // body it does not have.
+        if self.string_mapping_of(state.current).is_some() {
+            return Err(IdentityCarrierUnwrap::Concrete(state.current));
+        }
+        if self.cancellation.is_cancelled() {
+            return Err(IdentityCarrierUnwrap::Unresolvable);
+        }
+        state.depth += 1;
+        if let Err(refusal) = crate::semantic_query::checker_policy::instantiation_budget(
+            self.connected_demand
+                .instantiation_within_budget(state.depth),
+        ) {
+            return Err(if graph_only {
+                IdentityCarrierUnwrap::Unresolvable
+            } else {
+                IdentityCarrierUnwrap::Concrete(
+                    self.recover_at_operation_budget(refusal, Some(state.current)),
+                )
+            });
+        }
+        if !graph_only {
+            self.graph().record_carrier_declaration_unwrapped();
+        }
+        Ok(SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
                 self.type_slot_for(
                     identity.canonical_id.clone(),
                     identity.owner,
@@ -13109,35 +13117,200 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ),
                 args,
                 self.instantiate_context_for(&identity.canonical_id, transit),
-            ));
-            // `execute_type_node` IS the shared read boundary (dispatch
-            // counters + the universal build-local taint fold); a bespoke
-            // re-fold here would double-count the same read.
-            let unwrapped = match self.execute_type_node(key) {
-                QueryResult::Value(SemanticQueryOutput {
-                    value: unwrapped, ..
-                }) => {
-                    // A nominal `typeof` carrier IS the type it denotes, so
-                    // the deferred evaluator must not be handed it: that
-                    // evaluator's job is to resolve a shell to its content,
-                    // and this carrier's content is the widened `symbol`
-                    // primitive, which is exactly the declaring identity the
-                    // relation is about to read.
-                    if self.node_is_nominal_typeof(unwrapped) {
-                        unwrapped
-                    } else {
-                        self.evaluate_deferred_semantic_node_with_context(unwrapped, transit)
-                            .into_active_query_build_node(self)
+            ),
+        ))
+    }
+
+    /// An access that could read no further stays concrete; otherwise the
+    /// walk goes on at its answer, retaining the open-type-parameter rule.
+    #[inline(always)]
+    fn carrier_access_read(
+        &self,
+        state: &mut CarrierWalkState,
+        read: SemanticNodeId,
+        of_type_param: bool,
+    ) -> Option<IdentityCarrierUnwrap> {
+        let graph = self.graph();
+        let missed = of_type_param
+            && matches!(
+                graph.node_data(read).as_deref(),
+                Some(SemanticNodeData::Opaque(QueryError::Miss))
+            );
+        if read == state.current || missed {
+            return Some(IdentityCarrierUnwrap::Concrete(state.current));
+        }
+        state.current = read;
+        None
+    }
+
+    /// Carry an owned identity-carrier walk to its answer or its next read.
+    /// Declaration instantiations and deferred evaluations return their reads
+    /// to the holder; the other carrier arms read where this stage stands.
+    #[inline(never)]
+    pub(super) fn advance_identity_carrier_read(
+        &self,
+        read: &mut IdentityCarrierRead,
+    ) -> IdentityCarrierStep {
+        use super::evaluate::{DeferredEvaluationDemand, DeferredStep};
+        let transit = ProjectionReductionContext::structural_transit();
+        loop {
+            match std::mem::replace(&mut read.standing, CarrierStanding::Walking) {
+                CarrierStanding::Walking => {}
+                CarrierStanding::Instantiated(None) => {
+                    return IdentityCarrierStep::Done(IdentityCarrierUnwrap::Unresolvable)
+                }
+                CarrierStanding::Instantiated(Some(node)) if self.node_is_nominal_typeof(node) => {
+                    if !read.state.arrive(node) {
+                        return IdentityCarrierStep::Done(IdentityCarrierUnwrap::Unresolvable);
                     }
                 }
-                _ => return IdentityCarrierUnwrap::Unresolvable,
-            };
-            if unwrapped == current {
-                return IdentityCarrierUnwrap::Unresolvable;
+                CarrierStanding::Instantiated(Some(node)) => {
+                    match self.begin_deferred_read(node, transit, DeferredEvaluationDemand::Shell) {
+                        DeferredStep::Read(key, evaluation) => {
+                            read.standing =
+                                CarrierStanding::Evaluation(CarrierEvaluation::Answer, evaluation);
+                            return IdentityCarrierStep::Read(key);
+                        }
+                        DeferredStep::Done(outcome) => {
+                            read.standing = CarrierStanding::Evaluated(
+                                CarrierEvaluation::Answer,
+                                outcome.into_active_query_build_node(self),
+                            );
+                            continue;
+                        }
+                    }
+                }
+                CarrierStanding::Evaluated(CarrierEvaluation::Answer, node) => {
+                    if !read.state.arrive(node) {
+                        return IdentityCarrierStep::Done(IdentityCarrierUnwrap::Unresolvable);
+                    }
+                }
+                CarrierStanding::Evaluated(CarrierEvaluation::Access { of_type_param }, node) => {
+                    if let Some(done) =
+                        self.carrier_access_read(&mut read.state, node, of_type_param)
+                    {
+                        return IdentityCarrierStep::Done(done);
+                    }
+                }
+                CarrierStanding::Declaration | CarrierStanding::Evaluation(..) => {
+                    unreachable!("a standing read is delivered before the walk advances")
+                }
             }
-            current = unwrapped;
+            match self.carrier_hops(&mut read.state, &mut |_| {}, false) {
+                CarrierHop::Done(done) => return IdentityCarrierStep::Done(done),
+                CarrierHop::Declaration(identity, args) => {
+                    return match self.carrier_declaration_key(
+                        &mut read.state,
+                        identity,
+                        args,
+                        false,
+                    ) {
+                        Ok(key) => {
+                            read.standing = CarrierStanding::Declaration;
+                            IdentityCarrierStep::Read(key)
+                        }
+                        Err(done) => IdentityCarrierStep::Done(done),
+                    };
+                }
+                CarrierHop::Access { of_type_param } => {
+                    let evaluation_of = CarrierEvaluation::Access { of_type_param };
+                    match self.begin_deferred_read(
+                        read.state.current,
+                        ProjectionReductionContext::structural_transit_with_mode(
+                            crate::semantic_query::ProjectionMode::Navigate,
+                        ),
+                        DeferredEvaluationDemand::Shell,
+                    ) {
+                        DeferredStep::Read(key, evaluation) => {
+                            read.standing = CarrierStanding::Evaluation(evaluation_of, evaluation);
+                            return IdentityCarrierStep::Read(key);
+                        }
+                        DeferredStep::Done(outcome) => {
+                            read.standing = CarrierStanding::Evaluated(
+                                evaluation_of,
+                                outcome.into_active_query_build_node(self),
+                            );
+                        }
+                    }
+                }
+            }
         }
-        IdentityCarrierUnwrap::Unresolvable
+    }
+
+    /// Deliver inside the evaluation that named the read, or retain a
+    /// declaration's answer for the walk loop. No graph hop runs here.
+    #[inline(never)]
+    pub(super) fn deliver_identity_carrier_read(
+        &self,
+        read: &mut IdentityCarrierRead,
+        deliver: &mut dyn FnMut() -> crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> Option<SemanticQueryKey> {
+        use super::evaluate::DeferredStep;
+        match std::mem::replace(&mut read.standing, CarrierStanding::Walking) {
+            CarrierStanding::Declaration => {
+                read.standing = CarrierStanding::Instantiated(match deliver().value {
+                    QueryResult::Value(node) => Some(node),
+                    QueryResult::Recursive(_) | QueryResult::Error(_) => None,
+                });
+                None
+            }
+            CarrierStanding::Evaluation(evaluation_of, evaluation) => {
+                match self.resume_deferred_read(evaluation, deliver) {
+                    DeferredStep::Read(key, evaluation) => {
+                        read.standing = CarrierStanding::Evaluation(evaluation_of, evaluation);
+                        Some(key)
+                    }
+                    DeferredStep::Done(outcome) => {
+                        read.standing = CarrierStanding::Evaluated(
+                            evaluation_of,
+                            outcome.into_active_query_build_node(self),
+                        );
+                        None
+                    }
+                }
+            }
+            _ => unreachable!("a delivery answers the read the walk stands at"),
+        }
+    }
+
+    /// Abandon a standing evaluation's recordings before its holder releases
+    /// the walk. A declaration read holds no recording on the dispatcher.
+    pub(super) fn abandon_identity_carrier_read(&self, read: IdentityCarrierRead) {
+        if let CarrierStanding::Evaluation(_, evaluation) = read.standing {
+            self.abandon_deferred_read(*evaluation);
+        }
+    }
+
+    /// Drive the owned walk through the same read boundary as an evaluation.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn unwrap_identity_carrier_stepwise_for_tests(
+        &self,
+        node: SemanticNodeId,
+    ) -> IdentityCarrierUnwrap {
+        let (_connected_guard, _) = self.enter_connected_demand(false);
+        let mut read = IdentityCarrierRead::at(CarrierWalkPoint { node, depth: 0 });
+        let mut step = self.advance_identity_carrier_read(&mut read);
+        loop {
+            match step {
+                IdentityCarrierStep::Done(done) => return done,
+                IdentityCarrierStep::Read(key) => {
+                    let mut key = Some(key);
+                    let counts = read.reads_for_carrier();
+                    let next = self.deliver_identity_carrier_read(&mut read, &mut || {
+                        let key = key.take().expect("a carrier read is made once");
+                        if counts {
+                            self.carrier_read_in_place(key)
+                        } else {
+                            self.execute_read(key)
+                        }
+                    });
+                    step = match next {
+                        Some(key) => IdentityCarrierStep::Read(key),
+                        None => self.advance_identity_carrier_read(&mut read),
+                    };
+                }
+            }
+        }
     }
 
     /// The object a mapped type resolves to for a relation, when its source
@@ -15617,6 +15790,96 @@ pub(super) struct CarrierWalkPoint {
     pub(super) node: SemanticNodeId,
     pub(super) depth: u32,
 }
+
+/// The node and declaration depth reached, and every node visited, by one
+/// identity-carrier walk.
+pub(super) struct CarrierWalkState {
+    current: SemanticNodeId,
+    depth: u32,
+    seen: crate::semantic_query::small_node_set::SmallNodeSet,
+}
+
+impl CarrierWalkState {
+    #[inline(always)]
+    fn at(start: CarrierWalkPoint) -> Self {
+        Self {
+            current: start.node,
+            depth: start.depth,
+            seen: Default::default(),
+        }
+    }
+
+    #[inline(always)]
+    fn arrive(&mut self, node: SemanticNodeId) -> bool {
+        if node == self.current {
+            return false;
+        }
+        self.current = node;
+        true
+    }
+}
+
+/// The next step after taking the graph hops of an identity carrier.
+enum CarrierHop {
+    Done(IdentityCarrierUnwrap),
+    Declaration(DeclIdentity, Arc<[SemanticNodeId]>),
+    Access { of_type_param: bool },
+}
+
+/// A caller-owned identity-carrier walk between two of its reads.
+pub(super) struct IdentityCarrierRead {
+    state: CarrierWalkState,
+    standing: CarrierStanding,
+}
+
+enum CarrierStanding {
+    Walking,
+    Declaration,
+    Evaluation(CarrierEvaluation, Box<super::evaluate::DeferredRead>),
+    Instantiated(Option<SemanticNodeId>),
+    Evaluated(CarrierEvaluation, SemanticNodeId),
+}
+
+#[derive(Clone, Copy)]
+enum CarrierEvaluation {
+    Answer,
+    Access { of_type_param: bool },
+}
+
+pub(super) enum IdentityCarrierStep {
+    Done(IdentityCarrierUnwrap),
+    Read(SemanticQueryKey),
+}
+
+impl IdentityCarrierRead {
+    pub(super) fn at(start: CarrierWalkPoint) -> Self {
+        Self {
+            state: CarrierWalkState::at(start),
+            standing: CarrierStanding::Walking,
+        }
+    }
+
+    pub(super) fn reads_for_carrier(&self) -> bool {
+        match &self.standing {
+            CarrierStanding::Declaration => true,
+            CarrierStanding::Evaluation(_, evaluation) => evaluation.reads_for_carrier(),
+            _ => false,
+        }
+    }
+}
+
+static_assertions::assert_impl_all!(IdentityCarrierRead: Send);
+static_assertions::assert_not_impl_any!(IdentityCarrierRead: Clone, Copy);
+const _: () = assert!(
+    std::mem::size_of::<CarrierWalkState>()
+        <= 16 + std::mem::size_of::<crate::semantic_query::small_node_set::SmallNodeSet>()
+);
+const _: () = assert!(
+    std::mem::size_of::<IdentityCarrierRead>() <= 24 + std::mem::size_of::<CarrierWalkState>()
+);
+const _: () = assert!(
+    std::mem::size_of::<IdentityCarrierStep>() <= 16 + std::mem::size_of::<SemanticQueryKey>()
+);
 
 /// A PROOF that two nodes have no common inhabitant, carrying the CHECKER'S
 /// answer to the one question a consumer may not decide for itself: whether

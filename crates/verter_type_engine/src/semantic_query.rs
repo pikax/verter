@@ -6712,6 +6712,10 @@ pub struct SemanticGraphStats {
     /// the slot is built, the extra rest element included and a receiver
     /// not, outside every charge. A position composed again counts again.
     pub signature_parameters_composed: u64,
+    /// Declarations an identity-carrier walk names for instantiation, after
+    /// its admission checks, outside every charge. A declaration unwrapped
+    /// again counts again, whichever driver runs the walk.
+    pub carrier_declarations_unwrapped: u64,
     /// Signature result reads performed, whichever driver made them: one
     /// per read begun, counted before its recipe is read. A result forced
     /// again counts again.
@@ -13118,7 +13122,8 @@ mod tests {
     ///   binder_substitutions, substitution_child_visits,
     ///   discovery_nodes_walked, discovery_signatures_published,
     ///   signature_positions_compared, signature_comparisons_decided,
-    ///   signature_parameters_composed, signature_results_forced,
+    ///   signature_parameters_composed, carrier_declarations_unwrapped,
+    ///   signature_results_forced,
     ///   signature_rebinds, signature_descriptors_rebound.
     /// - Exceptional-path: same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
@@ -13174,6 +13179,7 @@ mod tests {
             "signature_positions_compared",
             "signature_comparisons_decided",
             "signature_parameters_composed",
+            "carrier_declarations_unwrapped",
             "signature_results_forced",
             "signature_rebinds",
             "signature_descriptors_rebound",
