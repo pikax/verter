@@ -6953,7 +6953,7 @@ mod semantic_poll_contract {
     }
 
     /// Every suspension seam of the families built as continuations.
-    const HELD_SEAMS: [HeldSeam; 17] = [
+    const HELD_SEAMS: [HeldSeam; 19] = [
         HeldSeam {
             seam: "a routed declaration's defining declaration",
             host: routed_declaration_host,
@@ -7173,6 +7173,24 @@ mod semantic_poll_contract {
             // resumes with its list, then with its composite's result.
             in_all: (3, 2),
             // The set's frame and its list's.
+            frames: 2,
+        },
+        HeldSeam {
+            seam: "a signature's rest parameter declaration",
+            host: callable_host,
+            keys: rest_tuple_seam_keys,
+            expression_site: false,
+            before_seam: (1, 0),
+            in_all: (1, 1),
+            frames: 2,
+        },
+        HeldSeam {
+            seam: "a signature's rest parameter evaluation",
+            host: callable_host,
+            keys: rest_access_seam_keys,
+            expression_site: false,
+            before_seam: (1, 0),
+            in_all: (1, 1),
             frames: 2,
         },
     ];
@@ -8909,6 +8927,10 @@ mod semantic_poll_contract {
         matching_at_hold: MatchingWork,
         matching_repoll: MatchingWork,
         matching_total: MatchingWork,
+        /// Declaration steps of identity-carrier walks over the same spans.
+        carrier_at_hold: u64,
+        carrier_repoll: u64,
+        carrier_total: u64,
         read: ValueRead,
         /// The synchronous waits the first poll entered, recorded: a
         /// dependency joined in place instead of named as the root's need
@@ -8952,6 +8974,9 @@ mod semantic_poll_contract {
         let before = work(&host);
         let before_discovery = discovery_work(&host);
         let before_matching = matching_work(&host);
+        let before_carrier = carrier_steps(&host);
+        let mut carrier_at_hold = 0;
+        let mut carrier_repoll = 0;
         let mut discovery_at_hold = DiscoveryWork::default();
         let mut discovery_repoll = DiscoveryWork::default();
         let mut matching_at_hold = MatchingWork::default();
@@ -8967,6 +8992,7 @@ mod semantic_poll_contract {
                 let at_hold = work_since(&host, before);
                 discovery_at_hold = discovery_work(&host).since(before_discovery);
                 matching_at_hold = matching_work(&host).since(before_matching);
+                carrier_at_hold = carrier_steps(&host) - before_carrier;
                 if first.is_ready() {
                     return (first, at_hold, false, None, NO_WORK, first_waits);
                 }
@@ -8991,6 +9017,7 @@ mod semantic_poll_contract {
                 matching_repoll = matching_work(&host)
                     .since(before_matching)
                     .since(matching_at_hold);
+                carrier_repoll = carrier_steps(&host) - before_carrier - carrier_at_hold;
                 (
                     first,
                     at_hold,
@@ -9024,6 +9051,9 @@ mod semantic_poll_contract {
             matching_at_hold,
             matching_repoll,
             matching_total: matching_work(&host).since(before_matching),
+            carrier_at_hold,
+            carrier_repoll,
+            carrier_total: carrier_steps(&host) - before_carrier,
             read,
             first_waits,
         };
@@ -12794,7 +12824,12 @@ mod semantic_poll_contract {
                              interface TakesA<T, U, V> { (a: T, b: U): 1 }\n\
                              interface TakesB<T, U, V> { (a: V, b: T): 2 }\n\
                              interface BindsA<X> { <T>(a: T, b: 1): 1 }\n\
-                             interface BindsB<X> { <T>(a: T, b: 2): 2 }\n";
+                             interface BindsB<X> { <T>(a: T, b: 2): 2 }\n\
+                             type RestPair<T> = [a: T, b: T];\n\
+                             interface RestA<T> { (a: T): 1; (...args: RestPair<T>): 2 }\n\
+                             interface RestBox<T> { items: [a: T] }\n\
+                             type RestItems<T> = RestBox<T>[\"items\"];\n\
+                             interface RestB<T> { (...args: RestItems<T>): 1 }\n";
 
     fn callable_host() -> Arc<crate::VerterHost> {
         let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
@@ -13200,6 +13235,125 @@ mod semantic_poll_contract {
         callable_keys(host, subject, reads)
     }
 
+    /// An interface whose later signature unwraps a tuple declaration.
+    fn rest_tuple(host: &crate::VerterHost, dispatch: &HostDispatch<'_>) -> CallableKeys {
+        let x = callable_argument(dispatch);
+        callable_keys(
+            host,
+            callable_application(host, dispatch, "RestA", &[x]),
+            vec![
+                callable_instantiation(dispatch, "RestA", &[x]),
+                callable_instantiation(dispatch, "RestPair", &[x]),
+            ],
+        )
+    }
+
+    /// A deferred access whose object is a conditional. The conditional is
+    /// read inside the evaluation, before the access reads its chosen object.
+    fn rest_access(host: &crate::VerterHost, dispatch: &HostDispatch<'_>) -> CallableKeys {
+        use verter_type_engine::semantic_query::{
+            FunctionParam, IndexKey, IndexedAccessOrigin, PayloadArray, SignatureKind,
+            SignatureReturnCarrier,
+        };
+        let x = callable_argument(dispatch);
+        let object = callable_application(host, dispatch, "RestBox", &[x]);
+        let index = IndexKey::from("items");
+        let extends = dispatch
+            .graph_arc()
+            .intern_node(SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::String,
+            ));
+        let never = dispatch
+            .graph_arc()
+            .intern_node(SemanticNodeData::Primitive(
+                verter_type_engine::semantic_query::PrimitiveKind::Never,
+            ));
+        let conditional = dispatch
+            .graph_arc()
+            .intern_node(SemanticNodeData::Conditional {
+                check: x,
+                extends,
+                true_branch_ref: object,
+                false_branch_ref: never,
+                distributive: false,
+                pending: None,
+            });
+        let ty = dispatch
+            .graph_arc()
+            .intern_node(SemanticNodeData::IndexedAccess {
+                object: conditional,
+                index: index.clone(),
+                origin: IndexedAccessOrigin::Composed,
+            });
+        let mut occurrence = super::super::call_resolve_tests::occurrence("RestB", 0);
+        occurrence.function.anchor.canonical_id = CALLABLE_FILE.into();
+        occurrence.function.anchor.space = verter_type_expr::locators::LocatorSymbolSpace::Type;
+        let subject = dispatch
+            .graph_arc()
+            .intern_node(SemanticNodeData::Signature {
+                kind: SignatureKind::Call,
+                params: PayloadArray::from(vec![FunctionParam::synthetic(
+                    Some("args".into()),
+                    ty,
+                    false,
+                    true,
+                )]),
+                return_type: x,
+                type_parameters: PayloadArray::from(Vec::new()),
+                occurrence: Some(occurrence),
+                return_carrier: SignatureReturnCarrier::Declared(x),
+                signature_span: None,
+                return_type_span: None,
+                predicate: None,
+                is_abstract: false,
+            });
+        callable_keys(
+            host,
+            subject,
+            vec![
+                SemanticQueryKey::Conditional {
+                    check: x,
+                    extends,
+                    true_branch: object,
+                    false_branch: never,
+                    distributive: false,
+                    pending: None,
+                },
+                SemanticQueryKey::IndexedAccess {
+                    base: object,
+                    index,
+                    mode: ProjectionMode::Navigate,
+                },
+            ],
+        )
+    }
+
+    fn carrier_steps(host: &crate::VerterHost) -> u64 {
+        host.project_type_store()
+            .semantic_graph()
+            .stats_snapshot()
+            .carrier_declarations_unwrapped
+    }
+
+    fn synchronous_rest_work(fixture: CallableFixture) -> (u64, u64) {
+        let host = callable_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _scope = dispatch.enter_construction_scope();
+        let keys = fixture(&host, &dispatch);
+        let before = carrier_steps(&host);
+        let before_deferred = work(&host).deferred;
+        let read = dispatch.execute_via_cold_build_helper(keys.set);
+        let summary = read_summary(&dispatch, &read);
+        assert!(
+            !summary.3 && summary.5.is_some(),
+            "a complete, priced rest signature: {summary:?}"
+        );
+        (
+            carrier_steps(&host) - before,
+            work(&host).deferred - before_deferred,
+        )
+    }
+
     /// The signature walks' own work: subject nodes entered and
     /// signatures published.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -13552,6 +13706,68 @@ mod semantic_poll_contract {
             },
             "{label}: the subject entered, nothing published"
         );
+    }
+
+    #[test]
+    fn a_signature_list_waiting_on_a_later_signatures_rest_parameter_declaration_resumes_without_publishing_or_unwrapping_again(
+    ) {
+        let label = "a later signature's rest declaration";
+        assert_list_reads(rest_tuple, label);
+        assert_eq!(synchronous_rest_work(rest_tuple), (1, 0));
+        let run = assert_list_suspends(
+            rest_tuple,
+            1,
+            DiscoveryWork {
+                nodes: 1,
+                published: 2,
+            },
+            MatchingWork::default(),
+            label,
+        );
+        assert_eq!(
+            run.discovery_at_hold,
+            DiscoveryWork {
+                nodes: 1,
+                published: 1
+            }
+        );
+        assert_eq!(run.carrier_at_hold, 1);
+        assert_eq!(run.carrier_repoll, 0);
+        assert_eq!(run.carrier_total, 1);
+        assert_eq!(run.total.deferred, 0);
+    }
+
+    #[test]
+    fn a_rest_parameter_whose_type_is_read_inside_an_evaluation_resumes_inside_that_evaluation() {
+        let label = "a rest parameter's deferred access";
+        assert_list_reads(rest_access, label);
+        assert_eq!(synchronous_rest_work(rest_access), (0, 5));
+        let run = assert_list_suspends(
+            rest_access,
+            0,
+            DiscoveryWork {
+                nodes: 1,
+                published: 1,
+            },
+            MatchingWork::default(),
+            label,
+        );
+        assert_eq!(
+            run.discovery_at_hold,
+            DiscoveryWork {
+                nodes: 1,
+                published: 0
+            }
+        );
+        assert_eq!(run.carrier_at_hold, 0);
+        assert_eq!(run.carrier_repoll, 0);
+        assert_eq!(run.carrier_total, 0);
+        // The access pushes its conditional object (1); the conditional
+        // names its read (2), then finishes on its application (3); the
+        // access names its read (4), then finishes on its tuple (5).
+        assert_eq!(run.at_hold.deferred, 2);
+        assert_eq!(run.total.deferred, 5);
+        assert_eq!(run.repoll, NO_WORK);
     }
 
     /// An overload set over `CallA<"x"> & CallB<"x"> & CallD<"x">` whose
@@ -14295,6 +14511,22 @@ mod semantic_poll_contract {
 
     /// The overload set over `CallA<"x"> & CallB<"x"> & CallD<"x">` and the
     /// result of `CallD`'s signature its list first reads.
+    fn rest_tuple_seam_keys(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
+        let keys = rest_tuple(host, dispatch);
+        (keys.set, keys.reads[1].clone())
+    }
+
+    fn rest_access_seam_keys(
+        host: &crate::VerterHost,
+        dispatch: &HostDispatch<'_>,
+    ) -> (SemanticQueryKey, SemanticQueryKey) {
+        let keys = rest_access(host, dispatch);
+        (keys.set, keys.reads[0].clone())
+    }
+
     fn callable_triple_seam_keys(
         host: &crate::VerterHost,
         dispatch: &HostDispatch<'_>,
