@@ -2000,7 +2000,14 @@ mod tests {
 
     fn empty_component_meta(root_reachability: RootReachability) -> ComponentMetaAnalysis {
         ComponentMetaAnalysis {
-            domain_guarantees: Default::default(),
+            domain_guarantees: verter_session_query::analysis::component_meta::ComponentDomainGuarantees {
+            models: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+            exposed: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+            accepted: verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::Exact.guarantee(),
+            public_instance: verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Exact.guarantee(),
+            type_registry: verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false),
+            ..Default::default()
+        },
             props: Vec::new(),
             events: Vec::new(),
             slots: Vec::new(),

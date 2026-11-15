@@ -367,6 +367,9 @@ fn materialize_component_meta_output_types<'a, M: verter_audit::observe::Observe
     cap: &MetaResolveProjectorsOutputCap<'_, '_, crate::resolver_core::HostCapabilities<M>>,
     scope_canonical_id: &'a str,
     analysis: &'a verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
+    declarations: Vec<
+        Option<verter_session_query::declarations::metadata::ResolvedTypeDeclaration>,
+    >,
 ) -> Result<
     crate::meta_resolve::MaterializedComponentMetaTypes,
     crate::meta_resolve::ComponentMetaOutputError,
@@ -376,7 +379,10 @@ fn materialize_component_meta_output_types<'a, M: verter_audit::observe::Observe
 
     let mut memo = OutputSourceMemo::new();
     let scope: &'a str = scope_canonical_id;
-    let mut lanes = crate::meta_resolve::output::MaterializedComponentMetaTypeLanes::default();
+    let mut lanes = crate::meta_resolve::output::MaterializedComponentMetaTypeLanes {
+        type_registry_declarations: declarations,
+        ..Default::default()
+    };
 
     for (index, prop) in analysis.props.iter().enumerate() {
         lanes.props.push(memo.materialize_publication_lane_slot(
@@ -727,6 +733,17 @@ pub(crate) fn build_component_meta_output<M: verter_audit::observe::ObserveExec>
     // materialized registry lane aligns with the MERGED registry the wire
     // publishes.
     let resolution_output = resolution.map(|seed| {
+        analysis.domain_guarantees.type_registry =
+            crate::typeinfo::surface_resolution::metadata_guarantee(
+                if seed.completeness.is_partial() {
+                    verter_type_engine::semantic_query::FactStatus::approximate(
+                        seed.completeness.reasons(),
+                    )
+                } else {
+                    verter_type_engine::semantic_query::FactStatus::Complete
+                },
+                false,
+            );
         finalize_resolved_type_registry_overlay(
             &mut analysis.type_registry,
             seed.resolved_type_registry,
@@ -734,13 +751,35 @@ pub(crate) fn build_component_meta_output<M: verter_audit::observe::ObserveExec>
         seed.output
     });
 
+    // Resolve declaration identity once in the session; the transport only zips.
+    let mut by_name = rustc_hash::FxHashMap::default();
+    if let Some(output) = &resolution_output {
+        for row in &output.resolved_type_registry_meta {
+            by_name.entry(row.name.as_str()).or_insert(&row.declaration);
+        }
+    }
+    let declarations = analysis
+        .type_registry
+        .iter()
+        .map(|entry| {
+            by_name
+                .get(entry.name.as_str())
+                .map(|declaration| (*declaration).clone())
+        })
+        .collect();
+
     // ONE dispatch for the whole output payload; the capability mint and
     // every sealed-carrier unwrap live here, in the terminal sink.
     let cap = MetaResolveProjectorsOutputCap::new(dispatch);
     let _materialization_scope =
         verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
-    let types =
-        materialize_component_meta_output_types(dispatch, &cap, scope_canonical_id, &analysis)?;
+    let types = materialize_component_meta_output_types(
+        dispatch,
+        &cap,
+        scope_canonical_id,
+        &analysis,
+        declarations,
+    )?;
     let completeness = completeness
         .merge(verter_type_engine::request_context::current_cold_compute_completeness());
     let adapter_id = ctx

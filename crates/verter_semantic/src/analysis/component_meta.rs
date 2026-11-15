@@ -272,6 +272,12 @@ pub struct ResolvedMacroInput {
     /// Producer-owned slots-lane claim. `None` makes no claim.
     pub slots_guarantee:
         Option<verter_session_query::analysis::component_meta::MetadataFactGuarantee>,
+    /// Producer-owned model-name domain claim.
+    pub models_guarantee:
+        Option<verter_session_query::analysis::component_meta::MetadataFactGuarantee>,
+    /// Producer-owned exposed-member domain claim.
+    pub exposed_guarantee:
+        Option<verter_session_query::analysis::component_meta::MetadataFactGuarantee>,
 }
 
 pub struct ComponentMetaInput<'a> {
@@ -1266,6 +1272,8 @@ fn merged_resolved_macro_input(
             props_guarantee: None,
             events_guarantee: None,
             slots_guarantee: None,
+            models_guarantee: None,
+            exposed_guarantee: None,
         });
         verter_session_query::analysis::component_meta::MetadataFactGuarantee::absorb_option(
             &mut entry.props_guarantee,
@@ -1280,6 +1288,14 @@ fn merged_resolved_macro_input(
             resolved.slots_guarantee.clone(),
         );
 
+        verter_session_query::analysis::component_meta::MetadataFactGuarantee::absorb_option(
+            &mut entry.models_guarantee,
+            resolved.models_guarantee.clone(),
+        );
+        verter_session_query::analysis::component_meta::MetadataFactGuarantee::absorb_option(
+            &mut entry.exposed_guarantee,
+            resolved.exposed_guarantee.clone(),
+        );
         for prop in &resolved.props {
             if let Some(existing) = entry
                 .props
@@ -3024,6 +3040,35 @@ fn component_domain_guarantees(
         }
         result
     }
+    fn producer_lane(
+        macros: &[AnalyzedMacro],
+        resolved: &[ResolvedMacroInput],
+        kind: AnalyzedMacroKind,
+        claim: impl Fn(&ResolvedMacroInput) -> Option<&MetadataFactGuarantee>,
+    ) -> MetadataFactGuarantee {
+        let mut result = MetadataFactGuarantee::complete(false);
+        for (index, mac) in macros
+            .iter()
+            .enumerate()
+            .filter(|(_, mac)| mac.kind == kind)
+        {
+            // Object-literal expose names are authoritative analyzer facts.
+            if kind == AnalyzedMacroKind::DefineExpose
+                && !mac.is_type_based
+                && !mac.expose_fields.is_empty()
+            {
+                result.absorb(&MetadataFactGuarantee::complete(false));
+                continue;
+            }
+            let mut joined = None;
+            for row in resolved.iter().filter(|row| row.macro_index == index) {
+                MetadataFactGuarantee::absorb_option(&mut joined, claim(row).cloned());
+            }
+            let next = joined.unwrap_or_default();
+            result.absorb(&next);
+        }
+        result
+    }
     let mut guarantees = ComponentDomainGuarantees {
         props: lane(
             macros,
@@ -3043,6 +3088,23 @@ fn component_domain_guarantees(
             evaluated.map(|value| value.define_slots.as_slice()),
             None,
         ),
+        models: producer_lane(
+            macros,
+            resolved_macros,
+            AnalyzedMacroKind::DefineModel,
+            |row| row.models_guarantee.as_ref(),
+        ),
+        exposed: producer_lane(
+            macros,
+            resolved_macros,
+            AnalyzedMacroKind::DefineExpose,
+            |row| row.exposed_guarantee.as_ref(),
+        ),
+        accepted: AcceptedSurfaceCompleteness::Exact.guarantee(),
+        public_instance:
+            verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Exact
+                .guarantee(),
+        type_registry: MetadataFactGuarantee::complete(false),
     };
     for resolved in resolved_macros {
         if let Some(next) = &resolved.props_guarantee {

@@ -437,6 +437,14 @@ pub(crate) fn populate_public_instance_sidecar(
             },
         )
     };
+    meta.domain_guarantees.public_instance = meta
+        .public_instance
+        .as_ref()
+        .map_or(
+            verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Exact,
+            |instance| instance.completeness,
+        )
+        .guarantee();
 }
 
 /// Internal carrier for one component-meta extraction. Bundles the projected
@@ -542,6 +550,7 @@ pub(crate) fn extract_component_meta_from_resolved<M: verter_audit::observe::Obs
             meta.accepted_props = resolution.accepted_props;
             meta.accepted_events = resolution.accepted_events;
             meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
+            meta.domain_guarantees.accepted = resolution.accepted_surface_completeness.guarantee();
             meta.fallthrough_surface = resolution.fallthrough_surface;
         }
         verter_type_engine::request_context::fold_result_completeness(outcome.completeness);
@@ -579,6 +588,14 @@ pub(crate) fn extract_component_meta_from_resolved<M: verter_audit::observe::Obs
     if resolved.completeness.is_partial() || completeness.is_partial() {
         meta.accepted_surface_completeness =
             verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound;
+        meta.domain_guarantees.accepted.absorb(
+            &crate::typeinfo::surface_resolution::metadata_guarantee(
+                verter_type_engine::semantic_query::FactStatus::approximate(
+                    resolved.completeness.merge(completeness).reasons(),
+                ),
+                true,
+            ),
+        );
     }
     ComponentMetaExtractOutcome {
         analysis: meta,
@@ -652,6 +669,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts<
             meta.accepted_props = resolution.accepted_props;
             meta.accepted_events = resolution.accepted_events;
             meta.accepted_surface_completeness = resolution.accepted_surface_completeness;
+            meta.domain_guarantees.accepted = resolution.accepted_surface_completeness.guarantee();
             meta.fallthrough_surface = resolution.fallthrough_surface;
             Some(facts)
         } else {
@@ -682,6 +700,14 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts<
     if resolved.completeness.is_partial() || completeness.is_partial() {
         meta.accepted_surface_completeness =
             verter_session_query::analysis::component_meta::AcceptedSurfaceCompleteness::LowerBound;
+        meta.domain_guarantees.accepted.absorb(
+            &crate::typeinfo::surface_resolution::metadata_guarantee(
+                verter_type_engine::semantic_query::FactStatus::approximate(
+                    resolved.completeness.merge(completeness).reasons(),
+                ),
+                true,
+            ),
+        );
     }
     ComponentMetaExtractOutcome {
         analysis: meta,

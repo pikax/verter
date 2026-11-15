@@ -391,6 +391,15 @@ pub(crate) fn component_meta_resolved_macros<M: verter_audit::observe::ObserveEx
             // POSITIONS alongside the analysis fields — the normalized-surface
             // authority the extraction publishes (the flat evaluated lanes
             // contribute metadata only).
+            match mac.kind {
+                AnalyzedMacroKind::DefineModel => {
+                    input.models_guarantee = dtos.domain_guarantee.clone()
+                }
+                AnalyzedMacroKind::DefineExpose => {
+                    input.exposed_guarantee = dtos.domain_guarantee.clone()
+                }
+                _ => {}
+            }
             input.props = prop_inputs(dtos);
             input.emits = emit_inputs(dtos);
             input.slots = dtos.slot_fields().to_vec();
@@ -540,6 +549,8 @@ fn empty_macro_input(
         props_guarantee: None,
         events_guarantee: None,
         slots_guarantee: None,
+        models_guarantee: None,
+        exposed_guarantee: None,
     }
 }
 

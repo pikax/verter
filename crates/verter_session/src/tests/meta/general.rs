@@ -2229,6 +2229,7 @@ fn output_registry_overlay_finalize_replaces_in_place_and_appends() {
         );
     }
     let seed = crate::meta_resolve::output::ComponentMetaResolutionSeed {
+        completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
         resolved_type_registry: vec![
             verter_session_query::analysis::component_meta::ResolvedTypeAnalysis {
                 name: "Alpha".to_string(),
