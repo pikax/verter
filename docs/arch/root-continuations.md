@@ -2422,8 +2422,16 @@ Signature discovery and the kernel still read in place, inventoried for
 conversion:
 
 - a runtime nominal's augmentation fold (`collect_augmentation_contributions`),
-  read in place by its discovery stage; contributor loading and planned-body
-  projection remain the fold owner's work;
+  read in place by its discovery stage, contributors pending ingestion
+  included; contributor loading and planned-body projection remain the fold
+  owner's work. The fold materializes any pending contributor that has no
+  published index, so suspending at a contributor's index ahead of it is
+  sound only if every contributor the walk indexed is still published and
+  current when the fold runs. A content epoch cannot prove that: publication
+  is fenced by more transitions than content edits (a resolution change on an
+  unrelated module leaves a delivered index unpublished). Indexing ahead of
+  the fold becomes sound once the walk abandons, without caching, whenever
+  any delivery it consumed is unpublished or its inputs moved;
 - a class expression's or object literal's instance surface
   (`class_expression_read_surface`), from discovery and the carrier walk:
   its substitution replaces a `this` binder by the instance and a deferred
