@@ -195,14 +195,6 @@ async fn serve() {
         VerterLanguageServer::get_component_meta,
     )
     .custom_method(
-        "$/verter/getComponentMetaSurface",
-        VerterLanguageServer::get_component_meta_surface,
-    )
-    .custom_method(
-        "$/verter/getComponentMetaTypeExpansion",
-        VerterLanguageServer::get_component_meta_type_expansion,
-    )
-    .custom_method(
         "$/verter/audit/getRecord",
         VerterLanguageServer::get_audit_record,
     )

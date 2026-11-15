@@ -6,8 +6,8 @@
 //! `VerterHost` query entry points), an overlay-less session
 //! (`SessionResolverContext` with no overlay), and a session whose overlay
 //! republishes byte-identical content for every corpus file. The published
-//! component-meta output, its selective surface, and the expanded type
-//! evaluation must be structurally identical across all three.
+//! component-meta output and expanded type evaluation must be
+//! structurally identical across all three.
 //!
 //! Discriminates: the same-content overlay routes every dependency read
 //! through the overlay-rooted view (overlay hash rooting, session-scoped
@@ -84,12 +84,11 @@ fn make_project() -> Arc<MetaProject> {
 }
 
 /// One structural rendering per component: the published output envelope,
-/// the selective surface, and the expanded types, concatenated.
+/// and the expanded types, concatenated.
 #[derive(Debug, PartialEq, Eq)]
 struct Answer {
     component: &'static str,
     output: String,
-    surface: String,
     evaluated: String,
 }
 
@@ -112,15 +111,6 @@ fn render_semantic_output(
     format!("{analysis:?}{:?}", types.into_lanes())
 }
 
-/// The selective surface minus the same registration identity, which it
-/// carries as the encoded `ordered_sfc_structure_bytes`.
-fn render_surface(surface: Option<crate::component_meta_payload::ComponentMetaSurface>) -> String {
-    let mut surface = surface.expect("the corpus components resolve to a surface");
-    assert!(surface.ordered_sfc_structure_bytes.is_some());
-    surface.ordered_sfc_structure_bytes = None;
-    format!("{surface:?}")
-}
-
 fn host_answers(host: &VerterHost) -> Vec<Answer> {
     COMPONENTS
         .iter()
@@ -133,7 +123,6 @@ fn host_answers(host: &VerterHost) -> Vec<Answer> {
             Answer {
                 component,
                 output: render_semantic_output(analysis, types),
-                surface: render_surface(host.get_component_meta_surface(component)),
                 evaluated: format!("{:?}", host.evaluate_types(component)),
             }
         })
@@ -152,11 +141,6 @@ fn session_answers(session: &MetaSession) -> Vec<Answer> {
             Answer {
                 component,
                 output: render_semantic_output(analysis, types),
-                surface: render_surface(
-                    session
-                        .get_component_meta_surface(component)
-                        .expect("session surface ok"),
-                ),
                 evaluated: format!(
                     "{:?}",
                     session
@@ -179,11 +163,6 @@ fn assert_answers_substantive(answers: &[Answer]) {
         assert!(
             answer.evaluated.contains("Size"),
             "{}: the cross-file `Size` reference must reach the evaluated types",
-            answer.component
-        );
-        assert!(
-            answer.surface.contains("variant"),
-            "{}: the surface must carry the corpus prop",
             answer.component
         );
     }

@@ -36,10 +36,6 @@ export enum RequestType {
   GetRouteTree = "$/verter/getRouteTree",
   /** Full Volar-shape component metadata. */
   GetComponentMeta = "$/verter/getComponentMeta",
-  /** D102 — selective surface envelope as protobuf-encoded bytes. */
-  GetComponentMetaSurface = "$/verter/getComponentMetaSurface",
-  /** D104 — one-layer TypeHandle expansion as protobuf-encoded bytes. */
-  GetComponentMetaTypeExpansion = "$/verter/getComponentMetaTypeExpansion",
 }
 
 export interface StructureRangeV1 {
@@ -128,21 +124,6 @@ export interface TsQueryParams {
   arguments: Record<string, unknown>;
 }
 
-/** D104 / D114: structured handle error for the type-expansion bridge. */
-export type TypeHandleErrorPayload =
-  | { kind: "projectMismatch"; expected: string; actual: string }
-  | { kind: "staleHandle"; reason: string }
-  | { kind: "depthExceeded"; cap: number }
-  | { kind: "other"; message: string };
-
-/** Response envelope for `$/verter/getComponentMetaTypeExpansion`. */
-export interface GetComponentMetaTypeExpansionResponse {
-  /** Encoded `TypeExpansion` proto bytes. Empty array on error. */
-  expansionBytes: number[];
-  /** Structured handle error, present only on failure. */
-  error?: TypeHandleErrorPayload;
-}
-
 export type RequestParams = {
   [RequestType.GetCompiledCode]: { uri: string };
   [RequestType.GetDocumentStructure]: DocumentStructureRequestV1;
@@ -154,13 +135,7 @@ export type RequestParams = {
   [RequestType.GetComponentParents]: { uri: string };
   [RequestType.GetRouteTree]: Record<string, never>;
   [RequestType.GetComponentMeta]: { uri: string };
-  [RequestType.GetComponentMetaSurface]: { uri: string };
-  [RequestType.GetComponentMetaTypeExpansion]: {
-    handleBytes: number[];
-    depth?: number;
-  };
 };
-
 export type RequestResponse = {
   [RequestType.GetCompiledCode]: {
     js: { code: string; map: any | undefined };
@@ -186,7 +161,4 @@ export type RequestResponse = {
   [RequestType.GetRouteTree]: RouteAnalysisSnapshot;
   /** Full Volar-shape payload, JSON-projected. `null` when not a component. */
   [RequestType.GetComponentMeta]: unknown;
-  /** Surface envelope encoded as proto bytes. `null` when not a component. */
-  [RequestType.GetComponentMetaSurface]: number[];
-  [RequestType.GetComponentMetaTypeExpansion]: GetComponentMetaTypeExpansionResponse;
 };

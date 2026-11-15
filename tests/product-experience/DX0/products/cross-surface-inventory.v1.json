@@ -98,8 +98,6 @@
         "$/verter/documentDropEdit",
         "$/verter/getRouteTree",
         "$/verter/getComponentMeta",
-        "$/verter/getComponentMetaSurface",
-        "$/verter/getComponentMetaTypeExpansion",
         "$/verter/audit/getRecord",
         "$/verter/audit/getRecent"
       ],

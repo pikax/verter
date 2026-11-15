@@ -251,12 +251,7 @@ struct PassRow {
     derivation_edges: usize,
     edges_truncated: u32,
     has_orphan_edges: bool,
-    /// Max BFS frontier depth observed by the component-meta bridge while
-    /// assembling this fixture's full payload (D115). Reserved column —
-    /// the BFS bridge ships in Tier 1B; pre-bridge runs record `0` and
-    /// the column slot stays in `summary-179.csv`. A pre-Tier-0 dry run
-    /// measured a corpus-wide max of 11 (ChatMessages family); the
-    /// `MAX_BRIDGE_DEPTH = 32` constant is justified at ~3x that floor.
+    /// Reserved compatibility column; always zero.
     bridge_max_depth_observed: u32,
     /// Count of structured events emitted by the request and surfaced
     /// on `RequestFootprintAudit::structured_events`. The

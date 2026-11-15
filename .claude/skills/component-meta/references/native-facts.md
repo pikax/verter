@@ -56,6 +56,10 @@ interning, persisted graph validation, protobuf and TypeScript rendering.
 Optional capture still contributes no origin graph by default. No new counters,
 histories, timers or optional observation stores are introduced.
 
+Partial component reads use the framework-surface operation through
+`typeInfoWithAudit` and expand-around on a `NodeRef`. The full component-meta
+payload remains the composite metadata entry.
+
 Every variable component domain retains its producer claim on
 `ComponentDomainGuarantees`: props, events, slots, models, exposed, accepted,
 public instance, and type registry. Model membership proves the syntactic

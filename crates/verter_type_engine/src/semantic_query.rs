@@ -667,11 +667,7 @@ impl std::hash::Hasher for ExactHashEventRecorder {
 /// `Send + Sync` [`SemanticNodeId`]) so it can live in host-owned shared
 /// caches.
 ///
-/// **Distinct from the public `TypeHandle`.** This is NOT
-/// [`component_meta_payload::TypeHandle`](crate::component_meta_payload::TypeHandle),
-/// which is a public content-hash BFS DTO addressed by `(project, canonical,
-/// content_hash, query_path)`. `HotTypeRef` is an internal arena ordinal and
-/// never crosses a wire/FFI boundary.
+/// This internal arena ordinal never crosses a wire/FFI boundary.
 ///
 /// **NEVER a cache key (R6).** A `HotTypeRef` is a content/version-bearing
 /// arena ordinal — exactly the identity R6 forbids in a derived-`Hash`

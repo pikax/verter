@@ -59,19 +59,6 @@ export interface NativeMetaSession {
   getResolvedComponentMeta(canonicalOrAlias: string): Buffer | null;
   /** Provenance counters for observability. Returns JSON. */
   getProvenance(): string;
-  /**
-   * Selective surface. Returns
-   * `verter.v1.ComponentMetaSurface` bytes (eager scalars +
-   * `NamedTypeHandle` for every type-bearing field). Error envelopes
-   * are magic-byte-prefixed (`buf[0] === 0xFF`).
-   */
-  getComponentMetaSurface(canonicalOrAlias: string): Buffer | null;
-  /**
-   * Selective surface. Resolves a
-   * `verter.v1.TypeHandle` to a one-layer `verter.v1.TypeExpansion`.
-   * Error envelopes are magic-byte-prefixed (`buf[0] === 0xFF`).
-   */
-  getComponentMetaTypeExpansion(handleBuf: Buffer, depth?: number): Buffer;
 }
 
 export class ProjectEngine {

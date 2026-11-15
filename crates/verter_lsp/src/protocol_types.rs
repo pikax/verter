@@ -764,7 +764,7 @@ mod document_structure_response_tests {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Component-meta selective API (D32 / D102 / D104 / D113)
+// Component metadata
 // ─────────────────────────────────────────────────────────────────
 
 /// Params for `$/verter/getComponentMeta` request — full Volar-shape payload.
@@ -772,53 +772,6 @@ mod document_structure_response_tests {
 pub struct GetComponentMetaParams {
     /// Document URI of the Vue SFC whose component metadata is being requested.
     pub uri: String,
-}
-
-/// Params for `$/verter/getComponentMetaSurface` request — selective surface
-/// envelope (D102).
-#[derive(Debug, Deserialize)]
-pub struct GetComponentMetaSurfaceParams {
-    pub uri: String,
-}
-
-/// Params for `$/verter/getComponentMetaTypeExpansion` request — one-layer
-/// `TypeHandle` resolution (D104).
-///
-/// `handle_bytes` carries the protobuf-encoded `TypeHandle` (D100 wire format).
-/// `depth` is accepted and forwarded but currently ignored — the resolver
-/// always performs a one-layer expansion.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GetComponentMetaTypeExpansionParams {
-    pub handle_bytes: Vec<u8>,
-    #[serde(default)]
-    pub depth: Option<u32>,
-}
-
-/// Response envelope for `$/verter/getComponentMetaTypeExpansion`.
-///
-/// `expansion_bytes` is the protobuf-encoded `TypeExpansion` on success.
-/// `error` carries the structured `TypeHandleError` on failure (D104 + D114).
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GetComponentMetaTypeExpansionResponse {
-    /// Encoded `TypeExpansion` proto bytes. Empty on error.
-    pub expansion_bytes: Vec<u8>,
-    /// Structured handle error (e.g. `projectMismatch`, `staleHandle`).
-    /// `None` on success.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<TypeHandleErrorPayload>,
-}
-
-/// JSON-side projection of `TypeHandleError`. The wire form keeps a discriminator
-/// `kind` to mirror the proto union shape so the TS-side switch can stay typed.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
-pub enum TypeHandleErrorPayload {
-    ProjectMismatch { expected: String, actual: String },
-    StaleHandle { reason: String },
-    DepthExceeded { cap: u32 },
-    Other { message: String },
 }
 
 /// Params for `$/verter/audit/getRecord` request.
@@ -852,12 +805,6 @@ pub struct GetAuditRecentParams {
 
 #[cfg(test)]
 mod component_meta_protocol_tests {
-    //! D113 / Tier 5b W7 review: JSON round-trip checks for the three new
-    //! component-meta protocol types. These tests guard the wire format
-    //! shared with `packages/language-shared/src/request.ts` (the TS LSP
-    //! client-side bindings) — any field rename or shape drift breaks JSON
-    //! interop with the VS Code extension.
-
     use super::*;
     use serde_json::json;
 
@@ -868,77 +815,5 @@ mod component_meta_protocol_tests {
         }))
         .expect("camelCase uri must decode");
         assert_eq!(p.uri, "file:///test/Comp.vue");
-    }
-
-    #[test]
-    fn get_component_meta_surface_params_decodes_camel_case_uri() {
-        let p: GetComponentMetaSurfaceParams = serde_json::from_value(json!({
-            "uri": "file:///test/Comp.vue"
-        }))
-        .expect("camelCase uri must decode");
-        assert_eq!(p.uri, "file:///test/Comp.vue");
-    }
-
-    #[test]
-    fn get_component_meta_type_expansion_params_uses_camel_case_handle_bytes() {
-        let p: GetComponentMetaTypeExpansionParams = serde_json::from_value(json!({
-            "handleBytes": [10, 0, 18, 9, 47, 116, 101, 115, 116, 46, 118, 117, 101],
-            "depth": 2
-        }))
-        .expect("camelCase handleBytes + depth must decode");
-        assert_eq!(p.handle_bytes.len(), 13);
-        assert_eq!(p.depth, Some(2));
-    }
-
-    #[test]
-    fn get_component_meta_type_expansion_params_depth_optional() {
-        let p: GetComponentMetaTypeExpansionParams =
-            serde_json::from_value(json!({ "handleBytes": [] })).expect("depth must be optional");
-        assert!(p.depth.is_none());
-    }
-
-    #[test]
-    fn type_expansion_response_serializes_with_camel_case_and_skips_none_error() {
-        let response = GetComponentMetaTypeExpansionResponse {
-            expansion_bytes: vec![1, 2, 3],
-            error: None,
-        };
-        let json = serde_json::to_value(&response).expect("must serialize");
-        // expansionBytes camelCase
-        assert_eq!(json["expansionBytes"], json!([1, 2, 3]));
-        // error skipped on None
-        assert!(
-            json.get("error").is_none(),
-            "error: None must be skipped from JSON"
-        );
-    }
-
-    #[test]
-    fn type_expansion_response_error_project_mismatch_serializes_with_kind_discriminator() {
-        let response = GetComponentMetaTypeExpansionResponse {
-            expansion_bytes: vec![],
-            error: Some(TypeHandleErrorPayload::ProjectMismatch {
-                expected: String::new(),
-                actual: "foreign-project".to_string(),
-            }),
-        };
-        let json = serde_json::to_value(&response).expect("must serialize");
-        let err = &json["error"];
-        assert_eq!(err["kind"], "projectMismatch");
-        assert_eq!(err["actual"], "foreign-project");
-    }
-
-    #[test]
-    fn type_expansion_response_error_stale_handle_serializes_with_kind_discriminator() {
-        let response = GetComponentMetaTypeExpansionResponse {
-            expansion_bytes: vec![],
-            error: Some(TypeHandleErrorPayload::StaleHandle {
-                reason: "FileDeleted".to_string(),
-            }),
-        };
-        let json = serde_json::to_value(&response).expect("must serialize");
-        let err = &json["error"];
-        assert_eq!(err["kind"], "staleHandle");
-        assert_eq!(err["reason"], "FileDeleted");
     }
 }
