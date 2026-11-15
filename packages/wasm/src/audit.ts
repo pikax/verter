@@ -39,7 +39,7 @@ export type RustSemanticFootprintAudit = RequestFootprintAudit;
  * wasm package exposes).
  */
 export interface AuditCapableMetaSession {
-  getComponentMetaWithAudit(canonicalOrAlias: string): unknown | null;
+  getComponentMetaWithAudit(canonicalOrAlias: string): string | null;
   whyLoadedFromAuditJson(auditJson: string, canonicalId: string): string;
   whyInstantiatedFromAuditJson(
     auditJson: string,
@@ -57,13 +57,13 @@ export interface AuditBundle {
 }
 
 /**
- * Cast the raw `JsValue` returned by
+ * Parse the JSON text returned by
  * `MetaSession.getComponentMetaWithAudit` to a typed `AuditBundle`.
  * Returns `null` when the session's query was unresolvable.
  */
-export function decodeAuditBundle(value: unknown): AuditBundle | null {
-  if (value === null || value === undefined) return null;
-  return value as AuditBundle;
+export function decodeAuditBundle(value: string | null): AuditBundle | null {
+  if (value === null) return null;
+  return JSON.parse(value) as AuditBundle;
 }
 
 /**
@@ -73,10 +73,9 @@ export function decodeAuditBundle(value: unknown): AuditBundle | null {
  */
 export function whyLoaded(
   session: AuditCapableMetaSession,
-  bundle: AuditBundle,
+  auditJson: string,
   canonicalId: string,
 ): ProvenanceChain {
-  const auditJson = JSON.stringify(bundle);
   const chainJson = session.whyLoadedFromAuditJson(auditJson, canonicalId);
   return JSON.parse(chainJson) as ProvenanceChain;
 }
@@ -87,12 +86,11 @@ export function whyLoaded(
  */
 export function whyInstantiated(
   session: AuditCapableMetaSession,
-  bundle: AuditBundle,
+  auditJson: string,
   declCanonicalId: string,
   declSymbolName: string,
   argsFingerprintHex: string,
 ): ProvenanceChain {
-  const auditJson = JSON.stringify(bundle);
   const chainJson = session.whyInstantiatedFromAuditJson(
     auditJson,
     declCanonicalId,

@@ -3000,10 +3000,6 @@ fn build_test_meta() -> FfiComponentMeta {
                 }],
             },
         },
-        // The synthetic test payload carries no resolution seed.
-        resolution_status: crate::types::FfiComponentMetaResolutionStatus::Unavailable(
-            crate::types::FfiResolutionUnavailableReason::ResolutionProviderAbsent,
-        ),
         props: vec![FfiPropMeta {
             name: "root".to_string(),
             r#type: Some(tree_ref.clone()),

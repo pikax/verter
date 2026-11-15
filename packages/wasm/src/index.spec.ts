@@ -64,7 +64,15 @@ vi.mock("../wasm/verter_wasm.js", () => ({
 }));
 
 // Import after mock setup so the module picks up mocked dependencies
-const { initialize, isInitialized, createHost, captureAvailability } = await import("./index.js");
+const {
+  initialize,
+  isInitialized,
+  createHost,
+  captureAvailability,
+  decodeAuditBundle,
+  whyLoaded,
+  whyInstantiated,
+} = await import("./index.js");
 
 beforeEach(async () => {
   mockInit.mockClear();
@@ -82,6 +90,32 @@ beforeEach(async () => {
 });
 
 describe("@verter/wasm host wrapper", () => {
+  it("decodes audit JSON text and forwards the original text to both Rust walkers", () => {
+    const auditJson =
+      '{ "analysis": {}, "resolution": {}, "record": { "request_id": "9007199254740993" } }';
+    expect(decodeAuditBundle(auditJson)?.record.request_id).toBe("9007199254740993");
+    expect(decodeAuditBundle(null)).toBeNull();
+    expect(() => decodeAuditBundle("{")).toThrow();
+    const chain = { root: null, steps: [], terminated: "NotFound", shared_load_terminals: [] };
+    const session = {
+      getComponentMetaWithAudit: vi.fn(() => auditJson),
+      whyLoadedFromAuditJson: vi.fn(() => JSON.stringify(chain)),
+      whyInstantiatedFromAuditJson: vi.fn(() => JSON.stringify(chain)),
+    };
+
+    expect(whyLoaded(session, auditJson, "/Widget.vue")).toEqual(chain);
+    expect(session.whyLoadedFromAuditJson).toHaveBeenCalledWith(auditJson, "/Widget.vue");
+    expect(whyInstantiated(session, auditJson, "/types.ts", "Widget", "0".repeat(32))).toEqual(
+      chain,
+    );
+    expect(session.whyInstantiatedFromAuditJson).toHaveBeenCalledWith(
+      auditJson,
+      "/types.ts",
+      "Widget",
+      "0".repeat(32),
+    );
+  });
+
   describe("isInitialized", () => {
     // @ai-generated - Reports initialization state correctly
     it("should return true after initialization", () => {

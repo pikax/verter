@@ -2,9 +2,9 @@
 //! driven IN-PROCESS: the ACTUAL LSP custom method (JSON), the ACTUAL
 //! `verter_ffi::convert::component_meta_output_to_ffi` projection of the
 //! same audited entry, and the ACTUAL `verter_protocol` payload encoder
-//! (the byte route the NAPI/WASM bindings share — the bindings THEMSELVES
-//! are not executed here; their thin `Buffer`/`JsValue` mapping is
-//! binding-level code outside this harness).
+//! (the shared encoder used by NAPI's `Buffer` and WASM's `Uint8Array`
+//! seeded payload entries). The bindings themselves are not executed here;
+//! their boundary mapping is covered by their own suites.
 //!
 //! Compares DECODED wire DTOs (the LSP JSON against the ffi projection's
 //! JSON) and ENCODED BYTES (the protocol encoding of two independent
@@ -84,9 +84,14 @@ defineEmits<{ change: [next: number] }>()
     let ffi = verter_ffi::convert::component_meta_output_to_ffi(output);
     let ffi_json = serde_json::to_value(&ffi).expect("ffi serializes");
     assert_eq!(
+        lsp_json["schemaVersion"],
+        verter_protocol::component_meta::COMPONENT_META_SCHEMA_VERSION,
+        "JSON and protobuf identify the same component-meta schema"
+    );
+    assert_eq!(
         lsp_json, ffi_json,
         "the LSP wire JSON must equal the ffi projection of the same \
-         audited entry at the DECODED-DTO level (the D19 equivalence, \
+         audited entry at the DECODED-DTO level, \
          compared on the real wire shapes — not producer Debug strings)"
     );
     // The payload is REAL (a blank envelope would trivially compare equal).

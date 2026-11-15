@@ -144,6 +144,7 @@ pub(crate) const CAPTURE_UNAVAILABLE: &str =
     "audit capture is unavailable: this module was built without the semantic-observe feature";
 
 /// The error an audit method returns when capture is compiled out.
+#[cfg(not(feature = "semantic-observe"))]
 pub(crate) fn capture_unavailable_error() -> JsValue {
     JsValue::from_str(CAPTURE_UNAVAILABLE)
 }

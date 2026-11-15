@@ -1227,14 +1227,6 @@ pub struct FfiComponentMeta {
     pub options_api: bool,
     pub file_path: String,
     pub resolution: Option<FfiComponentMetaResolution>,
-    /// Typed status of the payload's type-resolution position: `Resolved`
-    /// when the payload was produced with the `resolution` sidecar (the
-    /// resolved type-registry overlay applied), else the typed
-    /// `Unavailable(ResolutionProviderAbsent)` — a sidecar-less payload
-    /// self-describes as partial on this axis and is NEVER an
-    /// exact/successful-looking silence. Always serialized (additive wire
-    /// field; every pre-existing field is unchanged).
-    pub resolution_status: FfiComponentMetaResolutionStatus,
     /// Typed completeness of the PUBLISHED SURFACE: `Complete` when the
     /// payload is the full surface this component declares, `Partial` (with
     /// its typed reasons) when the producing compute degraded and members may
@@ -1550,30 +1542,6 @@ pub struct FfiPublicSlotInput {
 pub struct FfiPublicSlotBinding {
     pub name: String,
     pub ty: FfiPublicTypeReference,
-}
-
-/// Typed resolution status of a component-meta payload — see
-/// [`FfiComponentMeta::resolution_status`].
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
-#[serde(rename_all = "camelCase", tag = "kind", content = "reason")]
-pub enum FfiComponentMetaResolutionStatus {
-    /// The payload carries the `resolution` sidecar (the resolved
-    /// type-registry overlay is applied).
-    Resolved,
-    /// The payload was produced WITHOUT the resolution sidecar: the
-    /// type registry and declaration metadata are the un-overlaid
-    /// view — a typed partial status, never an implied exact success.
-    Unavailable(FfiResolutionUnavailableReason),
-}
-
-/// Why a payload's type-resolution position is unavailable.
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
-#[serde(rename_all = "camelCase")]
-pub enum FfiResolutionUnavailableReason {
-    /// The producing entry ran without the resolution sidecar/seed (the
-    /// sidecar-less output-envelope surfaces — e.g. the plain WASM lane,
-    /// which has no filesystem/project resolver behind it).
-    ResolutionProviderAbsent,
 }
 
 /// Macro-wide expansion diagnostics that apply to an entire macro, not to a

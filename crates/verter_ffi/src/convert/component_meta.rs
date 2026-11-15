@@ -540,16 +540,6 @@ pub(super) fn component_meta_parts_with_contract_to_ffi(
         domain_guarantees: analysis.domain_guarantees,
         component_public_contract: component_contract_to_ffi(contract),
         result_completeness: result_completeness_to_ffi(completeness),
-        // Typed resolution status: honest on every lane — a payload
-        // without the resolution sidecar self-describes as
-        // `Unavailable(ResolutionProviderAbsent)`.
-        resolution_status: if resolution.is_some() {
-            FfiComponentMetaResolutionStatus::Resolved
-        } else {
-            FfiComponentMetaResolutionStatus::Unavailable(
-                FfiResolutionUnavailableReason::ResolutionProviderAbsent,
-            )
-        },
         props: analysis
             .props
             .into_iter()

@@ -26,10 +26,9 @@ use std::panic::AssertUnwindSafe;
 
 use serde::{Deserialize, Serialize};
 use verter_compiler::compile_request::{CompileRequest, CompileRequestError};
-use verter_ffi::component_meta::AuditBundle;
+use verter_ffi::component_meta::{encode_audit_bundle, encode_component_meta_payload, AuditBundle};
 use verter_ffi::convert::*;
 use verter_ffi::types::*;
-use verter_protocol::types::FfiComponentMeta;
 use verter_session as host;
 #[cfg(feature = "semantic-observe")]
 use verter_session::component_meta_audit::assertions::RequestAuditRecordAssertions;
@@ -2188,6 +2187,63 @@ impl WasmMetaSession {
     }
 }
 
+fn component_meta_bytes(
+    session: &host::component_meta_host::ComponentMetaSession,
+    canonical_or_alias: &str,
+) -> Result<Option<Vec<u8>>, String> {
+    session
+        .get_component_meta_payload(canonical_or_alias, encode_component_meta_payload)
+        .map_err(|error| error.to_string())
+}
+
+fn component_meta_batch_bytes(
+    session: &host::component_meta_host::ComponentMetaSession,
+    canonicals_or_aliases: &[String],
+) -> Result<Vec<Option<Vec<u8>>>, String> {
+    session
+        .get_component_meta_batch_payloads(canonicals_or_aliases, encode_component_meta_payload)
+        .map_err(|error| error.to_string())
+}
+
+fn component_meta_audit_json(
+    session: &host::component_meta_host::ComponentMetaSession,
+    canonical_or_alias: &str,
+) -> Result<Option<String>, String> {
+    let (outcome, record) = session
+        .get_component_meta_with_audit(canonical_or_alias)
+        .into_parts();
+    // Request faults outrank unavailable capture, matching the native binding.
+    if record.capture_state == verter_audit::AuditCaptureState::Unavailable {
+        return Err(match outcome {
+            Err(error)
+                if !matches!(
+                    error,
+                    host::component_meta_host::ComponentMetaHostError::AuditNotEnabled
+                ) =>
+            {
+                error.to_string()
+            }
+            _ => audit::CAPTURE_UNAVAILABLE.to_owned(),
+        });
+    }
+    let Some(output) = outcome.map_err(|error| error.to_string())? else {
+        return Ok(None);
+    };
+    let ffi = verter_ffi::convert::component_meta_output_to_ffi(output);
+    let resolution = ffi
+        .resolution
+        .clone()
+        .ok_or("audited component-meta output carries no resolution sidecar")?;
+    let bytes = encode_audit_bundle(&AuditBundle {
+        analysis: ffi,
+        resolution,
+        record,
+    })?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| format!("audit bundle UTF-8 error: {error}"))
+}
+
 #[wasm_bindgen(js_class = MetaSession)]
 impl WasmMetaSession {
     pub fn upsert(&self, canonical_id: &str, source: &str) -> Result<(), JsValue> {
@@ -2218,13 +2274,9 @@ impl WasmMetaSession {
         }))?
     }
 
-    /// Synchronous audit bundle — returns
-    /// `{ analysis: FfiComponentMeta, resolution: FfiComponentMetaResolution,
-    ///   record: RequestAuditRecord } | null` as a JS object. Host must
-    /// have `audit_enabled` + `footprint_capture` set; otherwise throws.
-    ///
-    /// NOT a Promise. Consumer-side Promise ergonomics (if desired)
-    /// live in `packages/wasm/audit.ts`.
+    /// Synchronous audit bundle as shared UTF-8 JSON text, or `null` for a
+    /// missing component. Requires `semantic-observe`, `audit_enabled`, and
+    /// `footprint_capture`; otherwise throws.
     #[wasm_bindgen(js_name = "getComponentMetaWithAudit")]
     pub fn get_component_meta_with_audit(
         &self,
@@ -2232,81 +2284,26 @@ impl WasmMetaSession {
     ) -> Result<JsValue, JsValue> {
         let session = self.session()?;
         catch_panic(AssertUnwindSafe(|| {
-            let (outcome, record) = session
-                .get_component_meta_with_audit(canonical_or_alias)
-                .into_parts();
-            // A genuine request fault (a closed session, say) outranks the
-            // build's missing capture; only the capture refusal itself
-            // reports unavailable capture.
-            if record.capture_state == verter_audit::AuditCaptureState::Unavailable {
-                return Err(match outcome {
-                    Err(error)
-                        if !matches!(
-                            error,
-                            verter_session::component_meta_host::ComponentMetaHostError::AuditNotEnabled
-                        ) =>
-                    {
-                        ffi_err(error)
-                    }
-                    _ => audit::capture_unavailable_error(),
-                });
-            }
-            let Some(output) = outcome.map_err(ffi_err)? else {
-                return Ok(JsValue::NULL);
-            };
-            let ffi = verter_ffi::convert::component_meta_output_to_ffi(output);
-            let Some(ffi_resolution) = ffi.resolution.clone() else {
-                return Err(ffi_err(
-                    "audited component-meta output carries no resolution sidecar",
-                ));
-            };
-            let bundle = AuditBundle {
-                analysis: ffi,
-                resolution: ffi_resolution,
-                record,
-            };
-            to_wasm_value(&bundle)
+            let json = component_meta_audit_json(session, canonical_or_alias).map_err(ffi_err)?;
+            Ok(json.map_or(JsValue::NULL, JsValue::from))
         }))?
     }
 
-    /// Component metadata as a JS object (FFI projection), or `null`
-    /// when the canonical does not resolve.
-    ///
-    /// This lane runs WITHOUT a type-resolution seed: the payload's typed
-    /// `resolutionStatus` field reports
-    /// `{ kind: "unavailable", reason: "resolutionProviderAbsent" }` so the
-    /// un-overlaid registry is never mistaken for an exact resolved
-    /// surface. The type-resolution-seeded payload is
-    /// `getComponentMetaWithAudit` (`resolutionStatus.kind == "resolved"`).
+    /// Seeded component metadata as protobuf bytes (`Uint8Array`), or `null`
+    /// when the canonical does not resolve. Uses the shared native payload cache.
     #[wasm_bindgen(js_name = "getComponentMeta")]
     pub fn get_component_meta(&self, canonical_or_alias: &str) -> Result<JsValue, JsValue> {
         let session = self.session()?;
         catch_panic(AssertUnwindSafe(|| {
-            let Some(output) = session
-                .get_component_meta_output(canonical_or_alias)
-                .map_err(ffi_err)?
-            else {
-                return Ok(JsValue::NULL);
-            };
-            let ffi = verter_ffi::convert::component_meta_output_to_ffi(output);
-            to_wasm_value(&ffi)
+            let bytes = component_meta_bytes(session, canonical_or_alias).map_err(ffi_err)?;
+            Ok(bytes.map_or(JsValue::NULL, JsValue::from))
         }))?
     }
 
-    /// Batch surface for `getComponentMeta`: compute metadata for
-    /// `canonicalsOrAliases` under one shared overlay view. The host batch
-    /// coordinator runs the N queries inline/sequentially on wasm (no
-    /// coordinator pool) and accounts the submission once per non-empty
-    /// batch (skipped for an empty batch). Returns one
-    /// slot per input in input order as a JS array; each slot is the FFI
-    /// projection of the
-    /// analysis, or `null` EXCLUSIVELY for a genuinely missing canonical.
-    ///
-    /// Throws on project-level shutdown AND on a real per-id failure (a
-    /// budget overrun or a fail-closed output-materialization failure) —
-    /// batch failure semantics match the scalar `getComponentMeta` throw
-    /// (scalar ≡ batch); a real failure is never collapsed onto the
-    /// missing `null` sentinel.
+    /// Seeded protobuf payloads under one shared overlay view, computed inline
+    /// on WASM. Returns `(Uint8Array | null)[]` in input order; `null` is reserved
+    /// for missing components. Shutdown and real per-item failures throw, as on
+    /// the scalar entry. A non-empty batch accounts one submission.
     #[wasm_bindgen(js_name = "getComponentMetaBatch")]
     pub fn get_component_meta_batch(
         &self,
@@ -2314,20 +2311,19 @@ impl WasmMetaSession {
     ) -> Result<JsValue, JsValue> {
         let session = self.session()?;
         catch_panic(AssertUnwindSafe(|| {
-            let results = session
-                .get_component_meta_output_batch(&canonicals_or_aliases)
-                .map_err(ffi_err)?;
-            let ffi_results: Vec<Option<FfiComponentMeta>> = results
+            let payloads =
+                component_meta_batch_bytes(session, &canonicals_or_aliases).map_err(ffi_err)?;
+            let slots: Vec<JsValue> = payloads
                 .into_iter()
-                .map(|slot| slot.map(verter_ffi::convert::component_meta_output_to_ffi))
+                .map(|bytes| bytes.map_or(JsValue::NULL, JsValue::from))
                 .collect();
-            to_wasm_value(&ffi_results)
+            Ok(JsValue::from(slots))
         }))?
     }
 
     /// Run the Rust walker against a committed audit record (JSON
-    /// string from a prior `getComponentMetaWithAudit` round-trip
-    /// through `JSON.stringify`) rooted at `canonical_id`. Returns
+    /// text from a prior `getComponentMetaWithAudit`) rooted at
+    /// `canonical_id`. Returns
     /// the `ProvenanceChain` encoded as JSON string. Single walker
     /// implementation; TS helpers format the JSON via pure rendering.
     #[wasm_bindgen(js_name = "whyLoadedFromAuditJson")]
@@ -2675,5 +2671,118 @@ mod host_root_wasm_tests {
                 .expect("the owner is a component")
         );
         assert_eq!(polled, synchronous);
+    }
+
+    #[wasm_bindgen_test]
+    fn component_meta_js_values_are_byte_arrays_with_null_misses() {
+        let project = WasmMetaProject::new(js_sys::JSON::parse("{}").expect("valid JSON"))
+            .expect("standalone project");
+        project.upsert_base(OWNER, OWNER_SOURCE).unwrap();
+        let session = project.open_session().unwrap();
+        let scalar = session.get_component_meta(OWNER).unwrap();
+        assert!(scalar.is_instance_of::<js_sys::Uint8Array>());
+        let batch = session
+            .get_component_meta_batch(vec!["/missing.vue".to_owned(), OWNER.to_owned()])
+            .unwrap();
+        assert!(js_sys::Array::is_array(&batch));
+        let batch = js_sys::Array::from(&batch);
+        assert_eq!(batch.length(), 2);
+        assert!(batch.get(0).is_null());
+        assert!(batch.get(1).is_instance_of::<js_sys::Uint8Array>());
+        assert_eq!(
+            js_sys::Uint8Array::new(&batch.get(1)).to_vec(),
+            js_sys::Uint8Array::new(&scalar).to_vec()
+        );
+        assert!(session
+            .get_component_meta("/missing.vue")
+            .unwrap()
+            .is_null());
+    }
+}
+
+#[cfg(test)]
+mod component_meta_payload_tests {
+    use super::*;
+    const OWNER: &str = "/src/Owner.vue";
+
+    #[test]
+    fn component_meta_bytes_match_the_seeded_session_payload() {
+        let project =
+            host::component_meta_host::ComponentMetaHost::new_standalone(host::HostConfig {
+                audit_enabled: true,
+                footprint_capture: true,
+                ..host::HostConfig::default()
+            });
+        project
+            .upsert_base(
+                OWNER,
+                "<script setup lang=\"ts\">\n\
+                 type Named = { value: string };\n\
+                 defineProps<{ named: Named }>();\n\
+                 </script><template><div /></template>",
+            )
+            .expect("the owner registers");
+        let session = project.open_session().expect("session opens");
+        let actual = component_meta_bytes(&session, OWNER)
+            .expect("metadata resolves")
+            .expect("the owner is a component");
+        #[cfg(feature = "semantic-observe")]
+        let cold = session.get_provenance().unwrap();
+        let expected = session
+            .get_component_meta_payload(
+                OWNER,
+                verter_ffi::component_meta::encode_component_meta_payload,
+            )
+            .expect("payload resolves")
+            .expect("the owner is a component");
+        assert_eq!(actual, expected);
+        #[cfg(feature = "semantic-observe")]
+        {
+            let warm = session.get_provenance().unwrap();
+            eprintln!(
+                "payload cache cold: hits={} misses={} encodes={}; warm: hits={} misses={} encodes={}",
+                cold.payload_cache_hits,
+                cold.payload_cache_misses,
+                cold.payload_encodes,
+                warm.payload_cache_hits,
+                warm.payload_cache_misses,
+                warm.payload_encodes,
+            );
+            assert_eq!(cold.payload_cache_misses, 1);
+            assert_eq!(cold.payload_encodes, 1);
+            assert_eq!(warm.payload_cache_hits, cold.payload_cache_hits + 1);
+            assert_eq!(warm.payload_encodes, cold.payload_encodes);
+        }
+        let batch =
+            component_meta_batch_bytes(&session, &["/missing.vue".to_owned(), OWNER.to_owned()])
+                .expect("batch resolves");
+        assert_eq!(batch, vec![None, Some(expected)]);
+        assert!(component_meta_bytes(&session, "/missing.vue")
+            .unwrap()
+            .is_none());
+        assert!(component_meta_batch_bytes(&session, &[])
+            .unwrap()
+            .is_empty());
+        #[cfg(not(feature = "semantic-observe"))]
+        assert_eq!(
+            component_meta_audit_json(&session, OWNER).unwrap_err(),
+            audit::CAPTURE_UNAVAILABLE
+        );
+        // Reads optional audit capture: runs in the instrumentation lane.
+        #[cfg(feature = "semantic-observe")]
+        {
+            let json = component_meta_audit_json(&session, OWNER)
+                .unwrap()
+                .expect("the audited owner resolves");
+            let bundle: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                bundle["analysis"]["schemaVersion"],
+                verter_protocol::component_meta::COMPONENT_META_SCHEMA_VERSION
+            );
+            assert!(bundle["record"]["request_id"].is_string());
+            assert!(component_meta_audit_json(&session, "/missing.vue")
+                .unwrap()
+                .is_none());
+        }
     }
 }
