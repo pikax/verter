@@ -60,7 +60,7 @@ use crate::types::{FileLanguage, UpsertRequest};
 use crate::{HostConfig, VerterHost};
 
 /// Build a standalone host with a single resolvable TS declaration.
-fn host_with_decl() -> (Arc<VerterHost>, String) {
+pub(super) fn host_with_decl() -> (Arc<VerterHost>, String) {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let canonical = "/proj/decl.ts".to_string();
     let _ = host
@@ -81,7 +81,7 @@ fn host_with_decl() -> (Arc<VerterHost>, String) {
 /// `base_view` retry cap is the only retry), so a regression that
 /// re-loops a never-coherent build forever would hang here. The watchdog turns that hang into a deterministic failure
 /// instead of stalling the suite.
-fn run_with_watchdog<T, F>(secs: u64, f: F) -> T
+pub(super) fn run_with_watchdog<T, F>(secs: u64, f: F) -> T
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
@@ -110,6 +110,117 @@ fn is_unstable_state<T: std::fmt::Debug>(
         outcome,
         Err(crate::host_resolve_type_audit::TypeResolutionRequestError::UnstableState { .. })
     )
+}
+
+#[test]
+fn resolve_named_symbol_succeeds_under_sustained_additive_loads() {
+    let (host, canonical) = host_with_decl();
+    let control = host
+        .resolve_named_symbol_with_audit(&canonical, "Widget", None)
+        .into_result()
+        .expect("quiescent resolution must succeed")
+        .expect("Widget must resolve");
+    let expected = host
+        .project_node_to_type_expr_json_bytes(&control)
+        .expect("quiescent projection must settle")
+        .expect("Widget must project");
+
+    let host_for_query = Arc::clone(&host);
+    let resolved = run_with_watchdog(10, move || {
+        let before = host_for_query.current_validation_token();
+        HostStoreView::arm_additive_advance_always_for_tests();
+        host_for_query.bump_load_generation();
+        let resolved = host_for_query
+            .resolve_named_symbol_with_audit(&canonical, "Widget", None)
+            .into_result();
+        HostStoreView::disarm_additive_advance_always_for_tests();
+        let live = host_for_query.current_validation_token();
+        assert!(!before.externally_superseded_by(&live));
+        assert!(live.load_generation > before.load_generation);
+        assert_eq!(before.artifact_generation, live.artifact_generation);
+        assert_eq!(
+            before.strict_self_root_generation,
+            live.strict_self_root_generation
+        );
+        resolved
+    });
+    let root = resolved
+        .expect("additive loads must not exhaust a request-bound query")
+        .expect("Widget must still resolve under additive loads");
+    assert_eq!(
+        host.project_node_to_type_expr_json_bytes(&root)
+            .expect("projection after additive loads must settle")
+            .expect("Widget must still project"),
+        expected
+    );
+}
+
+#[test]
+fn additive_stale_query_view_misses_full_token_warm_validation() {
+    let (host, canonical) = host_with_decl();
+    let host_for_query = Arc::clone(&host);
+    let canonical_for_query = canonical.clone();
+    let (root, stale) = run_with_watchdog(10, move || {
+        // Materialise the declaration before isolating load-only churn.
+        host_for_query
+            .resolve_named_symbol_with_audit(&canonical_for_query, "Widget", None)
+            .into_result()
+            .expect("quiescent resolution must succeed")
+            .expect("Widget must resolve");
+        HostStoreView::arm_additive_advance_always_for_tests();
+        host_for_query.bump_load_generation();
+        let resolved = host_for_query
+            .resolve_named_symbol_with_audit(&canonical_for_query, "Widget", None)
+            .into_result();
+        let stale = crate::typeinfo::current_store_view_for_query(&host_for_query);
+        // The general accessor is the warm-validation chokepoint. Its full
+        // token probe must miss even though the query can use this world.
+        let warm_hit = host_for_query.resolver_store_view_read().current();
+        HostStoreView::disarm_additive_advance_always_for_tests();
+        let stale = stale.expect("a request-bound query may accept additive lag");
+        let captured = stale.view().validation_token();
+        let live = host_for_query.current_validation_token();
+        assert!(!captured.externally_superseded_by(&live));
+        assert!(captured.load_generation < live.load_generation);
+        assert_eq!(
+            host_for_query.store_view_manager().cached_token(),
+            Some(captured)
+        );
+        assert!(warm_hit.is_none(), "a full-token warm validator must miss");
+        (
+            resolved
+                .expect("additive loads must allow resolution")
+                .expect("Widget must resolve"),
+            stale,
+        )
+    });
+
+    let rebuilt = host
+        .resolver_store_view_read()
+        .current()
+        .expect("a quiescent read must rebuild the full-token-stale snapshot");
+    assert_eq!(
+        rebuilt.view().validation_token(),
+        host.current_validation_token()
+    );
+    assert_ne!(
+        rebuilt.view().snapshot_ptr_for_tests(),
+        stale.view().snapshot_ptr_for_tests(),
+        "the stale snapshot must not be relabelled as the live snapshot"
+    );
+    let cold = host
+        .resolve_named_symbol_with_audit(&canonical, "Widget", None)
+        .into_result()
+        .expect("resolution with the rebuilt view must succeed")
+        .expect("Widget must resolve after rebuild");
+    assert_eq!(
+        host.project_node_to_type_expr_json_bytes(&root)
+            .expect("additive-stale answer must settle")
+            .expect("additive-stale answer must project"),
+        host.project_node_to_type_expr_json_bytes(&cold)
+            .expect("cold rebuilt answer must settle")
+            .expect("cold rebuilt answer must project")
+    );
 }
 
 #[test]

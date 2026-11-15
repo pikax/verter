@@ -657,11 +657,13 @@ pub(crate) enum StoreViewReturnOnlyReason {
     ReentrantBuildClaim,
 }
 
-/// A [`HostStoreView`] the [`StoreViewManager`] proved current at
-/// handoff: it was published (or coalesced onto an already-published
-/// same-token entry) through [`PublishOutcome::Published`], and its
-/// token matched the live host token under the manager lock at that
-/// moment.
+/// A [`HostStoreView`] the [`StoreViewManager`] proved was not externally
+/// superseded at handoff. Request-bound queries that exhaust their retry
+/// budget may receive a settled view whose additive dimensions lag the
+/// live host. The view retains its real full token as the reuse key.
+/// As described by `FileArtifactStore`'s artifact-generation rationale,
+/// lazy publications missing from a snapshot cause conservative warm
+/// validation false misses; the next full-token read rebuilds the view.
 ///
 /// This wrapper is the type-level proof that a view is safe for warm-
 /// cache validation. The fact-validation entry points
@@ -1324,6 +1326,11 @@ thread_local! {
         std::cell::Cell::new(false)
     };
 
+    /// Advance only the additive load generation on every build attempt.
+    pub(crate) static FORCE_ADDITIVE_ADVANCE_ALWAYS: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+
     /// Test-only ONE-SHOT knob: when armed, the next
     /// [`StoreViewManager::base_view`] iteration advances `store_view_epoch`
     /// INSIDE the manager lock, immediately BEFORE the warm-probe re-reads
@@ -1558,10 +1565,14 @@ impl HostStoreView {
     /// its [`StoreViewReturnOnlyReason`]). Warm-cache validators call this
     /// and accept ONLY the `Current` arm; a `ReturnOnly` is a cache miss
     /// that falls to the cold path.
+    /// `request_bound_query` is set only by the typeinfo query accessor,
+    /// whose callers bind a completion overlay before dispatch. It permits
+    /// additive lag only after the handoff spends its retry budget.
     #[track_caller]
-    pub(crate) fn from_host_read(host: &VerterHost) -> StoreViewRead {
+    pub(crate) fn from_host_read(host: &VerterHost, request_bound_query: bool) -> StoreViewRead {
         Self::record_host_read(host);
-        host.store_view_manager().base_view(host)
+        host.store_view_manager()
+            .base_view(host, request_bound_query)
     }
 
     /// [`Self::from_host_read`] as a pollable computation: it returns
@@ -1598,18 +1609,23 @@ impl HostStoreView {
     }
 
     /// Build a coherent root-backed base snapshot or report supersession
-    /// (no-torn return). The final attempt never treats a capture whose roots
-    /// and token could straddle a mutation as publishable. The
+    /// (no-torn return). Roots and token always come from one capture. On the
+    /// final attempt an exhausted request-bound query may accept additive
+    /// lag, but never external supersession or an unsettled artifact root. The
     /// [`StoreViewManager`] retries on `Superseded` (a concurrent winner
     /// may have published a coherent view in the meantime), and on
     /// retry-cap exhaustion hands the carried freshest view back
     /// return-only WITHOUT caching it.
-    fn build_coherent(host: &VerterHost, session_id: Option<u64>) -> SnapshotBuildOutcome {
+    fn build_coherent(
+        host: &VerterHost,
+        session_id: Option<u64>,
+        allow_additive_lag: bool,
+    ) -> SnapshotBuildOutcome {
         // The freshest view from a superseded attempt, kept so an
         // all-superseded run can hand a built (if incoherent) view back to
         // the caller return-only instead of producing nothing.
         let mut freshest: Option<HostStoreView> = None;
-        for _ in 0..STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS {
+        for attempt in 0..STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS {
             // Count every actual coherent root capture (one per `build`
             // attempt). A batch-saturation gate reads this to verify the
             // `StoreViewManager` collapses a warm batch onto ~O(1) captures
@@ -1702,6 +1718,10 @@ impl HostStoreView {
             {
                 host.bump_store_view_epoch();
             }
+            #[cfg(test)]
+            if FORCE_ADDITIVE_ADVANCE_ALWAYS.with(std::cell::Cell::get) {
+                host.bump_load_generation();
+            }
             // Compare the single PRE-build captured token against a fresh
             // live capture. Because the view was stamped entirely from
             // `pre`, this detects ANY mid-build advance of ANY token
@@ -1710,7 +1730,9 @@ impl HostStoreView {
             // project identity, project generation) — including a dimension
             // that moved WITHOUT bumping `store_view_epoch` — and forces a
             // retry / `Superseded` rather than publishing a torn view whose
-            // snapshot maps and token straddle the mutation.
+            // snapshot maps and token straddle the mutation. Only the final
+            // attempt of an exhausted request-bound query may accept additive
+            // lag, using the same external-supersession oracle as publication.
             //
             // The token alone cannot vouch for the artifact root: an
             // artifact publication that finished above a mutation still in
@@ -1721,7 +1743,12 @@ impl HostStoreView {
             // the artifact until some later mutation moved the token. Such a
             // capture retries like a superseded one.
             let live_token = capture_store_view_validation_token(host);
-            if pre_token == live_token && artifact_root_settled {
+            if artifact_root_settled
+                && (pre_token == live_token
+                    || (allow_additive_lag
+                        && attempt + 1 == STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS
+                        && !pre_token.externally_superseded_by(&live_token)))
+            {
                 return SnapshotBuildOutcome::Coherent {
                     view,
                     token: pre_token,
@@ -3855,8 +3882,8 @@ impl StoreViewManager {
     }
 
     /// Synchronous compatibility over the same suspended computation.
-    fn base_view(&self, host: &VerterHost) -> StoreViewRead {
-        build_claim::drive(self, host)
+    fn base_view(&self, host: &VerterHost, request_bound_query: bool) -> StoreViewRead {
+        build_claim::drive(self, host, request_bound_query)
     }
 
     /// If the manager has a cached base view, classify it against the live
@@ -3901,23 +3928,20 @@ impl StoreViewManager {
     ///    a host-lifecycle reset. Republishing its pre-reset snapshot would
     ///    defeat the reset's `Arc`-release intent and re-warm the cache with
     ///    a stale base view, so the view is [`PublishOutcome::Declined`].
-    /// 2. **Live-token fence.** A snapshot is only published when its token
-    ///    still equals the live host token, re-read here while holding the
-    ///    manager lock. A token that moved between build completion and
-    ///    publish is stale; caching it would violate the no-torn-PUBLISH
-    ///    contract, and RETURNING it to a warm validator would let that
-    ///    validator validate a cached entry against pre-mutation state. The
-    ///    view is [`PublishOutcome::Declined`]. (`build_coherent` already
-    ///    guarantees the built view is internally coherent; this re-read
-    ///    additionally rejects a view the host superseded after the build's
-    ///    own post-build check.)
+    /// 2. **Live-token fence.** Re-read the live host token under the manager
+    ///    lock. Require full equality unless an exhausted request-bound query
+    ///    allows additive lag; external supersession always declines. The
+    ///    cache retains the build's real token so ordinary warm reads miss
+    ///    on every full-token difference. `build_coherent` already guarantees
+    ///    a settled capture; this re-read also fences later external changes.
     /// 3. **Newer-cache fence.** A racing build may have already published
     ///    the SAME token (reuse its `Arc` so all callers share one snapshot)
     ///    or a DIFFERENT one this older snapshot must not clobber.
     ///
     /// A declined view is KNOWN-STALE: `base_view` must re-loop against the
     /// freshly-read live token rather than return it to a warm validator.
-    /// Only the live, published/coalesced view is [`PublishOutcome::Published`].
+    /// Only the externally coherent published/coalesced view is
+    /// [`PublishOutcome::Published`].
     fn publish_coherent(
         &self,
         state: &mut StoreViewManagerState,
@@ -3925,6 +3949,7 @@ impl StoreViewManager {
         claim_reset_generation: u64,
         token: StoreViewValidationToken,
         view: HostStoreView,
+        allow_additive_lag: bool,
     ) -> PublishOutcome {
         // Test-only PERSISTENT knob: force the RESET fence to decline on
         // every publish WITHOUT advancing any token dimension, so
@@ -3962,14 +3987,14 @@ impl StoreViewManager {
         }) {
             host.bump_store_view_epoch();
         }
-        // Gate 2: the host moved past this token after the build →
-        // known-stale, decline. Returning this view to a warm validator
-        // would validate a cached entry against already-superseded state.
-        if token != capture_store_view_validation_token(host) {
+        // Gate 2: external changes always decline. An exhausted request-bound
+        // query may accept additive lag without changing the cache's token.
+        let live = capture_store_view_validation_token(host);
+        if token != live && !(allow_additive_lag && !token.externally_superseded_by(&live)) {
             return PublishOutcome::Declined { view };
         }
         // Gate 3: reuse an already-published same-token entry; never clobber
-        // a newer one. Either branch yields a live view at `token`.
+        // a newer one. Either branch retains the captured `token`.
         match state.cached.as_ref() {
             Some((cached_token, cached_view)) if *cached_token == token => {
                 PublishOutcome::Published {
@@ -4099,7 +4124,7 @@ impl VerterHost {
     #[track_caller]
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn resolver_store_view(&self) -> StoreViewRead {
-        HostStoreView::from_host_read(self)
+        HostStoreView::from_host_read(self, false)
     }
 
     /// Every compaction domain's LIVE clock, as five atomic loads.
@@ -4139,7 +4164,7 @@ impl VerterHost {
     /// that name the typed read explicitly. Identical behaviour.
     #[track_caller]
     pub(crate) fn resolver_store_view_read(&self) -> StoreViewRead {
-        HostStoreView::from_host_read(self)
+        HostStoreView::from_host_read(self, false)
     }
 
     /// [`Self::resolver_store_view_read`] as a pollable computation: it
@@ -4672,6 +4697,16 @@ impl HostStoreView {
         FORCE_SUPERSEDE_ALWAYS.with(|c| c.set(false));
     }
 
+    /// Test-only: advance only the load generation on every build attempt
+    /// on the current thread until disarmed.
+    pub(crate) fn arm_additive_advance_always_for_tests() {
+        FORCE_ADDITIVE_ADVANCE_ALWAYS.with(|c| c.set(true));
+    }
+
+    pub(crate) fn disarm_additive_advance_always_for_tests() {
+        FORCE_ADDITIVE_ADVANCE_ALWAYS.with(|c| c.set(false));
+    }
+
     /// Test-only: arm the PERSISTENT reset-fence-decline knob on the
     /// CURRENT thread. Every `publish_coherent` then declines its build
     /// through the reset-fence gate WITHOUT advancing any token dimension,
@@ -4854,7 +4889,7 @@ impl HostStoreView {
     /// supersession.
     pub(crate) fn build_coherent_is_superseded_for_tests(host: &VerterHost) -> bool {
         FORCE_SUPERSEDE_ATTEMPTS.with(|c| c.set(STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS));
-        let outcome = Self::build_coherent(host, None);
+        let outcome = Self::build_coherent(host, None, false);
         // Reset the knob so it cannot leak into a later build on this
         // thread.
         FORCE_SUPERSEDE_ATTEMPTS.with(|c| c.set(0));
