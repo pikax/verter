@@ -40,6 +40,8 @@ pub enum InferenceSessionState {
 pub(crate) struct SessionCheckpoint {
     /// `candidates.len()` per [`InferenceInfo`], in info order.
     candidate_lens: Vec<usize>,
+    /// Repeated deposits still reach a parameter without appending a candidate.
+    duplicate_deposits: Option<DuplicateDeposits>,
     /// The reverse mappings in flight at the checkpoint.
     reverse_depth: usize,
     /// Registered reverse-projection targets of the innermost reverse
@@ -65,6 +67,60 @@ pub struct InferenceCandidate {
     /// drives the per-rung combination (covariant candidates union,
     /// contravariant candidates intersect).
     pub variance: VariancePhase,
+}
+
+/// Trial observations that candidate lengths cannot represent. Most sessions
+/// receive no duplicates; one repeated parameter/priority needs no map.
+#[derive(Debug, Clone)]
+enum DuplicateDeposits {
+    One {
+        parameter: usize,
+        priority: InferenceCandidatePriority,
+        count: u64,
+    },
+    Many(FxHashMap<(usize, InferenceCandidatePriority), u64>),
+}
+
+impl DuplicateDeposits {
+    fn record(&mut self, parameter: usize, priority: InferenceCandidatePriority) {
+        match self {
+            Self::One {
+                parameter: stored_parameter,
+                priority: stored_priority,
+                count,
+            } if (*stored_parameter, *stored_priority) == (parameter, priority) => *count += 1,
+            Self::One {
+                parameter: stored_parameter,
+                priority: stored_priority,
+                count,
+            } => {
+                let mut counts = FxHashMap::default();
+                counts.insert((*stored_parameter, *stored_priority), *count);
+                counts.insert((parameter, priority), 1);
+                *self = Self::Many(counts);
+            }
+            Self::Many(counts) => *counts.entry((parameter, priority)).or_default() += 1,
+        }
+    }
+
+    fn count(&self, parameter: usize, priority: InferenceCandidatePriority) -> u64 {
+        match self {
+            Self::One {
+                parameter: stored_parameter,
+                priority: stored_priority,
+                count,
+            } if (*stored_parameter, *stored_priority) == (parameter, priority) => *count,
+            Self::One { .. } => 0,
+            Self::Many(counts) => counts.get(&(parameter, priority)).copied().unwrap_or(0),
+        }
+    }
+
+    fn restore(&mut self, checkpoint: &Self) {
+        match (self, checkpoint) {
+            (Self::Many(counts), Self::Many(saved)) => counts.clone_from(saved),
+            (counts, saved) => *counts = saved.clone(),
+        }
+    }
 }
 
 /// One registered indexed-access projection and the ordinary inference
@@ -288,6 +344,9 @@ pub struct InferenceSession {
     /// Per-parameter candidate state.
     infos: Vec<InferenceInfo>,
     info_positions: FxHashMap<SemanticNodeId, usize>,
+    /// Allocated only after a duplicate deposit. Candidate lengths continue to
+    /// observe new candidates, including reverse aggregates, without counters.
+    duplicate_deposits: Option<Box<DuplicateDeposits>>,
     /// A recursive inference edge was encountered in the current walk.
     /// Deposits alone cannot establish a complete fixed-member match.
     pub(crate) inference_circularity: bool,
@@ -329,6 +388,7 @@ impl InferenceSession {
             setup,
             infos,
             info_positions,
+            duplicate_deposits: None,
             inference_circularity: false,
             reverse_frames: Vec::new(),
             staged_bindings: None,
@@ -381,9 +441,9 @@ impl InferenceSession {
     }
 
     /// A rollback point over the session's per-parameter candidate lists.
-    /// Deposits strictly APPEND onto `InferenceInfo::candidates` (the info
+    /// New candidates APPEND onto `InferenceInfo::candidates` (the info
     /// set itself is fixed at session open), so a checkpoint is the ordered
-    /// list of candidate lengths and rollback truncates back to it — the
+    /// list of candidate lengths and duplicate counts. Rollback restores both — the
     /// alternative-scoping primitive: a LOSING overload / signature-group
     /// alternative's deposits must not survive into fixation.
     pub(crate) fn checkpoint(&self) -> SessionCheckpoint {
@@ -394,6 +454,7 @@ impl InferenceSession {
                 .iter()
                 .map(|info| info.candidates.len())
                 .collect(),
+            duplicate_deposits: self.duplicate_deposits.as_deref().cloned(),
             reverse_depth: self.reverse_frames.len(),
             projection_info_len: reverse.map_or(0, |state| state.projection_infos.len()),
             projection_candidate_lens: reverse
@@ -421,6 +482,14 @@ impl InferenceSession {
             self.infos[position].candidates[checkpoint.candidate_lens[position]..]
                 .iter()
                 .any(|candidate| candidate.priority == priority)
+                || self
+                    .duplicate_deposits
+                    .as_deref()
+                    .map_or(0, |counts| counts.count(position, priority))
+                    > checkpoint
+                        .duplicate_deposits
+                        .as_ref()
+                        .map_or(0, |counts| counts.count(position, priority))
         })
     }
 
@@ -444,6 +513,15 @@ impl InferenceSession {
         }
         for (info, len) in self.infos.iter_mut().zip(checkpoint.candidate_lens.iter()) {
             info.candidates.truncate(*len);
+        }
+        if let Some(saved) = &checkpoint.duplicate_deposits {
+            if let Some(counts) = self.duplicate_deposits.as_deref_mut() {
+                counts.restore(saved);
+            } else {
+                self.duplicate_deposits = Some(Box::new(saved.clone()));
+            }
+        } else {
+            self.duplicate_deposits = None;
         }
         if checkpoint.reverse_depth > self.reverse_frames.len() {
             verter_debug_assert!(
@@ -625,7 +703,10 @@ impl InferenceSession {
     }
 
     /// Deposit a candidate for `param` under `priority`, tagged with the
-    /// variance of the position it came from. Returns `false` when `param`
+    /// variance of the position it came from. Retains the first occurrence of
+    /// each node within one priority and covariant or contravariant list;
+    /// invariant positions share the covariant list. A repeated deposit still
+    /// succeeds and is observable by an inference trial. Returns `false` when `param`
     /// is absent from the frozen setup; callers must propagate `Unknown`
     /// rather than treating an inactive declaration as a successful bind.
     pub(crate) fn deposit(
@@ -638,18 +719,35 @@ impl InferenceSession {
         if self.state != InferenceSessionState::Collecting {
             return false;
         }
-        let Some(info) = self
-            .info_positions
-            .get(&param_node)
-            .and_then(|&position| self.infos.get_mut(position))
-        else {
+        let Some(&position) = self.info_positions.get(&param_node) else {
             return false;
         };
-        info.candidates.push(InferenceCandidate {
-            node: candidate,
-            priority,
-            variance,
+        let Some(info) = self.infos.get_mut(position) else {
+            return false;
+        };
+        let contravariant = variance == VariancePhase::Contravariant;
+        let duplicate = info.candidates.iter().any(|existing| {
+            existing.node == candidate
+                && existing.priority == priority
+                && (existing.variance == VariancePhase::Contravariant) == contravariant
         });
+        if duplicate {
+            if let Some(counts) = self.duplicate_deposits.as_deref_mut() {
+                counts.record(position, priority);
+            } else {
+                self.duplicate_deposits = Some(Box::new(DuplicateDeposits::One {
+                    parameter: position,
+                    priority,
+                    count: 1,
+                }));
+            }
+        } else {
+            info.candidates.push(InferenceCandidate {
+                node: candidate,
+                priority,
+                variance,
+            });
+        }
         true
     }
 
@@ -848,6 +946,7 @@ impl InferenceSession {
         for info in &mut self.infos {
             info.candidates.clear();
         }
+        self.duplicate_deposits = None;
         self.reverse_frames.clear();
         self.staged_bindings = None;
         self.state = InferenceSessionState::Abandoned;
@@ -866,3 +965,7 @@ pub(crate) struct FixationInput {
     /// uninferred).
     pub(crate) candidates: super::WinningCandidates,
 }
+
+#[cfg(test)]
+#[path = "session_tests.rs"]
+mod tests;
