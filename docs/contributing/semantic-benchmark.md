@@ -556,7 +556,7 @@ and an ordered script of steps, run in ONE live engine per invocation:
 |---|---|---|
 | `incremental-edits` | INCREMENTAL | demand an alias that depends on a leaf through an intermediate generic; edit the leaf, the intermediate type and an unrelated file, re-requesting after each |
 | `editor-session` | EDITOR SESSION | an InputMenu-equivalent Vue component (props composed from a picked base, events from a tuple map, both imported from a types module): hover-like demands on its types and its component metadata, cold, then across an edit to the types and an edit to the file being hovered |
-| `concurrent-demands` | CONCURRENT | eight demands in eight files issued at once (one thread each for Verter; all in flight together through tsc's asynchronous API), cold, then again |
+| `concurrent-demands` | CONCURRENT | trivial init demands prepare the seven remaining files after c0's init, then eight relation demands in eight ready files issued at once (one thread each for Verter; all in flight together through tsc's asynchronous API), cold, then again |
 | `augment-global-growth`, `augment-module-growth` | AUGMENTATION GROWTH | the `augment-global` and `augment-module` reproductions in one engine (standard tier): the probe answered at 500 contributors, then 1,500 edits each filling in one declaration-free contributor file, then the probe at 2,000; the engine's retention counters after every step feed the retention proof below |
 | `augment-global-baseline`, `augment-module-baseline` | AUGMENTATION GROWTH | the same files with all 2,000 contributors from the start, the probe answered once: the growth session's baseline |
 
@@ -577,6 +577,18 @@ to name its file and advance the snapshot. A step is compared only when all
 its answers matched in Verter and reproduced the constructed answer in tsc.
 Answers are observed right after each step, outside every timer, so a
 session's memory figures include observation for both tools.
+
+The concurrent session's first sequential step requests `__BenchInit` in
+c1 through c7 through the regular host path, making every demanded file
+parsed and indexed before concurrent timing. This separate step reports
+the cold preparation cost without resolving the relation probes. Verter
+starts all demand threads and parks them before starting the concurrent
+timer; `wallMicros` covers barrier release through the last join. Each
+demand step also carries `summedRequestMicros`, the sum of its individual
+`requests[].micros` timers, so overlapping request cost remains visible
+beside wall time in the summary and session table. Sequential steps have
+equal wall and summed request times. These record fields are additive;
+the analyzer can derive the sum from individual timers in older records.
 
 Each arm's provenance is bound as the probes' is: a Verter session must have
 run the pinned probe's `session` runner, a tsc session the harness's own node

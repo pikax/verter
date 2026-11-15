@@ -157,6 +157,14 @@ export function stepMs(tool, step) {
   return null;
 }
 
+/** Summed request milliseconds, separate from a concurrent step's wall time. */
+export function summedRequestMs(tool, step) {
+  if (tool !== "verter" || step?.kind !== "demand") return null;
+  // Records predating the additive field already carry individual timers.
+  const us = step.summedRequestMicros ?? step.requests?.reduce((sum, r) => sum + r.micros, 0);
+  return finite(us) ? us / 1000 : null;
+}
+
 const peakOf = (record) =>
   (record?.tool === "verter" ? record?.afterSteps : record?.serverAfterSteps)?.peakBytes ?? null;
 
@@ -319,6 +327,9 @@ function sessionArmSummary(arm, invs, session, limits) {
         step: s,
         kind: step.kind,
         ms: stats([...records, ...partialRecords].map((r) => stepMs(tool, r.steps?.[s]))),
+        summedRequestMs: stats(
+          [...records, ...partialRecords].map((r) => summedRequestMs(tool, r.steps?.[s])),
+        ),
       })),
       peakBytes: stats(records.map(peakOf)),
     },
@@ -561,6 +572,13 @@ export function sessionRecordProblems(record, session, { tool, partial = false }
         `step ${s} concurrency differs from the script`,
       );
       need(stepMs(tool, got) !== null, `step ${s} has no valid time`);
+      if (tool === "verter" && got.summedRequestMicros !== undefined) {
+        need(
+          finite(got.summedRequestMicros) &&
+            got.summedRequestMicros === reqs.reduce((sum, r) => sum + r.micros, 0),
+          `step ${s} summed request time differs from its individual timers`,
+        );
+      }
     } else if (step.kind === "edit") {
       need(got.file === step.file, `step ${s} edited ${got.file}, not ${step.file}`);
       need(
