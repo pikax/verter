@@ -166,6 +166,10 @@ impl Serialize for FfiComponentMeta {
         use serde::ser::SerializeStruct;
         let facts = self.facts();
         let mut output = serializer.serialize_struct("ComponentMeta", 29)?;
+        output.serialize_field(
+            "schemaVersion",
+            &crate::component_meta::COMPONENT_META_SCHEMA_VERSION,
+        )?;
         output.serialize_field("facts", &facts)?;
         output.serialize_field("componentPublicContract", &self.component_public_contract)?;
         output.serialize_field(
@@ -261,7 +265,6 @@ impl Serialize for FfiComponentMeta {
         if self.resolution.is_some() {
             output.serialize_field("resolution", &self.resolution)?;
         }
-        output.serialize_field("resolutionStatus", &self.resolution_status)?;
         if !self.origin.edges.is_empty() {
             output.serialize_field("origin", &self.origin)?;
         }

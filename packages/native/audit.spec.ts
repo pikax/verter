@@ -128,13 +128,19 @@ describe("ts_helpers_do_not_reimplement_walker_logic", () => {
 
   it("why-loaded / why-instantiated helpers delegate to the Rust walker via JSON round-trip only", () => {
     // The whyLoaded / whyInstantiated TS helpers must compose of:
-    //   1. JSON.stringify(bundle) — serialize the audit record
+    //   1. the audit JSON text: the native helper serializes its decoded
+    //      bundle (JSON.stringify(bundle)); the WASM helper receives the
+    //      bundle as JSON text and forwards it unchanged
     //   2. session.whyLoadedFromAuditJson(...) — delegate to Rust
     //   3. JSON.parse(chainJson) — return a typed chain
     // Any extra logic walking the footprint (e.g. fallback traversal
     // when the Rust walker returns NotFound) is forbidden — TS helpers
     // are pure adapters.
-    const REQUIRED_SUBSTRINGS = ["JSON.stringify(bundle)", "JSON.parse(chainJson)"];
+    const REQUIRED_SUBSTRINGS = ["JSON.parse(chainJson)"];
+    expect(
+      FILES[0].content.includes("JSON.stringify(bundle)"),
+      `${FILES[0].label} is missing expected walker-adapter pattern: JSON.stringify(bundle)`,
+    ).toBe(true);
     const REQUIRED_BINDING_CALLS = [
       "whyLoadedFromAuditJson(auditJson",
       "whyInstantiatedFromAuditJson(",

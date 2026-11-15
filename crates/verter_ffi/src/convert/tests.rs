@@ -3370,48 +3370,6 @@ fn component_public_contract_crosses_the_production_ffi_seam_structurally() {
     ));
 }
 
-/// The wire payload's RESOLUTION STATUS is typed and honest: a
-/// sidecar-less conversion (no resolution seed — the sidecar-less
-/// output-envelope surfaces, e.g. the plain WASM `getComponentMeta`
-/// lane) reports the typed
-/// `Unavailable(ResolutionProviderAbsent)` status — NEVER an
-/// exact/successful-looking silence — while a resolution-bearing conversion
-/// reports `Resolved`. The status is additive JSON (`resolutionStatus`);
-/// every pre-existing field is untouched.
-#[test]
-fn resolution_less_conversion_reports_typed_unavailable_status_never_silent_success() {
-    // Resolution-less lane: the typed unavailable status.
-    let ffi = component_meta_parts_to_ffi(empty_analysis(), None, Default::default());
-    assert_eq!(
-        ffi.resolution_status,
-        FfiComponentMetaResolutionStatus::Unavailable(
-            FfiResolutionUnavailableReason::ResolutionProviderAbsent
-        ),
-        "a resolution-less payload must carry the typed unavailable status"
-    );
-    assert!(ffi.resolution.is_none(), "no resolution sidecar fabricated");
-    let json = serde_json::to_value(&ffi).expect("serialize");
-    assert_eq!(
-        json["resolutionStatus"]["kind"], "unavailable",
-        "the wire self-describes the resolution-less lane"
-    );
-    assert_eq!(
-        json["resolutionStatus"]["reason"], "resolutionProviderAbsent",
-        "the wire carries the typed reason"
-    );
-
-    // Resolution-bearing lane: the resolved status.
-    let resolution = resolution_output_with(Vec::new(), None);
-    let ffi = component_meta_parts_to_ffi(empty_analysis(), Some(resolution), Default::default());
-    assert_eq!(
-        ffi.resolution_status,
-        FfiComponentMetaResolutionStatus::Resolved,
-        "a resolution-bearing payload reports the resolved status"
-    );
-    let json = serde_json::to_value(&ffi).expect("serialize");
-    assert_eq!(json["resolutionStatus"]["kind"], "resolved");
-}
-
 /// The FFI boundary preserves the whole-return wrapper role's EXACTNESS: an
 /// exact family, a completed non-wrapper proof, a typed degradation carrying its
 /// exact reason, and an undemanded binding all cross distinctly, and the JSON

@@ -289,6 +289,34 @@ The remaining types are re-exported from `@verter/native/host-types`:
 See the [@verter/native documentation](./native.md) for full definitions of the
 re-exported types.
 
+## Component metadata
+
+The generated WASM bindings expose `MetaProject` and `MetaSession` for
+standalone in-memory projects. Register source with `upsertBase()` and open a
+session with `openSession()`.
+
+| Session method | Return value |
+| --- | --- |
+| `getComponentMeta(canonicalOrAlias)` | `Uint8Array \| null` |
+| `getComponentMetaBatch(canonicalsOrAliases)` | `(Uint8Array \| null)[]` |
+| `getComponentMetaWithAudit(canonicalOrAlias)` | JSON `string \| null` |
+
+Scalar and batch metadata use the same seeded session entries and protobuf
+encoder as NAPI, producing identical bytes for identical host state. Batches
+run inline and preserve input order. `null` means a missing component; genuine
+request failures throw. Encoded payloads participate in the shared payload cache.
+
+The audit method returns the same JSON text NAPI encodes as UTF-8 bytes.
+`decodeAuditBundle(text)` parses it; `whyLoaded(session, text, canonicalId)` and
+`whyInstantiated(session, text, declCanonicalId, declSymbolName, argsFingerprintHex)`
+forward the original text to the Rust walkers. Audit integers retain their
+decimal-string representation. Capture requires a build with
+`semantic-observe` and host options `auditEnabled` and `footprintCapture`;
+otherwise the audit method reports unavailable or disabled capture.
+
+The protobuf payload and audit analysis JSON share component-meta schema 15;
+the JSON rendering includes `schemaVersion` and omits `resolutionStatus`.
+
 ## Differences from @verter/native
 
 | Feature                         | @verter/native                   | @verter/wasm                     |

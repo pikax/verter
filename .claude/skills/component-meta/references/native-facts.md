@@ -1,13 +1,25 @@
 # Native component facts
 
 `verter_ffi::component_meta` owns the materialized-payload byte encoder and
-the shared `AuditBundle` with its JSON byte encoder. Bindings adapt these to
-their boundary types; WASM's component-meta entries still serialize the shared
-bundle directly to a JavaScript object. `verter_ffi::typeinfo` owns the shared
+the shared `AuditBundle` with its JSON byte encoder. NAPI and WASM scalar and
+batch component-meta calls use the seeded session payload entries and the same
+encoder: NAPI returns Buffers, WASM returns `Uint8Array | null` slots. WASM's
+audit entry returns the shared bundle's UTF-8 JSON as text; `decodeAuditBundle`
+parses it, and both provenance helpers forward the original text to Rust.
+WASM supports standalone projects only and runs batches inline. Audit capture
+is unavailable without `semantic-observe`. `verter_ffi::typeinfo` owns the shared
 typeinfo request helpers, audited execution, response encoding and stored-record
 gate. Binding error mapping preserves native argument/serialization statuses
 and WASM string errors. Response-byte attribution fires once in the shared
 encoder; its observation gate is owned by `verter_audit`.
+
+`component_meta.proto` defines one schema, versioned by the single
+`COMPONENT_META_SCHEMA_VERSION` constant (currently 15). Protobuf and the JSON
+rendering both state that version (`schemaVersion` in JSON). JSON has no
+`resolutionStatus` field. Adding JSON's version and removing that field do not
+bump the unchanged protobuf schema. Proto field additions, removals, retyping
+or meaning changes require a bump; producer claim changes and new open cause
+codes do not.
 
 Schema 13 gives `ComponentMetaBody.facts` (field 28) ownership of semantic lanes.
 The former body arrays and contract fields are reserved, as is the former
@@ -69,8 +81,9 @@ expose states its analyzer-owned complete closed names. Accepted props, events
 and fallthrough share the resolver claim and absorb surrounding partial-compute
 causes. Public-instance completeness stays typed through the wire DTO.
 
-A seeded registry carries the resolution policy's completeness; an unseeded
-registry retains its complete closed claim. The output sink finalizes the
+A transport registry carries the resolution policy's completeness. Internal
+sidecar-less output readers still use the shared envelope builder; they are
+not the WASM transport. The output sink finalizes the
 registry and emits aligned declaration positions, including absent declarations.
 The converter zips these positions and copies rawType from that same declaration.
 The cause-code vocabulary is defined once by

@@ -1,11 +1,10 @@
 //! Rust-side verification of the `verter_wasm` audit binding
 //! serialization surface.
 //!
-//! `serde-wasm-bindgen` drives the FFI conversion via the same
-//! `serde::Serialize` / `serde::Deserialize` impls that `serde_json`
-//! consumes; round-tripping through `serde_json` therefore exercises
-//! the exact shape the WASM boundary produces, one layer down from
-//! the `JsValue` conversion.
+//! The WASM audited entry returns the shared audit bundle as JSON text,
+//! encoded with `serde_json` through the same `serde::Serialize` impls;
+//! round-tripping through `serde_json` therefore exercises the exact text
+//! the WASM boundary returns.
 //!
 //! These tests form the Rust half of a layered coverage story:
 //!
@@ -132,8 +131,7 @@ fn synthesize_record() -> RequestAuditRecord {
 /// `wasm_get_component_meta_with_audit_serializes_across_boundary`.
 /// Verify that the Rust-side
 /// `RequestAuditRecord` round-trips through `serde_json` without loss —
-/// this exercises the exact serde impls `serde-wasm-bindgen` consumes
-/// to produce a `JsValue` bundle.
+/// the same serde impls that encode the JSON text the WASM entry returns.
 #[test]
 fn wasm_get_component_meta_with_audit_serializes_across_boundary() {
     let original = synthesize_record();

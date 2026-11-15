@@ -27,8 +27,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { captureAvailability, initSync, MetaProject, VerterHost } from "../wasm/verter_wasm.js";
-import type { AuditBundle } from "./audit.js";
-import { type AuditCapableMetaSession, loadedFiles, renderChainText, whyLoaded } from "./audit.js";
+import { decodeAuditBundle, loadedFiles, renderChainText, whyLoaded } from "./audit.js";
 
 const WASM_BINARY_PATH = resolve(import.meta.dirname, "../wasm/verter_wasm_bg.wasm");
 
@@ -64,7 +63,7 @@ describe("@verter/wasm audit bindings", () => {
 
       expect(() => session.getComponentMetaWithAudit("/Widget.vue")).toThrow(CAPTURE_UNAVAILABLE);
       // The plain query is unaffected by capture.
-      expect(session.getComponentMeta("/Widget.vue")).not.toBeNull();
+      expect(session.getComponentMeta("/Widget.vue")).toBeInstanceOf(Uint8Array);
       expect(() => session.whyLoadedFromAuditJson("{}", "/Widget.vue")).toThrow(
         CAPTURE_UNAVAILABLE,
       );
@@ -105,7 +104,7 @@ describe("@verter/wasm audit bindings", () => {
     // Exercise the real WASM boundary:
     // `MetaProject` constructor with audit enabled, upsert source,
     // open a session, call `getComponentMetaWithAudit`, and assert
-    // the JS value round-trip produces an `AuditBundle` shape.
+    // the JSON text decodes to an `AuditBundle` shape.
     //
     // Discriminating: if the FFI serialization regresses (a new
     // record field without `#[serde]`, a camelCase/snake_case
@@ -118,9 +117,9 @@ describe("@verter/wasm audit bindings", () => {
 
     const raw = session.getComponentMetaWithAudit("/Widget.vue");
     expect(raw, "audit bundle must be non-null when audit is enabled").not.toBeNull();
-    expect(typeof raw).toBe("object");
+    expect(typeof raw).toBe("string");
 
-    const bundle = raw as unknown as AuditBundle;
+    const bundle = decodeAuditBundle(raw)!;
     expect(bundle).toHaveProperty("analysis");
     expect(bundle).toHaveProperty("resolution");
     expect(bundle).toHaveProperty("record");
@@ -154,9 +153,7 @@ describe("@verter/wasm audit bindings", () => {
 
     expect(bundle.record.canonical_id).toBe("/Widget.vue");
 
-    // Exercise the TS helper — confirms the serde-wasm-bindgen
-    // output shape conforms to the ts-rs contract the helpers
-    // consume.
+    // The shared JSON encoding conforms to the generated record contract.
     const files = loadedFiles(fp ?? null);
     expect(Array.isArray(files)).toBe(true);
 
@@ -167,7 +164,7 @@ describe("@verter/wasm audit bindings", () => {
   it.runIf(captured)("wasm_why_loaded_binding_invokes_rust_walker", () => {
     // End-to-end exercise of the Rust
     // walker through the WASM binding. The TS wrapper `whyLoaded`
-    // stringifies the bundle, hands it to `whyLoadedFromAuditJson`,
+    // hands the original JSON to `whyLoadedFromAuditJson`,
     // and `JSON.parse`s the returned chain.
     //
     // Discriminating: if the walker binding regresses (e.g. the JSON
@@ -182,13 +179,7 @@ describe("@verter/wasm audit bindings", () => {
 
     const raw = session.getComponentMetaWithAudit("/Widget.vue");
     expect(raw).not.toBeNull();
-    const bundle = raw as unknown as AuditBundle;
-
-    // The WASM `MetaSession` satisfies `AuditCapableMetaSession`
-    // structurally — the wrapper delegates via the exact
-    // `whyLoadedFromAuditJson` method name the binding exposes.
-    const walkerSession: AuditCapableMetaSession = session as unknown as AuditCapableMetaSession;
-    const chain = whyLoaded(walkerSession, bundle, "/Widget.vue");
+    const chain = whyLoaded(session, raw!, "/Widget.vue");
 
     expect(chain).toBeTruthy();
     expect(chain).toHaveProperty("steps");
@@ -218,8 +209,8 @@ describe("@verter/wasm audit bindings", () => {
     project.upsertBase("/B.vue", SIMPLE_SFC);
     const session = project.openSession();
 
-    const first = session.getComponentMetaWithAudit("/A.vue") as unknown as AuditBundle | null;
-    const second = session.getComponentMetaWithAudit("/B.vue") as unknown as AuditBundle | null;
+    const first = decodeAuditBundle(session.getComponentMetaWithAudit("/A.vue"));
+    const second = decodeAuditBundle(session.getComponentMetaWithAudit("/B.vue"));
     expect(first).not.toBeNull();
     expect(second).not.toBeNull();
 
