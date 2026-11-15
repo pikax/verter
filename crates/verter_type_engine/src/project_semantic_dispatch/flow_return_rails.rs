@@ -30,6 +30,11 @@
 //! the stack, which checks that it is the top. If an extent unwinds, its
 //! [`RailExtent`] restores the thread's stacks as it found them, merging
 //! nothing.
+//!
+//! A traced compute that advances by poll keeps its completeness scopes on
+//! the same stack, as rails of completeness alone
+//! ([`ReadRails::open_completeness`]): see
+//! [`crate::project_semantic_dispatch::compute_rails::ComputeRails`].
 
 use crate::fact_tracing::refusal_scope::HeldRefusal;
 use crate::request_context::{HeldCompleteness, HeldSticky, HeldValidity, ThreadRailMark};
@@ -56,6 +61,9 @@ struct RecordingRails {
 enum ReadRail {
     Observation(ObservationRails),
     Recording(RecordingRails),
+    /// A cold-compute completeness scope alone: no validity, no sticky
+    /// deferral.
+    Completeness(HeldCompleteness),
 }
 
 impl ReadRail {
@@ -70,6 +78,7 @@ impl ReadRail {
                 rails.refusal.attach();
                 rails.reads.attach();
             }
+            Self::Completeness(completeness) => completeness.attach(),
         }
     }
 
@@ -84,6 +93,7 @@ impl ReadRail {
                 rails.reads.detach();
                 rails.refusal.detach();
             }
+            Self::Completeness(completeness) => completeness.detach(),
         }
     }
 }
@@ -95,6 +105,10 @@ pub(in crate::project_semantic_dispatch) struct ObservationRail(usize);
 /// A held transaction-read recording's place in its read's rail stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::project_semantic_dispatch) struct RecordingRail(usize);
+
+/// A completeness rail's place in its compute's rail stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::project_semantic_dispatch) struct CompletenessRailId(usize);
 
 /// What a held read observation's thread-side rails observed, taken at its
 /// completion: the abort its validity observed (already handed to the
@@ -264,6 +278,27 @@ impl ReadRails {
             reads,
             refused: refusal.observed(),
         }
+    }
+
+    /// Open a completeness rail on top of the running thread, seeded
+    /// `Complete`, as a cold-compute completeness scope is seeded.
+    pub(in crate::project_semantic_dispatch) fn open_completeness(&mut self) -> CompletenessRailId {
+        let mut rail = ReadRail::Completeness(HeldCompleteness::open());
+        self.push(&mut rail);
+        self.rails.push(rail);
+        CompletenessRailId(self.rails.len() - 1)
+    }
+
+    /// Close the completeness rail `rail` names, the top of the stack: what
+    /// it accumulated, merged nowhere.
+    pub(in crate::project_semantic_dispatch) fn close_completeness(
+        &mut self,
+        rail: CompletenessRailId,
+    ) -> ResultCompleteness {
+        let ReadRail::Completeness(completeness) = self.pop(rail.0) else {
+            unreachable!("a completeness rail names a completeness scope")
+        };
+        completeness.close()
     }
 
     /// Put a newly opened rail on the running thread: the read's rails are

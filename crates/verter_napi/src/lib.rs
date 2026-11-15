@@ -4245,21 +4245,12 @@ impl NapiVerterHost {
         let envelope = typeinfo::decode_type_info_graph_request(request)?;
         let host = std::sync::Arc::clone(&self.inner);
         catch_panic(std::panic::AssertUnwindSafe(move || {
-            let (outcome, record) = host.type_info_with_audit(envelope).into_parts();
-            // The validation-first executor always yields a typed wire
-            // response: the operation's answer arm on success, the
-            // `error` arm on a typed rejection. The `AuditedResult` Err
-            // arm drops the (error-arm) response, so re-form it here so
-            // the JS side always decodes a `TypeInfoGraphResponse`.
-            let response = match outcome {
-                Ok(response) => response,
-                Err(error) => typeinfo::framework_error_response(error),
-            };
-            let response_buf = typeinfo::encode_type_info_graph_response(&response);
-            let audit_buf = typeinfo::encode_stored_audit_record(&record)?;
+            let (response, audit_record) =
+                verter_ffi::typeinfo::type_info_with_audit(&host, envelope)
+                    .map_err(|e| Error::new(Status::GenericFailure, e))?;
             Ok(typeinfo::NapiFrameworkSurfaceResult {
-                response: response_buf,
-                auditRecord: audit_buf,
+                response: Buffer::from(response),
+                auditRecord: audit_record.map(|json| Buffer::from(json.into_bytes())),
             })
         }))?
     }
@@ -5426,6 +5417,34 @@ defineProps<{ value: Unsafe }>()
         let result = napi_host
             .type_info_with_audit(request_buf)
             .expect("the NAPI wire adapter must decode/dispatch/encode successfully");
+        #[cfg(not(feature = "semantic-observe"))]
+        assert!(result.auditRecord.is_none());
+
+        let mut rejected = envelope.clone();
+        rejected.schema_version = 0;
+        let rejection = napi_host
+            .type_info_with_audit(Buffer::from(rejected.encode_to_vec()))
+            .expect("a typed rejection must still encode a response");
+        assert!(matches!(
+            wire::TypeInfoGraphResponse::decode(rejection.response.as_ref())
+                .expect("the rejection must be a protobuf response")
+                .kind,
+            Some(type_info_graph_response::Kind::Error(_))
+        ));
+        #[cfg(not(feature = "semantic-observe"))]
+        assert!(rejection.auditRecord.is_none());
+
+        let (_, mut uncaptured_record) =
+            napi_host.inner.type_info_with_audit(envelope).into_parts();
+        for state in [
+            verter_audit::AuditCaptureState::FilteredNoop,
+            verter_audit::AuditCaptureState::AuditDisabled,
+        ] {
+            uncaptured_record.capture_state = state;
+            assert!(typeinfo::encode_stored_audit_record(&uncaptured_record)
+                .expect("uncaptured records must project without an encoding error")
+                .is_none());
+        }
 
         let response = wire::TypeInfoGraphResponse::decode(result.response.as_ref())
             .expect("response must be a valid protobuf TypeInfoGraphResponse");

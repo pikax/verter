@@ -20,7 +20,7 @@ producer, returns before an incomplete nested dependency settles.
 | Store-view and per-attempt snapshot capture, owner indexing and overlay indexing suspend through their existing handoffs | Metadata computation, extraction/fallthrough and output materialization still call synchronous dependency paths |
 | Cache admission, scheduler completion, resolver flights, carrier publication/stable parse, store-view capture, lowering and workspace resolution offer task-owned handoffs with independent cancellation | Higher callers must consume these owned APIs throughout their traversal instead of driving compatibility entries inside a poll |
 | Root state and converted scopes move between polling threads | Nested semantic dispatch still drives tasks or waits on subscriptions synchronously; complete-root no-replay is not proved |
-| Compile roots hand out one macro producer and retain followers; their blocker routes, blocker loads and dependency-verdict walk suspend through the owned resolution and load handoffs | That producer runs a synchronous traversal; taking a route can still ingest configured programs inside the poll for an importer no configured project lists |
+| Compile roots hand out one macro producer and retain followers, which take its bundle only when the producer's observations hold in their own view and otherwise produce their own; their blocker routes, blocker loads and dependency-verdict walk suspend through the owned resolution and load handoffs, and a stopped load or request answers its typed stop | That producer runs the macro traversal's pollable form to its end in place: its reads, its construction lane and builder, and the producer run's own request and task scopes still hold the thread for the drive; taking a route can still ingest configured programs inside the poll for an importer no configured project lists |
 | An external consumer fixture and a queued-wake driver exercise multiple roots | The driver does not yet prove progress across every nested family with admission closed and no retained synchronous stack |
 
 The parse-once, zero eager-body and one shallow-walk assertions cover overlay
@@ -117,7 +117,9 @@ re-exported from the crate root with `RootWork`.
   end on the calling thread. Today's producer body has no wait of its own,
   so its first poll runs it and answers `Ready(true)`; polling work after
   it answered panics. Dropping a transferred producer abandons
-  its dependency, and the next poll answers that abandonment. Dropping a
+  its dependency, and the next poll answers that abandonment. Roots that
+  followed the dropped producer are not failed by it (see the compile
+  request below). Dropping a
   dispatch opportunity leaves the admitted dependency live; a later poll may
   offer another dispatch step or producer, or remain pending. Dropping the
   root withdraws its subscription and request ownership.
@@ -162,6 +164,25 @@ What each root suspends on today:
   inside the handed-out producer runs synchronously wherever the driver
   runs it; its own dependency waits are the semantic engine's.
 
+  A root that followed another caller's producer does not take its bundle
+  unchecked (`delivery_of` in `typeinfo/vue_macro_codegen.rs`, shared with
+  the synchronous macro bundle entry). It takes the bundle when every
+  observation the producer recorded holds in the root's own view, with the
+  owner as its strict self-root (`MacroFactFootprint::holds_under`, the
+  validator a warm semantic-memo hit uses); a footprint that recorded
+  nothing vouches for nothing. An absence is not a recorded fact, so a
+  bundle that reports a dependency failure is not taken on its first
+  delivery. In either case the root begins the scoped node again over its
+  own seed and overlay: the settled flight is gone, so the roots that begin
+  it again share one new flight and elect one producer among themselves.
+  A root whose own driver dropped its producer answers
+  `Host(HostError::Cancelled)`, the abandonment above; a root that followed
+  that producer and whose own request is live begins the node again and
+  completes. A producer's supersession still reaches its followers as
+  `Superseded`: they share its lane, whose pin folds every external
+  dimension the supersession could have moved, so a follower that produced
+  again would abort the same way.
+
   Before it captures its input, the compile root hydrates its blockers
   (`host_resolve/compile_blocker_hydration.rs`): it resolves each external
   block source and macro type import, records the owner's dependency edges
@@ -179,8 +200,21 @@ What each root suspends on today:
   protocol answers in place. Taking the route can still ingest configured
   programs inside the poll for an importer no configured project lists.
   Hydration's outcome is typed
-  (`BlockerHydration`): a refused route or a load that does not integrate
-  is recorded as a gap and the remaining blockers still load. The capture
+  (`BlockerHydration`): a refused route or a load that failed is a gap and
+  the remaining blockers still load. A load stopped by cancellation,
+  supersession or shutdown ends hydration with that abort before the
+  capture, and the request answers it as
+  `CompileRequestFailure::Host(Cancelled | Superseded | Shutdown)`: nothing
+  is captured or compiled, no blocker source is integrated after the stop,
+  and no flight is left. The dependency edges and resolution witnesses
+  recorded for routes that resolved before the stop stay, as any later
+  request would record them again. The request's cancellation reaches a
+  resolving route or loading blocker through a subscription on the
+  request's own token, which the computation polls beside each handoff, so
+  the cancellation itself wakes the root; the load keeps the host-wide
+  token as its own stop. A root begun outside a request has no request
+  token and stops only on shutdown, reset, the host-wide token or being
+  dropped. The capture
   (`capture_compile_input`) takes that outcome by value, so it cannot run
   before hydration. Input preparation (`prepare_execution_inputs_pollable`
   in `host_resolve/compile_inputs.rs`) then produces the macro bundle and
@@ -229,7 +263,18 @@ other waits, a follower's wake arrives while the driver runs that work and
 only queues a later poll, and every answer is the synchronous entry's.
 Cancelling a suspended follower root's request wakes it to its
 cancellation while the producing root completes, and a scheduler reset
-wakes it to the shutdown. Planted controls fail the same checks: the
+wakes it to the shutdown. Three followers of a producer held on a host
+nothing compiled yet hand out no producer however often they are polled,
+and once it runs all four roots answer a fresh host's answer with no
+second production (making a follower whose footprint holds produce again
+fails it). Dropping handed-out producer work wakes its follower; the
+dropping root answers `Cancelled`, and the follower produces the bundle
+once and answers the synchronous entry's answer (leaving the dropped
+producer's node admitted, or failing the live follower with the
+cancellation, fails it). Cancelling one of two followers answers only
+that follower; the other produces nothing and completes with the
+producing root (delivering the cancellation to the node fails it).
+Planted controls fail the same checks: the
 synchronous capture behind a held build is refused, and running the macro
 producer inside the compile root's poll fails the compile cases. A driver
 that polls the handed-out producer instead of running it gets the
@@ -252,7 +297,28 @@ synchronous answer and a cold host's generated code; a refused
 blocker route leaves the other blockers loading; a block source hydration
 loads is in the captured input; an unsupplied re-export target answers
 the incomplete failure naming the barrel's route, and supplying exactly
-the named gaps compiles to a fresh host's answer. The
+the named gaps compiles to a fresh host's answer. A root that followed a
+producer whose payload lookup ended early produces the bundle itself,
+once, and answers a lone request's answer while the producing root
+answers the incomplete failure (taking every delivered bundle fails it);
+in `typeinfo_tests`, a producer's footprint holds over the files it read,
+not once one changes, and a factless footprint holds nowhere (a footprint
+that always holds fails it). In `typeinfo_tests`, the macro traversal
+stepped one poll at a time (it yields at each row's start, after a typed
+row's payload read and between its lanes when a test hook asks) resumes
+where it suspended and does the work of the run in place, with the same
+bundle, footprint and counters (beginning it again after a suspension
+fails it); after every poll the driving thread's validity, completeness,
+sticky and tracer depths are where they were before the first (leaving the
+rails attached at a suspension fails it); and a partial `defineProps`
+leaves the next macro's typed outcome as it is in place (one scope shared
+across the traversal fails it). A scheduler reset while a blocker's read is
+held answers `Host(Shutdown)` with no capture, one owned load and the
+blocker never integrated (treating the stopped load as a gap fails it);
+cancelling the request there wakes the root to `Host(Cancelled)` with no
+capture, and the next request compiles (without the request subscription
+the wake never arrives); and every load error but a stop is a gap, every
+stop its abort (moving a stop to a gap fails it). The
 compile contracts `root_external_consumer_positive` (a plain external
 consumer drives both roots, with no support feature) and
 `root_poll_no_blocking_driver` (the boundary driver is unreachable from a
@@ -315,16 +381,24 @@ one poll that runs to the end — sees the scope exactly as it was before.
 | Work attribution | the site | `attribute_polls` |
 | Parse-stack refusals | the recording | `refusals_within_pollable` |
 | Demand scope of a helper's requested read | `query_frames::DemandScope` on the frame that produces the read, inherited by the frames its needs start | `step_instantiate_frame` (each step) |
+| Macro traversal fact tracer | `OwnedStepwiseFactTracer::fanning_out` | `install_fact_tracer_pollable` |
+| Macro traversal completeness scopes (outer, per macro, per lane, local observations) | `compute_rails::ComputeRails`: completeness rails on the flow read's rail stack, opened with `enter_completeness` and closed (folding into the scope below) or discarded | the same |
 
 Each converted computation has one implementation: the pollable form. Its
 synchronous form drives it — `drive_pending` under the caller's execution
 task where it may wait, `complete_now` where every step runs in place and
-the first poll must answer. A driver takes its computation pinned where the
+the first poll must answer. The Vue macro traversal is driven by
+`complete_now`: every production drive is one poll, so its scopes attach
+once and detach once per traversal, and the fact tracer, the last on a pool
+thread, leaves the thread once (popping the last tracer drains the
+per-demand proof memos). Its construction lane and builder stay
+thread-bound for the drive; they are what keeps the traversal from moving
+between threads. A driver takes its computation pinned where the
 caller builds it, so the state is not copied into the driver's frame, and
-the cold component-meta path builds its large nested computations with
-`on_heap`, from a frame that ends before they run, so a synchronous caller
-does not hold their state on its stack while the compute recurses below
-them.
+the cold component-meta path and the macro traversal build their large
+nested computations with `on_heap`, from a frame that ends before they
+run, so a synchronous caller does not hold their state on its stack while
+the compute recurses below them.
 
 ## Interior state a suspended computation shares
 
@@ -797,8 +871,11 @@ producer on the existing CPU pool.
   bundle entry and the Vue API projector still use
   `execute_scoped_cache_node`. Both drivers share one request, one producer
   body and one delivery (`vue_macro_codegen_request`,
-  `build_vue_macro_codegen`, `finish_vue_macro_codegen`), and both place
-  producers through `Scheduler::run_transferred_producer`.
+  `build_vue_macro_codegen`, `delivery_of`, `finish_vue_macro_codegen`),
+  and both place producers through `Scheduler::run_transferred_producer`.
+  The scheduler contract is unchanged: followers of a dropped producer
+  settle `Cancelled` and the scheduler starts nothing. The macro bundle's
+  callers decide whether to take a delivered value or begin the node again.
 
 ### Store-view reads
 
@@ -1209,22 +1286,85 @@ Every node it enters, every intersection member it flattens and every
 signature-list entry settles through its carrier chain as the owned
 `SourceCarrierRead` over the shared deferred evaluation: the read the
 chain names — an instantiation, or a read inside the settlement's
-evaluation, delivered inside that evaluation — is the build's need. A
-primitive, literal, template, symbol, array or tuple reads its apparent
+evaluation, delivered inside that evaluation — is the build's need.
+A leaf's rest parameters are unwrapped before the leaf is published, as a
+boxed level of the walk (`DiscoveryFrame::RestParameters`). Its owned
+`IdentityCarrierRead` retains the node, declaration depth and visited set;
+each declaration instantiation and each read inside either deferred
+evaluation (the instantiation's answer at `Shell`, an indexed access at
+`Navigate`) is the build's need. Delivery records the answer and returns
+`DiscoveryFlow::Unwrap` to the walk loop, so later graph hops run beneath
+neither delivery frames nor the leaf's header temporaries. The walk counts
+`carrier_declarations_unwrapped` once per declaration step after admission,
+whichever driver runs it. The later-signature rest-declaration regression
+pins one step and two publications, with one publication before the wait;
+the deferred rest-access regression holds a conditional read inside the
+evaluation, pins its five steps (two before the wait), and proves delivery
+resumes there. Both seams cover release and cancellation with nothing open.
+A primitive, literal, template, symbol, array or tuple reads its apparent
 wrapper as the path walk does: the global declaration lookup
 (`GlobalLookup`, begun in the demand site the stage stands in) is stepped
 as the build's ports, loads and indexes, and the instantiation of the
 declaration it finds (`global_wrapper_answered`) is the build's need,
-whose surface the walk enters under the subject's level. The
+whose surface the walk enters under the subject's level. A union's arms
+and an intersection type's members are combined by a kernel machine
+(`SignatureComposition`, `signature_kernel/matching.rs`) the walk carries
+as its own level (`DiscoveryFrame::Composing`): a step answers what the
+graph tells at rest and asks its holder the rest. A binder closure — an
+identity question under a binder correspondence that moves a binder, and
+a union synthesis's mapping of the other arm's types into the binders
+the combination declares (`TypeRequest::MapBinders`, asked only when its
+binder map moves a binder) — is answered where the stage stands
+(`closed_under_binders`, through `substitute_canonical`; the pairs map
+binders onto binders, so the closure names no template reduction). A union synthesis composes its
+parameters with a position cursor (`ParameterComposition`, cut at each
+binder mapping and each intersection): each position's intersection,
+a rest run's and the receivers' too, is the `ReduceIntersection` read of
+the operands it stands at (`TypeRequest::Intersect`), the build's need.
+Its key names graph nodes only, so no epoch retires it; the delivered
+reduction (or, its read failed, the ordered intersection
+`intersection_of_reduction` builds, the same fallback the dispatch funnel
+uses) is kept in the composition's level (`CompositionRead::Reduced`) and
+the walk loop advances the composition with it, so no delivery sits
+beneath its next closures. The combination declares the master's
+binders, or a non-generic master's first generic arm's
+(`left.typeParameters || right.typeParameters`); the synthesized
+signature and the mapping of its constituents are in those binders, and
+the master names it. A result a comparison includes is the
+`ReadSignatureResult` read of the candidate under the identity call
+substitution, the build's need: memoized, so each candidate is forced
+once however many comparisons read it, read where it was published
+through its own lease, and — named in an epoch a replacement retired
+while it waited — not made (in place) or dropped unread (on a frame),
+then named again by one `EpochRebind` pass of the candidate's descriptor
+into the current epoch (`FamilyBuild::awaits_retired_read`). The
 walk counts its own work (`discovery_nodes_walked` per node entered,
-`discovery_signatures_published` per signature published) and moves no
-stage counter. A frame drives it when a frame needs the list (an overload
+`discovery_signatures_published` per signature published), the kernel
+its matching (`signature_comparisons_decided` per pair decided,
+`signature_positions_compared` per identity it asks,
+`signature_parameters_composed` per synthesized parameter position, the
+extra rest element included), and moves no stage counter. A frame drives it when a frame needs the list (an overload
 set's, an apparent type's, a call's); read synchronously, or polled as a
 root, `SignaturesOfType` is built in place by the same stages through
 `drive_family_value_in_place`, each read made where the walk stands. A
 walk released while it stands in a settlement's evaluation abandons that
 evaluation's recordings (`FamilyBuild::release_retained_accounting`); one
-standing at its wrapper holds nothing on the dispatcher.
+standing at its wrapper, at a composition's result or at a parameter
+intersection holds nothing on the dispatcher.
+`a_signature_list_waiting_on_a_later_comparisons_result_resumes_without_comparing_again`
+holds the result of a three-member intersection's last signature and
+requires the list to yield there with its first pair decided and, resumed
+elsewhere, to decide no pair and compare no position again;
+`a_generic_union_waiting_on_a_later_overloads_result_keeps_its_earlier_common_match`
+holds a union's later overload's result after its generic common match;
+`a_matching_result_named_in_an_epoch_that_retired_is_named_again_and_nothing_is_compared_twice`
+replaces the kernel epoch while a compared result is held.
+`a_union_synthesis_waiting_on_a_later_positions_intersection_resumes_without_composing_again`
+holds a synthesized union signature's second parameter intersection and
+requires the list to yield there with its first position composed and,
+resumed elsewhere, to compose, decide and compare nothing again;
+`a_parameter_intersection_delivered_after_the_walks_epoch_retired_is_composed_in_that_epoch`
+replaces the kernel epoch while that intersection is held.
 `a_signature_list_waiting_on_a_primitive_arms_wrapper_resumes_without_walking_again`
 holds the later arm's wrapper instantiation of an overload set over
 `string | number`, read under a request on the declaring file, and
@@ -1716,7 +1856,9 @@ When those leave the pair undecided, the dispatch's first reads — the
 unwraps of both operands' identity carriers — are demanded
 (`OperandDemand`): each operand's first instantiation, the read its carrier
 walk makes first when it reaches it through graph-only steps
-(`relation_operand_first_instantiation`, computed without reading), is
+(`relation_operand_first_instantiation`, computed without reading through
+the unwrap's shared, inlined `carrier_hops` and `carrier_declaration_key`;
+the graph-only probe takes no step and records no declaration count), is
 entered once as the walk would enter it; a warm result answers at once and
 one that must be computed is a request. With every demanded instantiation
 answered, the dispatch runs over the deliveries. Nothing is demanded that
@@ -2278,17 +2420,43 @@ Signature discovery and the kernel still read in place, inventoried for
 conversion:
 
 - a runtime nominal's augmentation fold (`collect_augmentation_contributions`),
-  a class expression's instance surface (`class_expression_read_surface`)
-  and a rest parameter's carrier unwrap (`unwrap_identity_carrier_for_relation`),
-  each read in place by the stage that needs it;
+  read in place by its discovery stage; contributor loading and planned-body
+  projection remain the fold owner's work;
+- a class expression's or object literal's instance surface
+  (`class_expression_read_surface`), from discovery and the carrier walk:
+  its substitution replaces a `this` binder by the instance and a deferred
+  signature by a signature. Those images cannot fold a template literal,
+  so this substitution names no template reduction. Reads inside the
+  substitution remain the substitution walk's;
+- a carrier walk's other reads (`carrier_hops`): a bare or import-type
+  subject's resolution (carrier admission, the projection owner), a deferred
+  callable's materialization (flow), a `keyof` key set (key enumeration),
+  an authored intersection's reduction (relation), and a mapped type's
+  object (mapped types). These stay where the owned or in-place walk stands;
+- the identity-carrier unwraps of callers outside discovery
+  (`unwrap_identity_carrier_walk`): relation, flow, call and projection
+  consumers drive the same stages in one native frame. The hops, declaration
+  key and access-answer stages are inlined into that walk;
 - a generic carrier's arguments, evaluated in place before its
   instantiation is named (`source_carrier_instantiation`), as for the path
   walk's mapped source;
 - `SignaturesOfType` read synchronously or polled as a root: built in place
   through the same stages, its reads made where the walk stands;
-- the kernel callbacks that reach the dispatch from inside matching and
-  union composition (`identical`, `intersect`, `map_binders`,
-  `forced_result`), in the walk's epoch;
+- a composition's binder closure — an identity question under a
+  correspondence that moves a binder, a union synthesis's binder mapping —
+  answered where the stage stands (`closed_under_binders`, from
+  `advance_composition` and from the relation authority's comparison)
+  through `substitute_canonical`: its closure names no template
+  reduction (debug assertion), and the reads inside that substitution
+  belong to the substitution walk below;
+- the ordered intersection built when a parameter intersection's
+  reduction read fails (`intersection_of_reduction`, from the walk's
+  delivery, in place and on a frame): graph construction, charged, with
+  no dependency read;
+- the relation authority's exact signature identity
+  (`signature_types_identical`), one comparison stepped in place: its
+  identities through `relate_type_identity`, its results through the
+  result function in the comparison's own epoch;
 - a composite candidate's result forced by the in-place list readers
   (`signature_nodes_of`), including for a contextual list delivered on a
   frame: a result read in the list's own epoch, not a list read;
@@ -2306,9 +2474,9 @@ one composite-construction funnel), an index key's deferred evaluation,
 the `NoInfer` genericness test and its `Instantiate`, and a
 signature-bearing object's instantiation buckets (`SignaturesOfType` and
 composite results). Every other holder of a substitution or an explicit
-instantiation (the call walk and executor, relations, signature discovery,
-carriers, the evaluator, path walks and flow returns) drives the same
-walk in place.
+instantiation (the call walk and executor, relations, signature
+discovery's identity questions and union synthesis, carriers, the
+evaluator, path walks and flow returns) drives the same walk in place.
 
 Every other family a frame or cold build reaches still builds in one
 synchronous step: mapped types, `keyof`, template literals,

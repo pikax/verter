@@ -42,6 +42,7 @@ use verter_session_query::facts::store_view::StoreViewCompatToken;
 use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise};
 use verter_type_engine::locator_identity::BroadRuntimeSubjectLocator;
 use verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeView;
+use verter_type_engine::project_semantic_dispatch::compute_rails::ComputeRails;
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::resolver_core::ResolverContext;
 use verter_type_engine::semantic_query::{
@@ -367,7 +368,9 @@ pub(crate) struct VueMacroCodegenOutput {
 /// all. This carrier holds the producer's observations plus its non-cacheable
 /// refusal so [`Self::replay`] can restate both on the CONSUMING thread; it is
 /// what roots the enclosing compile on every file the macro traversal actually
-/// read, including the transitively reached ones no direct import names.
+/// read, including the transitively reached ones no direct import names. A
+/// joining caller first checks that those observations hold in its own view
+/// ([`Self::holds_under`]) and produces its own bundle when they do not.
 #[derive(Debug, Clone)]
 pub(crate) enum MacroFactFootprint {
     /// The complete observation set (every fact, however wide), built only from
@@ -415,6 +418,25 @@ impl MacroFactFootprint {
             Self::MutationUnstable | Self::Unobserved => {
                 verter_session_query::facts::fact_set::FactsRef::Slice(&[])
             }
+        }
+    }
+
+    /// Whether a caller that did not run the producer may take its bundle:
+    /// every observation the producer recorded holds in `view`, with the
+    /// owner's content validated strictly. A footprint that recorded nothing
+    /// vouches for nothing.
+    pub(crate) fn holds_under(
+        &self,
+        view: &impl verter_session_query::facts::store_view::StoreView,
+        owner_canonical: &str,
+    ) -> bool {
+        match self {
+            Self::Rooted(facts) | Self::RootedNonCacheable(facts) => view
+                .validates_fact_signature_with_self_roots(
+                    verter_session_query::facts::fact_set::FactsRef::Set(facts),
+                    &[owner_canonical],
+                ),
+            Self::MutationUnstable | Self::Unobserved => false,
         }
     }
 
@@ -657,6 +679,68 @@ fn vue_macro_codegen_request<M: verter_audit::observe::ObserveExec>(
     }
 }
 
+/// A scoped node's answer, and whether this caller's own producer made it.
+struct ScopedAnswer<T> {
+    result: Result<Arc<T>, ScopedCacheNodeError>,
+    own_producer: bool,
+}
+
+/// What a caller does with a scoped node's answer.
+enum Delivery {
+    /// Deliver the answer.
+    Take,
+    /// Begin the node again: the settled flight is gone, so the scheduler
+    /// opens a fresh one and elects its producer among the callers that
+    /// begin it.
+    ProduceAgain,
+}
+
+/// Whether a caller delivers a scoped node's answer `produced` under its own
+/// `ctx`, or begins the node again.
+///
+/// A caller whose own producer made the answer takes it. A caller that
+/// followed another caller's producer takes a bundle only when the
+/// producer's recorded observations hold in its own view. It does not take,
+/// on its first delivery, a bundle that reports a dependency failure: an
+/// absence the producer reported is not a recorded fact, so nothing in its
+/// footprint could show this caller's view differs, and a second production
+/// reads the host as a fresh request would. A follower whose producer went
+/// away while its own request is live produces the bundle itself.
+fn delivery_of<M: verter_audit::observe::ObserveExec>(
+    ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> + Sync),
+    owner_canonical: &str,
+    own_producer: bool,
+    produced_again: bool,
+    produced: &Result<Arc<Result<VueMacroCodegenOutput, ExecutionAbort>>, ScopedCacheNodeError>,
+) -> Delivery {
+    use verter_type_engine::resolver_core::fact_validation_port::FactValidationView;
+    if own_producer {
+        return Delivery::Take;
+    }
+    match produced {
+        Ok(bundle) => match bundle.as_ref() {
+            Ok(output) if !produced_again && !output.dependency_failures.is_empty() => {
+                Delivery::ProduceAgain
+            }
+            Ok(output)
+                if !output
+                    .fact_footprint
+                    .holds_under(&FactValidationView::new(ctx), owner_canonical) =>
+            {
+                Delivery::ProduceAgain
+            }
+            _ => Delivery::Take,
+        },
+        Err(ScopedCacheNodeError::Cancelled)
+            if !verter_type_engine::request_context::current_request_cancellation_token()
+                .is_some_and(|token| token.is_cancelled()) =>
+        {
+            Delivery::ProduceAgain
+        }
+        Err(_) => Delivery::Take,
+    }
+}
+
 /// The macro codegen bundle a scoped cache node `produced`, delivered to
 /// this thread: an abort refuses rooting, a scheduler fault answers the
 /// terminal partial bundle, and the producer's observations replay into
@@ -693,7 +777,8 @@ fn finish_vue_macro_codegen<M: verter_audit::observe::ObserveExec>(
     // The ONLY point at which the producer's observations reach this
     // thread. The build ran where its driver runs producers (a scheduler
     // CPU-pool worker, or the driver of a host root), or, for a caller that
-    // joined the in-flight rendezvous, did not run here at all; the tracer
+    // joined the in-flight rendezvous and found the producer's observations
+    // hold in its own view, did not run here at all; the tracer
     // stack is thread-local — so without this the enclosing compute roots on
     // nothing the macro traversal read past its direct imports, and any
     // refusal the producer raised is lost.
@@ -890,19 +975,41 @@ impl VerterHost {
     /// down scheduler, or a computation that read a superseded or torn view
     /// returns the abort, never a bundle of refusals standing in for the
     /// answer.
+    ///
+    /// A caller that joined another caller's production takes its bundle
+    /// only as [`delivery_of`] decides, and otherwise begins the node again.
     pub(crate) fn produce_vue_macro_codegen_with_ctx<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> + Sync),
         owner_canonical: &str,
         demand: VueMacroCodegenDemand,
     ) -> Result<VueMacroCodegenOutput, ExecutionAbort> {
-        let request = vue_macro_codegen_request(ctx, owner_canonical, demand);
-        let produced = self
-            .scheduler()
-            .execute_scoped_cache_node(request, |job_cancellation| {
-                self.build_vue_macro_codegen(ctx, owner_canonical, demand, job_cancellation)
-            });
-        finish_vue_macro_codegen(ctx, owner_canonical, demand, produced)
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut produced_again = false;
+        loop {
+            let request = vue_macro_codegen_request(ctx, owner_canonical, demand);
+            // The build runs on a scheduler CPU-pool worker when this caller
+            // is elected, and not at all when it joins another's production.
+            let own_producer = AtomicBool::new(false);
+            let produced =
+                self.scheduler()
+                    .execute_scoped_cache_node(request, |job_cancellation| {
+                        own_producer.store(true, Ordering::Release);
+                        self.build_vue_macro_codegen(ctx, owner_canonical, demand, job_cancellation)
+                    });
+            match delivery_of(
+                ctx,
+                owner_canonical,
+                own_producer.load(Ordering::Acquire),
+                produced_again,
+                &produced,
+            ) {
+                Delivery::Take => {
+                    return finish_vue_macro_codegen(ctx, owner_canonical, demand, produced)
+                }
+                Delivery::ProduceAgain => produced_again = true,
+            }
+        }
     }
 
     /// [`Self::produce_vue_macro_codegen`] as a pollable computation, for a
@@ -916,7 +1023,9 @@ impl VerterHost {
     /// instead of running it: the driver runs the macro traversal — over a
     /// request context of its own on the same seed and completion overlay
     /// — wherever it runs producers, then polls the root again for the
-    /// value.
+    /// value. A root that followed another caller's producer takes the
+    /// bundle only as [`delivery_of`] decides, and otherwise begins the node
+    /// again over its own seed and overlay.
     pub(crate) async fn produce_vue_macro_codegen_pollable<'h>(
         &'h self,
         owner_canonical: &str,
@@ -928,33 +1037,58 @@ impl VerterHost {
             .into_cold_seed_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            let request = {
+            let mut produced_again = false;
+            loop {
+                let request = {
+                    let ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
+                        self,
+                        &cold_seed,
+                        Arc::clone(&overlay),
+                    );
+                    vue_macro_codegen_request(&ctx, owner_canonical, demand)
+                };
+                let build = {
+                    let (cold_seed, overlay) = (cold_seed.clone(), Arc::clone(&overlay));
+                    let owner_canonical = owner_canonical.to_owned();
+                    move |job_cancellation: &verter_execution::cancellation::CancellationToken| {
+                        let ctx =
+                            crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
+                                self,
+                                &cold_seed,
+                                overlay,
+                            );
+                        self.build_vue_macro_codegen(
+                            &ctx,
+                            &owner_canonical,
+                            demand,
+                            job_cancellation,
+                        )
+                    }
+                };
+                let answer = self.scoped_cache_node_pollable(request, work, build).await;
                 let ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
                     self,
                     &cold_seed,
                     Arc::clone(&overlay),
                 );
-                vue_macro_codegen_request(&ctx, owner_canonical, demand)
-            };
-            let build = {
-                let (cold_seed, overlay) = (cold_seed.clone(), Arc::clone(&overlay));
-                let owner_canonical = owner_canonical.to_owned();
-                move |job_cancellation: &verter_execution::cancellation::CancellationToken| {
-                    let ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
-                        self,
-                        &cold_seed,
-                        overlay,
-                    );
-                    self.build_vue_macro_codegen(&ctx, &owner_canonical, demand, job_cancellation)
+                match delivery_of(
+                    &ctx,
+                    owner_canonical,
+                    answer.own_producer,
+                    produced_again,
+                    &answer.result,
+                ) {
+                    Delivery::Take => {
+                        break finish_vue_macro_codegen(
+                            &ctx,
+                            owner_canonical,
+                            demand,
+                            answer.result,
+                        )
+                    }
+                    Delivery::ProduceAgain => produced_again = true,
                 }
-            };
-            let produced = self.scoped_cache_node_pollable(request, work, build).await;
-            let ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
-                self,
-                &cold_seed,
-                overlay,
-            );
-            finish_vue_macro_codegen(&ctx, owner_canonical, demand, produced)
+            }
         })
     }
 
@@ -968,14 +1102,22 @@ impl VerterHost {
         request: ScopedCacheNodeRequest,
         work: &crate::root_continuation::RootWorkSlot<'h>,
         build: impl FnOnce(&verter_execution::cancellation::CancellationToken) -> T + Send + 'h,
-    ) -> Result<Arc<T>, ScopedCacheNodeError>
+    ) -> ScopedAnswer<T>
     where
         T: Send + Sync + 'static,
     {
         use verter_scheduler::scheduler::ScopedCacheNodeStep;
-        let mut handoff = self.scheduler().begin_scoped_cache_node::<T>(request)?;
+        let mut handoff = match self.scheduler().begin_scoped_cache_node::<T>(request) {
+            Ok(handoff) => handoff,
+            Err(error) => {
+                return ScopedAnswer {
+                    result: Err(error),
+                    own_producer: false,
+                }
+            }
+        };
         let mut build = Some(build);
-        std::future::poll_fn(|cx| match handoff.poll(cx.waker()) {
+        let result = std::future::poll_fn(|cx| match handoff.poll(cx.waker()) {
             std::task::Poll::Ready(Ok(ScopedCacheNodeStep::Value(value))) => {
                 std::task::Poll::Ready(Ok(value))
             }
@@ -995,7 +1137,12 @@ impl VerterHost {
                 std::task::Poll::Pending
             }
         })
-        .await
+        .await;
+        ScopedAnswer {
+            result,
+            // The build is taken exactly when this caller is elected.
+            own_producer: build.is_none(),
+        }
     }
 
     /// The scoped cache node's producer: the macro traversal under `ctx`,
@@ -1048,22 +1195,17 @@ impl VerterHost {
             rendezvous.0.wait();
             rendezvous.1.wait();
         }
-        let (mut state, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
-            &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
-            || {
-                let _completeness_scope =
-                    verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
-                let mut state = self.produce_vue_macro_codegen_inner(ctx, owner_canonical, demand);
-                // The artifact summary is the statuses of the facts this
-                // produce actually published. It does not authorize a fact,
-                // and it is not a filter over the ambient reason bag. An
-                // abort is not one of those facts, but it still refuses the
-                // bundle: the producer maps it onto a fault row, and
-                // `ExecutionAbort::observed_in` only reads the abort class.
-                state.completeness = Self::completeness_of_published(&state.published);
-                state
-            },
-        );
+        let source =
+            verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx);
+        let rails = ComputeRails::new();
+        let traversal = verter_execution::blocking::on_heap(|| {
+            verter_type_engine::fact_signature_helpers::install_fact_tracer_pollable(
+                &source,
+                &rails,
+                self.traverse_vue_macros(ctx, owner_canonical, demand, &rails),
+            )
+        });
+        let (mut state, finalise) = self.drive_macro_traversal(traversal);
         state.counters.record_scheduler_submission();
 
         let (transitive_canonicals, fact_footprint) = MacroFactFootprint::from_finalise(finalise);
@@ -1087,11 +1229,83 @@ impl VerterHost {
         }
     }
 
-    fn produce_vue_macro_codegen_inner<M: verter_audit::observe::ObserveExec>(
+    /// Drive the macro traversal in place: its first poll answers.
+    fn drive_macro_traversal<F: std::future::Future>(
+        &self,
+        mut traversal: std::pin::Pin<Box<F>>,
+    ) -> F::Output {
+        #[cfg(test)]
+        {
+            // Taken out of the lock first: each suspension point reads it.
+            let hook = self
+                .test_force
+                .vue_macro_traversal_step_hook
+                .0
+                .lock()
+                .clone();
+            if let Some(observe) = hook {
+                return drive_stepped(traversal, &*observe);
+            }
+        }
+        verter_execution::blocking::complete_now(traversal.as_mut())
+    }
+
+    /// The macro traversal: every row of the plan, under one outer
+    /// completeness scope. It owns its scopes as `rails`, which each poll
+    /// puts on the polling thread for that poll alone.
+    async fn traverse_vue_macros<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> + Sync),
         owner_canonical: &str,
         demand: VueMacroCodegenDemand,
+        rails: &ComputeRails,
+    ) -> ProducerState {
+        let outer = rails.enter_completeness();
+        let mut state = self
+            .traverse_macro_rows(ctx, owner_canonical, demand, rails)
+            .await;
+        // The artifact summary is the statuses of the facts this produce
+        // actually published. It does not authorize a fact, and it is not a
+        // filter over the ambient reason bag. An abort is not one of those
+        // facts, but it still refuses the bundle: the producer maps it onto a
+        // fault row, and `ExecutionAbort::observed_in` only reads the abort
+        // class.
+        state.completeness = Self::completeness_of_published(&state.published);
+        drop(outer);
+        state
+    }
+
+    /// Where the macro traversal can suspend: it yields once here when a
+    /// test steps it (`vue_macro_traversal_step_hook`), and never otherwise.
+    #[cfg(test)]
+    async fn macro_traversal_point(&self) {
+        if self
+            .test_force
+            .vue_macro_traversal_step_hook
+            .0
+            .lock()
+            .is_none()
+        {
+            return;
+        }
+        let mut yielded = false;
+        std::future::poll_fn(|cx| {
+            if std::mem::replace(&mut yielded, true) {
+                std::task::Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+    }
+
+    async fn traverse_macro_rows<M: verter_audit::observe::ObserveExec>(
+        &self,
+        ctx: &(dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> + Sync),
+        owner_canonical: &str,
+        demand: VueMacroCodegenDemand,
+        rails: &ComputeRails,
     ) -> ProducerState {
         let mut state = ProducerState {
             origin_whole_hash: None,
@@ -1145,6 +1359,8 @@ impl VerterHost {
         };
         let mut published = std::mem::take(&mut state.published);
         for demand_row in semantic_input.demands() {
+            #[cfg(test)]
+            self.macro_traversal_point().await;
             let payload_index = demand_row.macro_index();
             let Some(mac) = macros.get(payload_index) else {
                 continue;
@@ -1160,10 +1376,10 @@ impl VerterHost {
                 if demand.wants_tsc() {
                     let syntax_index = demand_row.syntax_index();
                     let macro_index_value = macro_index(payload_index);
-                    let macro_scope =
-                        verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+                    let macro_scope = rails.enter_completeness();
                     let outcome = self.project_expose_runtime_object(
                         &dispatch,
+                        rails,
                         &mut attempt,
                         mac,
                         payload_index,
@@ -1220,10 +1436,9 @@ impl VerterHost {
             // independently nested below it. A partial demand must taint the
             // file-level result and cacheability without changing a sibling
             // macro's typed outcome or the other demand's outcome.
-            let macro_scope =
-                verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+            let macro_scope = rails.enter_completeness();
             let mut diagnostics = Vec::new();
-            let (payload_owner, payload_local) = observe_local(|| {
+            let (payload_owner, payload_local) = rails.observe(|| {
                 resolve_macro_payload(
                     &dispatch,
                     &owner,
@@ -1235,6 +1450,8 @@ impl VerterHost {
                     &mut diagnostics,
                 )
             });
+            #[cfg(test)]
+            self.macro_traversal_point().await;
             let payload = payload_owner.as_ref().map(|root| root.id());
             if payload.is_none() {
                 // A lookup that ended early has not shown the root absent:
@@ -1282,8 +1499,7 @@ impl VerterHost {
 
             if demand.wants_runtime() {
                 let mut walker_diagnostics = Vec::new();
-                let runtime_scope =
-                    verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+                let runtime_scope = rails.enter_completeness();
                 let outcome = if let Some(failure) = payload_failure {
                     failure.runtime()
                 } else {
@@ -1296,6 +1512,7 @@ impl VerterHost {
                                     Some(subject) => self.project_runtime_props(
                                         ctx,
                                         &dispatch,
+                                        rails,
                                         &mut attempt,
                                         payload,
                                         &subject,
@@ -1315,6 +1532,7 @@ impl VerterHost {
                             AnalyzedMacroKind::DefineEmits => self.project_runtime_emits(
                                 ctx,
                                 &dispatch,
+                                rails,
                                 &mut attempt,
                                 payload,
                                 owner_canonical,
@@ -1369,10 +1587,11 @@ impl VerterHost {
                 });
             }
 
+            #[cfg(test)]
+            self.macro_traversal_point().await;
             if demand.wants_tsc() {
                 let mut walker_diagnostics = Vec::new();
-                let tsc_scope =
-                    verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+                let tsc_scope = rails.enter_completeness();
                 let outcome = if mac.kind == AnalyzedMacroKind::DefineProps && payload.is_none() {
                     if let Some(failure) = payload_failure {
                         published.push(projection_failure_fact(&failure));
@@ -1393,6 +1612,7 @@ impl VerterHost {
                         Some(payload) => self.project_tsc_macro(
                             ctx,
                             &dispatch,
+                            rails,
                             &mut attempt,
                             payload,
                             mac,
@@ -1441,6 +1661,7 @@ impl VerterHost {
         &self,
         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+        rails: &ComputeRails,
         attempt: &mut CompileAttempt<'_>,
         payload: verter_type_engine::semantic_query::SemanticNodeId,
         mac: &AnalyzedMacro,
@@ -1456,7 +1677,7 @@ impl VerterHost {
     ) -> MacroTscOutcome {
         match mac.kind {
             AnalyzedMacroKind::DefineProps => {
-                if probe_definitely_non_object_root(dispatch, payload) {
+                if probe_definitely_non_object_root(dispatch, rails, payload) {
                     return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
                 }
                 counters.record_root_shallow_demand();
@@ -1516,6 +1737,7 @@ impl VerterHost {
                     } else {
                         match render_tsc_testing_node(
                             dispatch,
+                            rails,
                             owner_canonical,
                             member.value,
                             counters,
@@ -1553,7 +1775,7 @@ impl VerterHost {
                 }))
             }
             AnalyzedMacroKind::DefineEmits => {
-                if probe_definitely_non_object_root(dispatch, payload) {
+                if probe_definitely_non_object_root(dispatch, rails, payload) {
                     return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
                 }
                 counters.record_root_shallow_demand();
@@ -1583,6 +1805,7 @@ impl VerterHost {
                 }
                 let events = match tsc_emit_rows(
                     dispatch,
+                    rails,
                     owner_canonical,
                     &surface,
                     mac,
@@ -1622,11 +1845,11 @@ impl VerterHost {
                 }))
             }
             AnalyzedMacroKind::DefineModel => {
-                let value_type = match render_tsc_node(dispatch, owner_canonical, payload, counters)
-                {
-                    Ok(text) => text,
-                    Err(failure) => return failure.tsc(),
-                };
+                let value_type =
+                    match render_tsc_node(dispatch, rails, owner_canonical, payload, counters) {
+                        Ok(text) => text,
+                        Err(failure) => return failure.tsc(),
+                    };
                 let name = mac.model_name.as_deref().unwrap_or("modelValue").to_owned();
                 let optional = mac
                     .prop_fields
@@ -1672,9 +1895,11 @@ impl VerterHost {
     /// [`TscExposeMemberType::Unavailable`] row instead of a silent
     /// `unknown` masquerading as success; the compiler falls back to its own
     /// authored-syntax-derived type (or `unknown`) for that member.
+    #[allow(clippy::too_many_arguments)]
     fn project_expose_runtime_object<M: verter_audit::observe::ObserveExec>(
         &self,
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+        rails: &ComputeRails,
         attempt: &mut CompileAttempt<'_>,
         mac: &AnalyzedMacro,
         payload_index: usize,
@@ -1756,8 +1981,13 @@ impl VerterHost {
                             // masquerading as `Ok` text, so it needs no
                             // second, textual screen of its own; a genuinely
                             // resolved member is the only `Ok` outcome.
-                            match render_tsc_node(dispatch, owner_canonical, render_node, counters)
-                            {
+                            match render_tsc_node(
+                                dispatch,
+                                rails,
+                                owner_canonical,
+                                render_node,
+                                counters,
+                            ) {
                                 Ok(text) => {
                                     crate::resolver_core::component_meta_registry::collect_node_ref_names(dispatch,
                                         render_node,
@@ -1808,6 +2038,7 @@ impl VerterHost {
         &self,
         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+        rails: &ComputeRails,
         attempt: &mut CompileAttempt<'_>,
         payload: verter_type_engine::semantic_query::SemanticNodeId,
         runtime_subject: &BroadRuntimeSubjectLocator,
@@ -1821,7 +2052,7 @@ impl VerterHost {
         >,
     ) -> MacroRuntimeOutcome {
         let _ = analysis;
-        if probe_definitely_non_object_root(dispatch, payload) {
+        if probe_definitely_non_object_root(dispatch, rails, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         }
         counters.record_root_shallow_demand();
@@ -1895,6 +2126,7 @@ impl VerterHost {
                 RuntimePropType::Unclassified
             } else if direct_member_dependency_is_missing(
                 dispatch,
+                rails,
                 member.value,
                 &member_dependency_names,
             ) {
@@ -1966,6 +2198,7 @@ impl VerterHost {
         &self,
         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
         dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+        rails: &ComputeRails,
         attempt: &mut CompileAttempt<'_>,
         payload: verter_type_engine::semantic_query::SemanticNodeId,
         owner_canonical: &str,
@@ -1976,7 +2209,7 @@ impl VerterHost {
             verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic,
         >,
     ) -> MacroRuntimeOutcome {
-        if probe_definitely_non_object_root(dispatch, payload) {
+        if probe_definitely_non_object_root(dispatch, rails, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         }
         counters.record_root_shallow_demand();
@@ -2125,6 +2358,29 @@ impl VerterHost {
             Err(_) => partial_failure().runtime(),
         }
     }
+}
+
+/// Drive the macro traversal one poll at a time on this thread, running
+/// `observe` before the first poll and after every poll (test-only).
+#[cfg(test)]
+fn drive_stepped<F: std::future::Future>(
+    mut traversal: std::pin::Pin<Box<F>>,
+    observe: &(dyn Fn() + Send + Sync),
+) -> F::Output {
+    // A traversal that never answers fails here rather than hanging.
+    const POLL_CAP: usize = 64;
+    observe();
+    for _ in 0..POLL_CAP {
+        let polled = std::future::Future::poll(
+            traversal.as_mut(),
+            &mut std::task::Context::from_waker(std::task::Waker::noop()),
+        );
+        observe();
+        if let std::task::Poll::Ready(output) = polled {
+            return output;
+        }
+    }
+    panic!("the stepped macro traversal did not answer within {POLL_CAP} polls");
 }
 
 /// Discharge a shallow-surface resolution for the CODEGEN lanes.

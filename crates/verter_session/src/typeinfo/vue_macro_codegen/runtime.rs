@@ -14,6 +14,7 @@ use verter_type_engine::semantic_query::{root_narrowing_fact, FactResult};
 /// that participate in broad constructor inference.
 pub(super) fn direct_member_dependency_is_missing<M: verter_audit::observe::ObserveExec>(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    rails: &ComputeRails,
     subject: verter_type_engine::semantic_query::SemanticNodeId,
     dependency_names: &FxHashSet<&str>,
 ) -> bool {
@@ -50,6 +51,7 @@ pub(super) fn direct_member_dependency_is_missing<M: verter_audit::observe::Obse
                 drop(data);
                 let Some(resolved) = resolve_member_carrier(
                     dispatch,
+                    rails,
                     &builder,
                     node,
                     tracked_dependency,
@@ -69,6 +71,7 @@ pub(super) fn direct_member_dependency_is_missing<M: verter_audit::observe::Obse
                 drop(data);
                 let Some(resolved) = resolve_member_carrier(
                     dispatch,
+                    rails,
                     &builder,
                     node,
                     tracked_dependency,
@@ -85,6 +88,7 @@ pub(super) fn direct_member_dependency_is_missing<M: verter_audit::observe::Obse
                 drop(data);
                 let Some(resolved) = resolve_member_carrier(
                     dispatch,
+                    rails,
                     &builder,
                     node,
                     tracked_dependency,
@@ -102,7 +106,7 @@ pub(super) fn direct_member_dependency_is_missing<M: verter_audit::observe::Obse
                     tracked_dependency || dependency_names.contains(identity.decl_name.as_ref());
                 let identity = identity.clone();
                 drop(data);
-                let (resolved, local) = observe_local(|| {
+                let (resolved, local) = rails.observe(|| {
                     dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope: ScopeId {
                             canonical_id: identity.canonical_id.clone(),
@@ -134,7 +138,7 @@ pub(super) fn direct_member_dependency_is_missing<M: verter_audit::observe::Obse
                 let base = base.clone();
                 let args: Arc<[_]> = Arc::from(&args[..]);
                 drop(data);
-                let (resolved, local) = observe_local(|| {
+                let (resolved, local) = rails.observe(|| {
                     dispatch.execute_type_node(SemanticQueryKey::Instantiate(
                         verter_type_engine::semantic_query::InstantiateKey::new(
                             dispatch.type_slot_for(
@@ -180,7 +184,7 @@ pub(super) fn direct_member_dependency_is_missing<M: verter_audit::observe::Obse
                 let owner = *owner;
                 let name = name.clone();
                 drop(data);
-                let (resolved, local) = observe_local(|| {
+                let (resolved, local) = rails.observe(|| {
                     dispatch.execute_type_node(SemanticQueryKey::Instantiate(
                         verter_type_engine::semantic_query::InstantiateKey::new(
                             dispatch.type_slot_for(canonical_id.clone(), owner, name),
@@ -363,9 +367,10 @@ fn is_definitely_non_object_root<M: verter_audit::observe::ObserveExec>(
 /// re-observes it and does not inherit a definitive negative.
 pub(super) fn probe_definitely_non_object_root<M: verter_audit::observe::ObserveExec>(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    rails: &ComputeRails,
     subject: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> bool {
-    let probe_scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+    let probe_scope = rails.enter_completeness();
     let definitely_non_object = is_definitely_non_object_root(dispatch, subject);
     let observed = verter_type_engine::request_context::current_cold_compute_completeness();
     probe_scope.discard();
@@ -549,28 +554,18 @@ fn span_is_owned_by_macro(member: verter_span::Span, mac: verter_span::Span) -> 
     member.start >= mac.start && member.end <= mac.end
 }
 
-/// Run `body` in a nested completeness scope and return what that body
-/// itself observed. Dropping the scope bubbles those reasons into the
-/// parent; the returned completeness is the body's own, read before the drop.
-pub(super) fn observe_local<R>(body: impl FnOnce() -> R) -> (R, ResultCompleteness) {
-    let scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
-    let value = body();
-    let local = verter_type_engine::request_context::current_cold_compute_completeness();
-    drop(scope);
-    (value, local)
-}
-
 /// The carrier subject `node` resolves to, handed to `builder`, which keeps
 /// it live while the caller's walk continues from it.
 fn resolve_member_carrier<M: verter_audit::observe::ObserveExec>(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    rails: &ComputeRails,
     builder: &verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     tracked_dependency: bool,
     eager_context: ProjectionReductionContext,
     carrier_context: ProjectionReductionContext,
 ) -> Option<verter_type_engine::semantic_query::SemanticNodeId> {
-    let (resolved, local) = observe_local(|| {
+    let (resolved, local) = rails.observe(|| {
         dispatch
             .owning()
             .resolve_carrier_subject_node(

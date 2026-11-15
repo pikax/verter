@@ -158,3 +158,89 @@ const value = defineModel<number>("value")
         "the model type is the defineModel type argument"
     );
 }
+
+/// A `defineModel<T>()` whose model type is imported from another file
+/// publishes its model, model prop and update event from the shared
+/// framework-surface props read of the macro, the only source of the model
+/// type: the prop carries that read's provenance, the model and the prop
+/// share its authored type-argument source, and demanding that source
+/// resolves the imported declaration.
+#[test]
+fn imported_model_type_publishes_from_the_framework_surface_props_read() {
+    use verter_type_expr::facts::{SemanticTypeSource, SourcePosition};
+    use verter_type_expr::locators::AuthoredBodyLocator;
+
+    let project = make_project();
+    project
+        .upsert_base("/choice.ts", "export interface Choice { id: number }\n")
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import type { Choice } from './choice'
+const choice = defineModel<Choice>("choice")
+</script>
+<template><div /></template>"#,
+        )
+        .unwrap();
+
+    let meta = project
+        .host()
+        .get_component_meta("/App.vue")
+        .expect("component resolves");
+    let model = meta
+        .models
+        .iter()
+        .find(|model| model.name == "choice")
+        .expect("the model publishes");
+    match &model.type_source {
+        SourcePosition::Present(SemanticTypeSource::Authored(
+            AuthoredBodyLocator::MacroPayload(payload),
+        )) => assert_eq!(
+            payload.macro_index, 0,
+            "the model type source anchors at the defineModel macro"
+        ),
+        other => panic!("the model publishes the resolved row's authored source, got {other:?}"),
+    }
+    let prop = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "choice")
+        .expect("the model prop publishes");
+    assert_eq!(
+        prop.publication.authority().provenance(),
+        verter_type_expr::ResolutionProvenance::FrameworkSurface,
+        "the model prop publishes the framework-surface row, not the analyzer field"
+    );
+    assert_eq!(
+        prop.publication.authority().source_position(),
+        model.type_source,
+        "the model prop and the model share one type source"
+    );
+    assert!(
+        meta.events
+            .iter()
+            .any(|event| event.name == "update:choice"),
+        "the model update event publishes"
+    );
+
+    let demanded = demand_published_type(
+        project.host(),
+        "/App.vue",
+        model.type_source.present(),
+        "model value type",
+    );
+    match &demanded {
+        TypeExpr::Object(shape) => assert!(
+            shape.properties.iter().any(|member| matches!(
+                member,
+                ObjectMember::Property(property)
+                    if property.string_name().expect("string-key fixture") == "id"
+            )),
+            "the demanded model type expands to the imported members, got {demanded:?}"
+        ),
+        TypeExpr::Ref { name, .. } if name.as_ref() == "Choice" => {}
+        other => panic!("the demanded model type resolves the imported `Choice`, got {other:?}"),
+    }
+}

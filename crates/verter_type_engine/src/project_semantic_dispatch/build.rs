@@ -21423,28 +21423,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     verter_session_query::flow::policy::NullabilityPolicy::Strict,
                 )
             } else {
-                match self
-                    .execute_read(
-                        crate::semantic_query::SemanticQueryKey::reduce_intersection_operands(
-                            self.graph().store(),
-                            std::sync::Arc::from(members.to_vec().into_boxed_slice()),
-                        ),
-                    )
-                    .value
-                {
-                    crate::semantic_query::QueryResult::Value(node) => node,
-                    crate::semantic_query::QueryResult::Recursive(node) => node,
-                    crate::semantic_query::QueryResult::Error(_) => {
-                        let composite =
-                            super::canonical_algebra::intern_ordered_intersection_charged(
-                                self.graph(),
-                                members,
-                                self.construction_meter(),
-                            );
-                        self.deposit_canonical_evidence(composite.evidence);
-                        composite.node
-                    }
-                }
+                let read = self.execute_read(
+                    crate::semantic_query::SemanticQueryKey::reduce_intersection_operands(
+                        self.graph().store(),
+                        std::sync::Arc::from(members.to_vec().into_boxed_slice()),
+                    ),
+                );
+                self.intersection_of_reduction(members, &read.value)
+            }
+        }
+    }
+
+    /// The intersection of `members` that `reduced`, its reduction's read,
+    /// denotes: the reduced node, or — the read failed — the ordered
+    /// intersection built here and charged to the construction meter.
+    #[inline(never)]
+    pub(super) fn intersection_of_reduction(
+        &self,
+        members: &[SemanticNodeId],
+        reduced: &crate::semantic_query::QueryResult<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        match reduced {
+            crate::semantic_query::QueryResult::Value(node)
+            | crate::semantic_query::QueryResult::Recursive(node) => *node,
+            crate::semantic_query::QueryResult::Error(_) => {
+                let composite = super::canonical_algebra::intern_ordered_intersection_charged(
+                    self.graph(),
+                    members,
+                    self.construction_meter(),
+                );
+                self.deposit_canonical_evidence(composite.evidence);
+                composite.node
             }
         }
     }

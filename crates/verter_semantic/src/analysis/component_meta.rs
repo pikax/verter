@@ -787,8 +787,11 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
                 );
             }
             AnalyzedMacroKind::DefineModel => {
-                let prop_fields = merged_prop_fields(mac, resolved_macro.as_ref());
-                extract_model_from_macro(mac, &prop_fields, &mut models);
+                extract_model_from_macro(
+                    mac,
+                    model_prop_rows(resolved_macro.as_ref()),
+                    &mut models,
+                );
             }
             AnalyzedMacroKind::DefineExpose => {
                 extract_exposed_from_macro(
@@ -863,10 +866,9 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
             continue;
         }
         let resolved_macro = merged_resolved_macro_input(input.resolved_macros, macro_index);
-        let prop_fields = merged_prop_fields(mac, resolved_macro.as_ref());
         synthesize_model_prop_and_event(
             mac,
-            &prop_fields,
+            model_prop_rows(resolved_macro.as_ref()),
             evaluated_types,
             &mut props,
             &mut events,
@@ -2454,6 +2456,13 @@ fn merged_prop_fields(
         }
     }
     rows
+}
+
+/// The model prop rows of a `defineModel` macro: the host-resolved surface
+/// rows only. The analyzer's own model prop field is not a second source; a
+/// macro the resolved surface answered no row for publishes no model type.
+fn model_prop_rows(resolved: Option<&ResolvedMacroInput>) -> &[ResolvedPropInput] {
+    resolved.map_or(&[], |resolved| resolved.props.as_slice())
 }
 
 fn merge_prop_field(target: &mut AnalyzedPropField, candidate: &AnalyzedPropField) {

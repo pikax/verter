@@ -1,65 +1,15 @@
-//! Typed NAPI helpers for the typeinfo host substrate.
-//!
-//! Mirror to `crate::audit` — keeps free functions / object types
-//! that the inline `impl NapiVerterHost` block in `lib.rs` consumes.
-//! The methods themselves MUST live in the lib.rs impl block so the
-//! napi-derive class registration picks up the
-//! `js_name = "VerterHost"` rename.
+//! NAPI result types and error mapping for the shared typeinfo adapter.
 
 use napi::bindgen_prelude::*;
 use napi::{Error, Status};
 use napi_derive::napi;
-
-use prost::Message;
-use verter_audit::{AuditCaptureState, RequestAuditRecord};
+pub(crate) use shared::{project_resolved_root, split_resolve_outcome};
+use verter_ffi::typeinfo as shared;
 use verter_protocol::typeinfo::graph::{
     TypeInfoCapabilityHandshakeRequest, TypeInfoCapabilityHandshakeResponse, TypeInfoGraphRequest,
-    TypeInfoGraphResponse,
 };
-use verter_session::host_resolve_type_audit::TypeResolutionRequestError;
 use verter_type_engine::semantic_query::ProjectionMode;
-use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
 use verter_type_expr::TypeExpr;
-
-/// Split a resolve / evaluate outcome into the resolved node's owning
-/// root (if any)
-/// and an optional dispatch-fault description.
-///
-/// - `Ok(Some(node))` → `(Some(node), None)`.
-/// - `Ok(None)` (non-fault miss) → `(None, None)`.
-/// - `Err(fault)` (dispatch fault) → `(None, Some(description))`.
-///
-/// This is the FFI projection of the carrier's `Err` arm: a genuine
-/// dispatch fault is surfaced through the result DTO's `error` channel
-/// instead of being silently erased to a `None` node.
-pub(crate) fn split_resolve_outcome(
-    outcome: std::result::Result<Option<NodeRoot>, TypeResolutionRequestError>,
-) -> (Option<NodeRoot>, Option<String>) {
-    match outcome {
-        Ok(node) => (node, None),
-        Err(fault) => (None, Some(format!("{fault:?}"))),
-    }
-}
-
-/// Project a resolved root to its wire `TypeExpr` bytes. The projection
-/// takes its own view after the audited resolve; when that view cannot
-/// settle the answer is the `UnstableState` fault on the `error` channel,
-/// never a silent `null` that reads as a non-fault miss.
-pub(crate) fn project_resolved_root(
-    host: &verter_session::VerterHost,
-    resolved: Option<NodeRoot>,
-) -> (Option<Vec<u8>>, Option<String>) {
-    let Some(node) = resolved else {
-        return (None, None);
-    };
-    match host.project_node_to_type_expr_json_bytes(&node) {
-        Ok(bytes) => (bytes, None),
-        Err(unsettled) => (
-            None,
-            Some(format!("{:?}", TypeResolutionRequestError::from(unsettled))),
-        ),
-    }
-}
 
 /// Response shape for `resolveSymbolWithAudit`: JSON Buffers.
 ///
@@ -86,78 +36,6 @@ pub struct NapiTypeInfoResolveResult {
     pub error: Option<String>,
 }
 
-/// Encode a record into the optional `auditRecord` DTO slot, projecting
-/// the host carrier's mandatory record through the historical "null
-/// when audit is disabled / filtered" contract: only an
-/// [`AuditCaptureState::ActiveStored`] record encodes to a `Buffer`; a
-/// filtered or disabled record projects to `None`.
-pub(crate) fn encode_stored_audit_record(rec: &RequestAuditRecord) -> Result<Option<Buffer>> {
-    match rec.capture_state {
-        AuditCaptureState::ActiveStored => encode_audit_record(rec).map(Some),
-        AuditCaptureState::FilteredNoop
-        | AuditCaptureState::AuditDisabled
-        | AuditCaptureState::Unavailable => Ok(None),
-    }
-}
-
-/// Encode a `RequestAuditRecord` to a JSON Buffer (parity with
-/// `crate::audit::encode_record`).
-pub(crate) fn encode_audit_record(rec: &RequestAuditRecord) -> Result<Buffer> {
-    let bytes = serde_json::to_vec(rec).map_err(|e| {
-        Error::new(
-            Status::GenericFailure,
-            format!("audit record serialization error: {e}"),
-        )
-    })?;
-    Ok(Buffer::from(bytes))
-}
-
-/// Decode a `Buffer` containing a JSON array of `TypeExpr` values
-/// into the host slice shape used by `resolve_named_symbol_with_audit`.
-///
-/// An empty / `None` buffer maps to an empty slice; this is the common
-/// "no generic instantiation" case at the JS boundary.
-pub(crate) fn decode_type_expr_list(buf: Option<Buffer>) -> Result<Vec<TypeExpr>> {
-    let Some(buf) = buf else {
-        return Ok(Vec::new());
-    };
-    if buf.is_empty() {
-        return Ok(Vec::new());
-    }
-    let exprs: Vec<TypeExpr> = serde_json::from_slice(&buf).map_err(|e| {
-        Error::new(
-            Status::InvalidArg,
-            format!("type-expr list decode error: {e}"),
-        )
-    })?;
-    Ok(exprs)
-}
-
-/// Convert an FFI/JS-supplied projection-mode string to the host enum.
-/// `None` selects the host's default-mode policy (Navigate for generic
-/// carriers, Expanded otherwise) — see
-/// `verter_session::typeinfo::ResolveMode`.
-pub(crate) fn parse_resolve_mode(mode: Option<String>) -> Result<Option<ProjectionMode>> {
-    let Some(tag) = mode else {
-        return Ok(None);
-    };
-    let parsed = verter_ffi::convert::parse_projection_mode(&tag).map_err(|e| {
-        Error::new(
-            Status::InvalidArg,
-            format!("resolve-symbol mode error: {e}"),
-        )
-    })?;
-    Ok(Some(parsed))
-}
-
-/// Combined response shape for `typeInfoWithAudit`.
-///
-/// `response` is the protobuf-encoded `TypeInfoGraphResponse` — the
-/// operation's answer arm on success, the `error` arm on a typed
-/// rejection. It is ALWAYS present (the validation-first executor always
-/// produces a typed response). `auditRecord` carries the per-request
-/// `RequestAuditRecord` as a JSON Buffer; `null` when audit is disabled
-/// or the record was filtered.
 #[napi(object)]
 pub struct NapiFrameworkSurfaceResult {
     /// Protobuf-encoded `TypeInfoGraphResponse` Buffer (always present).
@@ -167,60 +45,34 @@ pub struct NapiFrameworkSurfaceResult {
     pub auditRecord: Option<Buffer>,
 }
 
-/// Decode a `Buffer` carrying a protobuf-encoded
-/// [`TypeInfoGraphRequest`] envelope into the host wire type.
-///
-/// The framework-surface operation rides the existing graph envelope;
-/// this is the binding-side decode that hands the validated request to
-/// the host's validation-first executor.
-pub(crate) fn decode_type_info_graph_request(buf: Buffer) -> Result<TypeInfoGraphRequest> {
-    TypeInfoGraphRequest::decode(buf.as_ref()).map_err(|e| {
-        Error::new(
-            Status::InvalidArg,
-            format!("type-info graph request decode error: {e}"),
-        )
-    })
+pub(crate) fn decode_type_expr_list(buf: Option<Buffer>) -> Result<Vec<TypeExpr>> {
+    shared::decode_type_expr_list(buf.as_deref()).map_err(|e| Error::new(Status::InvalidArg, e))
 }
 
-/// Decode a `Buffer` carrying a protobuf-encoded
-/// [`TypeInfoCapabilityHandshakeRequest`].
+pub(crate) fn parse_resolve_mode(mode: Option<String>) -> Result<Option<ProjectionMode>> {
+    shared::parse_resolve_mode(mode.as_deref()).map_err(|e| Error::new(Status::InvalidArg, e))
+}
+
+pub(crate) fn encode_stored_audit_record(
+    rec: &verter_audit::RequestAuditRecord,
+) -> Result<Option<Buffer>> {
+    shared::encode_stored_audit_record(rec)
+        .map(|json| json.map(|json| Buffer::from(json.into_bytes())))
+        .map_err(|e| Error::new(Status::GenericFailure, e))
+}
+
+pub(crate) fn decode_type_info_graph_request(buf: Buffer) -> Result<TypeInfoGraphRequest> {
+    shared::decode_type_info_graph_request(&buf).map_err(|e| Error::new(Status::InvalidArg, e))
+}
+
 pub(crate) fn decode_capability_handshake_request(
     buf: Buffer,
 ) -> Result<TypeInfoCapabilityHandshakeRequest> {
-    TypeInfoCapabilityHandshakeRequest::decode(buf.as_ref()).map_err(|e| {
-        Error::new(
-            Status::InvalidArg,
-            format!("capability handshake decode error: {e}"),
-        )
-    })
+    shared::decode_capability_handshake_request(&buf).map_err(|e| Error::new(Status::InvalidArg, e))
 }
 
-/// Encode a [`TypeInfoCapabilityHandshakeResponse`] to a protobuf Buffer.
 pub(crate) fn encode_capability_handshake_response(
     resp: &TypeInfoCapabilityHandshakeResponse,
 ) -> Buffer {
-    Buffer::from(resp.encode_to_vec())
-}
-
-/// Encode a [`TypeInfoGraphResponse`] to a protobuf Buffer.
-pub(crate) fn encode_type_info_graph_response(resp: &TypeInfoGraphResponse) -> Buffer {
-    let encoded = resp.encode_to_vec();
-    verter_audit::attribute_n!(TypeInfoGraphEncode, encoded.len());
-    Buffer::from(encoded)
-}
-
-/// Wrap a typed [`TypeInfoRequestError`] back into the `error` arm of a
-/// [`TypeInfoGraphResponse`].
-///
-/// The host's `AuditedResult` Err arm carries only the typed error (the
-/// error-arm response it built is dropped on the carrier). The binding
-/// re-forms the wire response so the JS side always decodes a uniform
-/// `TypeInfoGraphResponse` regardless of success / rejection.
-pub(crate) fn framework_error_response(
-    error: verter_protocol::typeinfo::graph::TypeInfoRequestError,
-) -> TypeInfoGraphResponse {
-    use verter_protocol::verter::v1::type_info_graph_response;
-    TypeInfoGraphResponse {
-        kind: Some(type_info_graph_response::Kind::Error(error)),
-    }
+    Buffer::from(shared::encode_capability_handshake_response(resp))
 }

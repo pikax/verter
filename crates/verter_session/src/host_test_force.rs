@@ -112,6 +112,11 @@ pub(crate) struct TestForceKnobs {
     #[cfg(test)]
     pub(crate) vue_macro_codegen_build_rendezvous:
         parking_lot::Mutex<Option<std::sync::Arc<(std::sync::Barrier, std::sync::Barrier)>>>,
+    /// When set, the Vue macro traversal yields once at each of its
+    /// suspension points, and this runs on the driving thread before the
+    /// first poll and after every poll.
+    #[cfg(test)]
+    pub(crate) vue_macro_traversal_step_hook: SeamHook,
     /// Observations of the session-wrapper operations that runtime-render
     /// compilation must bypass. Host-backed compilation is the firing control.
     #[cfg(test)]

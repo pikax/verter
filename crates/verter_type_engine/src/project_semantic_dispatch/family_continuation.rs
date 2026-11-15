@@ -253,7 +253,10 @@ pub(super) enum FamilyBuild {
     /// A path projection's walk, standing at the read a hop named.
     ProjectPath(Box<super::walk::ProjectPathBuild>),
     /// A signature discovery's walk, standing at the read a settlement
-    /// named, or in its apparent wrapper's lookup or instantiation.
+    /// named, in its apparent wrapper's lookup or instantiation, at a
+    /// result its matching compares, at a parameter intersection its
+    /// union synthesis composes, or at a rest unwrap's declaration or
+    /// deferred-evaluation read before the leaf is published.
     Discovery(Box<super::signature_discovery::DiscoveryWalk>),
 }
 
@@ -266,7 +269,8 @@ impl FamilyBuild {
     /// `typeof` value's, and a callable's apparent-type probe
     /// ([`super::walk::WalkState::counts_awaited_intent`]). A signature
     /// discovery counts its settlement evaluation's carrier reads, as that
-    /// evaluation made in place always counted them.
+    /// evaluation made in place always counted them, and a rest unwrap's
+    /// declaration instantiations and evaluation carrier reads.
     fn counts_need_intent(&self, key: &SemanticQueryKey) -> bool {
         match self {
             Self::ApparentType(_) => true,
@@ -278,12 +282,14 @@ impl FamilyBuild {
 
     /// Whether the read this build waits on was named from kernel handles a
     /// replacement retired while it waited — a composite candidate's result,
-    /// prepared in a signature list's epoch the replacement retired. Only a
-    /// result that was forced before the retirement answers the build: the
-    /// in-place driver does not make the read, and the frame drops any
-    /// other delivery unread, whose rails the staleness alone would taint.
-    /// Either resumes the build with [`retired_read`], and the list names
-    /// the composite's read again, rebound into the current epoch.
+    /// prepared in a signature list's epoch the replacement retired, or a
+    /// result a signature discovery's matching compares, named in an epoch
+    /// the replacement retired. Only a result that was forced before the
+    /// retirement answers the build: the in-place driver does not make the
+    /// read, and the frame drops any other delivery unread, whose rails the
+    /// staleness alone would taint. Either resumes the build with
+    /// [`retired_read`], and the build names its read again, rebound into
+    /// the current epoch.
     pub(super) fn awaits_retired_read<C: crate::resolver_core::ResolverCapabilities>(
         &self,
         stage: &ContinuationStage<'_, '_, C>,
@@ -291,6 +297,9 @@ impl FamilyBuild {
         match self {
             Self::OverloadSet(build) => build.awaits_retired_read(stage),
             Self::ApparentType(build) => build.awaits_retired_read(stage),
+            Self::Discovery(walk) => {
+                walk.awaits_retired_result(stage.graph_store().signature_store().epoch())
+            }
             Self::MacroPayload(_)
             | Self::ReduceIntersection(_)
             | Self::ClassInstanceSurface(_)
@@ -298,16 +307,16 @@ impl FamilyBuild {
             | Self::CycleGate(_)
             | Self::ResolveDecl(_)
             | Self::TemplateUnion(..)
-            | Self::ProjectPath(_)
-            | Self::Discovery(_) => false,
+            | Self::ProjectPath(_) => false,
         }
     }
 
     /// Record `key`, a read this build names, in the test dispatch trace
     /// as the read a synchronous build makes is recorded: a path walk's
-    /// hop reads, a signature discovery's settlement reads, and the
-    /// template reductions an overload set's candidate substitutions read,
-    /// are recorded wherever their driver reads them.
+    /// hop reads, a signature discovery's settlement, compared-result and
+    /// parameter-intersection and rest-unwrap reads, and the template reductions an
+    /// overload set's candidate substitutions read, are recorded wherever
+    /// their driver reads them.
     #[cfg(any(test, feature = "test-support"))]
     pub(super) fn trace_need(&self, key: &SemanticQueryKey) {
         let traced = match self {
@@ -334,8 +343,9 @@ impl FamilyBuild {
     /// recording leaves those charges its consumer's. An overload set's
     /// candidate standing in a substitution abandons the recordings its
     /// walk's levels opened, top first. A signature discovery standing in
-    /// its settlement's deferred evaluation abandons that evaluation's
-    /// recordings; one standing at its apparent wrapper holds nothing.
+    /// its settlement's or rest unwrap's deferred evaluation abandons that
+    /// evaluation's recordings; one standing at a declaration or apparent
+    /// wrapper holds nothing.
     pub(super) fn release_retained_accounting<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
         dispatch: &ProjectSemanticDispatch<'_, C>,

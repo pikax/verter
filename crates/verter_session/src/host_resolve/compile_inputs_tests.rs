@@ -18,7 +18,12 @@
 //! - the dependency verdict's walk to a missing export enters no wait
 //!   inside a root's poll and decides what the in-place walk decides;
 //! - a refused blocker route does not stop the other blockers loading;
-//! - a source block hydration loads is in the input the compile captures.
+//! - a source block hydration loads is in the input the compile captures;
+//! - a root that followed a producer whose lookup ended early produces the
+//!   bundle itself and answers what a lone request answers;
+//! - a shutdown or the request's cancellation while a blocker loads ends
+//!   the request with that typed stop before anything is captured, and
+//!   only a load that genuinely failed is a gap.
 
 use std::future::Future;
 use std::sync::atomic::Ordering;
@@ -532,6 +537,244 @@ fn a_compile_root_whose_blocker_is_loading_stays_pending_and_resumes_to_the_sync
         .expect("the cold host compiles");
     assert!(runtime_code(&cold).contains("from-the-view"));
     assert_eq!(runtime_code(&answer), runtime_code(&cold));
+}
+
+/// A root that follows a producer whose payload lookup ended early does not
+/// take that producer's bundle: once the condition that ended the lookup
+/// is over, it produces the bundle itself, once, and answers what a lone
+/// request on an untouched host answers. The producing root still answers
+/// the incomplete failure naming the lookup.
+#[test]
+fn a_follower_of_a_producer_whose_dependency_lookup_ended_early_produces_its_own_bundle() {
+    use crate::root_continuations_tests::{
+        drive_root_counting, hold_producer, poll_past_route_resolutions,
+    };
+    let types_host = || {
+        let host = strict_host();
+        upsert(&host, TYPES, TYPES_SOURCE);
+        upsert(&host, APP, TYPES_APP_SOURCE);
+        host
+    };
+    let fresh = rendered(
+        &types_host()
+            .compile_request(APP, request())
+            .expect("a lone request compiles"),
+    );
+
+    let host = types_host();
+    let waker = Waker::from(Arc::new(UnparkWaker(std::thread::current())));
+    let partial = PartialLookups::arm(&host);
+    let mut producing = host.begin_compile_request(APP, request());
+    let producer = hold_producer(&host, &mut producing, &waker);
+    let mut following = host.begin_compile_request(APP, request());
+    poll_past_route_resolutions(&host, &mut following);
+    assert!(
+        following.take_work().is_none_or(|work| !work.is_producer()),
+        "the follower waits on the held producer"
+    );
+    std::thread::scope(|scope| {
+        assert!(scope
+            .spawn(move || producer.run())
+            .join()
+            .expect("the producer runs"));
+    });
+    drop(partial);
+
+    let (gaps, _) = incomplete_gaps(drive_root(producing));
+    assert!(
+        gaps.contains(&CompileDependencyGap::Lookup {
+            import_source: "./types".to_owned(),
+            type_name: "Props".to_owned(),
+        }),
+        "the producing root names its early-ended lookup: {gaps:?}"
+    );
+    let (answer, handed) = drive_root_counting(&host, following, WaitProbe::forbid);
+    let answer = answer.unwrap_or_else(|failure| {
+        panic!("the follower produces its own bundle and compiles: {failure:?}")
+    });
+    assert_eq!(handed.producers, 1, "the follower produces the bundle once");
+    assert_eq!(rendered(&answer), fresh);
+}
+
+/// A scheduler reset while a compile root's blocker is loading ends the
+/// request with the typed shutdown before its input is captured: nothing
+/// is captured, the load begun is the only one, and the blocker's source
+/// is never integrated, even once its read goes on.
+#[test]
+fn a_shutdown_during_blocker_loading_answers_a_typed_failure_and_retains_nothing() {
+    let host = workspace_host(&[(VIEW, VIEW_SOURCE)]);
+    upsert(&host, APP, VIEW_APP_SOURCE);
+    let count = |counter: &std::sync::atomic::AtomicUsize| counter.load(Ordering::SeqCst);
+    let loads = count(&host.test_force.loads_begun);
+    let blocking_loads = count(&host.test_force.blocking_loads_begun);
+    let captures = count(&host.test_force.compile_input_capture_count);
+
+    let gate = Arc::clone(&host.test_force.source_load_gate);
+    gate.hold(VIEW);
+    let mut held = HeldRead(Some(&*gate));
+    let mut root = host.begin_compile_request(APP, request());
+    let (waker, wakes) = crate::root_continuations_tests::channel_waker();
+    let loading = poll_to_loading_blocker(&mut root, &waker);
+    assert_eq!(count(&host.test_force.loads_begun) - loads, 1);
+    drop(loading);
+    while wakes.try_recv().is_ok() {}
+
+    host.scheduler().reset();
+    wakes
+        .recv_timeout(crate::root_continuations_tests::POLL_DEADLINE)
+        .expect("the reset wakes the root");
+    let answer = {
+        let _forbid = WaitProbe::forbid();
+        root.poll(&waker)
+    };
+    held.release();
+    assert!(
+        matches!(
+            answer,
+            Poll::Ready(Err(CompileRequestFailure::Host(HostError::Shutdown)))
+        ),
+        "the request answers the shutdown: {answer:?}"
+    );
+    assert_eq!(
+        count(&host.test_force.compile_input_capture_count),
+        captures,
+        "nothing is captured"
+    );
+    assert_eq!(count(&host.test_force.loads_begun) - loads, 1);
+    assert_eq!(count(&host.test_force.blocking_loads_begun), blocking_loads);
+    assert!(
+        host.scheduler.try_get_source(VIEW).is_none(),
+        "the blocker's source is not integrated"
+    );
+}
+
+/// Cancelling a request while its compile root's blocker is loading wakes
+/// the root, which answers the cancellation without capturing its input;
+/// the cancelled request leaves nothing behind that stops the next
+/// request compiling.
+#[test]
+fn cancelling_a_request_during_blocker_loading_answers_cancelled_and_captures_nothing() {
+    let host = workspace_host(&[(VIEW, VIEW_SOURCE)]);
+    upsert(&host, APP, VIEW_APP_SOURCE);
+    let captures = || {
+        host.test_force
+            .compile_input_capture_count
+            .load(Ordering::SeqCst)
+    };
+    let before = captures();
+
+    let gate = Arc::clone(&host.test_force.source_load_gate);
+    gate.hold(VIEW);
+    let mut held = HeldRead(Some(&*gate));
+    let (mut root, cancel) = {
+        let _request = verter_type_engine::request_context::install_test_request_for(APP);
+        let cancel = verter_type_engine::request_context::current_request_context()
+            .expect("the request is installed")
+            .cancellation_token();
+        (host.begin_compile_request(APP, request()), cancel)
+    };
+    let (waker, wakes) = crate::root_continuations_tests::channel_waker();
+    drop(poll_to_loading_blocker(&mut root, &waker));
+    while wakes.try_recv().is_ok() {}
+
+    cancel.cancel();
+    wakes
+        .recv_timeout(crate::root_continuations_tests::POLL_DEADLINE)
+        .expect("cancelling the request wakes the root");
+    let answer = {
+        let _forbid = WaitProbe::forbid();
+        root.poll(&waker)
+    };
+    assert!(
+        matches!(
+            answer,
+            Poll::Ready(Err(CompileRequestFailure::Host(HostError::Cancelled)))
+        ),
+        "the request answers its cancellation: {answer:?}"
+    );
+    assert_eq!(captures(), before, "nothing is captured");
+    held.release();
+    let next = host
+        .compile_request(APP, request())
+        .expect("the next request compiles");
+    assert!(runtime_code(&next).contains("from-the-view"));
+}
+
+/// Only a blocker load that genuinely failed is a gap: a load stopped by
+/// cancellation, supersession or shutdown, the scheduler's own shut-down
+/// failure included, ends hydration with that stop.
+#[test]
+fn only_a_failed_blocker_load_is_a_file_gap() {
+    use super::compile_blocker_hydration::blocker_load_answer;
+    use crate::host_load::HostLoadError;
+    use verter_scheduler::job::SchedulerError;
+    use verter_type_engine::semantic_query::ExecutionAbort;
+    let failed = || {
+        HostLoadError::Failed(SchedulerError::FileNotFound {
+            file_id: VIEW.to_owned(),
+        })
+    };
+    for (outcome, answer) in [
+        (Ok(true), Ok(true)),
+        (Ok(false), Ok(false)),
+        (
+            Err(HostLoadError::Cancelled),
+            Err(ExecutionAbort::Cancelled),
+        ),
+        (
+            Err(HostLoadError::Superseded),
+            Err(ExecutionAbort::Superseded),
+        ),
+        (Err(HostLoadError::Shutdown), Err(ExecutionAbort::Shutdown)),
+        (
+            Err(HostLoadError::Failed(SchedulerError::Shutdown)),
+            Err(ExecutionAbort::Shutdown),
+        ),
+        (Err(failed()), Ok(false)),
+        (Err(HostLoadError::Cycle), Ok(false)),
+        (Err(HostLoadError::WrongHost), Ok(false)),
+        (Err(HostLoadError::NoProgress), Ok(false)),
+    ] {
+        let shown = format!("{outcome:?}");
+        assert_eq!(blocker_load_answer(outcome), answer, "{shown}");
+    }
+}
+
+/// Poll `root`, whose template is its only blocker, past its template
+/// route's resolution to its pending load, every poll under a forbidding
+/// probe, and return the dispatch step the load hands out.
+fn poll_to_loading_blocker<'h>(
+    root: &mut crate::CompileRequestRoot<'h>,
+    waker: &Waker,
+) -> crate::RootWork<'h> {
+    let first = {
+        let _forbid = WaitProbe::forbid();
+        root.poll(waker)
+    };
+    assert!(
+        first.is_pending(),
+        "the root waits for its template's route"
+    );
+    let resolution = root
+        .take_work()
+        .expect("the root hands out its route's resolution");
+    assert!(resolution.is_producer() && resolution.run());
+    let second = {
+        let _forbid = WaitProbe::forbid();
+        root.poll(waker)
+    };
+    assert!(
+        second.is_pending(),
+        "the root waits for its loading blocker"
+    );
+    let work = root
+        .take_work()
+        .expect("the root hands out its dispatch step");
+    assert!(
+        !work.is_producer(),
+        "a loading blocker needs a dispatch step"
+    );
+    work
 }
 
 /// The owner-edge observations `host` recorded for `APP`'s `specifier`

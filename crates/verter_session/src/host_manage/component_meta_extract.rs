@@ -487,8 +487,8 @@ pub(crate) fn extract_component_meta_from_resolved<M: verter_audit::observe::Obs
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     // ONE full-extract completeness scope spans the WHOLE extract body so every
     // partiality source inside extraction folds into ONE signal — the pre-choke
-    // macro-DTO read below INCLUDED. That read can `observe_partial` a
-    // budget-tripped DTO (`resolver_component_meta_resolved_macros` →
+    // macro-DTO read below INCLUDED. That read's cold compute bubbles the
+    // partiality of a budget-tripped DTO (`resolver_component_meta_resolved_macros` →
     // `vue_macro_dtos_with_ctx`, which refuses its own `vue_surface_store`); a
     // gate keyed only on the later fallthrough completeness let such a partial
     // warm the overall result anyway. The scope captures it; the publishing
@@ -503,6 +503,7 @@ pub(crate) fn extract_component_meta_from_resolved<M: verter_audit::observe::Obs
     // `debug_assertions`-off build). See
     // `tests/cases/g_session/session_meta_store_view_regression.rs`.
     let resolved_macros = resolver_component_meta_resolved_macros(
+        host,
         ctx,
         dispatch,
         canonical.as_str(),
@@ -610,6 +611,7 @@ pub(crate) fn extract_component_meta_from_resolved_with_facts<
     // request-bound `ctx` requirement.
     let extract_scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
     let resolved_macros = resolver_component_meta_resolved_macros(
+        host,
         ctx,
         dispatch,
         canonical.as_str(),

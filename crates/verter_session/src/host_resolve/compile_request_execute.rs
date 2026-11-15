@@ -107,10 +107,13 @@ impl VerterHost {
         // compiler inputs: hydration resolves and loads those blockers
         // before the coherent owner/content capture, exactly as the
         // profile-derived lanes do. Its loads suspend this root rather than
-        // park inside its poll.
+        // park inside its poll. A load stopped by cancellation, supersession
+        // or shutdown, or this request's cancellation, answers that stop
+        // before anything is captured.
         let hydration = self
             .hydrate_compile_blockers_pollable(&canonical, work)
-            .await;
+            .await
+            .map_err(|abort| CompileRequestFailure::Host(HostError::from(abort)))?;
         // This route reads supplied (externally preprocessed) block
         // artifacts from the default-profile hash bucket — the bucket
         // `apply_block_overrides` writes to when the caller names no

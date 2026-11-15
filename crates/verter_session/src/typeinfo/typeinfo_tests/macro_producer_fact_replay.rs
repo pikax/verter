@@ -35,16 +35,17 @@
 //! | `cancelled_producer_handoff_refuses_the_consumer_rooting` | The `Unobserved` arm on the real path: a cancelled handoff refuses the CONSUMER's tracer, with an uncancelled control that does not. |
 //! | `non_cacheable_footprint_replays_facts_and_the_refusal` | The `NonCacheable` arm bubbles its facts AND its refusal. |
 //! | `rooted_footprint_replays_facts_without_refusing` | A publishable footprint replays its facts and leaves the consumer able to root. |
+//! | `a_producer_footprint_holds_only_where_its_observations_do` | The check a joining caller makes before taking the bundle: the footprint holds over the files it read, not once one changes, and a factless footprint holds nowhere. |
 //!
 //! ## Mutation recipes
 //!
 //! Each recipe is a single edit against the landed tree, verified to apply
-//! uniquely and to be caught. Counts are out of the 10 tests above. A recipe
+//! uniquely and to be caught. Counts are out of the 11 tests above. A recipe
 //! that applies but leaves the suite green means the suite has regressed —
 //! `perl`/`sed` exit 0 on a non-match, so confirm the marker is present exactly
 //! once before trusting a green run.
 //!
-//! All five live in `MacroFactFootprint` (`typeinfo/vue_macro_codegen.rs`),
+//! All six live in `MacroFactFootprint` (`typeinfo/vue_macro_codegen.rs`),
 //! four of them inside `replay()`:
 //!
 //! - **R1 — drop the publishable replay.** `Self::Rooted(facts) =>
@@ -67,6 +68,9 @@
 //!   matched and the carrier is still built correctly — it is the original bug
 //!   wearing the fix's clothes, and the shape a well-intentioned refactor would
 //!   produce. Caught: 6 fail.
+//! - **R6 — every footprint vouches.** `holds_under` returns `true`.
+//!   Caught: 1 fails, the footprint still holding after the file it read
+//!   changed.
 
 use std::sync::Arc;
 
@@ -678,4 +682,51 @@ fn second_owner_over_fully_warm_memos_roots_the_transitive_file() {
         "the warm-memo-served owner must re-emit its runtime validator: {after}"
     );
     assert!(!after.contains("type: String"), "{after}");
+}
+
+/// Whether `footprint` holds in a request context over `host`'s current
+/// view, with the owner as its strict self-root.
+fn footprint_holds(host: &VerterHost, footprint: &MacroFactFootprint) -> bool {
+    crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
+        footprint.holds_under(
+            &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(ctx),
+            OWNER,
+        )
+    })
+}
+
+/// The check a caller that did not run the producer makes before taking
+/// its bundle: the producer's footprint holds in a view over the same
+/// files, stops holding once a file it read changes, and a footprint that
+/// recorded nothing vouches for nothing under any view.
+#[test]
+fn a_producer_footprint_holds_only_where_its_observations_do() {
+    let host = make_host();
+    seed(&host, INNER_STRING, PROPS_SOURCE);
+    let output = produce_runtime(&host);
+    assert!(
+        footprint_holds(&host, &output.fact_footprint),
+        "the footprint holds over the files it was produced from"
+    );
+
+    upsert(
+        &host,
+        PROPS,
+        "import type { Inner } from './inner';\nexport interface Props { a: Inner; b: number }\n",
+    );
+    assert!(
+        !footprint_holds(&host, &output.fact_footprint),
+        "the footprint no longer holds once a file it read changed"
+    );
+    let fresh = make_host();
+    seed(&fresh, INNER_STRING, PROPS_SOURCE);
+    for (name, footprint) in [
+        ("MutationUnstable", MacroFactFootprint::MutationUnstable),
+        ("Unobserved", MacroFactFootprint::Unobserved),
+    ] {
+        assert!(
+            !footprint_holds(&fresh, &footprint) && !footprint_holds(&host, &footprint),
+            "a {name} footprint holds under no view"
+        );
+    }
 }

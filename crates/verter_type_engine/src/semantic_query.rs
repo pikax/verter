@@ -6706,6 +6706,21 @@ pub struct SemanticGraphStats {
     /// pair of types the kernel's identity comparison decides, counted
     /// before the pair is read. A comparison run again counts again.
     pub signature_positions_compared: u64,
+    /// Signature pairs kernel matching decided, wherever it ran: one per
+    /// comparison counted where it returns its decision, a pair that is one
+    /// descriptor and a pair refused on arity included, outside every
+    /// charge. A comparison that fails undecided or waits on its holder is
+    /// not counted; a pair decided again counts again.
+    pub signature_comparisons_decided: u64,
+    /// Parameter positions union synthesis composed, wherever it ran: one
+    /// per position slot of a synthesized union signature, counted where
+    /// the slot is built, the extra rest element included and a receiver
+    /// not, outside every charge. A position composed again counts again.
+    pub signature_parameters_composed: u64,
+    /// Declarations an identity-carrier walk names for instantiation, after
+    /// its admission checks, outside every charge. A declaration unwrapped
+    /// again counts again, whichever driver runs the walk.
+    pub carrier_declarations_unwrapped: u64,
     /// Signature result reads performed, whichever driver made them: one
     /// per read begun, counted before its recipe is read. A result forced
     /// again counts again.
@@ -13111,9 +13126,10 @@ mod tests {
     ///   intersection_products_built, explicit_candidates_instantiated,
     ///   binder_substitutions, substitution_child_visits,
     ///   discovery_nodes_walked, discovery_signatures_published,
-    ///   signature_positions_compared,
-    ///   signature_results_forced, signature_rebinds,
-    ///   signature_descriptors_rebound, call_value_runs.
+    ///   signature_positions_compared, signature_comparisons_decided,
+    ///   signature_parameters_composed, carrier_declarations_unwrapped,
+    ///   signature_results_forced,
+    ///   signature_rebinds, signature_descriptors_rebound, call_value_runs.
     /// - Exceptional-path: same_path_sentinel_returns,
     ///   joined_waits, inflight_aborted_retries, cold_aborts_swept.
     #[test]
@@ -13167,6 +13183,9 @@ mod tests {
             "discovery_nodes_walked",
             "discovery_signatures_published",
             "signature_positions_compared",
+            "signature_comparisons_decided",
+            "signature_parameters_composed",
+            "carrier_declarations_unwrapped",
             "signature_results_forced",
             "signature_rebinds",
             "signature_descriptors_rebound",

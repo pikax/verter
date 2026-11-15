@@ -2489,13 +2489,21 @@ impl VerterHost {
             .map(IdeResponse::from_cached)
     }
 
-    /// Generate public API output for a Vue SFC â€” minimal TypeScript declarations.
+    /// Generate the public API output for a framework component carrier: its
+    /// public TypeScript declaration.
     ///
     /// Unlike [`get_ide`](Self::get_ide), this does NOT require a prior
-    /// [`get_virtual_file`](Self::get_virtual_file) call. It performs
-    /// macro-only extraction (OXC parse â†’
-    /// defineProps/Emits/Slots/Model/Expose/Options)
-    /// and generates a `ComponentPublicInstance`-based declaration.
+    /// [`get_virtual_file`](Self::get_virtual_file) call. The canonical is
+    /// dispatched to its adapter's component-API projector. For a Vue SFC the
+    /// declaration is rendered from the macro codegen bundle
+    /// (`typeinfo::vue_macro_codegen`): a typed props or emits payload is
+    /// resolved through the shared engine query (`resolve_macro_payload`) and
+    /// its members are enumerated by the engine's shallow surface projection,
+    /// the same engine surface the component's framework surface normalizes;
+    /// models take their names and optionality from the macro's own facts,
+    /// and an object-form expose is typed through the engine's `TypeOf`.
+    /// The bundle is produced per request and keeps no aggregate cache; only
+    /// the engine's own query memos are retained.
     ///
     /// Returns `Ok(None)` if the file is not in the host or exposes no
     /// framework public-API carrier. Projection failures remain typed errors.

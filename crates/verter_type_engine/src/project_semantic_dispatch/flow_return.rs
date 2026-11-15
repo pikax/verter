@@ -10879,7 +10879,10 @@ mod rails;
 mod read;
 use branches::{BranchStep, DeadPath, Entered};
 use nested::{NestedChildParts, NestedDemand, NestedSignatureStep};
-pub(super) use rails::{ClosedObservation, ClosedRecording, ObservationRail, RecordingRail};
+pub(super) use rails::{
+    ClosedObservation, ClosedRecording, CompletenessRailId, ObservationRail, RailExtent, ReadRails,
+    RecordingRail,
+};
 use read::{ReadDelivery, ReadNesting, ReadStep, ReadWait};
 #[path = "flow_return_operators.rs"]
 mod operators;
@@ -30449,7 +30452,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         }
                     }
                     Some(Waiting::CallArgument(wait)) => {
-                        let step = self.resume_call_argument(wait, value);
+                        let step = self.resume_call_argument(*wait, value);
                         match self.resumed_call_step(run, step, suspend) {
                             ResumedCall::Value(done) => value = done,
                             ResumedCall::Descend => break,
@@ -30465,7 +30468,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         }
                     }
                     Some(Waiting::CallFunction(wait)) => {
-                        let step = self.resume_call_function(wait, value);
+                        let step = self.resume_call_function(*wait, value);
                         match self.resumed_call_step(run, step, suspend) {
                             ResumedCall::Value(done) => value = done,
                             ResumedCall::Descend => break,

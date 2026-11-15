@@ -2007,6 +2007,25 @@ impl SemanticGraphStore {
             .signature_positions_compared
             .fetch_add(1, Ordering::Relaxed);
     }
+    /// Bumped once per signature pair kernel matching decides.
+    pub fn record_signature_comparison_decided(&self) {
+        self.stats
+            .signature_comparisons_decided
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Bumped once per parameter position union synthesis composes.
+    pub fn record_signature_parameter_composed(&self) {
+        self.stats
+            .signature_parameters_composed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    /// Bumped once per declaration an identity-carrier walk instantiates.
+    #[inline(always)]
+    pub fn record_carrier_declaration_unwrapped(&self) {
+        self.stats
+            .carrier_declarations_unwrapped
+            .fetch_add(1, Ordering::Relaxed);
+    }
     /// Bumped once per signature result read begun.
     pub fn record_signature_result_forced(&self) {
         self.stats

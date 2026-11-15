@@ -4,8 +4,8 @@
 //! Sibling half of the parent module `impl VerterHost` orchestrator.
 
 use super::runtime::{
-    authored_emit_anchor, authored_emit_order, failure_from_local, observe_local,
-    resolution_failure, row_derivation_fact,
+    authored_emit_anchor, authored_emit_order, failure_from_local, resolution_failure,
+    row_derivation_fact,
 };
 use super::*;
 use verter_type_engine::semantic_query::FactStatus;
@@ -35,6 +35,7 @@ fn nameable_render_node<M: verter_audit::observe::ObserveExec>(
 
 pub(super) fn render_tsc_node<M: verter_audit::observe::ObserveExec>(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    rails: &ComputeRails,
     owner_canonical: &str,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
@@ -44,7 +45,7 @@ pub(super) fn render_tsc_node<M: verter_audit::observe::ObserveExec>(
     let nameable = nameable_render_node(dispatch, node, owner_canonical);
     let node = *nameable.value();
     let (rendered, local) =
-        observe_local(|| crate::typeinfo::raise::render_node_display_with_ctx(dispatch, node));
+        rails.observe(|| crate::typeinfo::raise::render_node_display_with_ctx(dispatch, node));
     if local.is_partial() {
         return Err(failure_from_local(local));
     }
@@ -97,6 +98,7 @@ pub(super) fn render_tsc_node<M: verter_audit::observe::ObserveExec>(
 /// node at all) still fails closed, matching every other caller.
 pub(super) fn render_tsc_testing_node<M: verter_audit::observe::ObserveExec>(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    rails: &ComputeRails,
     owner_canonical: &str,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
@@ -106,7 +108,7 @@ pub(super) fn render_tsc_testing_node<M: verter_audit::observe::ObserveExec>(
     let nameable = nameable_render_node(dispatch, node, owner_canonical);
     let node = *nameable.value();
     let (rendered, local) =
-        observe_local(|| crate::typeinfo::raise::render_node_display_with_ctx(dispatch, node));
+        rails.observe(|| crate::typeinfo::raise::render_node_display_with_ctx(dispatch, node));
     if local.is_partial() {
         return Ok((
             TscSpliceText::new("unknown"),
@@ -1303,6 +1305,7 @@ pub(super) fn cross_file_namespace_import_type<M: verter_audit::observe::Observe
 #[allow(clippy::too_many_arguments)]
 pub(super) fn tsc_emit_rows<M: verter_audit::observe::ObserveExec>(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    rails: &ComputeRails,
     owner_canonical: &str,
     surface: &TypeInfoSurface,
     mac: &AnalyzedMacro,
@@ -1341,6 +1344,7 @@ pub(super) fn tsc_emit_rows<M: verter_audit::observe::ObserveExec>(
         };
         let parameters = match render_function_parameters(
             dispatch,
+            rails,
             owner_canonical,
             &signature.raw_params().value()[1..],
             counters,
@@ -1371,15 +1375,19 @@ pub(super) fn tsc_emit_rows<M: verter_audit::observe::ObserveExec>(
         let Some(name) = member.published_name() else {
             continue;
         };
-        let parameters =
-            match render_emit_payload_parameters(dispatch, owner_canonical, member.value, counters)
-            {
-                Ok(parameters) => parameters,
-                Err(failure) => {
-                    row_facts.push(super::projection_failure_fact(&failure));
-                    continue;
-                }
-            };
+        let parameters = match render_emit_payload_parameters(
+            dispatch,
+            rails,
+            owner_canonical,
+            member.value,
+            counters,
+        ) {
+            Ok(parameters) => parameters,
+            Err(failure) => {
+                row_facts.push(super::projection_failure_fact(&failure));
+                continue;
+            }
+        };
         if push_tsc_emit(
             &mut rows,
             name.as_ref(),
@@ -1425,6 +1433,7 @@ fn push_tsc_emit(
 
 fn render_emit_payload_parameters<M: verter_audit::observe::ObserveExec>(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    rails: &ComputeRails,
     owner_canonical: &str,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
@@ -1432,7 +1441,7 @@ fn render_emit_payload_parameters<M: verter_audit::observe::ObserveExec>(
     use verter_type_engine::semantic_query::SemanticNodeData;
 
     let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
-    let (normalized, local) = observe_local(|| {
+    let (normalized, local) = rails.observe(|| {
         dispatch
             .owning()
             .normalize_node_for_structural_fact_demand(node, context)
@@ -1442,7 +1451,7 @@ fn render_emit_payload_parameters<M: verter_audit::observe::ObserveExec>(
     };
     match dispatch.graph().read_in_scope(node).as_deref() {
         Some(SemanticNodeData::Tuple { elements, .. }) => {
-            render_tuple_parameters(dispatch, owner_canonical, elements, counters)
+            render_tuple_parameters(dispatch, rails, owner_canonical, elements, counters)
         }
         // CALL kind only: an emit payload replays a callback's parameters;
         // a construct signature is not a callback shape and degrades to the
@@ -1451,20 +1460,21 @@ fn render_emit_payload_parameters<M: verter_audit::observe::ObserveExec>(
             kind: verter_type_engine::semantic_query::SignatureKind::Call,
             params,
             ..
-        }) => render_function_parameters(dispatch, owner_canonical, params, counters),
+        }) => render_function_parameters(dispatch, rails, owner_canonical, params, counters),
         _ => Ok(TscSpliceText::new("...args: unknown[]")),
     }
 }
 
 fn render_tuple_parameters<M: verter_audit::observe::ObserveExec>(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    rails: &ComputeRails,
     owner_canonical: &str,
     elements: &[verter_type_engine::semantic_query::TupleElement],
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
     let mut rendered = Vec::with_capacity(elements.len());
     for (index, element) in elements.iter().enumerate() {
-        let ty = render_tsc_node(dispatch, owner_canonical, element.value, counters)?;
+        let ty = render_tsc_node(dispatch, rails, owner_canonical, element.value, counters)?;
         let name = element
             .label
             .as_deref()
@@ -1484,13 +1494,14 @@ fn render_tuple_parameters<M: verter_audit::observe::ObserveExec>(
 
 fn render_function_parameters<M: verter_audit::observe::ObserveExec>(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    rails: &ComputeRails,
     owner_canonical: &str,
     params: &[verter_type_engine::semantic_query::FunctionParam],
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
     let mut rendered = Vec::with_capacity(params.len());
     for (index, param) in params.iter().enumerate() {
-        let ty = render_tsc_node(dispatch, owner_canonical, param.ty, counters)?;
+        let ty = render_tsc_node(dispatch, rails, owner_canonical, param.ty, counters)?;
         let name = param
             .name
             .as_deref()

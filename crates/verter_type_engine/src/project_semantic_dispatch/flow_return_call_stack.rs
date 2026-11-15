@@ -401,14 +401,14 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// route asked for.
     pub(super) fn resume_call_argument<'e>(
         &mut self,
-        wait: Box<CallArgumentWait<'e>>,
+        wait: CallArgumentWait<'e>,
         value: Positional<SemanticNodeId>,
     ) -> CallStep<'e> {
         let CallArgumentWait {
             flight,
             route,
             lowered,
-        } = *wait;
+        } = wait;
         let progress = self.deliver_resolve_call_argument(route, lowered, value);
         self.continue_call_route(flight, progress)
     }
@@ -417,7 +417,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// its executor route asked for.
     pub(super) fn resume_call_function<'e>(
         &mut self,
-        wait: Box<CallFunctionWait<'e>>,
+        wait: CallFunctionWait<'e>,
         value: Positional<SemanticNodeId>,
     ) -> CallStep<'e> {
         let CallFunctionWait {
@@ -426,7 +426,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             mark,
             window,
             ..
-        } = *wait;
+        } = wait;
         if window {
             self.dispatch.close_contextual_window();
         }

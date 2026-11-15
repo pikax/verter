@@ -224,14 +224,28 @@ The producer submits exactly one interactive scoped cache-node job per
 content-free; resolver epoch and external-validity fingerprint live only in the
 job's input pin, so an edit preserves the key while moving the pin. Every macro,
 member, owner, runtime classifier, and TSC materialization stays inside that one
-scheduled closure. The scoped rendezvous disappears at terminal state and is
-not a second cache authority.
+scheduled closure. The closure drives one pollable traversal in place
+(`complete_now`). The traversal owns its fact tracer and its completeness
+scopes and puts them on the thread for each poll
+(`install_fact_tracer_pollable`); a new completeness scope in the traversal
+is opened through its `ComputeRails` (`enter_completeness`, `observe`), never
+with `ColdComputeCompletenessScope::enter()`. Its construction lane and
+builder stay thread-bound for the drive. The scoped rendezvous disappears at
+terminal state and is not a second cache authority.
 
 The producer records one fact footprint, returns typed
 completeness/cacheability, and reports the sorted transitive canonicals observed
 by that request. Cancellation returns only typed `Partial(Cancelled)` entries,
 marks the result non-cacheable, and never publishes the cancelled aggregate; a
-live dedup sibling may still complete and publish to that sibling. Compile entry
+live dedup sibling may still complete and publish to that sibling. A caller
+that joined another caller's production takes the bundle only when the
+producer's fact footprint validates in its own view, and not on first delivery
+when the bundle reports a dependency failure; otherwise, or when the producer
+was dropped while its own request is live, it begins the scoped node again
+(`delivery_of`). Compile-blocker hydration (`compile_blocker_hydration.rs`)
+records a refused route or a failed load as a gap, but a load stopped by
+cancellation, supersession or shutdown, or the request's own cancellation,
+ends the request route with that typed stop before the capture. Compile entry
 points call the producer once per SFC/request for the target's combined demand,
 pass `output.compiler_input()` to the compiler, and unconditionally replace the
 semantic transitive-dependency axis with the returned canonical set. Public-API

@@ -21,7 +21,9 @@
 //!   and [`verter_session`] types. Errors use [`convert::FfiConversionError`] —
 //!   each consumer converts via the `Display` impl to its native error type.
 
+pub mod component_meta;
 pub mod convert;
+pub mod typeinfo;
 
 pub use verter_protocol::graph;
 pub use verter_protocol::types;

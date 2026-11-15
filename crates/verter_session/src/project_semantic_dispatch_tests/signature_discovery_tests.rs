@@ -2176,3 +2176,115 @@ fn a_deferred_header_still_classifies_as_a_runtime_function() {
         },
     );
 }
+
+/// Graph hops, declaration answers and deferred accesses keep the same
+/// meaning and declaration-step count with either holder of the walk.
+#[test]
+fn the_owned_identity_carrier_walk_answers_what_the_in_place_walk_answers() {
+    use verter_type_engine::project_semantic_dispatch::relation::IdentityCarrierUnwrap;
+    use verter_type_engine::semantic_query::{
+        DeclIdentity, IndexKey, IndexedAccessOrigin, LiteralValue, PayloadArray,
+    };
+    fn fixture() -> Arc<VerterHost> {
+        let h = host();
+        let _ = h
+            .upsert(UpsertRequest {
+                canonical_id: Some(CANONICAL.into()),
+                input_id: CANONICAL.into(),
+                source: Arc::from(concat!(
+                    "type RestPair<T> = [a: T, b: T]; ",
+                    "interface RestBox<T> { items: [a: T] } ",
+                    "type RestItems<T> = RestBox<T>['items']; ",
+                    "interface CallC { (a: string): 3 }",
+                )),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        h.ensure_indexed_ready(CANONICAL).unwrap();
+        h
+    }
+    fn operands(
+        h: &VerterHost,
+        d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> [SemanticNodeId; 7] {
+        let graph = d.graph();
+        let x = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("x".into())));
+        let identity = |name: &str| DeclIdentity {
+            canonical_id: CANONICAL.into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: h.shallow_file_state(CANONICAL).unwrap().whole_hash,
+            decl_name: name.into(),
+        };
+        let app = |name: &str| {
+            graph.intern_node(SemanticNodeData::InstantiationRef {
+                base: identity(name),
+                args: PayloadArray::from(vec![x]),
+            })
+        };
+        let pair = app("RestPair");
+        let alias = graph.intern_node(SemanticNodeData::Alias(pair));
+        let call = identity("CallC");
+        let placeholder =
+            graph.intern_node(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+                canonical_id: call.canonical_id,
+                owner: call.owner,
+                whole_hash: call.whole_hash,
+                name: call.decl_name,
+            }));
+        let object = app("RestBox");
+        let access = graph.intern_node(SemanticNodeData::IndexedAccess {
+            object,
+            index: IndexKey::from("items"),
+            origin: IndexedAccessOrigin::Composed,
+        });
+        let keys = graph.intern_node(SemanticNodeData::KeyOf { base: object });
+        [x, pair, alias, placeholder, app("RestItems"), access, keys]
+    }
+    // The in-place walk charges the connected demand its caller entered, as
+    // the relation authority does; the owned driver enters its own.
+    fn unwrap_in_place(
+        d: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        operand: SemanticNodeId,
+    ) -> IdentityCarrierUnwrap {
+        let (_guard, _) = d.enter_connected_demand(false);
+        d.unwrap_identity_carrier_for_relation(operand)
+    }
+    fn node(answer: IdentityCarrierUnwrap) -> Option<SemanticNodeId> {
+        match answer {
+            IdentityCarrierUnwrap::Concrete(node) => Some(node),
+            IdentityCarrierUnwrap::Unresolvable => None,
+        }
+    }
+    let h = fixture();
+    let d = ProjectSemanticDispatch::new(&*h);
+    let _scope = d.enter_construction_scope();
+    for operand in operands(&h, &d) {
+        let in_place = node(unwrap_in_place(&d, operand));
+        let owned = node(d.unwrap_identity_carrier_stepwise_for_tests(operand));
+        assert!(
+            in_place.is_some(),
+            "each operand settles to a concrete type"
+        );
+        assert_eq!(owned, in_place, "the two holders unwrap the same node");
+    }
+    for owned in [false, true] {
+        let h = fixture();
+        let d = ProjectSemanticDispatch::new(&*h);
+        let _scope = d.enter_construction_scope();
+        for (operand, declarations) in operands(&h, &d).into_iter().zip([0, 1, 1, 1, 1, 0, 0]) {
+            let before = d.graph().stats_snapshot().carrier_declarations_unwrapped;
+            let answer = if owned {
+                d.unwrap_identity_carrier_stepwise_for_tests(operand)
+            } else {
+                unwrap_in_place(&d, operand)
+            };
+            assert!(node(answer).is_some());
+            assert_eq!(
+                d.graph().stats_snapshot().carrier_declarations_unwrapped - before,
+                declarations,
+                "the holder takes each declaration step once, owned={owned}"
+            );
+        }
+    }
+}

@@ -85,6 +85,44 @@ fn empty_input(macros: &[AnalyzedMacro]) -> ComponentMetaInput<'_> {
     }
 }
 
+fn model_input<'a>(
+    macros: &'a [AnalyzedMacro],
+    resolved_macros: &'a [ResolvedMacroInput],
+) -> ComponentMetaInput<'a> {
+    ComponentMetaInput {
+        resolved_macros,
+        ..empty_input(macros)
+    }
+}
+
+/// The host-resolved input of every `defineModel` macro, one row per model
+/// prop field, as the framework surface answers it: the model's resolved
+/// surface rows are the only source of its prop and model type.
+fn resolved_model_inputs(macros: &[AnalyzedMacro]) -> Vec<ResolvedMacroInput> {
+    macros
+        .iter()
+        .enumerate()
+        .filter(|(_, mac)| mac.kind == AnalyzedMacroKind::DefineModel)
+        .map(|(macro_index, mac)| ResolvedMacroInput {
+            macro_index,
+            props: mac
+                .prop_fields
+                .iter()
+                .cloned()
+                .map(resolved_prop_input)
+                .collect(),
+            emits: Vec::new(),
+            slots: Vec::new(),
+            slot_return_publications: Vec::new(),
+            exposed: Vec::new(),
+            default_keys: Vec::new(),
+            props_guarantee: None,
+            events_guarantee: None,
+            slots_guarantee: None,
+        })
+        .collect()
+}
+
 fn make_define_props(fields: Vec<AnalyzedPropField>) -> AnalyzedMacro {
     AnalyzedMacro {
         edit_anchors: Default::default(),
@@ -2946,7 +2984,7 @@ fn extracts_model_from_define_model() {
         ..make_define_props(vec![])
     }];
 
-    let result = extract_component_meta(empty_input(&macros));
+    let result = extract_component_meta(model_input(&macros, &resolved_model_inputs(&macros)));
 
     assert_eq!(result.models.len(), 1);
     assert_eq!(result.models[0].name, "modelValue");
@@ -2974,7 +3012,7 @@ fn define_model_without_default_stays_optional_in_component_meta() {
         ..make_define_props(vec![])
     }];
 
-    let result = extract_component_meta(empty_input(&macros));
+    let result = extract_component_meta(model_input(&macros, &resolved_model_inputs(&macros)));
     let model_prop = result
         .props
         .iter()
@@ -3031,7 +3069,8 @@ fn define_model_with_default_emits_bare_update_event_payload() {
         ..make_define_props(vec![])
     }];
 
-    let result = extract_component_meta(empty_input(&defaulted));
+    let result =
+        extract_component_meta(model_input(&defaulted, &resolved_model_inputs(&defaulted)));
     let model_prop = result
         .props
         .iter()
@@ -3068,7 +3107,10 @@ fn define_model_with_default_emits_bare_update_event_payload() {
         ..make_define_props(vec![])
     }];
 
-    let control = extract_component_meta(empty_input(&undefaulted));
+    let control = extract_component_meta(model_input(
+        &undefaulted,
+        &resolved_model_inputs(&undefaulted),
+    ));
     let control_event = control
         .events
         .iter()
@@ -3104,7 +3146,7 @@ fn define_model_threads_default_value_into_synthesized_prop() {
         ..make_define_props(vec![])
     }];
 
-    let result = extract_component_meta(empty_input(&macros));
+    let result = extract_component_meta(model_input(&macros, &resolved_model_inputs(&macros)));
     let prop = result
         .props
         .iter()
@@ -3145,7 +3187,7 @@ fn untyped_define_model_threads_default_value_into_synthesized_prop() {
         ..make_define_props(vec![])
     }];
 
-    let result = extract_component_meta(empty_input(&macros));
+    let result = extract_component_meta(model_input(&macros, &resolved_model_inputs(&macros)));
     let prop = result
         .props
         .iter()
@@ -3189,7 +3231,7 @@ fn define_model_default_value_updates_existing_prop() {
         },
     ];
 
-    let result = extract_component_meta(empty_input(&macros));
+    let result = extract_component_meta(model_input(&macros, &resolved_model_inputs(&macros)));
     assert_eq!(
         result
             .props
@@ -3224,7 +3266,7 @@ fn define_model_without_default_keeps_default_value_none() {
         ..make_define_props(vec![])
     }];
 
-    let result = extract_component_meta(empty_input(&macros));
+    let result = extract_component_meta(model_input(&macros, &resolved_model_inputs(&macros)));
     let prop = result
         .props
         .iter()
@@ -3350,7 +3392,8 @@ fn define_model_reconciles_existing_model_value_prop_from_define_props() {
         bindings: Vec::new(),
     };
 
-    let mut input = empty_input(&macros);
+    let resolved = resolved_model_inputs(&macros);
+    let mut input = model_input(&macros, &resolved);
     input.evaluated_types = Some(&evaluated);
 
     let result = extract_component_meta(input);
@@ -3384,6 +3427,84 @@ fn define_model_reconciles_existing_model_value_prop_from_define_props() {
     );
 }
 
+/// A `defineModel` macro's prop, model and update event publish the
+/// host-resolved surface row, never the analyzer's own model prop field.
+/// The fixture's analyzer field (`string`, optional) disagrees with the
+/// resolved row (`Choice`, required): the resolved row wins whole, and a
+/// macro the resolved surface answered no row for publishes no model type
+/// rather than the analyzer field's.
+#[test]
+fn define_model_publishes_only_the_resolved_surface_row() {
+    let macros = vec![AnalyzedMacro {
+        edit_anchors: Default::default(),
+        kind: AnalyzedMacroKind::DefineModel,
+        model_name: Some("choice".to_string()),
+        prop_fields: vec![make_prop("choice", Some("string"), true)],
+        ..make_define_props(vec![])
+    }];
+    let resolved = vec![ResolvedMacroInput {
+        props: vec![resolved_prop_input(make_prop(
+            "choice",
+            Some("Choice"),
+            false,
+        ))],
+        ..resolved_model_inputs(&macros).remove(0)
+    }];
+
+    let result = extract_component_meta(model_input(&macros, &resolved));
+    let prop = result
+        .props
+        .iter()
+        .find(|prop| prop.name == "choice")
+        .expect("the model prop publishes");
+    let event = result
+        .events
+        .iter()
+        .find(|event| event.name == "update:choice")
+        .expect("the model update event publishes");
+    assert_eq!(
+        prop.publication.evidence().map(AuthoredTypeEvidence::text),
+        Some("Choice"),
+        "the model prop publishes the resolved row's type"
+    );
+    assert!(
+        prop.required,
+        "the model prop's optionality is the resolved row's (required), not the analyzer field's"
+    );
+    assert_eq!(
+        event.raw_signature.as_deref(),
+        Some("[value: Choice]"),
+        "the update event payload is the resolved row's type"
+    );
+    assert_eq!(
+        result.models[0].type_source,
+        SourcePosition::Present(authored_source(0)),
+        "the model type source is the resolved row's"
+    );
+
+    let unanswered = extract_component_meta(model_input(&macros, &[]));
+    let prop = unanswered
+        .props
+        .iter()
+        .find(|prop| prop.name == "choice")
+        .expect("the model prop still publishes by name");
+    assert_eq!(
+        prop.publication.evidence(),
+        None,
+        "without a resolved row the analyzer field's `string` is never published"
+    );
+    assert_eq!(
+        prop.publication.source_position(),
+        SourcePosition::unannotated(),
+        "without a resolved row the model prop carries no type source"
+    );
+    assert_eq!(
+        unanswered.models[0].type_source,
+        SourcePosition::unannotated(),
+        "without a resolved row the model carries no type source"
+    );
+}
+
 #[test]
 fn extracts_named_model() {
     let macros = vec![AnalyzedMacro {
@@ -3394,7 +3515,7 @@ fn extracts_named_model() {
         ..make_define_props(vec![])
     }];
 
-    let result = extract_component_meta(empty_input(&macros));
+    let result = extract_component_meta(model_input(&macros, &resolved_model_inputs(&macros)));
 
     assert_eq!(result.models.len(), 1);
     assert_eq!(result.models[0].name, "title");

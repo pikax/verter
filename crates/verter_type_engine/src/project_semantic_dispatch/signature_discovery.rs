@@ -26,13 +26,14 @@ use crate::semantic_query::{
     CONTEXT_FREE_EVIDENCE,
 };
 use crate::signature_kernel::{
-    heritage_signatures, intersection_signatures, merged_declaration_signatures, publish_signature,
-    set_from_candidates, union_signatures, AppliedResult, AppliedResultId, BinderInput,
-    DeclarationGroupId, DeclarationParentId, DiscoveryError, DiscoveryTypes, EpochBinding,
-    EpochRebind, ParamInput, RestInput, ResultDemand, ResultInput, SemanticReadView,
-    SignatureCandidate, SignatureDescriptorId, SignatureInput, SignatureKind, SignatureProvenance,
-    SignatureResultRecipe, SignatureSemanticFlags, SignatureStore, SlotTypeFacts, SourceLocatorId,
-    TypeToken,
+    heritage_signatures, merged_declaration_signatures, publish_signature, set_from_candidates,
+    AppliedResult, AppliedResultId, BinderInput, DeclarationGroupId, DeclarationParentId,
+    DiscoveryError, DiscoveryTypes, EpochBinding, EpochRebind, ForcedResult, KernelStep,
+    ParamInput, ReadSignatureResultKey, RestInput, ResultDemand, ResultInput, SemanticReadView,
+    SignatureCandidate, SignatureComparison, SignatureComposition, SignatureDescriptorId,
+    SignatureInput, SignatureKind, SignatureProvenance, SignatureResultRecipe,
+    SignatureSemanticFlags, SignatureStore, SlotTypeFacts, SourceLocatorId, TypeAnswer,
+    TypeRequest, TypeToken,
 };
 use verter_session_query::type_solver::arena::PrimitiveKind;
 
@@ -174,56 +175,28 @@ impl<C: crate::resolver_core::ResolverCapabilities> SlotTypeFacts for GraphTypes
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> DiscoveryTypes for GraphTypes<'_, '_, C> {
-    fn identical(
+    fn identical_at_rest(
         &self,
         a: TypeToken,
         b: TypeToken,
         corr: &[(SemanticNodeId, SemanticNodeId)],
     ) -> Option<bool> {
         self.dispatch.graph().record_signature_position_compared();
-        let na = self.node(a)?;
-        let nb = self.node(b)?;
-        let moving: Vec<(SemanticNodeId, SemanticNodeId)> =
-            corr.iter().copied().filter(|(x, y)| x != y).collect();
-        let na = if moving.is_empty() {
-            na
-        } else {
-            self.dispatch.substitute_canonical(
-                na,
-                &CanonicalTypeSubstitution::new(self.dispatch.graph().store(), moving),
-            )
-        };
-        if self.semantic_identity {
-            return self.dispatch.relate_type_identity(na, nb);
+        // A correspondence that moves a binder needs a substitution, and the
+        // relation authority's identity needs relation reads: both are the
+        // holder's question.
+        if self.semantic_identity || corr.iter().any(|(x, y)| x != y) {
+            return None;
         }
-        if na == nb {
-            return Some(true);
-        }
-        let graph = self.dispatch.graph();
-        let ka = crate::semantic_query::stable_key::stable_key_for_node(graph.store(), na);
-        let kb = crate::semantic_query::stable_key::stable_key_for_node(graph.store(), nb);
-        Some(ka == kb)
+        Some(self.dispatch.same_stable_type(self.node(a)?, self.node(b)?))
     }
 
-    fn intersect(&self, members: &[TypeToken]) -> Option<TypeToken> {
-        let nodes: Option<Vec<SemanticNodeId>> = members.iter().map(|t| self.node(*t)).collect();
-        let node = self
-            .dispatch
-            .intern_normalized_union_or_intersection(&nodes?, false);
-        self.token(node)
+    fn comparison_decided(&self) {
+        self.dispatch.graph().record_signature_comparison_decided();
     }
 
-    fn map_binders(
-        &self,
-        ty: TypeToken,
-        map: &[(SemanticNodeId, SemanticNodeId)],
-    ) -> Option<TypeToken> {
-        let node = self.node(ty)?;
-        let mapped = self.dispatch.substitute_canonical(
-            node,
-            &CanonicalTypeSubstitution::new(self.dispatch.graph().store(), map.to_vec()),
-        );
-        self.token(mapped)
+    fn parameter_composed(&self) {
+        self.dispatch.graph().record_signature_parameter_composed();
     }
 
     fn unknown(&self) -> Option<TypeToken> {
@@ -249,59 +222,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> DiscoveryTypes for GraphType
                 Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
             )
         })
-    }
-
-    fn forced_result(
-        &self,
-        candidate: &SignatureCandidate,
-    ) -> Result<crate::signature_kernel::ForcedResult, IncompleteReason> {
-        let empty = self
-            .binding
-            .intern_substitution(
-                crate::signature_kernel::CallSubstitution::identity(
-                    self.residual_space(candidate.signature)
-                        .ok_or(IncompleteReason::UnsettledInput)?,
-                ),
-                None,
-            )
-            .map_err(|_| IncompleteReason::UnsettledInput)?;
-        let result = self.dispatch.read_signature_result(
-            self.binding,
-            candidate.signature,
-            empty,
-            ResultDemand::Both,
-            CONTEXT_FREE_EVALUATION,
-            SemanticContextId::production(),
-        );
-        match result {
-            QueryOutcome::Ready(Ready { value, .. }) => {
-                let applied = self
-                    .binding
-                    .view()
-                    .applied_result(value)
-                    .map_err(|_| IncompleteReason::UnsettledInput)?;
-                Ok(crate::signature_kernel::ForcedResult {
-                    return_type: applied
-                        .return_type
-                        .ok_or(IncompleteReason::UnsettledInput)?,
-                    effects: applied.effects,
-                })
-            }
-            QueryOutcome::Incomplete(reason) => Err(reason),
-        }
-    }
-}
-
-impl<C: crate::resolver_core::ResolverCapabilities> GraphTypes<'_, '_, C> {
-    fn residual_space(
-        &self,
-        descriptor: SignatureDescriptorId,
-    ) -> Option<crate::signature_kernel::BinderSpaceId> {
-        self.binding
-            .view()
-            .descriptor(descriptor)
-            .ok()
-            .map(|d| d.residual_binders)
     }
 }
 
@@ -339,10 +259,12 @@ fn wrapper_flow(wrapper: super::apparent_type::GlobalWrapper) -> DiscoveryFlow {
 /// never native stack depth. A level that settles a node through its
 /// carrier chain stands at the read the chain names, and a level reading a
 /// global wrapper stands at each port and file its declaration lookup
-/// reads and then at its instantiation ([`DiscoveryRead`]): a frame driver
-/// suspends there and resumes the walk on whichever thread delivers the
-/// read, the in-place driver reads it where it stands. No stage that
-/// completed runs again.
+/// reads and then at its instantiation, and a level composing a union's or
+/// an intersection's lists stands at each result its matching compares and
+/// at each parameter intersection a union synthesis composes
+/// ([`DiscoveryRead`]): a frame driver suspends there and resumes the walk
+/// on whichever thread delivers the read, the in-place driver reads it
+/// where it stands. No stage that completed runs again.
 pub(super) struct DiscoveryWalk {
     subject: SemanticNodeId,
     kind: GraphSignatureKind,
@@ -397,6 +319,76 @@ enum DiscoveryFrame {
         at: usize,
         found: Vec<SignatureCandidate>,
     },
+    /// A union's or an intersection's lists being composed by the kernel.
+    Composing(Box<CompositionStage>),
+    /// A leaf whose rest types settle before its publication.
+    RestParameters(Box<LeafRest>),
+}
+
+/// One authored signature's owned header, as publication reads it.
+struct LeafSignature {
+    kind: GraphSignatureKind,
+    params: Arc<[crate::semantic_query::FunctionParam]>,
+    type_parameters: Arc<[crate::semantic_query::TypeParamDecl]>,
+    occurrence: Option<crate::semantic_query::SignatureNodeOccurrence>,
+    carrier: crate::semantic_query::SignatureReturnCarrier,
+    span: Option<verter_span::Span>,
+    predicate: Option<crate::semantic_query::SignaturePredicate>,
+}
+
+impl LeafSignature {
+    fn rest_type(&self, index: usize) -> Option<SemanticNodeId> {
+        crate::semantic_query::split_this_receiver(&self.params)
+            .1
+            .iter()
+            .filter(|param| param.rest)
+            .nth(index)
+            .map(|param| param.ty)
+    }
+}
+
+/// A leaf between rest unwraps, retaining each completed answer once.
+struct LeafRest {
+    node: SemanticNodeId,
+    leaf: LeafSignature,
+    settled: smallvec::SmallVec<[super::relation::IdentityCarrierUnwrap; 1]>,
+    unwrap: Option<super::relation::IdentityCarrierRead>,
+}
+
+static_assertions::assert_impl_all!(LeafRest: Send);
+static_assertions::assert_not_impl_any!(LeafRest: Clone, Copy);
+const _: () = assert!(
+    std::mem::size_of::<LeafSignature>()
+        <= 48
+            + std::mem::size_of::<Option<crate::semantic_query::SignatureNodeOccurrence>>()
+            + std::mem::size_of::<crate::semantic_query::SignatureReturnCarrier>()
+            + std::mem::size_of::<Option<crate::semantic_query::SignaturePredicate>>()
+);
+const _: () = assert!(
+    std::mem::size_of::<LeafRest>()
+        <= 48
+            + std::mem::size_of::<LeafSignature>()
+            + std::mem::size_of::<Option<super::relation::IdentityCarrierRead>>()
+);
+
+/// A kernel composition, between two of its questions, and the read the
+/// walk stands at for it.
+struct CompositionStage {
+    composition: SignatureComposition,
+    /// The read the walk stands at for the composition, or delivered it.
+    read: CompositionRead,
+}
+
+/// What a composition's level keeps for a read of the walk.
+enum CompositionRead {
+    /// Nothing is outstanding and nothing is undelivered.
+    None,
+    /// The candidate whose result the walk waits on, and the epoch its
+    /// read was named in.
+    Result(SignatureCandidate, crate::signature_kernel::GraphEpoch),
+    /// A parameter intersection its read delivered: the answer the
+    /// composition's next step is given.
+    Reduced(TypeToken),
 }
 
 /// The members of an intersection type with every member that is itself an
@@ -438,6 +430,17 @@ enum DiscoveryRead {
     /// A global wrapper's instantiation, whose answer is the surface the
     /// walk enters ([`super::apparent_type::GlobalWrapper::of_read`]).
     Wrapper,
+    /// The result a composition's comparison needs: the read of a
+    /// candidate's result, delivered in its own value domain
+    /// ([`ProjectSemanticDispatch::deliver_forced_result`]).
+    ForcedResult,
+    /// The intersection of parameter types a union synthesis composes: the
+    /// reduction of the operands the composition stands at
+    /// ([`ProjectSemanticDispatch::deliver_parameter_intersection`]).
+    ParameterIntersection,
+    /// A declaration instantiation or evaluation read of the rest unwrap
+    /// held by the top level, delivered inside that unwrap.
+    RestCarrier,
 }
 
 /// The read of the global wrapper `name` over `args` while its declaration
@@ -467,6 +470,12 @@ enum DiscoveryFlow {
     Found(Vec<SignatureCandidate>),
     /// The top level has every list: combine it.
     Combine,
+    /// The top level is a composition just built, or one whose parameter
+    /// intersection was delivered: advance it from its start, or with
+    /// that intersection.
+    Compose,
+    /// The top level is a leaf whose rest unwrap the walk carries on.
+    Unwrap,
     /// The subject's candidates: no level is left.
     Complete(Vec<SignatureCandidate>),
     /// The walk stands at the read it named.
@@ -496,11 +505,18 @@ static_assertions::assert_impl_all!(DiscoveryWalk: Send);
 static_assertions::assert_not_impl_any!(DiscoveryWalk: Clone, Copy);
 static_assertions::assert_impl_all!(DiscoveryStep: Send);
 static_assertions::assert_not_impl_any!(DiscoveryStep: Clone, Copy);
+static_assertions::assert_impl_all!(CompositionStage: Send);
+static_assertions::assert_not_impl_any!(CompositionStage: Clone, Copy);
 // A level of the walk is a heap frame of at most one cache line; what it
 // retains beyond that is boxed.
 const _: () = assert!(std::mem::size_of::<DiscoveryFrame>() <= 64);
 const _: () = assert!(std::mem::size_of::<IntersectionFlattening>() <= 112);
 const _: () = assert!(std::mem::size_of::<MergedDeclarationLists>() <= 80);
+// A composition's level retains the kernel machine and the candidate it
+// waits on, behind the level's one box.
+const _: () = assert!(
+    std::mem::size_of::<CompositionStage>() <= 32 + std::mem::size_of::<SignatureComposition>()
+);
 // What the stage loop and its drivers hold on the native stack.
 const _: () = assert!(std::mem::size_of::<DiscoveryFlow>() <= 32);
 const _: () = assert!(std::mem::size_of::<DiscoveryStep>() <= 16);
@@ -549,8 +565,61 @@ impl DiscoveryWalk {
     fn reads_for_carrier(&self) -> bool {
         match &self.standing {
             Some(DiscoveryRead::Carrier { chain, .. }) => chain.reads_for_carrier(),
-            Some(DiscoveryRead::WrapperLookup(_) | DiscoveryRead::Wrapper) | None => false,
+            Some(DiscoveryRead::RestCarrier) => matches!(self.frames.last(),
+                Some(DiscoveryFrame::RestParameters(rest)) if rest.unwrap.as_ref().is_some_and(|unwrap| unwrap.reads_for_carrier())),
+            Some(
+                DiscoveryRead::WrapperLookup(_)
+                | DiscoveryRead::Wrapper
+                | DiscoveryRead::ForcedResult
+                | DiscoveryRead::ParameterIntersection,
+            )
+            | None => false,
         }
+    }
+
+    /// Whether the walk stands at the result a composition's comparison
+    /// needs.
+    pub(super) fn stands_at_forced_result(&self) -> bool {
+        matches!(self.standing, Some(DiscoveryRead::ForcedResult))
+    }
+
+    /// Whether the walk stands at a composition's result read that was
+    /// named in an epoch other than `current`, which a replacement retired
+    /// while it waited: no read of it is made for the walk, which names it
+    /// again in the current epoch.
+    pub(super) fn awaits_retired_result(
+        &self,
+        current: crate::signature_kernel::GraphEpoch,
+    ) -> bool {
+        self.stands_at_forced_result()
+            && matches!(
+                self.frames.last(),
+                Some(DiscoveryFrame::Composing(stage))
+                    if matches!(stage.read, CompositionRead::Result(_, named) if named != current)
+            )
+    }
+
+    /// The composition on top of the walk.
+    fn composition_stage(&mut self) -> &mut CompositionStage {
+        let Some(DiscoveryFrame::Composing(stage)) = self.frames.last_mut() else {
+            unreachable!("a composition is advanced on top of the walk")
+        };
+        stage
+    }
+
+    /// The graph nodes of the types the composition on top of the walk
+    /// intersects, in order; `None` when one is unreadable.
+    fn intersection_operands(&self) -> Option<Arc<[SemanticNodeId]>> {
+        let Some(DiscoveryFrame::Composing(stage)) = self.frames.last() else {
+            unreachable!("a composition's intersection is read on top of the walk")
+        };
+        let view = self.binding.view();
+        stage
+            .composition
+            .operands()
+            .iter()
+            .map(|ty| view.type_token_node(*ty).ok())
+            .collect()
     }
 
     /// The resolver port the walk stands at ([`super::walk::WalkNeed::Port`]):
@@ -575,15 +644,26 @@ impl DiscoveryWalk {
     }
 
     /// Release what the walk holds on its computation's recording: a
-    /// settlement standing in a deferred evaluation abandons the recordings
-    /// that evaluation opened, top first. A wrapper's lookup or
-    /// instantiation holds nothing on the dispatcher.
+    /// settlement or rest unwrap standing in a deferred evaluation abandons
+    /// the recordings that evaluation opened, top first. A wrapper's lookup or
+    /// instantiation, a composition's result read and a union synthesis's
+    /// parameter intersection hold nothing on the dispatcher.
     pub(super) fn release<C: crate::resolver_core::ResolverCapabilities>(
         &mut self,
         dispatch: &ProjectSemanticDispatch<'_, C>,
     ) {
-        if let Some(DiscoveryRead::Carrier { chain, .. }) = self.standing.take() {
-            dispatch.abandon_source_carrier_read(*chain);
+        match self.standing.take() {
+            Some(DiscoveryRead::Carrier { chain, .. }) => {
+                dispatch.abandon_source_carrier_read(*chain)
+            }
+            Some(DiscoveryRead::RestCarrier) => {
+                if let Some(DiscoveryFrame::RestParameters(rest)) = self.frames.last_mut() {
+                    if let Some(unwrap) = rest.unwrap.take() {
+                        dispatch.abandon_identity_carrier_read(unwrap);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -637,6 +717,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 DiscoveryStep::Read(walk) => walk,
             };
             let flow = match walk.take_need() {
+                // A composition's result, read as the family driver reads
+                // it in place: not made when it was named in a retired
+                // epoch.
+                WalkNeed::Query(key) if walk.stands_at_forced_result() => {
+                    let current = self.graph().store().signature_store().epoch();
+                    let read = if walk.awaits_retired_result(current) {
+                        super::family_continuation::retired_read()
+                    } else {
+                        self.execute_via_cold_build_helper(key)
+                    };
+                    self.deliver_forced_result(&mut walk, read)
+                }
                 WalkNeed::Query(key) => {
                     let counts = walk.reads_for_carrier();
                     let mut key = Some(key);
@@ -698,12 +790,31 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             crate::semantic_query::QueryResult<crate::semantic_query::SemanticQueryValue>,
         >,
     ) -> super::family_continuation::FamilyStep {
-        let flow = {
+        // A composition's result is taken in its own value domain; every
+        // other read the walk stands at is a node.
+        let flow = if walk.stands_at_forced_result() {
+            self.resume_at_forced_result(&mut walk, deliver)
+        } else {
             let mut node_read = || super::narrow_value_cache_read(deliver());
             self.deliver_discovery_read(&mut walk, &mut node_read)
         };
         let step = self.run_signature_discovery(walk, flow);
         self.discovery_family_step(step)
+    }
+
+    /// The walk standing at a composition's result, given `deliver`, that
+    /// result's read: made out of line, so the read's envelope never sits in
+    /// the frame every other delivery resumes through.
+    #[inline(never)]
+    fn resume_at_forced_result(
+        &self,
+        walk: &mut DiscoveryWalk,
+        deliver: &mut dyn FnMut() -> crate::semantic_query::CacheRead<
+            crate::semantic_query::QueryResult<crate::semantic_query::SemanticQueryValue>,
+        >,
+    ) -> DiscoveryFlow {
+        let read = deliver();
+        self.deliver_forced_result(walk, read)
     }
 
     /// The next stage of a discovery family's build whose walk stands in a
@@ -784,6 +895,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
                 DiscoveryFlow::Found(list) => self.discovery_child_found(&mut walk, list),
                 DiscoveryFlow::Combine => self.combine_discovery_frame(&mut walk),
+                DiscoveryFlow::Compose => self.advance_composition(&mut walk, None),
+                DiscoveryFlow::Unwrap => self.advance_leaf_rest(&mut walk),
                 DiscoveryFlow::Stand => return DiscoveryStep::Read(walk),
                 DiscoveryFlow::Complete(list) => {
                     return self.finish_signature_discovery(walk, Ok(list))
@@ -797,8 +910,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// The walk standing at a query, given `node_read`, that read: the
     /// settlement's evaluation has it delivered inside the evaluation, the
-    /// chain's instantiation to the chain, and a wrapper's instantiation is
-    /// the surface the walk enters.
+    /// chain's instantiation to the chain, a wrapper's instantiation is the
+    /// surface the walk enters, a rest read is delivered to its unwrap,
+    /// and a parameter intersection is kept for
+    /// the composition the walk loop advances next.
     #[inline(never)]
     fn deliver_discovery_read(
         &self,
@@ -819,11 +934,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                 }
             }
+            Some(DiscoveryRead::RestCarrier) => self.deliver_rest_carrier(walk, node_read),
             Some(DiscoveryRead::Wrapper) => wrapper_flow(
                 super::apparent_type::GlobalWrapper::of_read(node_read().value),
             ),
-            Some(DiscoveryRead::WrapperLookup(_)) | None => {
-                unreachable!("a delivery answers the query the walk stands at")
+            Some(DiscoveryRead::ParameterIntersection) => {
+                self.deliver_parameter_intersection(walk, node_read)
+            }
+            Some(DiscoveryRead::WrapperLookup(_) | DiscoveryRead::ForcedResult) | None => {
+                unreachable!("a node delivery answers the node query the walk stands at")
             }
         }
     }
@@ -911,7 +1030,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         match settling {
             Settling::Subject => self.discover_settled_node(walk, node),
             Settling::Member => self.flattened_member_settled(walk, node),
-            Settling::Signature => self.signature_entry_settled(walk, node),
+            Settling::Signature => self.discover_leaf(walk, node),
         }
     }
 
@@ -951,10 +1070,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             SemanticNodeData::Signature { .. } | SemanticNodeData::DeferredCallable(_) => {
                 drop(data);
-                match self.publish_discovered_leaf(walk, node, 0) {
-                    Ok(candidate) => DiscoveryFlow::Found(candidate.into_iter().collect()),
-                    Err(error) => DiscoveryFlow::Failed(error),
-                }
+                self.discover_leaf(walk, node)
             }
             SemanticNodeData::Object(surface) => {
                 let list = match walk.kind {
@@ -1214,38 +1330,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             unreachable!("the list is the top level")
         };
         DiscoveryFlow::Found(found)
-    }
-
-    /// The list's next entry settled on `signature`: published at its
-    /// ordinal, or the walk fails when it is not a signature.
-    #[inline(never)]
-    fn signature_entry_settled(
-        &self,
-        walk: &mut DiscoveryWalk,
-        signature: SemanticNodeId,
-    ) -> DiscoveryFlow {
-        let Some(DiscoveryFrame::Signatures {
-            first_ordinal,
-            found,
-            ..
-        }) = walk.frames.last()
-        else {
-            unreachable!("an entry settles under its list")
-        };
-        let ordinal = *first_ordinal + found.len() as u32;
-        match self.publish_discovered_leaf(walk, signature, ordinal) {
-            Ok(Some(candidate)) => {
-                let Some(DiscoveryFrame::Signatures { found, .. }) = walk.frames.last_mut() else {
-                    unreachable!("the list is the top level")
-                };
-                found.push(candidate);
-                self.next_signature_entry(walk)
-            }
-            Ok(None) => {
-                DiscoveryFlow::Failed(DiscoveryError::Incomplete(IncompleteReason::Unsupported))
-            }
-            Err(error) => DiscoveryFlow::Failed(error),
-        }
     }
 
     /// The signatures of a merged declaration: every contributor's own
@@ -1511,38 +1595,44 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     None => DiscoveryFlow::Found(found),
                 }
             }
-            DiscoveryFrame::Flattening(_) | DiscoveryFrame::Signatures { .. } => {
+            DiscoveryFrame::Flattening(_)
+            | DiscoveryFrame::Signatures { .. }
+            | DiscoveryFrame::RestParameters(_) => {
                 unreachable!("a level settling a node waits on its settlement, never on a list")
+            }
+            DiscoveryFrame::Composing(_) => {
+                unreachable!("a composition waits on an answer, never on a list")
             }
         }
     }
 
     /// The completed level on top of the walk combined by the kernel rule
-    /// it stands for.
+    /// it stands for: a declaration's heritage and overloads at once, a
+    /// union's arms and an intersection type's members by a kernel
+    /// composition the walk carries as its own level.
     #[inline(never)]
     fn combine_discovery_frame(&self, walk: &mut DiscoveryWalk) -> DiscoveryFlow {
-        let frame = walk.frames.pop();
-        let types = GraphTypes {
-            dispatch: self,
-            binding: &walk.binding,
-            semantic_identity: false,
-        };
-        let combined = match frame {
-            Some(DiscoveryFrame::Arms { lists, .. }) => {
-                union_signatures(&walk.binding, &types, &lists)
-            }
+        let composition = match walk.frames.pop() {
+            Some(DiscoveryFrame::Arms { lists, .. }) => Ok(SignatureComposition::union(lists)),
             Some(DiscoveryFrame::Members {
                 category, lists, ..
             }) => match category {
                 // An interface or class body with heritage is a
                 // declaration, not an intersection type: it inherits its
                 // bases' signatures by concatenation, own first.
-                CompositeOriginCategory::Heritage => Ok(heritage_signatures(&lists)),
+                CompositeOriginCategory::Heritage => {
+                    return DiscoveryFlow::Found(heritage_signatures(&lists))
+                }
                 // One method's overloads are its signature list, every
                 // declaration's kept.
-                CompositeOriginCategory::OverloadGroup => Ok(lists.concat()),
+                CompositeOriginCategory::OverloadGroup => {
+                    return DiscoveryFlow::Found(lists.concat())
+                }
                 CompositeOriginCategory::MergedOverloadGroup => {
-                    merged_declaration_signatures(&walk.binding, &lists)
+                    return match merged_declaration_signatures(&walk.binding, &lists) {
+                        Ok(found) => DiscoveryFlow::Found(found),
+                        Err(error) => DiscoveryFlow::Failed(error),
+                    }
                 }
                 CompositeOriginCategory::Canonical(_)
                 | CompositeOriginCategory::CanonicalUnproven
@@ -1550,30 +1640,284 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 | CompositeOriginCategory::OrderedCarrier
                 | CompositeOriginCategory::PreservingRebuild
                 | CompositeOriginCategory::QuerySubject => {
-                    intersection_signatures(&walk.binding, &types, kernel_kind(walk.kind), &lists)
+                    self.intersection_composition(walk, lists)
                 }
                 #[cfg(any(test, feature = "test-support"))]
-                CompositeOriginCategory::TestFixture => {
-                    intersection_signatures(&walk.binding, &types, kernel_kind(walk.kind), &lists)
-                }
+                CompositeOriginCategory::TestFixture => self.intersection_composition(walk, lists),
             },
             _ => unreachable!("only a union's arms or a composite's members combine"),
         };
-        match combined {
-            Ok(found) => DiscoveryFlow::Found(found),
+        // The composition is advanced from the walk loop, once this frame
+        // and its construction temporaries are gone: its in-place reads
+        // never run beneath them.
+        match composition {
+            Ok(composition) => {
+                walk.frames
+                    .push(DiscoveryFrame::Composing(Box::new(CompositionStage {
+                        composition,
+                        read: CompositionRead::None,
+                    })));
+                DiscoveryFlow::Compose
+            }
             Err(error) => DiscoveryFlow::Failed(error),
         }
     }
 
-    /// One authored signature node as a published candidate, or `None` when
-    /// the node is not a signature at all.
+    /// The kernel composition of an intersection type's member lists, its
+    /// mixin members read in the walk's epoch.
+    fn intersection_composition(
+        &self,
+        walk: &DiscoveryWalk,
+        lists: Vec<Vec<SignatureCandidate>>,
+    ) -> Result<SignatureComposition, DiscoveryError> {
+        let types = GraphTypes {
+            dispatch: self,
+            binding: &walk.binding,
+            semantic_identity: false,
+        };
+        SignatureComposition::intersection(&walk.binding, &types, kernel_kind(walk.kind), lists)
+    }
+
+    /// Carry the composition on top of the walk on from `answer` — given
+    /// none, from the parameter intersection its level kept: its
+    /// candidates, the level done, or the read its next question names, the
+    /// walk standing there. A binder closure — an identity question under a
+    /// moving correspondence, a synthesis's binder mapping — is answered
+    /// where the stage stands.
     #[inline(never)]
-    fn publish_discovered_leaf(
+    fn advance_composition(
         &self,
         walk: &mut DiscoveryWalk,
+        mut answer: Option<TypeAnswer>,
+    ) -> DiscoveryFlow {
+        loop {
+            let request = {
+                let types = GraphTypes {
+                    dispatch: self,
+                    binding: &walk.binding,
+                    semantic_identity: false,
+                };
+                let Some(DiscoveryFrame::Composing(stage)) = walk.frames.last_mut() else {
+                    unreachable!("a composition is advanced on top of the walk")
+                };
+                if answer.is_none() {
+                    if let CompositionRead::Reduced(ty) = stage.read {
+                        stage.read = CompositionRead::None;
+                        answer = Some(TypeAnswer::Type(ty));
+                    }
+                }
+                match stage.composition.step(&walk.binding, &types, answer.take()) {
+                    Ok(KernelStep::Done(found)) => {
+                        walk.frames.pop();
+                        return DiscoveryFlow::Found(found);
+                    }
+                    Ok(KernelStep::Ask(TypeRequest::Identical { a, b })) => {
+                        let closed = self.closed_under_binders(
+                            &walk.binding,
+                            a,
+                            stage.composition.correspondence(),
+                        );
+                        match (closed, walk.binding.view().type_token_node(b).ok()) {
+                            (Some(na), Some(nb)) => {
+                                TypeAnswer::Identical(self.same_stable_type(na, nb))
+                            }
+                            _ => return failed_unsettled(),
+                        }
+                    }
+                    Ok(KernelStep::Ask(TypeRequest::MapBinders { ty })) => {
+                        match self
+                            .closed_under_binders(&walk.binding, ty, stage.composition.binder_map())
+                            .and_then(|node| walk.binding.intern_type_token(node, None).ok())
+                        {
+                            Some(mapped) => TypeAnswer::Type(mapped),
+                            None => return failed_unsettled(),
+                        }
+                    }
+                    Ok(KernelStep::Ask(TypeRequest::Intersect)) => {
+                        return self.name_parameter_intersection(walk)
+                    }
+                    Ok(KernelStep::Ask(TypeRequest::ForcedResult(candidate))) => {
+                        return self.name_forced_result(walk, candidate)
+                    }
+                    Err(error) => return DiscoveryFlow::Failed(error),
+                }
+            };
+            answer = Some(request);
+        }
+    }
+
+    /// Name the reduction of the parameter types the composition on top of
+    /// the walk intersects, and stand at it. Its key names graph nodes
+    /// only, so no epoch retires it.
+    #[inline(never)]
+    fn name_parameter_intersection(&self, walk: &mut DiscoveryWalk) -> DiscoveryFlow {
+        let Some(members) = walk.intersection_operands() else {
+            return failed_unsettled();
+        };
+        walk.stand(
+            DiscoveryRead::ParameterIntersection,
+            super::walk::WalkNeed::Query(
+                crate::semantic_query::SemanticQueryKey::reduce_intersection_operands(
+                    self.graph().store(),
+                    members,
+                ),
+            ),
+        )
+    }
+
+    /// The walk standing at a parameter intersection, given `node_read`,
+    /// its reduction's read: the intersection is kept in the composition's
+    /// level, which the walk loop advances, so nothing of this delivery
+    /// sits beneath the composition's next questions.
+    #[inline(never)]
+    fn deliver_parameter_intersection(
+        &self,
+        walk: &mut DiscoveryWalk,
+        node_read: &mut dyn FnMut() -> crate::semantic_query::CacheRead<
+            crate::semantic_query::QueryResult<SemanticNodeId>,
+        >,
+    ) -> DiscoveryFlow {
+        let Some(members) = walk.intersection_operands() else {
+            return failed_unsettled();
+        };
+        let read = node_read();
+        let node = self.intersection_of_reduction(&members, &read.value);
+        match walk.binding.intern_type_token(node, None) {
+            Ok(ty) => {
+                walk.composition_stage().read = CompositionRead::Reduced(ty);
+                DiscoveryFlow::Compose
+            }
+            Err(_) => failed_unsettled(),
+        }
+    }
+
+    /// Name the result read of `candidate`, which the composition on top
+    /// of the walk compares, and stand at it.
+    #[inline(never)]
+    fn name_forced_result(
+        &self,
+        walk: &mut DiscoveryWalk,
+        candidate: SignatureCandidate,
+    ) -> DiscoveryFlow {
+        match self.forced_result_key(&walk.binding, candidate) {
+            Ok(key) => {
+                walk.composition_stage().read =
+                    CompositionRead::Result(candidate, key.descriptor.epoch());
+                walk.stand(
+                    DiscoveryRead::ForcedResult,
+                    super::walk::WalkNeed::Query(
+                        crate::semantic_query::SemanticQueryKey::ReadSignatureResult(key),
+                    ),
+                )
+            }
+            Err(error) => DiscoveryFlow::Failed(error),
+        }
+    }
+
+    /// The result read of `candidate`, a handle of `binding`'s epoch, named
+    /// in the current epoch: the candidate's own descriptor while its epoch
+    /// is current, else a copy of it.
+    fn forced_result_key(
+        &self,
+        binding: &EpochBinding,
+        candidate: SignatureCandidate,
+    ) -> Result<ReadSignatureResultKey, DiscoveryError> {
+        let store = self.graph().store().signature_store();
+        if binding.epoch() == store.epoch() {
+            return identity_result_key(binding, candidate.signature);
+        }
+        self.rebound_forced_result_key(store, binding, candidate)
+    }
+
+    /// The result read of `candidate`, whose epoch a replacement retired:
+    /// one pass copies its descriptor, with everything it reaches, into the
+    /// current epoch, and the read is named there.
+    #[cold]
+    #[inline(never)]
+    fn rebound_forced_result_key(
+        &self,
+        store: &SignatureStore,
+        binding: &EpochBinding,
+        candidate: SignatureCandidate,
+    ) -> Result<ReadSignatureResultKey, DiscoveryError> {
+        let into = store.bind_current();
+        let mut rebind = EpochRebind::new(&binding.lease(), &into);
+        let copy = rebind.descriptor(candidate.signature)?;
+        let copied = rebind.descriptors_copied();
+        drop(rebind);
+        let key = identity_result_key(&into, copy)?;
+        self.graph().record_signature_rebind(copied);
+        Ok(key)
+    }
+
+    /// The walk standing at a composition's result, given `read`, that
+    /// result's read: the composition carried on with it, or — the read
+    /// named in an epoch a replacement retired, and refused or not made —
+    /// the read named again in the current epoch.
+    #[inline(never)]
+    fn deliver_forced_result(
+        &self,
+        walk: &mut DiscoveryWalk,
+        read: crate::semantic_query::CacheRead<
+            crate::semantic_query::QueryResult<crate::semantic_query::SemanticQueryValue>,
+        >,
+    ) -> DiscoveryFlow {
+        use crate::semantic_query::{QueryResult, SemanticQueryValue};
+        let Some(DiscoveryRead::ForcedResult) = walk.standing.take() else {
+            unreachable!("a result is delivered to the walk standing at it")
+        };
+        let CompositionRead::Result(candidate, named) =
+            std::mem::replace(&mut walk.composition_stage().read, CompositionRead::None)
+        else {
+            unreachable!("a composition standing at a result names its candidate")
+        };
+        let partial = read.result_is_partial();
+        match read.value {
+            QueryResult::Value(SemanticQueryValue::SignatureResult(result)) => {
+                match self.forced_result_in(&walk.binding, &result) {
+                    Ok(forced) => {
+                        self.advance_composition(walk, Some(TypeAnswer::ForcedResult(forced)))
+                    }
+                    Err(reason) => DiscoveryFlow::Failed(DiscoveryError::Incomplete(reason)),
+                }
+            }
+            // Named in an epoch a replacement retired, and refused: named
+            // again.
+            _ if named != self.graph().store().signature_store().epoch() => {
+                self.name_forced_result(walk, candidate)
+            }
+            _ => DiscoveryFlow::Failed(DiscoveryError::Incomplete(if partial {
+                IncompleteReason::Budget
+            } else {
+                IncompleteReason::UnsettledInput
+            })),
+        }
+    }
+
+    /// The forced result a delivered result read carries, as handles of
+    /// `binding`'s epoch: read where the result was published, through its
+    /// own lease, and — published in another epoch — its tokens named again
+    /// in `binding` through their graph nodes.
+    fn forced_result_in(
+        &self,
+        binding: &EpochBinding,
+        result: &crate::signature_kernel::SignatureResultValue,
+    ) -> Result<ForcedResult, IncompleteReason> {
+        match &result.version.0 {
+            Some(lease) => forced_result_from(&lease.read_view(), binding, result.result),
+            None if result.result.epoch() == binding.epoch() => {
+                forced_result_from(binding.view(), binding, result.result)
+            }
+            None => Err(IncompleteReason::UnsettledInput),
+        }
+    }
+
+    /// The owned header a leaf publishes, before any rest type is read.
+    #[inline(never)]
+    fn discovered_leaf(
+        &self,
         node: SemanticNodeId,
-        ordinal: u32,
-    ) -> Result<Option<SignatureCandidate>, DiscoveryError> {
+    ) -> Result<Option<LeafSignature>, DiscoveryError> {
         let graph = self.graph();
         let Some(data) = graph.node_data(node) else {
             return unsettled();
@@ -1612,11 +1956,39 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             _ => return Ok(None),
         };
         drop(data);
-        if kind != walk.kind {
-            return Ok(None);
-        }
+        Ok(Some(LeafSignature {
+            kind,
+            params,
+            type_parameters,
+            occurrence,
+            carrier,
+            span,
+            predicate,
+        }))
+    }
+
+    /// Publish a leaf whose rest parameters have all been unwrapped.
+    #[inline(never)]
+    fn publish_leaf(
+        &self,
+        walk: &mut DiscoveryWalk,
+        node: SemanticNodeId,
+        ordinal: u32,
+        leaf: &LeafSignature,
+        rests: &[super::relation::IdentityCarrierUnwrap],
+    ) -> Result<SignatureCandidate, DiscoveryError> {
+        let graph = self.graph();
+        let LeafSignature {
+            kind,
+            params,
+            type_parameters,
+            occurrence,
+            carrier,
+            span,
+            predicate,
+        } = leaf;
         let strict = walk.strict_null();
-        let (receiver, positional) = crate::semantic_query::split_this_receiver(&params);
+        let (receiver, positional) = crate::semantic_query::split_this_receiver(params);
         let to_param = |p: &crate::semantic_query::FunctionParam| ParamInput {
             name: p.name.as_deref().map(Arc::<str>::from),
             ty: p.ty,
@@ -1625,15 +1997,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         };
         let mut fixed: Vec<ParamInput> = Vec::new();
         let mut rest: Option<RestInput> = None;
+        let mut next_rest = 0;
         for param in positional {
             if !param.rest {
                 fixed.push(to_param(param));
                 continue;
             }
-            let settled = match self.unwrap_identity_carrier_for_relation(param.ty) {
+            let settled = match rests[next_rest] {
                 super::relation::IdentityCarrierUnwrap::Concrete(n) => Some(n),
                 super::relation::IdentityCarrierUnwrap::Unresolvable => None,
             };
+            next_rest += 1;
             let shape = settled.and_then(|n| graph.node_data(n));
             match shape.as_deref() {
                 Some(SemanticNodeData::Array { element, .. }) => {
@@ -1699,14 +2073,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             crate::semantic_query::SignatureResultSource::Declared(return_type) => {
                 ResultInput::Declared {
                     return_type: *return_type,
-                    predicate_or_assertion: predicate,
+                    predicate_or_assertion: *predicate,
                 }
             }
             crate::semantic_query::SignatureResultSource::Function(source) => ResultInput::Body {
                 locator: hash_u64(source),
             },
         };
-        let (space_key, space_identity, group, parent, source_ordinal) = match &occurrence {
+        let (space_key, space_identity, group, parent, source_ordinal) = match occurrence {
             Some(occ) => (
                 space_key_of(&(&occ.function, occ.signature_ordinal)),
                 identity_u128(&(&occ.function, occ.signature_ordinal)),
@@ -1744,7 +2118,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let specialized = params.iter().any(|param| param.declared_literal);
         let locator = span.map_or(0, |s| hash_u64(&(s.start, s.end)));
         let input = SignatureInput {
-            kind: kernel_kind(kind),
+            kind: kernel_kind(*kind),
             source: node,
             space_key,
             space_identity,
@@ -1771,7 +2145,139 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let candidate = publish_signature(&walk.binding, &input)?;
         self.graph().record_discovery_signature_published();
         walk.authored.entry(candidate.signature).or_insert(node);
-        Ok(Some(candidate))
+        Ok(candidate)
+    }
+
+    /// The leaf's publication is added to the list on top, or answers the
+    /// subject node. A list entry must be a signature of the requested kind.
+    #[inline(never)]
+    fn finish_leaf(
+        &self,
+        walk: &mut DiscoveryWalk,
+        node: SemanticNodeId,
+        leaf: Option<&LeafSignature>,
+        rests: &[super::relation::IdentityCarrierUnwrap],
+    ) -> DiscoveryFlow {
+        let ordinal = match walk.frames.last() {
+            Some(DiscoveryFrame::Signatures {
+                first_ordinal,
+                found,
+                ..
+            }) => *first_ordinal + found.len() as u32,
+            _ => 0,
+        };
+        let candidate = match leaf {
+            Some(leaf) => match self.publish_leaf(walk, node, ordinal, leaf, rests) {
+                Ok(candidate) => Some(candidate),
+                Err(error) => return DiscoveryFlow::Failed(error),
+            },
+            None => None,
+        };
+        if let Some(DiscoveryFrame::Signatures { found, .. }) = walk.frames.last_mut() {
+            match candidate {
+                Some(candidate) => {
+                    found.push(candidate);
+                    self.next_signature_entry(walk)
+                }
+                None => {
+                    DiscoveryFlow::Failed(DiscoveryError::Incomplete(IncompleteReason::Unsupported))
+                }
+            }
+        } else {
+            DiscoveryFlow::Found(candidate.into_iter().collect())
+        }
+    }
+
+    /// Put a rest-bearing leaf's header on the heap before its first unwrap
+    /// runs. A leaf without rest parameters publishes without another level.
+    #[inline(never)]
+    fn discover_leaf(&self, walk: &mut DiscoveryWalk, node: SemanticNodeId) -> DiscoveryFlow {
+        let leaf = match self.discovered_leaf(node) {
+            Ok(Some(leaf)) if leaf.kind == walk.kind => leaf,
+            Ok(_) => return self.finish_leaf(walk, node, None, &[]),
+            Err(error) => return DiscoveryFlow::Failed(error),
+        };
+        if leaf.rest_type(0).is_none() {
+            return self.finish_leaf(walk, node, Some(&leaf), &[]);
+        }
+        walk.frames
+            .push(DiscoveryFrame::RestParameters(Box::new(LeafRest {
+                node,
+                leaf,
+                settled: smallvec::SmallVec::new(),
+                unwrap: None,
+            })));
+        DiscoveryFlow::Unwrap
+    }
+
+    /// Unwrap the leaf's rest parameters in order, then publish it. Each
+    /// read an unwrap names is a need of the discovery walk.
+    #[inline(never)]
+    fn advance_leaf_rest(&self, walk: &mut DiscoveryWalk) -> DiscoveryFlow {
+        use super::relation::{CarrierWalkPoint, IdentityCarrierRead, IdentityCarrierStep};
+        let named = {
+            let Some(DiscoveryFrame::RestParameters(rest)) = walk.frames.last_mut() else {
+                unreachable!("a rest parameter is unwrapped on top of the walk")
+            };
+            loop {
+                if rest.unwrap.is_none() {
+                    let Some(ty) = rest.leaf.rest_type(rest.settled.len()) else {
+                        break None;
+                    };
+                    rest.unwrap = Some(IdentityCarrierRead::at(CarrierWalkPoint {
+                        node: ty,
+                        depth: 0,
+                    }));
+                }
+                let unwrap = rest.unwrap.as_mut().expect("the unwrap was begun above");
+                match self.advance_identity_carrier_read(unwrap) {
+                    IdentityCarrierStep::Done(settled) => {
+                        rest.settled.push(settled);
+                        rest.unwrap = None;
+                    }
+                    IdentityCarrierStep::Read(key) => break Some(key),
+                }
+            }
+        };
+        if let Some(key) = named {
+            return walk.stand(
+                DiscoveryRead::RestCarrier,
+                super::walk::WalkNeed::Query(key),
+            );
+        }
+        let Some(DiscoveryFrame::RestParameters(rest)) = walk.frames.pop() else {
+            unreachable!()
+        };
+        self.finish_leaf(walk, rest.node, Some(&rest.leaf), &rest.settled)
+    }
+
+    /// Deliver to the standing unwrap, then return to the walk loop before
+    /// taking another graph hop. Delivery frames stay out of later reads.
+    #[inline(never)]
+    fn deliver_rest_carrier(
+        &self,
+        walk: &mut DiscoveryWalk,
+        node_read: &mut dyn FnMut() -> crate::semantic_query::CacheRead<
+            crate::semantic_query::QueryResult<SemanticNodeId>,
+        >,
+    ) -> DiscoveryFlow {
+        let named = {
+            let Some(DiscoveryFrame::RestParameters(rest)) = walk.frames.last_mut() else {
+                unreachable!("a rest parameter's read is delivered on top of the walk")
+            };
+            let unwrap = rest
+                .unwrap
+                .as_mut()
+                .expect("a standing rest read holds its unwrap");
+            self.deliver_identity_carrier_read(unwrap, node_read)
+        };
+        match named {
+            Some(key) => walk.stand(
+                DiscoveryRead::RestCarrier,
+                super::walk::WalkNeed::Query(key),
+            ),
+            None => DiscoveryFlow::Unwrap,
+        }
     }
 
     /// The finished walk's set, published: in the walk's epoch while it is
@@ -2289,6 +2795,62 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         }
     }
+}
+
+/// The result read of `descriptor`, a handle of `binding`'s epoch: both
+/// halves of its result under the identity call substitution over its
+/// residual binders, context-free, in the production context.
+fn identity_result_key(
+    binding: &EpochBinding,
+    descriptor: SignatureDescriptorId,
+) -> Result<ReadSignatureResultKey, DiscoveryError> {
+    let space = binding.view().descriptor(descriptor)?.residual_binders;
+    let call_substitution = binding.intern_substitution(
+        crate::signature_kernel::CallSubstitution::identity(space),
+        None,
+    )?;
+    Ok(ReadSignatureResultKey {
+        descriptor,
+        call_substitution,
+        projection: ResultDemand::Both,
+        evaluation: CONTEXT_FREE_EVALUATION,
+        semantic_context: SemanticContextId::production(),
+    })
+}
+
+/// The forced result of the applied record `applied`, read in `view`, the
+/// epoch it was published in, as handles of `binding`'s epoch: its own
+/// tokens when the two are one, else each named again in `binding` through
+/// its graph node.
+fn forced_result_from(
+    view: &SemanticReadView,
+    binding: &EpochBinding,
+    applied: AppliedResultId,
+) -> Result<ForcedResult, IncompleteReason> {
+    let unsettled = IncompleteReason::UnsettledInput;
+    let applied = view.applied_result(applied).map_err(|_| unsettled)?;
+    let return_type = applied.return_type.ok_or(unsettled)?;
+    let effects = applied.effects;
+    if view.epoch() == binding.epoch() {
+        return Ok(ForcedResult {
+            return_type,
+            effects,
+        });
+    }
+    let rename = |token: TypeToken| -> Result<TypeToken, IncompleteReason> {
+        let node = view.type_token_node(token).map_err(|_| unsettled)?;
+        binding.intern_type_token(node, None).map_err(|_| unsettled)
+    };
+    Ok(ForcedResult {
+        return_type: rename(return_type)?,
+        effects: match effects {
+            Some(effect) => Some(crate::signature_kernel::PredicateEffect {
+                ty: effect.ty.map(rename).transpose()?,
+                ..effect
+            }),
+            None => None,
+        },
+    })
 }
 
 /// The constituent sequence of a composite candidate; `None` for a leaf.
@@ -3026,23 +3588,176 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let source = self.signature_set_value(source, kind).ok()?;
             let target = self.signature_set_value(target, kind).ok()?;
             let binding = self.signature_value_binding(&target).ok()?;
-            let compared = (|| {
-                let target = only_candidate(binding.view(), &target)?;
-                let source = self.single_candidate_in(&source, &binding)?;
-                crate::signature_kernel::signatures_identical(
-                    &binding,
-                    &GraphTypes {
-                        dispatch: self,
-                        binding: &binding,
-                        semantic_identity: true,
-                    },
-                    source,
-                    target,
-                    crate::signature_kernel::MatchOptions::EXACT,
-                )
-            })();
-            compared.ok()
+            let target = only_candidate(binding.view(), &target).ok()?;
+            let source = self.single_candidate_in(&source, &binding).ok()?;
+            self.compare_signatures_in_place(&binding, source, target)
         }
+    }
+
+    /// One exact comparison of `source` against `target`, handles of
+    /// `binding`'s epoch, stepped where the relation authority stands: each
+    /// identity the relation authority's, each result read by the result
+    /// function in `binding`. `None` when a question stays undecided.
+    #[inline(never)]
+    fn compare_signatures_in_place(
+        &self,
+        binding: &EpochBinding,
+        source: SignatureCandidate,
+        target: SignatureCandidate,
+    ) -> Option<bool> {
+        let types = GraphTypes {
+            dispatch: self,
+            binding,
+            semantic_identity: true,
+        };
+        let mut comparison =
+            SignatureComparison::new(source, target, crate::signature_kernel::MatchOptions::EXACT);
+        let mut answer = None;
+        loop {
+            let request = match comparison.step(binding, &types, answer.take()).ok()? {
+                KernelStep::Done(same) => return Some(same),
+                KernelStep::Ask(request) => request,
+            };
+            answer = Some(match request {
+                TypeRequest::Identical { a, b } => {
+                    let na = self.closed_under_binders(binding, a, comparison.correspondence())?;
+                    let nb = binding.view().type_token_node(b).ok()?;
+                    TypeAnswer::Identical(self.relate_type_identity(na, nb)?)
+                }
+                TypeRequest::ForcedResult(candidate) => {
+                    TypeAnswer::ForcedResult(self.force_result_in_binding(binding, candidate).ok()?)
+                }
+                TypeRequest::MapBinders { .. } | TypeRequest::Intersect => {
+                    unreachable!("one comparison composes no parameters")
+                }
+            });
+        }
+    }
+
+    /// Node equality, else equality of the two nodes' stable keys.
+    fn same_stable_type(&self, a: SemanticNodeId, b: SemanticNodeId) -> bool {
+        if a == b {
+            return true;
+        }
+        let store = self.graph().store();
+        crate::semantic_query::stable_key::stable_key_for_node(store, a)
+            == crate::semantic_query::stable_key::stable_key_for_node(store, b)
+    }
+
+    /// The node `ty` names in `binding`, closed under the pairs of `pairs`
+    /// (`(from, to)`) that move a binder, where the asker stands: an
+    /// identity question's left type under its correspondence, or a union
+    /// synthesis's right-side type under its binder map. `None` when the
+    /// type is unreadable.
+    ///
+    /// The pairs map binders onto binders, and a substitution names a read
+    /// only where a changed template's every hole folds into its text,
+    /// which a binder never does: the closure names no template reduction,
+    /// so it is made in place.
+    #[inline(never)]
+    fn closed_under_binders(
+        &self,
+        binding: &EpochBinding,
+        ty: TypeToken,
+        pairs: &[(SemanticNodeId, SemanticNodeId)],
+    ) -> Option<SemanticNodeId> {
+        let node = binding.view().type_token_node(ty).ok()?;
+        let moving: Vec<(SemanticNodeId, SemanticNodeId)> =
+            pairs.iter().copied().filter(|(x, y)| x != y).collect();
+        if moving.is_empty() {
+            return Some(node);
+        }
+        let graph = self.graph();
+        verter_debug_assert!(
+            moving.iter().all(|(_, image)| matches!(
+                graph.node_data(*image).as_deref(),
+                Some(SemanticNodeData::TypeParam { .. })
+            )),
+            "a binder correspondence maps binders onto binders, so its closure names no \
+             template reduction"
+        );
+        Some(self.substitute_canonical(
+            node,
+            &CanonicalTypeSubstitution::new(self.graph().store(), moving),
+        ))
+    }
+
+    /// The result `candidate`, a handle of `binding`'s epoch, denotes: its
+    /// return type and predicate effect, read by the result function in
+    /// that epoch, current or retired, under the identity call
+    /// substitution over its residual binders.
+    #[inline(never)]
+    fn force_result_in_binding(
+        &self,
+        binding: &EpochBinding,
+        candidate: SignatureCandidate,
+    ) -> Result<ForcedResult, IncompleteReason> {
+        let space = binding
+            .view()
+            .descriptor(candidate.signature)
+            .map_err(|_| IncompleteReason::UnsettledInput)?
+            .residual_binders;
+        let empty = binding
+            .intern_substitution(
+                crate::signature_kernel::CallSubstitution::identity(space),
+                None,
+            )
+            .map_err(|_| IncompleteReason::UnsettledInput)?;
+        let result = self.read_signature_result(
+            binding,
+            candidate.signature,
+            empty,
+            ResultDemand::Both,
+            CONTEXT_FREE_EVALUATION,
+            SemanticContextId::production(),
+        );
+        match result {
+            QueryOutcome::Ready(Ready { value, .. }) => {
+                let applied = binding
+                    .view()
+                    .applied_result(value)
+                    .map_err(|_| IncompleteReason::UnsettledInput)?;
+                Ok(ForcedResult {
+                    return_type: applied
+                        .return_type
+                        .ok_or(IncompleteReason::UnsettledInput)?,
+                    effects: applied.effects,
+                })
+            }
+            QueryOutcome::Incomplete(reason) => Err(reason),
+        }
+    }
+
+    /// The result read matching names for candidate `index` of `subject`'s
+    /// own signatures of `kind`: the list discovered outside the memo, its
+    /// reads made where they stand, and that result read named, not made.
+    /// `None` when the list does not settle or has no such candidate.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn matching_result_read_for_tests(
+        &self,
+        subject: SemanticNodeId,
+        kind: GraphSignatureKind,
+        index: usize,
+    ) -> Option<crate::semantic_query::SemanticQueryKey> {
+        let store = self.graph().store().signature_store();
+        let QueryOutcome::Ready(Ready { value, .. }) = self.signatures_of_type_with_authored(
+            store,
+            subject,
+            kind,
+            SemanticContextId::production(),
+        ) else {
+            return None;
+        };
+        let binding = self.signature_value_binding(&value).ok()?;
+        let candidate = match binding.view().read_set(value.set).ok()? {
+            crate::signature_kernel::BorrowedSet::Empty => None,
+            crate::signature_kernel::BorrowedSet::One { candidate, .. } => {
+                (index == 0).then_some(candidate)
+            }
+            crate::signature_kernel::BorrowedSet::Many(list) => list.get(index).copied(),
+        }?;
+        let key = self.forced_result_key(&binding, candidate).ok()?;
+        Some(crate::semantic_query::SemanticQueryKey::ReadSignatureResult(key))
     }
 
     construction_ordinal_seam! {

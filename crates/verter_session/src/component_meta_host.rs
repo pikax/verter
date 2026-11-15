@@ -823,6 +823,7 @@ fn extract_component_meta_from_resolved_with_evaluated<M: verter_audit::observe:
     // Macro-DTO surface reads through the same request-bound `ctx` as
     // `extract_component_meta_from_resolved`.
     let resolved_macros = resolver_component_meta_resolved_macros(
+        host,
         ctx,
         dispatch,
         canonical_id,
