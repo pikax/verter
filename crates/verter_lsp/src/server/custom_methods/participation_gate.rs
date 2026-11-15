@@ -158,34 +158,6 @@ impl VerterLanguageServer {
         )
         .await
     }
-
-    /// `$/verter/getComponentMetaSurface`.
-    pub async fn get_component_meta_surface(
-        &self,
-        params: GetComponentMetaSurfaceParams,
-    ) -> Result<Option<Vec<u8>>> {
-        let uri = document(&params.uri);
-        self.explain(
-            Op::ComponentMetaSurface,
-            uri.as_ref(),
-            self.get_component_meta_surface_admitted(params),
-        )
-        .await
-    }
-
-    /// `$/verter/getComponentMetaTypeExpansion`: a type handle carries no
-    /// document, so the expansion is admitted against the served profiles.
-    pub async fn get_component_meta_type_expansion(
-        &self,
-        params: GetComponentMetaTypeExpansionParams,
-    ) -> Result<GetComponentMetaTypeExpansionResponse> {
-        self.explain(
-            Op::TypeHandleExpansion,
-            None,
-            self.get_component_meta_type_expansion_admitted(params),
-        )
-        .await
-    }
 }
 
 impl VerterLanguageServer {

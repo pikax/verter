@@ -698,19 +698,7 @@ pub static VERTER_SESSION_PUB_SURFACE_SNAPSHOT: &[&str] = &[
         // `verter_type_runtime` / `verter_napi` and by the Tier 1A
         // lowering-boundary guards.
         "pub mod owned_artifacts",
-        // Tier 1B — selective component-meta surface API + BFS bridge
-        // wire types (D102 + D125). Public because verter_napi calls
-        // `TypeHandle::from_proto` / `to_proto`, surface envelope
-        // round-trip, and `BridgeError`/`TypeHandleError` envelopes
-        // through this module's public types.
-        "pub mod component_meta_payload",
-        // Tier 1B — `MetaSession` made public so the selective surface
-        // API methods (`get_component_meta_surface`,
-        // `get_component_meta_type_expansion`,
-        // `get_component_meta_payload_via_bridge`) are reachable from
-        // verter_napi (NapiMetaSession), the LSP custom-method handler
-        // chain, and the integration test target
-        // `tests/cases/g_misc0/selective_component_meta_api.rs`.
+        // Native metadata projects and overlay sessions.
         "pub mod meta",
         // tests/cases/g_misc0/host_tests.rs (project_type_store::*)
         "pub mod project_type_store",

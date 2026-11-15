@@ -155,8 +155,6 @@ export const PARTICIPATION_OPERATIONS: readonly string[] = [
   "inspection.bindingTypes",
   "inspection.documentStructure",
   "componentMeta",
-  "componentMeta.surface",
-  "componentMeta.typeExpansion",
   "workspace.projectOverview",
   "workspace.componentParents",
   "workspace.routeTree",

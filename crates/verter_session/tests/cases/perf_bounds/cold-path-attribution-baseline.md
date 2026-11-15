@@ -44,12 +44,7 @@ lands, `audit_real_component_meta` writes the worst-case batch count
 per fixture into this column via a new field on the
 `RustSemanticFootprintAudit` envelope.
 
-`bridge max depth (D115)`: BFS bridge ships in Tier 1B; D115 reserves
-the column slot pre-Tier-1B. Pre-Tier-1B observation = 0 per the audit
-dump's `bridge_max_depth_observed` column. Pre-Tier-0 manual
-instrumentation measured corpus-wide max ≤ 11 (ChatMessages family);
-the `MAX_BRIDGE_DEPTH = 32` constant is justified at ~3x that floor.
-Tier 1B will write the post-bridge measurement here.
+`bridge max depth`: reserved compatibility column, recorded as zero.
 
 ## Dominant cost arm — corpus-wide
 

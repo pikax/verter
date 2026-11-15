@@ -134,8 +134,6 @@ capability_operations! {
     BindingTypeInspection => "inspection.bindingTypes", optional = false;
     DocumentStructure => "inspection.documentStructure", optional = false;
     ComponentMetadata => "componentMeta", optional = false;
-    ComponentMetaSurface => "componentMeta.surface", optional = false;
-    TypeHandleExpansion => "componentMeta.typeExpansion", optional = false;
     ProjectOverview => "workspace.projectOverview", optional = false;
     ComponentParents => "workspace.componentParents", optional = false;
     RouteTree => "workspace.routeTree", optional = false;

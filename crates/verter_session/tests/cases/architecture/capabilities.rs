@@ -4857,12 +4857,7 @@ fn carrier_constructors_do_not_use_unknown_as_control_flow() {
     );
 }
 
-/// `HotTypeRef` (the internal session hot handle) is a DISTINCT nominal type
-/// from the public `component_meta_payload::TypeHandle` DTO, and is
-/// deliberately NOT `Hash`/`Ord` so R6 structurally forbids it from ever
-/// being a derived-`Hash` / `BTreeMap` cache key. A future `#[derive(Hash)]`
-/// on this `Copy` newtype — or a re-alias of the public handle onto the
-/// `HotTypeRef` name — must turn this guard RED.
+/// The internal hot handle deliberately has no Hash/Ord derivation.
 #[test]
 fn hot_type_ref_is_distinct_handle_and_not_hash_or_ord_derived() {
     let src = read_workspace_file("crates/verter_type_engine/src/semantic_query.rs");
@@ -4871,29 +4866,6 @@ fn hot_type_ref_is_distinct_handle_and_not_hash_or_ord_derived() {
     assert!(
         src.contains("struct HotTypeRef"),
         "guard must find the real `struct HotTypeRef` in semantic_query.rs"
-    );
-
-    // (2) Name distinctness: `HotTypeRef` is its own nominal `struct`, NOT a
-    // type alias of, nor a `use ... as` re-export of, the public `TypeHandle`.
-    assert!(
-        !src.contains("type HotTypeRef"),
-        "`HotTypeRef` must be a distinct `struct`, never a \
-         `type HotTypeRef = ...TypeHandle...` alias of the public DTO"
-    );
-    assert!(
-        !src.contains("as HotTypeRef"),
-        "`HotTypeRef` must not be a `use ... TypeHandle as HotTypeRef` \
-         re-export — the public handle stays \
-         `component_meta_payload::TypeHandle`"
-    );
-    let decl_line = src
-        .lines()
-        .find(|l| l.contains("struct HotTypeRef"))
-        .expect("guard must find the `struct HotTypeRef` line");
-    assert!(
-        !decl_line.contains("TypeHandle"),
-        "the `struct HotTypeRef` declaration must not wrap / equate to the \
-         public `TypeHandle` DTO"
     );
 
     // (3) R6 non-key rail: its derive carries NEITHER `Hash` NOR `Ord`.

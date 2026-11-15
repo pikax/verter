@@ -1279,14 +1279,13 @@
         "crates/verter_session/src/component_meta_cached_result.rs",
         "crates/verter_session/src/component_meta_result_admission.rs",
         "crates/verter_session/src/component_meta_host.rs",
-        "crates/verter_session/src/component_meta_payload.rs",
         "crates/verter_session/src/component_meta_resolution_policy",
         "crates/verter_session/src/meta_resolve",
         "crates/verter_protocol/src/component_meta.rs",
         "crates/verter_protocol/src/types.rs"
       ],
       "symbols": [
-        "MetaSession::get_component_meta and its batch/resolution/payload/surface/type-expansion variants",
+        "MetaSession::get_component_meta and its batch/resolution/payload variants",
         "VerterHost::get_component_meta_via_view",
         "VerterHost::get_component_meta_with_resolution",
         "resolve_component_meta_parts",
@@ -1295,7 +1294,6 @@
         "ComponentMetaResultDb / ComponentMetaResultKey",
         "CachedComponentMetaResult",
         "ComponentMetaHost / ComponentMetaSession",
-        "component_meta_payload::{ComponentMetaSurface, TypeHandle, assemble_volar_payload, assemble_surface_from_analysis, resolve_type_expansion}",
         "component_meta_resolution_policy",
         "COMPONENT_META_SCHEMA_VERSION / component_meta_payload / encode_component_meta_payload",
         "FfiComponentMeta / FfiComponentMetaOutputLane"

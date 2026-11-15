@@ -140,8 +140,6 @@ mod resolver_context_active_session_view;
 // Reads optional audit capture: runs in the instrumentation lane.
 #[cfg(feature = "semantic-observe")]
 mod sampler_thread_joined_at_host_drop;
-#[path = "g_misc0/selective_component_meta_api.rs"]
-mod selective_component_meta_api;
 #[path = "g_misc0/semantic_analysis_audit_e2e.rs"]
 mod semantic_analysis_audit_e2e;
 #[path = "g_misc0/semantic_analysis_audit_tls_propagation.rs"]

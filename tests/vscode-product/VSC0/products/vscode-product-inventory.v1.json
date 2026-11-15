@@ -179,18 +179,6 @@
         "kind": "e2e-only",
         "gate": "VERTER_E2E_TEST",
         "implementation": "packages/vue-vscode/src/extension.ts"
-      },
-      {
-        "id": "verter._getComponentMetaSurface",
-        "kind": "e2e-only",
-        "gate": "VERTER_E2E_TEST",
-        "implementation": "packages/vue-vscode/src/extension.ts"
-      },
-      {
-        "id": "verter._getComponentMetaTypeExpansion",
-        "kind": "e2e-only",
-        "gate": "VERTER_E2E_TEST",
-        "implementation": "packages/vue-vscode/src/extension.ts"
       }
     ]
   },

@@ -2725,21 +2725,9 @@ function addVerterAnalysis(getClient: GetClient, lifetime: Lifetime) {
         vueApiCalls: decorationProvider.getState(),
         propConstness: propConstnessProvider.getState(),
       })),
-      // D113: bridge custom-method LSP requests through VS Code commands
-      // so e2e tests can drive `getComponentMeta` / `getComponentMetaSurface`
-      // / `getComponentMetaTypeExpansion` without holding the language
-      // client themselves. Tests call e.g.
-      // `commands.executeCommand("verter._getComponentMeta", { uri })`.
+      // Expose the full metadata request to the editor integration tests.
       commands.registerCommand("verter._getComponentMeta", (params: { uri: string }) =>
         getClient().sendRequest(RequestType.GetComponentMeta, params),
-      ),
-      commands.registerCommand("verter._getComponentMetaSurface", (params: { uri: string }) =>
-        getClient().sendRequest(RequestType.GetComponentMetaSurface, params),
-      ),
-      commands.registerCommand(
-        "verter._getComponentMetaTypeExpansion",
-        (params: { handleBytes: number[]; depth?: number }) =>
-          getClient().sendRequest(RequestType.GetComponentMetaTypeExpansion, params),
       ),
     );
   }

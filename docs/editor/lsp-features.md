@@ -76,8 +76,6 @@ tools. They are Verter protocol extensions, not standard LSP methods:
 | Method | Result |
 | ------ | ------ |
 | `$/verter/getComponentMeta` | Full component metadata for a document, including the compatibility payload consumed by existing editor clients. |
-| `$/verter/getComponentMetaSurface` | Selective native surface data for requested component facets. |
-| `$/verter/getComponentMetaTypeExpansion` | One-layer expansion of a previously returned type handle. |
 
 The server validates request parameters and returns normal JSON-RPC errors for
 invalid or unavailable inputs. Projection safety limits retain their typed

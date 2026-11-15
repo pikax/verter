@@ -437,7 +437,7 @@
     },
     {
       "id": "lsp.component-meta",
-      "operation": "$/verter/getComponentMeta{,Surface,TypeExpansion}",
+      "operation": "$/verter/getComponentMeta",
       "profile": "inspection",
       "version": "1",
       "producerOwner": "crates/verter_lsp custom methods over the component-meta producer",

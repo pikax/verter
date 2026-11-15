@@ -6283,17 +6283,6 @@
         "26/component_public_contract"
       ]
     },
-    "ComponentMetaSurface": {
-      "reserve": [
-        "8/sfc_blocks",
-        "18..19"
-      ],
-      "add": [
-        "15/ordered_sfc_structure",
-        "16/surface_schema_version",
-        "17/component_public_contract"
-      ]
-    },
     "SfcBlocksMeta": {
       "reserve": [
         "1/template",
