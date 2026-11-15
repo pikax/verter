@@ -1,7 +1,9 @@
 //! The type an inference variable fixes to from candidates of both
 //! variances (`getInferredType`).
 //!
-//! Every expected answer is TypeScript 7.0.2's, measured with `tsc
+//! Repeated-candidate controls follow the source-pinned TypeScript parity
+//! rules in `.claude/skills/type-resolution/references/inference-owner.md`.
+//! The other expected answers are TypeScript 7.0.2's, measured with `tsc
 //! --ignoreConfig --noEmit --strict --noErrorTruncation` under all four
 //! `strictNullChecks` x `noImplicitAny` settings (alike in every setting):
 //! a type is read off TS2322 for `const s: never = x` with `declare const
@@ -30,6 +32,15 @@ export function c6() { return mix(o, (x: { a: number }) => {}); }
 export function c7() { return mix(one, (x: string) => {}); }
 export function c8() { return withCallback((item: any) => item, lit); }
 export function c9() { return withCallback((item) => item, lit); }
+type AnyProperty = { p: any };
+type UnknownProperty = { p: unknown };
+declare const anyProperty: AnyProperty;
+declare const unknownProperty: UnknownProperty;
+declare function three<T>(x: T, y: T, z: T): T;
+export function repeatedCovariantObject() {
+    return three(unknownProperty, anyProperty, unknownProperty).p;
+}
+export function repeatedCovariantLiterals() { return three("a", "b", "a"); }
 "##;
 
 /// A conditional's `infer` fixes to the union of its covariant candidates
@@ -49,6 +60,10 @@ fn a_conditional_infers_its_covariant_candidates_first() {
         ),
         ("MV<{ a: never; b: (x: string) => void }>", "never"),
         ("MV<{ a: any; b: (x: string) => void }>", "any"),
+        (
+            "{ a: 1; b: 2; c: 1 } extends { a: infer U; b: infer U; c: infer U } ? U : 0",
+            "1 | 2",
+        ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -72,6 +87,8 @@ fn a_signature_prefers_its_covariant_inference_where_it_fits() {
         ("c7", "string"),
         ("c8", "any"),
         ("c9", r#""literal""#),
+        ("repeatedCovariantObject", "any"),
+        ("repeatedCovariantLiterals", r#""a" | "b""#),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

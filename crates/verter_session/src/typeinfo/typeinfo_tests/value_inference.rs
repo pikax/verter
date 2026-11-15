@@ -4,6 +4,34 @@ use super::oracle;
 use super::support::*;
 use verter_session_oracle_macro::oracle_row;
 
+#[test]
+fn repeated_contravariant_candidate_keeps_typescript_first_occurrence_order() {
+    let host = make_host_with_footprint();
+    let canonical = "/fixtures/repeated-candidate.ts";
+    upsert_ts(
+        &host,
+        canonical,
+        r#"
+type A = { p: any };
+type B = { p: unknown };
+declare const a: (x: A) => void;
+declare const b: (x: B) => void;
+declare function co<T>(f: (x: T) => void, g: (x: T) => void, h: (x: T) => void): T;
+const result = co(a, b, a);
+type ResultProperty = (typeof result)["p"];
+"#,
+    );
+
+    let (property, _) = resolve_expr(
+        &host,
+        canonical,
+        "ResultProperty",
+        &[],
+        ProjectionMode::Expanded,
+    );
+    assert_primitive(&property, PrimitiveName::Unknown);
+}
+
 /// The work one chain length spent: its cold member visits, cold body
 /// inferences and the member visits of its warm read.
 struct SpreadChainWork {
