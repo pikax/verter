@@ -161,23 +161,9 @@ fn relation_only_assumption_replays_but_own_return_assumption_refuses() {
         super::call_resolve::ResolveCallStep::Complete(ResolvedCallResult::Selected { .. })
     ));
     let txn = dispatch.dispatch_txn.borrow();
-    assert_eq!(
-        txn.relation
-            .sessions
-            .iter()
-            .filter(|session| session.state == InferenceSessionState::Abandoned)
-            .count(),
-        1,
-        "the provisional attempt is abandoned before replay"
-    );
-    assert_eq!(
-        txn.relation
-            .sessions
-            .iter()
-            .filter(|session| session.state == InferenceSessionState::CommittedDeterministic)
-            .count(),
-        1,
-        "stable root replay commits its fresh session at atomic publication"
+    assert!(
+        txn.relation.sessions.is_empty(),
+        "neither a provisional non-generic candidate nor its replay opens a session"
     );
     drop(txn);
 
@@ -999,13 +985,14 @@ fn constraint_rejection_rolls_back_and_commits_only_the_winner() {
         }],
         bad_ret,
     );
+    let u = type_param(&dispatch, "Winner", 0);
     let good = signature(
         &dispatch,
         "constrained",
         1,
         SignatureKind::Call,
-        vec![FunctionParam::synthetic(None, number, false, false)],
-        Vec::new(),
+        vec![FunctionParam::synthetic(None, u, false, false)],
+        vec![plain_decl(u, "Winner")],
         good_ret,
     );
     let callee = callable(&dispatch, vec![bad, good], Vec::new());
@@ -3040,6 +3027,152 @@ fn plain_decl(param: SemanticNodeId, name: &str) -> TypeParamDecl {
         original: None,
         is_const: false,
     }
+}
+
+#[test]
+fn literal_overloads_without_type_parameters_push_no_inference_sessions() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
+    let graph = dispatch.graph_arc();
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let one = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_expr::LiteralValue::Number(1.0),
+    ));
+    let string_result = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_expr::LiteralValue::String("s".into()),
+    ));
+    let number_result = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_expr::LiteralValue::String("n".into()),
+    ));
+    let mut signatures = Vec::new();
+    for ordinal in 0..32 {
+        let literal = graph.intern_node(SemanticNodeData::Literal(
+            verter_type_expr::LiteralValue::String(format!("s{ordinal}")),
+        ));
+        signatures.push(signature(
+            &dispatch,
+            "f",
+            ordinal,
+            SignatureKind::Call,
+            vec![FunctionParam::synthetic(None, literal, false, false)],
+            Vec::new(),
+            string_result,
+        ));
+    }
+    signatures.push(signature(
+        &dispatch,
+        "f",
+        32,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, number, false, false)],
+        Vec::new(),
+        number_result,
+    ));
+    let callee = callable(&dispatch, signatures, Vec::new());
+    let before = dispatch.dispatch_txn.borrow().relation.sessions.len();
+    let result = selected(dispatch.execute_resolve_call(call_key(
+        &dispatch,
+        callee,
+        CallKind::Call,
+        None,
+        vec![fresh_literal(one)],
+    )));
+    assert!(
+        matches!(result, ResolvedCallResult::Selected { return_type, .. }
+        if return_type == number_result)
+    );
+    assert_eq!(
+        dispatch.dispatch_txn.borrow().relation.sessions.len() - before,
+        0,
+        "a candidate with no inferable parameters pushes no session",
+    );
+}
+
+#[test]
+fn nested_non_generic_candidate_deposits_nothing_into_outer_call_inference() {
+    use super::inference::session::InferenceSessionSetup;
+    use verter_type_engine::semantic_query::{
+        ConstParamPolicy, ContextualInferenceMode, InferenceCandidatePriority, InferencePassKind,
+        NoInferMask, VariancePhase,
+    };
+
+    let source = r#"
+        declare function f(x: "s0"): "s";
+        declare function f(x: number): "n";
+        declare function wrap<T>(fn: () => T): T;
+        const nested = wrap(() => f(1));
+    "#;
+    let matrix = super::differential_harness_tests::Matrix::new(source)
+        .settings(&[super::differential_harness_tests::STRICT]);
+    let rows = [(
+        super::differential_harness_tests::Read::Type("typeof nested"),
+        vec![r#""n""#],
+    )];
+    let source_host = matrix.host(&rows);
+    let verdict = &matrix.verdicts_on(&source_host, &rows)[0][0];
+    assert!(verdict.matched, "nested call: {}", verdict.lane);
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
+    let graph = dispatch.graph_arc();
+    let t = type_param(&dispatch, "Outer", 0);
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let setup = InferenceSessionSetup::new(
+        graph.as_ref(),
+        dispatch.call_inference_infos(&[plain_decl(t, "Outer")]),
+        VariancePhase::Covariant,
+        InferencePassKind::CallApplicability,
+        InferenceCandidatePriority::Argument,
+        NoInferMask::empty(),
+        ConstParamPolicy::NonConst,
+        ContextualInferenceMode::None,
+    );
+    let outer = dispatch
+        .dispatch_txn
+        .borrow_mut()
+        .push_collecting_session(setup);
+    // The inner signature captures the outer binder but declares none of its
+    // own. Checking it while the outer argument is evaluated must treat that
+    // captured parameter as rigid and leave the outer collector untouched.
+    let inner = signature(
+        &dispatch,
+        "inner",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, t, false, false)],
+        Vec::new(),
+        number,
+    );
+    let callee = callable(&dispatch, vec![inner], Vec::new());
+    let _ = dispatch.execute_resolve_call(call_key(
+        &dispatch,
+        callee,
+        CallKind::Call,
+        None,
+        vec![eager(number)],
+    ));
+    let mut txn = dispatch.dispatch_txn.borrow_mut();
+    let session = txn
+        .relation
+        .sessions
+        .iter_mut()
+        .find(|session| session.id == outer)
+        .expect("the outer call still owns its collector");
+    assert_eq!(session.state, InferenceSessionState::Collecting);
+    let bindings = session
+        .stage_fixation(|candidates, _| {
+            assert!(
+                candidates.is_empty(),
+                "the inner applicability check contributed {} outer candidates",
+                candidates.len()
+            );
+            number
+        })
+        .expect("outer inference can still fix");
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].param, t);
 }
 
 /// Literal elements inside a tuple ARGUMENT relate covariantly to concrete
