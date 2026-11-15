@@ -57,6 +57,268 @@ fn take_producer(handoff: &mut StoreViewHandoff) -> StoreViewProducer {
         _ => panic!("cold capture must transfer its producer"),
     }
 }
+
+#[test]
+fn request_bound_last_round_join_still_gets_one_additive_lag_attempt() {
+    use crate::store_view_non_current_contract_tests::{host_with_decl, run_with_watchdog};
+
+    run_with_watchdog(10, || {
+        let (host, canonical) = host_with_decl();
+        host.ensure_indexed_ready(&canonical).unwrap();
+        let old = host.resolver_store_view_read().current().unwrap();
+        host.bump_store_view_epoch();
+        let before = host.current_validation_token();
+        assert!(old
+            .view()
+            .validation_token_for_tests()
+            .externally_superseded_by(&before));
+        let scope = host.scheduler.enter_execution_scope();
+        let registry = scope.task().registry().clone();
+        drop(scope);
+        let mut request = begin(&host, &registry);
+        request.core.request_bound_query = true;
+
+        // Round one supplies a fallback, but cannot publish under additive churn.
+        let producer = take_producer(&mut request);
+        HostStoreView::arm_additive_advance_always_for_tests();
+        producer.run();
+        HostStoreView::disarm_additive_advance_always_for_tests();
+
+        // Each next claimant wins before the request resumes. The gate holds
+        // its real build while the request parks, forcing rounds two and three
+        // to be joins. These strict siblings leave the old cache untouched.
+        for _ in 1..STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS {
+            let mut sibling = begin(&host, &registry);
+            let producer = take_producer(&mut sibling);
+            TEST_BUILD_GATE.arm();
+            struct ReleaseGate;
+            impl Drop for ReleaseGate {
+                fn drop(&mut self) {
+                    TEST_BUILD_GATE.release();
+                }
+            }
+            let release = ReleaseGate;
+            let builder = std::thread::spawn(move || {
+                TEST_BUILD_GATE.enroll_current_thread();
+                HostStoreView::arm_additive_advance_always_for_tests();
+                producer.run();
+                HostStoreView::disarm_additive_advance_always_for_tests();
+            });
+            assert!(TEST_BUILD_GATE.wait_for_builder_parked(std::time::Duration::from_secs(5)));
+            assert!(request.poll(Waker::noop()).is_pending());
+            assert_eq!(host.store_view_manager().parked_waiters(), 1);
+            drop(release);
+            builder.join().unwrap();
+            drop(sibling);
+        }
+
+        COHERENT_BUILD_SWEEPS_THIS_THREAD.with(|count| count.set(0));
+        let producer = take_producer(&mut request);
+        assert_eq!(request.core.rounds, STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS);
+        assert!(producer.core.allow_additive_lag);
+        HostStoreView::arm_additive_advance_always_for_tests();
+        producer.run();
+        HostStoreView::disarm_additive_advance_always_for_tests();
+        let current = match request.poll(Waker::noop()) {
+            Poll::Ready(Ok(StoreViewStep::Value(value))) => value.into_read().current(),
+            _ => panic!("the exhausted request must finish after its lag-accepting attempt"),
+        }
+        .expect("additive churn after the last-round join must not yield UnstableState");
+        assert_eq!(
+            COHERENT_BUILD_SWEEPS_THIS_THREAD.with(std::cell::Cell::get),
+            STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS as u64,
+            "exactly one additional coherent-build pass is allowed"
+        );
+        let captured = current.view().validation_token_for_tests();
+        let live = host.current_validation_token();
+        assert!(!before.externally_superseded_by(&live));
+        assert!(!captured.externally_superseded_by(&live));
+        assert!(captured.load_generation < live.load_generation);
+        assert_eq!(host.store_view_manager().cached_token(), Some(captured));
+        assert_eq!(registry.wait_graph_occupancy().edges, 0);
+    });
+}
+
+#[test]
+fn exhausted_request_bound_reads_keep_the_superseded_cache_exit_under_contention() {
+    use crate::store_view_non_current_contract_tests::{host_with_decl, run_with_watchdog};
+
+    run_with_watchdog(10, || {
+        for phase in [Phase::Main, Phase::Final, Phase::Last] {
+            let (host, canonical) = host_with_decl();
+            host.ensure_indexed_ready(&canonical).unwrap();
+            let scope = host.scheduler.enter_execution_scope();
+            let registry = scope.task().registry().clone();
+            drop(scope);
+            assert!(host.resolver_store_view_read().current().is_some());
+            host.bump_store_view_epoch();
+            let mut request = begin(&host, &registry);
+            request.core.request_bound_query = true;
+            request.core.phase = phase;
+            COHERENT_BUILD_SWEEPS_THIS_THREAD.with(|count| count.set(0));
+
+            // Starting in Main exercises the real join-only budget exhaustion.
+            // The other cases protect both exhausted-phase exits directly.
+            let builds = if matches!(phase, Phase::Main) {
+                STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS
+            } else {
+                0
+            };
+            HostStoreView::arm_supersede_always_for_tests();
+            for _ in 0..builds {
+                let mut sibling = begin(&host, &registry);
+                let producer = take_producer(&mut sibling);
+                assert!(request.poll(Waker::noop()).is_pending());
+                producer.run();
+                drop(sibling);
+            }
+            // A competing claimant is already waiting to run another churned
+            // build. Exhaustion must return the stale cache without joining it.
+            let mut competitor = begin(&host, &registry);
+            let producer = take_producer(&mut competitor);
+            let answer = request.poll(Waker::noop());
+            HostStoreView::disarm_supersede_always_for_tests();
+            drop(producer);
+            drop(competitor);
+            let read = match answer {
+                Poll::Ready(Ok(StoreViewStep::Value(value))) => value.into_read(),
+                _ => panic!("exhausted external churn must terminate before another join or build"),
+            };
+            assert_eq!(
+                read.return_only_reason_for_tests(),
+                Some(StoreViewReturnOnlyReason::Superseded),
+                "the query accessor maps this bounded exit to UnstableState"
+            );
+            assert_eq!(
+                COHERENT_BUILD_SWEEPS_THIS_THREAD.with(std::cell::Cell::get),
+                (builds * STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS) as u64
+            );
+            assert_eq!(host.store_view_manager().parked_waiters(), 0);
+            assert_eq!(registry.wait_graph_occupancy().edges, 0);
+            if matches!(phase, Phase::Main) {
+                let captures_per_read = (STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS
+                    * STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS)
+                    as u64;
+                // Both the query read and the strict read used by the shallow
+                // mode probe must keep three handoff rounds of three captures.
+                // The strict read also preserves the original churn bound.
+                for request_bound_query in [true, false] {
+                    HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|count| count.set(0));
+                    COHERENT_BUILD_SWEEPS_THIS_THREAD.with(|count| count.set(0));
+                    HostStoreView::arm_supersede_always_for_tests();
+                    let read = HostStoreView::from_host_read(&host, request_bound_query);
+                    HostStoreView::disarm_supersede_always_for_tests();
+                    assert_eq!(
+                        read.return_only_reason_for_tests(),
+                        Some(StoreViewReturnOnlyReason::Superseded)
+                    );
+                    assert_eq!(
+                        HOST_STORE_VIEW_FROM_HOST_BUILDS.with(std::cell::Cell::get),
+                        1
+                    );
+                    assert_eq!(
+                        COHERENT_BUILD_SWEEPS_THIS_THREAD.with(std::cell::Cell::get),
+                        captures_per_read,
+                        "request_bound_query={request_bound_query} must preserve the per-read bound"
+                    );
+                }
+
+                HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|count| count.set(0));
+                COHERENT_BUILD_SWEEPS_THIS_THREAD.with(|count| count.set(0));
+                HostStoreView::arm_supersede_always_for_tests();
+                let resolved = host
+                    .resolve_named_symbol_with_audit(&canonical, "Widget", None)
+                    .into_result();
+                HostStoreView::disarm_supersede_always_for_tests();
+                assert!(matches!(
+                    resolved,
+                    Err(
+                        crate::host_resolve_type_audit::TypeResolutionRequestError::UnstableState {
+                            attempts: 3
+                        }
+                    )
+                ));
+                // resolve_named_symbol_request first tries its query view.
+                // With mode=None, its unsettled error arm then selects the
+                // audit mode through shallow_file_state ->
+                // with_base_resolver_context, taking a second, strict read.
+                // No projection runs. Each read has the bound checked above.
+                let reads = HOST_STORE_VIEW_FROM_HOST_BUILDS.with(std::cell::Cell::get);
+                assert_eq!(reads, 2, "query admission plus the default-mode probe");
+                assert_eq!(
+                    COHERENT_BUILD_SWEEPS_THIS_THREAD.with(std::cell::Cell::get),
+                    reads * captures_per_read,
+                    "the public path must preserve the per-read capture bound"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn exhausted_request_bound_join_checks_additive_lag_once_then_terminates() {
+    use crate::store_view_non_current_contract_tests::run_with_watchdog;
+
+    run_with_watchdog(10, || {
+        for publishes in [false, true] {
+            let (host, registry) = fixture();
+            let mut request = begin(&host, &registry);
+            request.core.request_bound_query = true;
+            request.core.phase = Phase::Last;
+            let mut sibling = begin(&host, &registry);
+            if publishes {
+                sibling.core.request_bound_query = true;
+                sibling.core.rounds = STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS - 1;
+            }
+            let producer = take_producer(&mut sibling);
+            assert!(request.poll(Waker::noop()).is_pending());
+            COHERENT_BUILD_SWEEPS_THIS_THREAD.with(|count| count.set(0));
+            if publishes {
+                HostStoreView::arm_additive_advance_always_for_tests();
+            } else {
+                HostStoreView::arm_supersede_always_for_tests();
+            }
+            producer.run();
+            HostStoreView::disarm_additive_advance_always_for_tests();
+            HostStoreView::disarm_supersede_always_for_tests();
+            drop(sibling);
+            assert_eq!(host.store_view_manager().is_populated(), publishes);
+
+            // Model another arrival winning the claim before the waiter wakes.
+            // Neither an additive publication nor an empty cache may send the
+            // exhausted request into another join.
+            let mut competitor = begin(&host, &registry);
+            let producer = take_producer(&mut competitor);
+            let answer = request.poll(Waker::noop());
+            drop(producer);
+            drop(competitor);
+            let read = match answer {
+                Poll::Ready(Ok(StoreViewStep::Value(value))) => value.into_read(),
+                _ => panic!("one exhausted join must decide the read without another attempt"),
+            };
+            assert_eq!(read.is_current_for_tests(), publishes);
+            if let StoreViewRead::Current(current) = read {
+                let captured = current.view().validation_token_for_tests();
+                let live = host.current_validation_token();
+                assert!(captured.load_generation < live.load_generation);
+                assert!(!captured.externally_superseded_by(&live));
+                assert_eq!(host.store_view_manager().cached_token(), Some(captured));
+            } else {
+                assert_eq!(
+                    read.return_only_reason_for_tests(),
+                    Some(StoreViewReturnOnlyReason::Superseded)
+                );
+            }
+            assert_eq!(
+                COHERENT_BUILD_SWEEPS_THIS_THREAD.with(std::cell::Cell::get),
+                STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS as u64
+            );
+            assert_eq!(host.store_view_manager().parked_waiters(), 0);
+            assert_eq!(registry.wait_graph_occupancy().edges, 0);
+        }
+    });
+}
+
 struct Notify {
     manager: StoreViewManager,
     wakes: std::sync::atomic::AtomicUsize,

@@ -143,7 +143,9 @@ impl From<UnsettledInput> for crate::host_flow_return_audit::FlowReturnError {
 pub(crate) fn current_store_view_for_query(
     host: &crate::VerterHost,
 ) -> Result<crate::resolver_store::CurrentHostStoreView, UnsettledInput> {
-    match host.resolver_store_view_read() {
+    // These callers bind a RequestStoreView with a completion overlay before
+    // dispatch, so additive snapshot gaps can be filled within the request.
+    match crate::resolver_store::HostStoreView::from_host_read(host, true) {
         crate::resolver_store::StoreViewRead::Current(current) => Ok(current),
         crate::resolver_store::StoreViewRead::ReturnOnly { reason, .. } => {
             Err(UnsettledInput { reason })

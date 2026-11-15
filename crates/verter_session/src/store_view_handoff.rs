@@ -78,7 +78,7 @@ impl VerterHost {
         stop: CancellationToken,
     ) -> StoreViewHandoff {
         StoreViewHandoff {
-            core: Core::new(self.clone(), waiter, stop, false),
+            core: Core::new(self.clone(), waiter, stop, false, false),
         }
     }
 }
@@ -313,6 +313,8 @@ struct Core<H: HostRef> {
     stop: Option<CancellationSubscription>,
     desired_reset: u64,
     compatibility: bool,
+    request_bound_query: bool,
+    additive_lag_attempted: bool,
     phase: Phase,
     rounds: usize,
     after_join: bool,
@@ -324,7 +326,13 @@ struct Core<H: HostRef> {
     finished: bool,
 }
 impl<H: HostRef> Core<H> {
-    fn new(host: H, waiter: ExecutionTask, stop: CancellationToken, compatibility: bool) -> Self {
+    fn new(
+        host: H,
+        waiter: ExecutionTask,
+        stop: CancellationToken,
+        compatibility: bool,
+        request_bound_query: bool,
+    ) -> Self {
         let manager = host.host().store_view_manager().clone();
         let desired_reset = manager.state.lock().reset_generation;
         Self {
@@ -334,6 +342,8 @@ impl<H: HostRef> Core<H> {
             stop: Some(stop.subscribe()),
             desired_reset,
             compatibility,
+            request_bound_query,
+            additive_lag_attempted: false,
             phase: Phase::Main,
             rounds: 0,
             after_join: false,
@@ -415,7 +425,12 @@ impl<H: HostRef> Core<H> {
                             self.host.as_ref().expect("live host").host(),
                         );
                         let current = state.cached.as_ref().is_some_and(|(token, cached)| {
-                            *token == live && Arc::ptr_eq(&cached.snapshot, &view.snapshot)
+                            (*token == live
+                                || (self.request_bound_query
+                                    && (self.rounds + 1 >= STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS
+                                        || !matches!(self.phase, Phase::Main))
+                                    && !token.externally_superseded_by(&live)))
+                                && Arc::ptr_eq(&cached.snapshot, &view.snapshot)
                         });
                         drop(state);
                         if current {
@@ -463,10 +478,13 @@ impl<H: HostRef> Core<H> {
                     Phase::Last => {}
                 }
             }
-            if self.rounds >= STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS {
+            let retry_budget_spent = self.rounds >= STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS;
+            if retry_budget_spent && !self.request_bound_query {
                 if let Some((view, reason)) = self.fallback.take() {
                     return self.finish(Ok(StoreViewRead::ReturnOnly { view, reason }));
                 }
+            }
+            if retry_budget_spent && self.fallback.is_none() {
                 self.phase = match self.phase {
                     Phase::Main => Phase::Final,
                     _ => Phase::Last,
@@ -489,13 +507,24 @@ impl<H: HostRef> Core<H> {
             {
                 host.host().bump_store_view_epoch();
             }
-            let cached = if matches!(self.phase, Phase::Main) {
+            let allow_additive_lag = self.request_bound_query
+                && (retry_budget_spent || !matches!(self.phase, Phase::Main));
+            let cached = if matches!(self.phase, Phase::Main) || allow_additive_lag {
                 let live = capture_store_view_validation_token(host.host());
-                state
-                    .cached
-                    .as_ref()
-                    .filter(|(token, _)| *token == live)
-                    .map(|(_, view)| StoreViewRead::Current(CurrentHostStoreView(view.clone())))
+                state.cached.as_ref().and_then(|(token, view)| {
+                    if *token == live
+                        || (allow_additive_lag && !token.externally_superseded_by(&live))
+                    {
+                        Some(StoreViewRead::Current(CurrentHostStoreView(view.clone())))
+                    } else if !matches!(self.phase, Phase::Main) {
+                        Some(StoreViewRead::ReturnOnly {
+                            view: view.clone(),
+                            reason: StoreViewReturnOnlyReason::Superseded,
+                        })
+                    } else {
+                        None
+                    }
+                })
             } else {
                 StoreViewManager::current_or_stale_cached_read(host.host(), &state)
             };
@@ -512,6 +541,22 @@ impl<H: HostRef> Core<H> {
                 }
                 read => read,
             };
+            // A final-round producer already tried with lag allowed. Otherwise
+            // an exhausted request gets one such attempt, even when its last
+            // round was a join and it already carries a strict-build fallback.
+            // After a lag-accepting join, probe the published cache above, then
+            // terminate even if that claimant left no published view or seed.
+            if self.request_bound_query && self.additive_lag_attempted {
+                let (view, reason) = self.fallback.take().unwrap_or_else(|| {
+                    let view = state
+                        .cached
+                        .as_ref()
+                        .map_or_else(HostStoreView::default, |(_, view)| view.clone());
+                    (view, StoreViewReturnOnlyReason::Superseded)
+                });
+                drop(state);
+                return self.finish(Ok(StoreViewRead::ReturnOnly { view, reason }));
+            }
             if state.building.is_claimed() {
                 if self.compatibility && claim_held_by_current_thread(&manager) {
                     let view = state
@@ -561,6 +606,7 @@ impl<H: HostRef> Core<H> {
                     drop(join);
                     return self.finish(Err(StoreViewError::ProducerUnowned));
                 }
+                self.additive_lag_attempted |= allow_additive_lag;
                 self.join = Some(join);
                 continue;
             }
@@ -590,7 +636,11 @@ impl<H: HostRef> Core<H> {
                 host: Some(host),
                 claim: Some(claim),
                 cached_read: maintenance,
+                allow_additive_lag: self.request_bound_query
+                    && (self.rounds + 1 >= STORE_VIEW_SNAPSHOT_RETRY_ATTEMPTS
+                        || !matches!(self.phase, Phase::Main)),
             };
+            self.additive_lag_attempted |= producer.allow_additive_lag;
             self.reply = Some(
                 producer
                     .claim
@@ -614,6 +664,7 @@ struct Producer<H: HostRef> {
     host: Option<H>,
     claim: Option<BuildClaimGuard>,
     cached_read: Option<StoreViewRead>,
+    allow_additive_lag: bool,
 }
 impl<H: HostRef> Producer<H> {
     fn run(mut self) {
@@ -636,7 +687,7 @@ impl<H: HostRef> Producer<H> {
                 .reclaim_after_root_release();
             Attempt::Read(read)
         } else {
-            match HostStoreView::build_coherent(host.host(), None) {
+            match HostStoreView::build_coherent(host.host(), None, self.allow_additive_lag) {
                 SnapshotBuildOutcome::Coherent { view, token } => {
                     let mut state = claim.manager.state.lock();
                     match claim.manager.publish_coherent(
@@ -645,6 +696,7 @@ impl<H: HostRef> Producer<H> {
                         claim.claim.reset_generation,
                         token,
                         view,
+                        self.allow_additive_lag,
                     ) {
                         PublishOutcome::Published { view } => Attempt::Published(view),
                         PublishOutcome::Declined { view } => {
@@ -679,7 +731,13 @@ impl<H: HostRef> Producer<H> {
 
 pub(super) async fn pollable(host: &VerterHost) -> StoreViewRead {
     let scope = host.scheduler.enter_execution_scope();
-    let mut core = Core::new(host, scope.task().clone(), CancellationToken::new(), true);
+    let mut core = Core::new(
+        host,
+        scope.task().clone(),
+        CancellationToken::new(),
+        true,
+        false,
+    );
     drop(scope);
     loop {
         match std::future::poll_fn(|cx| core.poll(cx.waker())).await {
@@ -703,9 +761,19 @@ pub(super) async fn pollable(host: &VerterHost) -> StoreViewRead {
     }
 }
 
-pub(super) fn drive(manager: &StoreViewManager, host: &VerterHost) -> StoreViewRead {
+pub(super) fn drive(
+    manager: &StoreViewManager,
+    host: &VerterHost,
+    request_bound_query: bool,
+) -> StoreViewRead {
     let scope = host.scheduler.enter_execution_scope();
-    let mut core = Core::new(host, scope.task().clone(), CancellationToken::new(), true);
+    let mut core = Core::new(
+        host,
+        scope.task().clone(),
+        CancellationToken::new(),
+        true,
+        request_bound_query,
+    );
     // The shared manager must be the host's exact cache owner.
     verter_debug_assert::verter_debug_assert!(Arc::ptr_eq(
         &manager.state,
