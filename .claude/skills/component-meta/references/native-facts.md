@@ -11,7 +11,8 @@ encoder; its observation gate is owned by `verter_audit`.
 
 Schema 13 gives `ComponentMetaBody.facts` (field 28) ownership of semantic lanes.
 The former body arrays and contract fields are reserved, as is the former
-payload registry field. Field 27 remains a derived compatibility summary.
+payload registry field. Field 27 carries the envelope's measured completeness,
+as does JSON `resultCompleteness`; neither derives it from independent facts.
 `SurfacePartialReason` codes 1–17 retain their meanings. `FactCause` is an open
 numeric vocabulary: a reader retains unfamiliar codes and never uses them to
 choose availability.
@@ -75,7 +76,13 @@ registry and emits aligned declaration positions, including absent declarations.
 The converter zips these positions and copies rawType from that same declaration.
 The cause-code vocabulary is defined once by
 `metadata_partial_reason_causes!` in `verter_session_query`; the session's
-forward projection and protocol's forward/reverse projections expand that table.
-The compatibility summary remains derived from independent facts and failed
-publications: measured completeness alone does not yet cover every failed
-publication. This summary never authorizes a domain.
+forward projection and protocol's forward projection expand that table.
+The terminal output sink folds failed publications and localized unraisable
+exposed/public-instance members into measured completeness with a missing-source
+cause. The semantic extractor carries typed source failures to that session
+boundary without depending on its request context. Such partial outputs never
+enter the encoded-payload cache. A localized projected-member miss keeps its
+semantic-query-fault cause. Independent approximate domains, including the
+public-instance lower bound, do not add reasons to this summary. This summary
+never authorizes a domain; current TypeScript decoding still derives its own
+compatibility summary from the independent facts.

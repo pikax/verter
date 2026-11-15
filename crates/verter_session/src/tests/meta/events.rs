@@ -2229,6 +2229,7 @@ defineEmits<{ save: [id: number] }>()
         crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("a present source materializes");
+    assert!(!output.completeness().is_partial());
     let (_analysis, _resolution, types) = output.into_parts();
     let TypeExpr::Tuple { .. } = &materialized_event_types(&types.into_lanes())[0] else {
         panic!("the present payload source materializes the authored tuple");
@@ -2250,6 +2251,7 @@ defineEmits<{ save: [id: number] }>()
         crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("schema absence keeps materializing the output");
+    assert!(!output.completeness().is_partial());
     let (_analysis, _resolution, types) = output.into_parts();
     assert_eq!(
         materialized_event_types(&types.into_lanes())[0],
@@ -2275,8 +2277,14 @@ defineEmits<{ save: [id: number] }>()
         crate::meta_resolve::PublishedCompleteness::COMPLETE,
     )
     .expect("a typed failed publication remains an occurrence-owned output row");
-    let (_analysis, _resolution, types, contract, _completeness) =
-        output.into_parts_with_contract();
+    let (_analysis, _resolution, types, contract, completeness) = output.into_parts_with_contract();
+    assert_eq!(
+        completeness,
+        verter_type_engine::semantic_query::ResultCompleteness::partial(
+            verter_type_engine::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
+        ),
+        "a failed required source makes measured output completeness partial",
+    );
     let lanes = types.into_lanes();
     assert!(matches!(
         lanes.events[0].payload.publication(),

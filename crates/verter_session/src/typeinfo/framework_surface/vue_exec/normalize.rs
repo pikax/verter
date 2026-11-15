@@ -882,9 +882,9 @@ pub(crate) fn emits_from_typeinfo_surface<C: crate::session_attachment::SessionC
         // ride the replay, so the faithful payload never degrades. The
         // realized signature's payload-tuple position is REQUIRED — with no
         // stamped type-argument base to replay off (no authored macro type
-        // argument), the position is the typed source-construction FAILURE
-        // (fails output materialization), never a partial fact and never a
-        // fabricated `unknown` success.
+        // argument), the position retains a typed source-construction FAILURE.
+        // The output sink publishes no value for it and records partiality;
+        // it never fabricates a partial tuple or an `unknown` success.
         let payload_source = dispatch
             .closed_params_tuple_source(&raw_params[1..])
             .map(verter_type_expr::facts::SourcePosition::Present)

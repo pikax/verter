@@ -201,7 +201,7 @@ fn component_meta_body_to_proto(
         root_info: legacy.root_info,
         macro_expansion_diagnostics: legacy.macro_expansion_diagnostics,
         ordered_sfc_structure: legacy.ordered_sfc_structure,
-        result_completeness: Some(result_completeness_to_proto(&meta.derived_completeness())),
+        result_completeness: legacy.result_completeness,
         facts: Some(facts),
     }
 }
@@ -3166,6 +3166,11 @@ mod tests {
             .completeness
             .guarantee();
         let json = serde_json::to_value(&meta).expect("json");
+        assert_eq!(
+            json["resultCompleteness"],
+            serde_json::to_value(&meta.result_completeness).unwrap(),
+            "an approximate public-instance fact does not replace measured completeness",
+        );
         assert_eq!(json["publicInstance"]["completeness"], "partial");
         assert_eq!(json["facts"]["publicInstance"]["kind"], "approximate");
         assert_eq!(json["facts"]["publicInstance"]["open"], true);
@@ -3176,9 +3181,16 @@ mod tests {
         assert!(json["facts"]["publicInstance"]["value"].is_object());
 
         let payload = super::component_meta_payload(&meta);
-        let guarantee = payload
-            .body
-            .expect("body")
+        let body = payload.body.expect("body");
+        assert_eq!(
+            body.result_completeness,
+            Some(proto::ResultCompleteness {
+                kind: proto::ResultCompletenessKind::Complete as i32,
+                partial_reasons: vec![],
+            }),
+            "field 27 carries measured completeness independently of fact guarantees",
+        );
+        let guarantee = body
             .facts
             .expect("facts")
             .public_instance

@@ -698,12 +698,13 @@ defineExpose<WidgetApi>({ focus, blur })
     assert!(blur.tags.is_empty(), "got {:?}", blur.tags);
 }
 
-/// ECRV8-AC3: `UnraisableSource` on Exposed / PublicInstanceMember publishes
+/// `UnraisableSource` on Exposed / PublicInstanceMember publishes
 /// the centralized typed unsupported outcome for that slot and keeps sibling
 /// members. The whole request stays `Ok`.
 #[test]
 fn component_meta_output_exposed_unraisable_source_degrades_per_member() {
     use verter_session_query::analysis::component_meta as cm;
+    use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
     let project = make_project();
     project
         .upsert_base("/App.vue", "<template><div /></template>")
@@ -741,7 +742,7 @@ fn component_meta_output_exposed_unraisable_source_degrades_per_member() {
             cm::PublicInstanceMemberAnalysis {
                 name: "ok".to_string(),
                 kind: cm::PublicInstanceMemberKind::Exposed,
-                type_source: verter_type_expr::facts::SourcePosition::Present(healthy),
+                type_source: verter_type_expr::facts::SourcePosition::Present(healthy.clone()),
                 type_expansion: None,
                 raw_type: None,
                 description: None,
@@ -751,33 +752,66 @@ fn component_meta_output_exposed_unraisable_source_degrades_per_member() {
         completeness: cm::PublicInstanceCompleteness::Exact,
     });
 
-    let fixture_dispatch_14 =
-        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
-    let output = crate::meta_resolve::projectors::build_component_meta_output(
-        host,
-        &fixture_dispatch_14,
-        "/App.vue",
-        analysis,
-        None,
-        crate::meta_resolve::PublishedCompleteness::COMPLETE,
-    )
-    .expect("UnraisableSource on Exposed/PublicInstanceMember must not fail the request");
-    let lanes = output.into_parts().2.into_lanes();
-    let unsupported = TypeExpr::Unknown(UnknownValue::missing_output());
-    let healthy_ty = TypeExpr::Ref {
-        name: Arc::from("Healthy"),
-        type_arguments: Arc::from([]),
-    };
-    assert_eq!(
-        lanes.exposed,
-        vec![unsupported.clone(), healthy_ty.clone()],
-        "unraisable exposed[0] is typed unsupported; sibling stays live"
-    );
-    assert_eq!(
-        lanes.public_instance_members,
-        vec![unsupported, healthy_ty],
-        "unraisable public-instance[0] is typed unsupported; sibling stays live"
-    );
+    for (exposed_unraisable, instance_unraisable) in
+        [(true, false), (false, true), (true, true), (false, false)]
+    {
+        let mut analysis = analysis.clone();
+        if !exposed_unraisable {
+            analysis.exposed[0].type_source =
+                verter_type_expr::facts::SourcePosition::Present(healthy.clone());
+        }
+        if !instance_unraisable {
+            analysis.public_instance.as_mut().unwrap().members[0].type_source =
+                verter_type_expr::facts::SourcePosition::Present(healthy.clone());
+        }
+        let fixture_dispatch_14 =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let output = crate::meta_resolve::projectors::build_component_meta_output(
+            host,
+            &fixture_dispatch_14,
+            "/App.vue",
+            analysis,
+            None,
+            crate::meta_resolve::PublishedCompleteness::COMPLETE,
+        )
+        .expect("UnraisableSource on Exposed/PublicInstanceMember must not fail the request");
+        let expected = if exposed_unraisable || instance_unraisable {
+            ResultCompleteness::partial(PartialReasonSet::MISSING_DEPENDENCY)
+        } else {
+            ResultCompleteness::Complete
+        };
+        assert_eq!(output.completeness(), expected);
+        let lanes = output.into_parts().2.into_lanes();
+        let unsupported = TypeExpr::Unknown(UnknownValue::missing_output());
+        let healthy_ty = TypeExpr::Ref {
+            name: Arc::from("Healthy"),
+            type_arguments: Arc::from([]),
+        };
+        assert_eq!(
+            lanes.exposed,
+            vec![
+                if exposed_unraisable {
+                    unsupported.clone()
+                } else {
+                    healthy_ty.clone()
+                },
+                healthy_ty.clone()
+            ],
+            "unraisable exposed[0] is typed unsupported; sibling stays live"
+        );
+        assert_eq!(
+            lanes.public_instance_members,
+            vec![
+                if instance_unraisable {
+                    unsupported
+                } else {
+                    healthy_ty.clone()
+                },
+                healthy_ty
+            ],
+            "unraisable public-instance[0] is typed unsupported; sibling stays live"
+        );
+    }
 }
 
 /// ECRV8-AC3 boundary: a non-`UnraisableSource` failure on Exposed still

@@ -18,7 +18,9 @@ use super::{
     materialize_output_source, missing_source_output_type_expr, MetaResolveProjectorsOutputCap,
 };
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+use verter_type_engine::request_context::fold_result_completeness;
 use verter_type_engine::resolver_core::ResolverContext;
+use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
 
 /// Request-local output-materialization memo: `(effective scope, source
 /// identity)` → materialized value, shared across ALL lanes of one output
@@ -120,6 +122,15 @@ pub(crate) static OUTPUT_MATERIALIZE_FORCE_FAIL_FOR: std::sync::Mutex<
     std::collections::BTreeSet<String>,
 > = std::sync::Mutex::new(std::collections::BTreeSet::new());
 
+#[cfg(test)]
+thread_local! {
+    /// Replace one publication after extraction, without changing the independently
+    /// complete analysis or its cache admission, to exercise output-only partiality.
+    pub(crate) static OUTPUT_PUBLICATION_FAILURE: std::cell::Cell<
+        Option<verter_type_expr::facts::SemanticSourceFailure>
+    > = const { std::cell::Cell::new(None) };
+}
+
 impl<'a> OutputSourceMemo<'a> {
     fn new() -> Self {
         #[cfg(test)]
@@ -156,6 +167,9 @@ impl<'a> OutputSourceMemo<'a> {
                 return Ok(missing_source_output_type_expr());
             }
             verter_type_expr::facts::SourcePosition::Failed(failure) => {
+                fold_result_completeness(ResultCompleteness::partial(
+                    PartialReasonSet::MISSING_DEPENDENCY,
+                ));
                 return Err(crate::meta_resolve::ComponentMetaOutputError {
                     lane,
                     index,
@@ -220,7 +234,15 @@ impl<'a> OutputSourceMemo<'a> {
         use verter_type_expr::PublicationResult;
 
         let (materialized_type, display) = match publication.result() {
-            PublicationResult::Failed { .. } => (None, None),
+            PublicationResult::Failed { .. } => {
+                // Extractors carry source-construction failures without depending
+                // on the request context. Adopt that missing required source at
+                // materialization, including failures added after extraction.
+                fold_result_completeness(ResultCompleteness::partial(
+                    PartialReasonSet::MISSING_DEPENDENCY,
+                ));
+                (None, None)
+            }
             PublicationResult::Absent { .. } => {
                 let materialized = missing_source_output_type_expr();
                 let display = verter_type_expr::render_type_expr_display(&materialized)
@@ -358,8 +380,9 @@ impl<'a> OutputSourceMemo<'a> {
 ///   never a silent `Unknown`). The one exception is an unraisable projected
 ///   member-path: that graph miss stays on its lane as a Failed publication
 ///   with no value, so one unavailable member does not sink its siblings.
-/// - `Failed(_)` → an immediate typed [`ComponentMetaOutputError`]: the
-///   REQUIRED position's producer-typed failure fails the output.
+/// - A failed publication retains its typed failure with no value and records
+///   missing-source partiality. A failed plain source position returns a typed
+///   [`ComponentMetaOutputError`].
 ///
 /// [`ComponentMetaOutputError`]: crate::meta_resolve::ComponentMetaOutputError
 fn materialize_component_meta_output_types<'a, M: verter_audit::observe::ObserveExec>(
@@ -503,6 +526,9 @@ fn materialize_component_meta_output_types<'a, M: verter_audit::observe::Observe
                     crate::meta_resolve::ComponentMetaOutputFailure::UnraisableSource
                 ) =>
             {
+                fold_result_completeness(ResultCompleteness::partial(
+                    PartialReasonSet::MISSING_DEPENDENCY,
+                ));
                 lanes.exposed.push(missing_source_output_type_expr());
             }
             Err(error) => return Err(error),
@@ -526,6 +552,9 @@ fn materialize_component_meta_output_types<'a, M: verter_audit::observe::Observe
                         crate::meta_resolve::ComponentMetaOutputFailure::UnraisableSource
                     ) =>
                 {
+                    fold_result_completeness(ResultCompleteness::partial(
+                        PartialReasonSet::MISSING_DEPENDENCY,
+                    ));
                     lanes
                         .public_instance_members
                         .push(missing_source_output_type_expr());
@@ -710,6 +739,19 @@ pub(crate) fn build_component_meta_output<M: verter_audit::observe::ObserveExec>
 ) -> Result<crate::meta_resolve::ComponentMetaOutput, crate::meta_resolve::ComponentMetaOutputError>
 {
     let completeness = completeness.get();
+    #[cfg(test)]
+    OUTPUT_PUBLICATION_FAILURE.with(|failure| {
+        if let Some(failure) = failure.take() {
+            analysis.props[0].publication = verter_type_expr::TypePublication::from_source_position(
+                &verter_type_expr::facts::SourcePosition::Failed(failure),
+                verter_type_expr::ResolutionExactness::Incomplete,
+                verter_type_expr::ResolutionProvenance::SessionProjector,
+                std::sync::Arc::from([]),
+                None,
+                &verter_type_expr::PublicationPolicy::exact_only(),
+            );
+        }
+    });
     #[cfg(test)]
     if OUTPUT_MATERIALIZE_FORCE_FAIL.with(|flag| {
         if flag.get() {

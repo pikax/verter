@@ -265,7 +265,7 @@ impl Serialize for FfiComponentMeta {
         if !self.origin.edges.is_empty() {
             output.serialize_field("origin", &self.origin)?;
         }
-        output.serialize_field("resultCompleteness", &self.derived_completeness())?;
+        output.serialize_field("resultCompleteness", &self.result_completeness)?;
         output.end()
     }
 }
@@ -417,69 +417,6 @@ impl Serialize for FfiSlotBindingMeta {
     }
 }
 
-impl FfiComponentMeta {
-    /// Compatibility projection, never authority for an individual fact.
-    pub fn derived_completeness(&self) -> FfiResultCompleteness {
-        let facts = self.facts();
-        let mut causes = Vec::new();
-        let mut add = |codes: &[u32]| {
-            for code in codes {
-                if !causes.contains(code) {
-                    causes.push(*code);
-                }
-            }
-        };
-        add(facts.props.causes());
-        add(facts.events.causes());
-        add(facts.slots.causes());
-        add(facts.models.causes());
-        add(facts.exposed.causes());
-        add(facts.accepted_props.causes());
-        add(facts.accepted_events.causes());
-        add(facts.root_reachability.causes());
-        add(facts.fallthrough_surface.causes());
-        add(facts.public_instance.causes());
-        add(facts.component_public_contract.causes());
-        add(facts.type_registry.causes());
-        add(facts.delivery.causes());
-        let mut publication = |value: &FfiTypePublication| match value {
-            FfiTypePublication::Failed { .. } => add(&[102]),
-            FfiTypePublication::Published {
-                exactness: FfiPublicationExactness::Incomplete,
-                ..
-            } => add(&[103]),
-            _ => {}
-        };
-        for prop in &self.props {
-            publication(&prop.publication);
-        }
-        for event in &self.events {
-            publication(&event.publication);
-        }
-        for slot in &self.slots {
-            for binding in &slot.bindings {
-                publication(&binding.publication);
-            }
-            if let Some(value) = &slot.return_publication {
-                publication(value);
-            }
-        }
-        let mut reasons = Vec::new();
-        for code in causes {
-            let reason =
-                partial_reason_from_cause(code).unwrap_or(FfiSurfacePartialReason::Propagated);
-            if !reasons.contains(&reason) {
-                reasons.push(reason);
-            }
-        }
-        if reasons.is_empty() {
-            FfiResultCompleteness::Complete
-        } else {
-            FfiResultCompleteness::Partial { reasons }
-        }
-    }
-}
-
 fn contract_causes(reason: &FfiComponentContractUnsupportedReason) -> FactCauses {
     let codes = match reason {
         FfiComponentContractUnsupportedReason::AdapterUnavailable => vec![106],
@@ -515,9 +452,6 @@ macro_rules! define_partial_reason_causes {
     ($($reason:ident => $code:literal,)*) => {
         fn surface_partial_reason_cause(reason: FfiSurfacePartialReason) -> u32 {
             match reason { $(FfiSurfacePartialReason::$reason => $code,)* }
-        }
-        fn partial_reason_from_cause(code: u32) -> Option<FfiSurfacePartialReason> {
-            match code { $($code => Some(FfiSurfacePartialReason::$reason),)* _ => None }
         }
     };
 }

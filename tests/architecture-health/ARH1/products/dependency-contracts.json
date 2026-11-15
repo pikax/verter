@@ -1437,6 +1437,7 @@
           "crates/verter_session/src/lower_locator_tests.rs",
           "crates/verter_session/src/meta.rs",
           "crates/verter_session/src/meta/output_api.rs",
+          "crates/verter_session/src/meta_batch_fixed_view_tests.rs",
           "crates/verter_session/src/meta_resolve.rs",
           "crates/verter_session/src/meta_resolve/callable_view_tests.rs",
           "crates/verter_session/src/meta_resolve/diagnostic_convert.rs",
@@ -2238,13 +2239,14 @@
               "crates/verter_type_engine/tests/allocation_cases/flow_literal_provenance.rs",
               "crates/verter_type_engine/tests/allocator_canaries.rs"
             ],
-            "note": "the cross-crate population outside verter_session imports only the retained ten types; retaining a type alone does not retain its methods, so PartialReasonSet::{empty,is_empty,iter,PROPAGATED,SEMANTIC_QUERY_FAULT}, ResultCompleteness::partial and ScopeId::file stay pub for the ffi/napi/wasm production consumers, and PartialReasonSet::{contains,CONNECTED_MEMORY_LIMIT,UNDECIDED_CONDITIONAL,UNSTABLE_STATE} and ResultCompleteness::is_partial stay pub for the verter_session files that import only retained types; the recorded consumer files each import at least one narrowed name (the verter_session sources reach the engine across the crate boundary, and its integration tests, benches and examples compile as separate crates); the test files migrate to the existing for_tests test-support surface pattern in the same change as the narrowing, and the verter_session production sources need a retained session-facing surface rather than pub(crate)"
+            "note": "the cross-crate population outside verter_session imports only the retained ten types; retaining a type alone does not retain its methods, so PartialReasonSet::{empty,is_empty,iter,PROPAGATED,SEMANTIC_QUERY_FAULT}, ResultCompleteness::partial and ScopeId::file stay pub for the ffi/napi/wasm production consumers, and PartialReasonSet::{contains,CONNECTED_MEMORY_LIMIT,MISSING_DEPENDENCY,UNDECIDED_CONDITIONAL,UNSTABLE_STATE} and ResultCompleteness::is_partial stay pub for the verter_session files that import only retained types; the recorded consumer files each import at least one narrowed name (the verter_session sources reach the engine across the crate boundary, and its integration tests, benches and examples compile as separate crates); the test files migrate to the existing for_tests test-support surface pattern in the same change as the narrowing, and the verter_session production sources need a retained session-facing surface rather than pub(crate)"
           }
         ],
         "rationale": "one authority (semantic_query.rs) with the cross-crate surface cut to exactly the imported envelope types and their used assoc items; the inline pub mods stay pub inside the module",
         "crossCrateRetainedVerifiedByConsumers": true,
         "retainedAssocItems": [
           "PartialReasonSet::CONNECTED_MEMORY_LIMIT",
+          "PartialReasonSet::MISSING_DEPENDENCY",
           "PartialReasonSet::PROPAGATED",
           "PartialReasonSet::SEMANTIC_QUERY_FAULT",
           "PartialReasonSet::UNDECIDED_CONDITIONAL",

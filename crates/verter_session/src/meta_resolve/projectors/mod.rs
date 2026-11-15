@@ -145,6 +145,7 @@ pub(crate) use output_sink::OUTPUT_MATERIALIZE_FORCE_FAIL_FOR;
 #[cfg(test)]
 pub(crate) use output_sink::{
     LAST_OUTPUT_MATERIALIZE_CALLS, LAST_OUTPUT_MEMO_HASH_OPS, OUTPUT_MATERIALIZE_FORCE_FAIL,
+    OUTPUT_PUBLICATION_FAILURE,
 };
 
 /// Merge a projector's `Vec<ExpandedField>` output into the target

@@ -227,8 +227,8 @@ fn define_props_shape<M: verter_audit::observe::ObserveExec>(
 /// or exact callable-occurrence replay route for an inherited / merged / richer
 /// payload (Typed-IR-Only: never reparse `payload_type`), or the typed
 /// source-construction FAILURE (a realized emit's payload-tuple position is
-/// REQUIRED — an unrepresentable payload fails output materialization
-/// instead of rendering a fabricated `unknown` success).
+/// REQUIRED — an unrepresentable payload retains a failed publication with
+/// no value and makes measured output completeness partial).
 ///
 /// No secondary evaluated/analyzer row participates: every occurrence owns
 /// its payload source and publication evidence.
@@ -426,8 +426,8 @@ pub(crate) fn slot_field_function_source(
 /// `Incomplete`, its execution status to the deterministic `HardStop`, and
 /// mark the enclosing request's completeness partial through the existing
 /// suppression rail — a failed required position is never cached or reported
-/// as a complete success (output materialization then fails it with the
-/// typed `RequiredSourceUnavailable` error).
+/// as a complete success. The output sink retains a failed publication with
+/// no value; a failed plain source position returns `RequiredSourceUnavailable`.
 fn fail_shape_result_on_failed_member(
     properties: &[ExpandedProperty],
     index_signatures: &[verter_session_query::analysis::type_expand::ExpandedIndexSignature],
