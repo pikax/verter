@@ -371,14 +371,14 @@ struct CandidatePrologue {
 }
 
 /// A candidate stopped inside its argument relations on its frame: its
-/// prologue, the arguments it relates, its open inference — its collecting
-/// session, taken out of the transaction while the frame waits, so nothing
-/// that runs meanwhile can deposit into it — and the argument it stands at.
+/// prologue, the arguments it relates, its optional collecting session,
+/// taken out of the transaction while the frame waits so nothing that runs
+/// meanwhile can deposit into it, and the argument it stands at.
 pub(super) struct SuspendedCandidate {
     prologue: Box<CandidatePrologue>,
     arguments: Vec<CallArgument>,
-    session: super::inference::session::InferenceSession,
-    checkpoint: SessionCheckpoint,
+    session: Option<super::inference::session::InferenceSession>,
+    checkpoint: Option<SessionCheckpoint>,
     /// The first-pass argument the candidate relates next.
     next_argument: usize,
     /// The diagnostic the first pass already met, as a reusable recipe so a
@@ -396,8 +396,8 @@ pub(super) struct SuspendedCandidate {
 /// A suspended candidate resumed, its collector back in the transaction
 /// as `session_id`.
 struct ResumedCandidate {
-    session_id: SessionId,
-    checkpoint: SessionCheckpoint,
+    session_id: Option<SessionId>,
+    checkpoint: Option<SessionCheckpoint>,
     next_argument: usize,
     failure: Option<crate::semantic_query::CheckerDiagnosticRecipe>,
     deferred_for_relation_scc: bool,
@@ -527,7 +527,8 @@ impl CallWalk {
             WalkStage::Candidates(walk) => walk
                 .suspended
                 .as_ref()
-                .map(|(candidate, _)| candidate.session.collected_candidates_for_tests()),
+                .and_then(|(candidate, _)| candidate.session.as_ref())
+                .map(|session| session.collected_candidates_for_tests()),
             _ => None,
         }
     }
@@ -1893,9 +1894,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// transaction abandoned, as a rejected candidate's does.
     pub(super) fn release_call_walk(&self, walk: CallWalk) {
         if let WalkStage::Candidates(candidates) = walk.stage {
-            if let Some((suspended, _)) = candidates.suspended {
-                let id = suspended.session.id;
-                self.restore_suspended_session(suspended.session);
+            if let Some(session) = candidates
+                .suspended
+                .and_then(|(suspended, _)| suspended.session)
+            {
+                let id = session.id;
+                self.restore_suspended_session(session);
                 self.abandon_session(id);
             }
         }
@@ -3350,8 +3354,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             generic_function_arguments,
             pending,
         } = *suspended;
-        let session_id = session.id;
-        self.restore_suspended_session(session);
+        let session_id = session.map(|session| {
+            let id = session.id;
+            self.restore_suspended_session(session);
+            id
+        });
         (
             prologue,
             arguments,
@@ -3454,7 +3461,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 } = resume;
                 (
                     session_id,
-                    Some(checkpoint),
+                    checkpoint,
                     Some((
                         next_argument,
                         deferred_for_relation_scc,
@@ -3464,29 +3471,38 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             }
             None => {
-                let setup = InferenceSessionSetup::new(
-                    self.graph().store(),
-                    self.call_inference_infos(&visible_type_params),
-                    VariancePhase::Covariant,
-                    InferencePassKind::CallApplicability,
-                    InferenceCandidatePriority::Argument,
-                    NoInferMask::empty(),
-                    ConstParamPolicy::NonConst,
-                    ContextualInferenceMode::None,
-                );
-                (
-                    self.dispatch_txn
-                        .borrow_mut()
-                        .push_collecting_session(setup),
-                    None,
-                    None,
-                )
+                let infos = self.call_inference_infos(&visible_type_params);
+                if infos.is_empty() {
+                    (None, None, None)
+                } else {
+                    let setup = InferenceSessionSetup::new(
+                        self.graph().store(),
+                        infos,
+                        VariancePhase::Covariant,
+                        InferencePassKind::CallApplicability,
+                        InferenceCandidatePriority::Argument,
+                        NoInferMask::empty(),
+                        ConstParamPolicy::NonConst,
+                        ContextualInferenceMode::None,
+                    );
+                    (
+                        Some(
+                            self.dispatch_txn
+                                .borrow_mut()
+                                .push_collecting_session(setup),
+                        ),
+                        None,
+                        None,
+                    )
+                }
             }
         };
         // A bare type-parameter rest takes its arity from the arguments
         // (`impliedArity`), none when a spread feeds it; inference from
         // the receiver onward reads it.
-        if let (Some((param, rest_start)), None) = (generic_rest, &resume) {
+        if let (Some((param, rest_start)), None, Some(session_id)) =
+            (generic_rest, &resume, session_id)
+        {
             let spread = arguments.iter().any(|argument| argument.indefinite_spread)
                 || key.args.iter().any(|argument| match argument {
                     CallArgKey::Eager { spread, .. }
@@ -3494,17 +3510,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 });
             if !spread {
                 let arity = arguments.len().saturating_sub(rest_start);
-                if let Some(session) = self.dispatch_txn.borrow_mut().active_session_mut() {
-                    session.set_implied_arity(param, arity);
-                }
+                self.dispatch_txn
+                    .borrow_mut()
+                    .relation
+                    .session_mut(session_id)
+                    .expect("fresh call session")
+                    .set_implied_arity(param, arity);
             }
         }
-        let checkpoint = checkpoint.unwrap_or_else(|| {
-            self.dispatch_txn
-                .borrow()
-                .active_session()
-                .expect("fresh call session")
-                .checkpoint()
+        let checkpoint = checkpoint.or_else(|| {
+            session_id.map(|id| {
+                self.dispatch_txn
+                    .borrow()
+                    .relation
+                    .session(id)
+                    .expect("fresh call session")
+                    .checkpoint()
+            })
         });
         let resumed = resume.is_some();
         let (first_argument, mut deferred_for_relation_scc, skipped_generic_functions, mut pending) =
@@ -3554,7 +3576,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             let deposits_before = self.accepted_inference_deposits();
             let source = self.receiver_relation_source(receiver, receiver_param.ty);
-            let step = self.call_receiver_relation(source, receiver_param.ty, receiver, budget);
+            let step = if session_id.is_some() {
+                self.call_receiver_relation(source, receiver_param.ty, receiver, budget)
+            } else {
+                self.call_relation(source, receiver_param.ty, receiver, budget, false, false)
+            };
             if !budget
                 .charge_accepted_deposits(self.accepted_inference_deposits() - deposits_before)
             {
@@ -3584,7 +3610,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
         if let (Some((param, rest_start)), false) = (generic_rest, resumed) {
             let deposits_before = self.accepted_inference_deposits();
-            let step = self.generic_rest_relation(arguments, rest_start, param, budget, true);
+            let step = self.generic_rest_relation(
+                arguments,
+                rest_start,
+                param,
+                budget,
+                session_id.is_some(),
+            );
             if !budget
                 .charge_accepted_deposits(self.accepted_inference_deposits() - deposits_before)
             {
@@ -3665,7 +3697,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     if let Some(request) =
                         self.advance_operand_demand(&mut demand, delivery.take(), depth)
                     {
-                        let session = self.take_suspended_session(session_id);
+                        let session = session_id.map(|id| self.take_suspended_session(id));
                         return CandidateVerdict::Suspended(
                             Box::new(SuspendedCandidate {
                                 prologue,
@@ -3722,19 +3754,30 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // is kept only when that reading relates, and never the
                 // reading whole at a naked type parameter.
                 if let Some(view) = argument.first_pass {
-                    let checkpoint = self.relation_session_checkpoint();
+                    let checkpoint = session_id.and_then(|_| self.relation_session_checkpoint());
                     self.graph().record_call_argument_related();
                     let deposits_before = self.accepted_inference_deposits();
-                    let step = self.call_argument_relation(
-                        view,
-                        target,
-                        argument.freshness_origin,
-                        budget,
-                        argument.literal_mode,
-                        argument.literal_provenance.as_deref(),
-                        &visible_type_params,
-                        Some(argument.node),
-                    );
+                    let step = if session_id.is_some() {
+                        self.call_argument_relation(
+                            view,
+                            target,
+                            argument.freshness_origin,
+                            budget,
+                            argument.literal_mode,
+                            argument.literal_provenance.as_deref(),
+                            &visible_type_params,
+                            Some(argument.node),
+                        )
+                    } else {
+                        self.call_relation(
+                            view,
+                            target,
+                            argument.freshness_origin,
+                            budget,
+                            false,
+                            true,
+                        )
+                    };
                     if !budget.charge_accepted_deposits(
                         self.accepted_inference_deposits() - deposits_before,
                     ) {
@@ -3754,16 +3797,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let (source, freshness_origin, literal_mode) = argument_source(argument, target);
             self.graph().record_call_argument_related();
             let deposits_before = self.accepted_inference_deposits();
-            let step = self.call_argument_relation(
-                source,
-                target,
-                freshness_origin,
-                budget,
-                literal_mode,
-                argument.literal_provenance.as_deref(),
-                &visible_type_params,
-                None,
-            );
+            let step = if session_id.is_some() {
+                self.call_argument_relation(
+                    source,
+                    target,
+                    freshness_origin,
+                    budget,
+                    literal_mode,
+                    argument.literal_provenance.as_deref(),
+                    &visible_type_params,
+                    None,
+                )
+            } else {
+                // Pure applicability still hides any enclosing call's collector.
+                self.call_relation(
+                    argument.node,
+                    target,
+                    argument.freshness_origin,
+                    budget,
+                    false,
+                    true,
+                )
+            };
             if !budget
                 .charge_accepted_deposits(self.accepted_inference_deposits() - deposits_before)
             {
@@ -3837,6 +3892,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // what the applicability check below relates in their place.
         let mut propagated_arguments: Vec<(usize, SemanticNodeId)> = Vec::new();
         for (index, signature, target) in generic_function_arguments {
+            let session_id =
+                session_id.expect("generic function arguments require inferable parameters");
             let argument = &arguments[index];
             let return_structure = match &candidate.return_carrier {
                 SignatureReturnCarrier::Declared(declared) => Some(*declared),
@@ -3897,7 +3954,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             match step {
                 RelationStep::Assignable { .. } => {}
                 RelationStep::NotAssignable => {
-                    return self.reject_call_candidate(session_id, &checkpoint)
+                    return self.reject_call_candidate(Some(session_id), &checkpoint)
                 }
                 RelationStep::Assumed(evidence)
                     if assumption_is_relation_only(&evidence, own_return_function.as_ref()) =>
@@ -3924,42 +3981,46 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .iter()
             .map(|decl| (decl.param, decl.constraint))
             .collect();
-        let inputs = {
-            let txn = self.dispatch_txn.borrow();
-            let Some(session) = txn.relation.session(session_id) else {
+        let (mut fixed, mut uninferred_positions) = if let Some(session_id) = session_id {
+            let inputs = {
+                let txn = self.dispatch_txn.borrow();
+                let Some(session) = txn.relation.session(session_id) else {
+                    return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
+                };
+                session.fixation_inputs()
+            };
+            let Some(inputs) = inputs else {
+                self.abandon_session(session_id);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
-            session.fixation_inputs()
-        };
-        let Some(inputs) = inputs else {
-            self.abandon_session(session_id);
-            return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
-        };
-        let fixation_params: Vec<_> = raw_type_params
-            .iter()
-            .map(crate::semantic_query::TypeParamDecl::copy)
-            .map(|mut decl| {
-                decl.constraint = decl
-                    .constraint
-                    .map(|node| self.substitute_canonical(node, contextual_substitution));
-                decl.default = decl
-                    .default
-                    .map(|node| self.substitute_canonical(node, contextual_substitution));
-                decl
-            })
-            .collect();
-        let fixation = self.fix_inference_inputs(inputs, &fixation_params, |this, from, to| {
-            decided_call_relation(
-                this.call_relation(from, to, from, budget, false, false),
-                own_return_function.as_ref(),
-            )
-        });
-        let (mut fixed, mut uninferred_positions) = match fixation {
-            Ok(fixation) => fixation,
-            Err(failure) => {
-                self.abandon_session(session_id);
-                return CandidateVerdict::Degraded(failure);
+            let fixation_params: Vec<_> = raw_type_params
+                .iter()
+                .map(crate::semantic_query::TypeParamDecl::copy)
+                .map(|mut decl| {
+                    decl.constraint = decl
+                        .constraint
+                        .map(|node| self.substitute_canonical(node, contextual_substitution));
+                    decl.default = decl
+                        .default
+                        .map(|node| self.substitute_canonical(node, contextual_substitution));
+                    decl
+                })
+                .collect();
+            let fixation = self.fix_inference_inputs(inputs, &fixation_params, |this, from, to| {
+                decided_call_relation(
+                    this.call_relation(from, to, from, budget, false, false),
+                    own_return_function.as_ref(),
+                )
+            });
+            match fixation {
+                Ok(fixation) => fixation,
+                Err(failure) => {
+                    self.abandon_session(session_id);
+                    return CandidateVerdict::Degraded(failure);
+                }
             }
+        } else {
+            (Vec::new(), Vec::new())
         };
         // A callback parameter has already observed these types. Later
         // arguments and error recovery cannot infer them again.
@@ -3993,16 +4054,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 })
             })
             .collect();
-        let bindings = {
-            let mut txn = self.dispatch_txn.borrow_mut();
-            let Some(session) = txn.relation.session_mut(session_id) else {
+        let bindings = if let Some(session_id) = session_id {
+            let bindings = {
+                let mut txn = self.dispatch_txn.borrow_mut();
+                let Some(session) = txn.relation.session_mut(session_id) else {
+                    return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
+                };
+                session.stage_fixation_bindings(fixed)
+            };
+            let Some(bindings) = bindings else {
+                self.abandon_session(session_id);
                 return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
             };
-            session.stage_fixation_bindings(fixed)
-        };
-        let Some(bindings) = bindings else {
-            self.abandon_session(session_id);
-            return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
+            bindings
+        } else {
+            Arc::from([])
         };
 
         let mut substitution = key.context.substitution.bindings().to_vec();
@@ -4762,7 +4828,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             },
             concrete_seeds,
             holds,
-            (!deferred_for_relation_scc).then_some(session_id),
+            (!deferred_for_relation_scc).then_some(session_id).flatten(),
             deferred_for_relation_scc,
         ))
     }
@@ -4792,22 +4858,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             });
         }
         let applicability = self.dispatch_txn.borrow().call.applicability;
-        let mut key = self.relate_key_for_kind(source, target, applicability);
-        key.source_freshness = self.freshness_for_source_node(freshness_origin);
-        key.policy.excess_property_check =
-            excess_property_check && key.source_freshness == FreshnessKey::Fresh;
+        let relate = || {
+            if !binding_enabled {
+                if let Some(step) =
+                    self.relation_pair_literal_answer(source, target, applicability, false)
+                {
+                    return step;
+                }
+            }
+            let mut key = self.relate_key_for_kind(source, target, applicability);
+            key.source_freshness = self.freshness_for_source_node(freshness_origin);
+            key.policy.excess_property_check =
+                excess_property_check && key.source_freshness == FreshnessKey::Fresh;
+            if binding_enabled {
+                // The member relation a non-blocking consumer advances, driven
+                // in place under the candidate's open session.
+                self.drive_relation_in_place(super::helper_continuation::RelationRead::member(
+                    key,
+                    super::dispatch_txn::InferenceOccurrence::ARGUMENT_COVARIANT,
+                ))
+            } else {
+                self.execute_relate(key)
+            }
+        };
         let step = if binding_enabled {
-            // The member relation a non-blocking consumer advances, driven
-            // in place under the candidate's open session.
-            self.drive_relation_in_place(super::helper_continuation::RelationRead::member(
-                key,
-                super::dispatch_txn::InferenceOccurrence::ARGUMENT_COVARIANT,
-            ))
+            relate()
         } else {
-            self.dispatch_txn.borrow_mut().begin_binding_disabled();
-            let step = self.execute_relate(key);
-            self.dispatch_txn.borrow_mut().end_binding_disabled();
-            step
+            self.with_binding_disabled(relate)
         };
         // An undecided relation outcome the call consumed: the flow
         // evaluator's per-call snapshot reads this to refuse claiming a
@@ -5144,7 +5221,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .collect(),
         );
         let inferred = self
-            .fresh_widened_substitution_outside_top_level(session_id, &inferred, return_structure)?
+            .fresh_widened_substitution_outside_top_level(
+                Some(session_id),
+                &inferred,
+                return_structure,
+            )?
             .unwrap_or(inferred);
         let contextual = self.substitute_canonical(target, &inferred);
         let contextual = match self.shared_signature_nodes(contextual, SignatureKind::Call) {
@@ -5368,9 +5449,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     fn reject_call_candidate(
         &self,
-        session_id: SessionId,
-        checkpoint: &SessionCheckpoint,
+        session_id: Option<SessionId>,
+        checkpoint: &Option<SessionCheckpoint>,
     ) -> CandidateVerdict {
+        let Some(session_id) = session_id else {
+            return CandidateVerdict::Mismatch;
+        };
+        let checkpoint = checkpoint
+            .as_ref()
+            .expect("a collecting candidate has a checkpoint");
         let mut txn = self.dispatch_txn.borrow_mut();
         if let Some(session) = txn.relation.session_mut(session_id) {
             session.rollback_to(checkpoint);
@@ -5387,7 +5474,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.restore_collecting_session(&mut Some(session));
     }
 
-    pub fn abandon_session(&self, session_id: SessionId) {
+    pub fn abandon_session(&self, session_id: impl Into<Option<SessionId>>) {
+        let Some(session_id) = session_id.into() else {
+            return;
+        };
         if let Some(session) = self
             .dispatch_txn
             .borrow_mut()
@@ -5436,10 +5526,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// which deposits as authored and never records one.
     fn binding_is_fresh_literal_deposit(
         &self,
-        session_id: SessionId,
+        session_id: Option<SessionId>,
         param: SemanticNodeId,
         bound: SemanticNodeId,
     ) -> bool {
+        let Some(session_id) = session_id else {
+            return false;
+        };
         self.dispatch_txn
             .borrow()
             .relation
@@ -5669,11 +5762,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// ([`BinderReach::Incomplete`]) leaves the call undecided.
     fn collect_union_top_level_fresh_bounds(
         &self,
-        session_id: SessionId,
+        session_id: Option<SessionId>,
         structure: SemanticNodeId,
         substitution: &CanonicalTypeSubstitution,
         fresh_literal_returns: &mut Vec<SemanticNodeId>,
     ) -> Result<(), ResolveCallFailure> {
+        if session_id.is_none() {
+            return Ok(());
+        }
         let graph = self.graph();
         for (param, bound) in substitution.bindings() {
             // A bound is one candidate, or several combined into a union
@@ -5781,10 +5877,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// [`ResolveCallFailure::Undecidable`] instead.
     fn fresh_widened_substitution_outside_top_level(
         &self,
-        session_id: SessionId,
+        session_id: Option<SessionId>,
         substitution: &CanonicalTypeSubstitution,
         return_structure: Option<SemanticNodeId>,
     ) -> Result<Option<CanonicalTypeSubstitution>, ResolveCallFailure> {
+        if session_id.is_none() {
+            return Ok(None);
+        }
         let graph = self.graph();
         let mut any_widened = false;
         let mut widened_bindings: Vec<(SemanticNodeId, SemanticNodeId)> =

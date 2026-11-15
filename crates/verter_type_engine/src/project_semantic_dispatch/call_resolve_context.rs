@@ -232,27 +232,29 @@ fn combined_contexts_in(contexts: &mut Vec<SemanticNodeId>) -> Arc<[SemanticNode
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
-    /// The inference setup of a call candidate's type parameters, each with
-    /// its const policy.
-    pub(super) fn call_inference_infos(
-        &self,
-        type_parameters: &[TypeParamDecl],
-    ) -> Arc<[InferenceInfoSetup]> {
-        type_parameters
-            .iter()
-            .map(|decl| {
-                InferenceInfoSetup::for_call(
-                    decl.param,
-                    Arc::<str>::from(&decl.name),
-                    if decl.is_const {
-                        ConstParamPolicy::Const
-                    } else {
-                        ConstParamPolicy::NonConst
-                    },
-                    decl.constraint,
-                )
-            })
-            .collect()
+    construction_ordinal_seam! {
+        /// The inference setup of a call candidate's type parameters, each with
+        /// its const policy.
+        fn call_inference_infos(
+            &self,
+            type_parameters: &[TypeParamDecl],
+        ) -> Arc<[InferenceInfoSetup]> {
+            type_parameters
+                .iter()
+                .map(|decl| {
+                    InferenceInfoSetup::for_call(
+                        decl.param,
+                        Arc::<str>::from(&decl.name),
+                        if decl.is_const {
+                            ConstParamPolicy::Const
+                        } else {
+                            ConstParamPolicy::NonConst
+                        },
+                        decl.constraint,
+                    )
+                })
+                .collect()
+        }
     }
 
     /// The type the bare literal argument `source` has against the

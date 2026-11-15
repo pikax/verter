@@ -1450,7 +1450,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         let fixed = CanonicalTypeSubstitution::new(self.graph().store(), fixed);
         let fixed = self
-            .fresh_widened_substitution_outside_top_level(id, &fixed, None)?
+            .fresh_widened_substitution_outside_top_level(Some(id), &fixed, None)?
             .unwrap_or(fixed);
         let inferred_params: FxHashSet<_> = inferred.iter().map(|(param, _)| *param).collect();
         let inference_mapper = CanonicalTypeSubstitution::new(
