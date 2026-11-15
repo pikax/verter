@@ -4530,12 +4530,13 @@ fn fanout_reason_survives_native_and_wire_publication() {
     for i in 0..301 {
         source.push_str(&format!("interface H{i} {{ p{i}?: string }}\n"));
     }
-    let members = (0..301)
-        .map(|i| format!("m{i}?: H{i}"))
+    // Keep the real registry fanout boundary while publishing only one prop.
+    let helpers = (0..301)
+        .map(|i| format!("H{i}"))
         .collect::<Vec<_>>()
-        .join("; ");
+        .join(" | ");
     source.push_str(&format!(
-        "interface Props {{ {members} }}\ndefineProps<Props>()\n</script>"
+        "interface Props {{ value?: {helpers} }}\ndefineProps<Props>()\n</script>"
     ));
     for (canonical, source) in [
         ("/Fanout.vue", source),
@@ -4556,6 +4557,17 @@ fn fanout_reason_survives_native_and_wire_publication() {
     }
     let control = wire_payload(&session, "/Control.vue");
     assert_eq!(control.result_completeness, FfiResultCompleteness::Complete);
+    assert_eq!(
+        serde_json::to_value(&control).unwrap()["resultCompleteness"],
+        serde_json::json!({ "kind": "complete" }),
+    );
+    assert_eq!(
+        proto_completeness(&control),
+        (
+            verter_protocol::verter::v1::ResultCompletenessKind::Complete as i32,
+            vec![]
+        ),
+    );
     for _ in 0..2 {
         let ffi = wire_payload(&session, "/Fanout.vue");
         assert_eq!(
@@ -4565,7 +4577,7 @@ fn fanout_reason_survives_native_and_wire_publication() {
             }
         );
         assert_eq!(
-            serde_json::to_value(&ffi.result_completeness).unwrap()["reasons"],
+            serde_json::to_value(&ffi).unwrap()["resultCompleteness"]["reasons"],
             serde_json::json!(["fanoutLimit"])
         );
         let body = verter_protocol::component_meta::component_meta_payload(&ffi)
@@ -4574,8 +4586,8 @@ fn fanout_reason_survives_native_and_wire_publication() {
         assert_eq!(body.facts.unwrap().delivery.unwrap().causes, [21]);
         assert_eq!(
             body.result_completeness.unwrap().partial_reasons,
-            [21, 7],
-            "accepted compute causes precede the independent lower-bound fact summary"
+            [21],
+            "the measured fanout refusal is not extended with independent fact approximation"
         );
     }
 }

@@ -337,6 +337,73 @@ fn fixed_view_promotes_both_caches_when_token_unchanged() {
     );
 }
 
+#[test]
+fn failed_member_publication_refuses_payload_cache_and_second_read_recomputes() {
+    use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
+    use verter_type_expr::facts::SemanticSourceFailure;
+
+    let project = make_project();
+    let ids = build_components(&project, 1);
+    let canonical = ids[0].as_str();
+    let session = project.open_session_batch().expect("batch session");
+    let host = project.host();
+    crate::meta_resolve::projectors::OUTPUT_PUBLICATION_FAILURE.with(|failure| {
+        failure.set(Some(
+            SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+        ));
+    });
+    let mut measured = None;
+    let first = session
+        .get_component_meta_payload(canonical, |output| {
+            measured = Some(output.completeness());
+            let lanes = output.into_parts().2.into_lanes();
+            assert!(matches!(
+                lanes.props[0].publication(),
+                verter_type_expr::PublicationResult::Failed { .. }
+            ));
+            assert!(lanes.props[0].materialized_type().is_none());
+            b"failed member".to_vec()
+        })
+        .expect("failed member remains a localized publication")
+        .expect("component exists");
+    assert_eq!(first, b"failed member");
+    assert!(
+        host.derived_raw_cache()
+            .get(canonical)
+            .and_then(|entry| entry.value().cached_meta_payload.clone())
+            .is_none(),
+        "a payload carrying a failed member must not warm the payload cache",
+    );
+    assert_eq!(
+        measured,
+        Some(ResultCompleteness::partial(
+            PartialReasonSet::MISSING_DEPENDENCY
+        )),
+    );
+
+    let mut recomputed = false;
+    let second = session
+        .get_component_meta_payload(canonical, |output| {
+            recomputed = true;
+            assert_eq!(output.completeness(), ResultCompleteness::Complete);
+            encode_counts(output)
+        })
+        .expect("healthy second output")
+        .expect("component exists");
+    assert!(
+        recomputed,
+        "a failed publication cannot replay from the payload cache"
+    );
+    assert_eq!(second, b"props=2 events=1");
+    assert!(
+        host.derived_raw_cache()
+            .get(canonical)
+            .and_then(|entry| entry.value().cached_meta_payload.clone())
+            .is_some(),
+        "a complete recomputation still admits a healthy payload",
+    );
+}
+
 /// (4) CORRECTNESS: batch-payload bytes == scalar-payload bytes for the
 /// same components. The fixed view changes only HOW reads are served (one
 /// capture vs per-item), never the OUTPUTS.

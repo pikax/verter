@@ -457,6 +457,7 @@
         ],
         "retainedAssocItems": [
           "PartialReasonSet::CONNECTED_MEMORY_LIMIT",
+          "PartialReasonSet::MISSING_DEPENDENCY",
           "PartialReasonSet::PROPAGATED",
           "PartialReasonSet::SEMANTIC_QUERY_FAULT",
           "PartialReasonSet::UNDECIDED_CONDITIONAL",
