@@ -15675,8 +15675,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> KeyOfCarrierStep {
         match std::mem::replace(&mut read.stage, KeyOfCarrierStage::Begun) {
             KeyOfCarrierStage::Transit(chain) => {
-                self.abandon_source_carrier_read(*chain); // PLANTED-MUTATION
-                KeyOfCarrierStep::Done(self.key_of_through_carrier(read.base, read.context))
+                let step = self.resume_source_carrier_read(*chain, deliver);
+                self.key_of_carrier_transit_step(read, step)
             }
             KeyOfCarrierStage::SourceKeys => {
                 let keys = self.complete_key_of_read(deliver()).and_then(|keys| {
