@@ -54,6 +54,7 @@ import {
   sessionAnswers,
   sessionRecordProblems,
   summarizeSessions,
+  summedRequestMs,
 } from "./session-analyze.mjs";
 import {
   allSessions,
@@ -2020,6 +2021,7 @@ function verterSessionRecord(session, { arm = "verter", answers = {} } = {}) {
         concurrent: isConcurrent(step),
         threads: isConcurrent(step) ? step.requests.length : 1,
         wallMicros: 100,
+        summedRequestMicros: step.requests.length * 50,
         requests: step.requests.map((r, k) => ({
           file: r.file,
           alias: r.alias,
@@ -2249,7 +2251,14 @@ test("the session catalog is well-formed and each workload sits in its tier", ()
     ["leaf.ts", "mid.ts", "unrelated.ts"],
   );
   assert.ok(sessions.find((x) => x.family === "editor").steps.some((x) => x.kind === "meta"));
-  assert.ok(sessions.find((x) => x.family === "concurrent").steps.every((x) => isConcurrent(x)));
+  const concurrent = sessions.find((x) => x.family === "concurrent");
+  const [prepare, ...demands] = concurrent.steps;
+  assert.ok(!isConcurrent(prepare));
+  assert.deepEqual(prepare.requests.map((r) => r.file), tscFiles(concurrent).slice(1));
+  assert.ok(prepare.requests.every((r) => r.alias === "__BenchInit" && r.expect === "0"));
+  assert.ok(tscFiles(concurrent).every((f) => concurrent.files[f].includes("type __BenchInit = 0;")));
+  assert.equal(demands.length, 2);
+  assert.ok(demands.every(isConcurrent));
   // A malformed construction is refused.
   const broken = structuredClone(INCREMENTAL);
   broken.steps[1].text = broken.files["leaf.ts"];
@@ -2264,6 +2273,9 @@ test("a session run validates; tsc contradicting a constructed answer fails it, 
   assert.deepEqual(validate(run).failures, []);
   const cell = run.summary.sessions.cells[0];
   assert.equal(cell.arms.verter.class, "matched");
+  assert.equal(cell.arms.verter.metrics.steps[0].summedRequestMs.median, 0.05);
+  const report = renderMarkdown({ ...run, validation: { ok: true, failures: [], warnings: [] } });
+  assert.ok(report.includes("Verter summed request ms"));
   // Every edit and every re-request after it is compared.
   assert.deepEqual(
     cell.comparison.map((c) => `${c.step}:${c.kind}`),
@@ -2293,6 +2305,20 @@ test("a session run validates; tsc contradicting a constructed answer fails it, 
   assert.equal(verter.demands.find((d) => d.step === 2).class, "mismatch");
   // The stale answer after the leaf edit is never compared.
   assert.ok(!wrongVerter.summary.sessions.cells[0].comparison.some((c) => c.step === 2));
+});
+
+test("concurrent request totals preserve overlapping time and accept older records", () => {
+  const session = allSessions().find((s) => s.id === "concurrent-demands");
+  const record = verterSessionRecord(session);
+  const step = record.steps[1];
+  assert.equal(summedRequestMs("verter", step), 0.4);
+  assert.equal(step.wallMicros / 1000, 0.1);
+  assert.deepEqual(sessionRecordProblems(record, session, { tool: "verter" }), []);
+  step.summedRequestMicros = 1;
+  assert.ok(sessionRecordProblems(record, session, { tool: "verter" }).some((p) => /summed request time/.test(p)));
+  delete step.summedRequestMicros;
+  assert.equal(summedRequestMs("verter", step), 0.4);
+  assert.deepEqual(sessionRecordProblems(record, session, { tool: "verter" }), []);
 });
 
 test("tsc's incremental arm must reuse the API program: each edit names its file and advances the snapshot", () => {

@@ -280,8 +280,8 @@ export function renderMarkdown(run) {
       "",
     );
     push(
-      "| session | step | kind | demand | Verter | tsc | Verter ms | tsc ms | verdict |",
-      "|---|---:|---|---|---|---|---:|---:|---|",
+      "| session | step | kind | demand | Verter | tsc | Verter wall ms | Verter summed request ms | tsc ms | verdict |",
+      "|---|---:|---|---|---|---|---:|---:|---:|---|",
     );
     for (const c of sessions) {
       const v = c.arms.verter;
@@ -294,7 +294,7 @@ export function renderMarkdown(run) {
         const cls = (ds) => [...new Set(ds.map((d) => d.class))].join(", ") || "—";
         const cmp = c.comparison.find((x) => x.step === step.step);
         push(
-          `| ${c.key} | ${step.step} | ${step.kind} | ${esc(names)} | ${step.kind === "edit" ? "—" : cls(vd)} | ${step.kind === "edit" ? "—" : step.kind === "meta" ? "n/a" : cls(td)} | ${fmtMs(v?.metrics.steps[step.step]?.ms)} | ${fmtMs(t?.metrics.steps[step.step]?.ms)} | ${cmp ? fmtRatio(cmp) : "—"} |`,
+          `| ${c.key} | ${step.step} | ${step.kind} | ${esc(names)} | ${step.kind === "edit" ? "—" : cls(vd)} | ${step.kind === "edit" ? "—" : step.kind === "meta" ? "n/a" : cls(td)} | ${fmtMs(v?.metrics.steps[step.step]?.ms)} | ${fmtMs(v?.metrics.steps[step.step]?.summedRequestMs)} | ${fmtMs(t?.metrics.steps[step.step]?.ms)} | ${cmp ? fmtRatio(cmp) : "—"} |`,
         );
       }
       const findings = (v?.demands ?? []).filter((d) => d.class !== "matched");

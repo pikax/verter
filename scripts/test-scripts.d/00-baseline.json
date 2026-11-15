@@ -81,7 +81,7 @@
     {
       "runner": "node-test",
       "file": "scripts/benchmark/semantic-perf/semantic-perf.test.mjs",
-      "ci": false
+      "ci": true
     },
     {
       "runner": "node-test",

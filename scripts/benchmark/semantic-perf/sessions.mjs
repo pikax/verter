@@ -169,7 +169,7 @@ const CONCURRENT_MEMBERS = 100;
 function concurrentFile(i) {
   const m = CONCURRENT_MEMBERS;
   return (
-    (i === 0 ? `type ${INIT_ALIAS} = 0;\n` : "") +
+    `type ${INIT_ALIAS} = 0;\n` +
     `type S = ${union(range(m).map((j) => `{ p${j}: ${j} }`))};\n` +
     `type T = ${union(range(m).map((j) => `{ p${j}: number }`))};\n` +
     `type __Probe = [S] extends [T] ? "c${i}-yes" : "c${i}-no";\n` +
@@ -189,10 +189,17 @@ function concurrent() {
   return {
     id: "concurrent-demands",
     family: "concurrent",
-    note: `${CONCURRENT_FILES} demands in ${CONCURRENT_FILES} files issued at once (a ${CONCURRENT_MEMBERS}-member union relation each), cold, then again`,
+    note: `prepare ${CONCURRENT_FILES} files through trivial demands, then issue ${CONCURRENT_FILES} demands at once (a ${CONCURRENT_MEMBERS}-member union relation each), cold, then again`,
     files,
     initFile: "c0.ts",
     steps: [
+      // File readiness uses the same host request path as every demand.
+      // The init request already prepared c0; separate the other cold parses
+      // from the concurrent relation timers without resolving the probes.
+      {
+        kind: "demand",
+        requests: requests.slice(1).map(({ file }) => ({ file, alias: INIT_ALIAS, expect: "0" })),
+      },
       { kind: "demand", concurrent: true, requests },
       { kind: "demand", concurrent: true, requests },
     ],

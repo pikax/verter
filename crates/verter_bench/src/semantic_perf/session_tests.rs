@@ -33,23 +33,30 @@ fn job(dir: &Path) -> SessionJob {
         "export type Init = 0; export type Answer = 42;",
     )
     .unwrap();
+    std::fs::write(
+        dir.join("other.ts"),
+        "export type Init = 0; export type Answer = 42;",
+    )
+    .unwrap();
     SessionJob {
         schema: SESSION_JOB_SCHEMA,
         dir: dir.into(),
         tsconfig: "tsconfig.json".into(),
         lib: "lib.d.ts".into(),
         lib_mode: LibMode::RootFile,
-        files: vec!["input.ts".into()],
+        files: vec!["input.ts".into(), "other.ts".into()],
         init_file: "input.ts".into(),
         init_alias: "Init".into(),
         observability: false,
         steps: (0..4)
-            .map(|_| Step::Demand {
-                concurrent: false,
-                requests: vec![Demand {
-                    file: "input.ts".into(),
-                    alias: "Answer".into(),
-                }],
+            .map(|index| Step::Demand {
+                concurrent: index > 0,
+                requests: ["input.ts", "other.ts"]
+                    .map(|file| Demand {
+                        file: file.into(),
+                        alias: if index == 0 { "Init" } else { "Answer" }.into(),
+                    })
+                    .into(),
             })
             .collect(),
     }
@@ -65,9 +72,16 @@ fn complete_session_journal_contains_each_real_answer_in_order() {
     // caches its answer, which repeats of the same demand reuse.
     assert_eq!(result.step_retention.len(), 4);
     assert!(result.step_retention[0].semantic_memo_candidates > 0);
+    // The explicit trivial demands make both files ready before the
+    // concurrent answer step; that step publishes no new file artifact.
+    assert!(result.step_retention[0].live_artifacts > result.init_retention.live_artifacts);
+    assert_eq!(
+        result.step_retention[1].live_artifacts,
+        result.step_retention[0].live_artifacts
+    );
     assert_eq!(
         result.step_retention[3].semantic_memo_candidates,
-        result.step_retention[0].semantic_memo_candidates
+        result.step_retention[1].semantic_memo_candidates
     );
     let journal = std::fs::read_to_string(dir.path().join("session.json.steps.jsonl")).unwrap();
     let entries: Vec<serde_json::Value> = journal
@@ -78,8 +92,22 @@ fn complete_session_journal_contains_each_real_answer_in_order() {
     assert_eq!(entries.len(), 5);
     for (index, entry) in entries[1..].iter().enumerate() {
         assert_eq!(entry["index"], index);
-        assert_eq!(entry["step"]["requests"][0]["observation"]["text"], "42");
+        assert_eq!(
+            entry["step"]["requests"][0]["observation"]["text"],
+            if index == 0 { "0" } else { "42" }
+        );
         assert_eq!(entry["step"]["requests"][0]["outcome"]["kind"], "value");
+        assert_eq!(
+            entry["step"]["summedRequestMicros"].as_u64(),
+            Some(
+                entry["step"]["requests"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["micros"].as_u64().unwrap())
+                    .sum()
+            )
+        );
         assert_eq!(
             entry["retention"]["semanticMemoCandidates"],
             result.step_retention[index].semantic_memo_candidates
@@ -174,7 +202,10 @@ fn memory_kill_keeps_two_answers_and_the_running_step_phase() {
     assert_eq!(entries.len(), 3);
     for (index, entry) in entries[1..].iter().enumerate() {
         assert_eq!(entry["index"], index);
-        assert_eq!(entry["step"]["requests"][0]["observation"]["text"], "42");
+        assert_eq!(
+            entry["step"]["requests"][0]["observation"]["text"],
+            if index == 0 { "0" } else { "42" }
+        );
         assert!(entry["step"]["wallMicros"].as_u64().is_some());
     }
     let phase: serde_json::Value = serde_json::from_str(

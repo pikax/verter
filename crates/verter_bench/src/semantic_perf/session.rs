@@ -21,6 +21,11 @@
 //! observation (both tools observe the same way). Completed steps are
 //! flushed to a journal; the final record adds statistics, and the phase
 //! marker names the step running.
+//!
+//! Concurrent workloads prepare their files with earlier trivial demands.
+//! Thread startup precedes the concurrent wall timer, which runs from the
+//! release barrier through the last join. Demand records also retain the
+//! sum of the individual request timers beside that wall time.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -127,8 +132,11 @@ pub enum StepRecord {
         concurrent: bool,
         /// Threads the step ran its requests on (1 when sequential).
         threads: usize,
-        /// The whole step, first request issued to last answered.
+        /// Barrier release through the last join for concurrent requests;
+        /// summed request time for sequential requests. Excludes startup.
         wall_micros: u64,
+        /// Sum of the individual request timers, including overlapping time.
+        summed_request_micros: u64,
         requests: Vec<DemandRecord>,
     },
     Edit {
@@ -231,34 +239,44 @@ fn demand_step(host: &Arc<VerterHost>, requests: &[Demand], concurrent: bool) ->
             concurrent: false,
             threads: 1,
             wall_micros,
+            summed_request_micros: wall_micros,
             requests,
         };
     }
     // Every request is issued before any is answered: one thread each,
     // released together.
-    let barrier = std::sync::Barrier::new(requests.len());
-    let start = Instant::now();
-    let answered: Vec<_> = std::thread::scope(|scope| {
+    let ready = std::sync::Barrier::new(requests.len() + 1);
+    let release = std::sync::Barrier::new(requests.len() + 1);
+    let (wall_micros, answered) = std::thread::scope(|scope| {
         let handles: Vec<_> = requests
             .iter()
             .map(|demand| {
-                let barrier = &barrier;
+                let ready = &ready;
+                let release = &release;
                 scope.spawn(move || {
-                    barrier.wait();
+                    ready.wait();
+                    release.wait();
                     request(host, &canonical(&demand.file), &demand.alias, false)
                 })
             })
             .collect();
-        handles
+        // All workers have started before the measured release. A separate
+        // barrier keeps them parked while the driver starts the timer.
+        ready.wait();
+        let start = Instant::now();
+        release.wait();
+        let answered: Vec<_> = handles
             .into_iter()
             .map(|handle| handle.join().expect("a demand thread completes"))
-            .collect()
+            .collect();
+        (micros(start), answered)
     });
-    let wall_micros = micros(start);
+    let summed_request_micros = answered.iter().map(|(record, _)| record.micros).sum();
     StepRecord::Demand {
         concurrent: true,
         threads: requests.len(),
         wall_micros,
+        summed_request_micros,
         requests: requests
             .iter()
             .zip(answered)
