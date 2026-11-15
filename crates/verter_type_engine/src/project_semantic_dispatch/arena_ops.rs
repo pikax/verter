@@ -50,6 +50,10 @@ impl<'a, M: verter_audit::observe::ObserveExec> ArenaOps<'a, M> {
     ) -> SemanticNodeId {
         self.graph.intern_preserving_scope(origin, data)
     }
+    /// Count a call whose value computation the flow evaluator begins.
+    pub(super) fn record_call_value_run(&self) {
+        self.graph.record_call_value_run()
+    }
 }
 
 impl<M: verter_audit::observe::ObserveExec> crate::semantic_query::NodeRead for ArenaOps<'_, M> {
