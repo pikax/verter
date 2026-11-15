@@ -660,7 +660,7 @@ export function callGenericThenOverloadedTwo() { return genericThenOverloaded("a
 /// right.typeParameters`), whichever arm the union lists first:
 /// `<T>(x: string & T) => number | T` and `<T>(x: string & T, y: number) =>
 /// boolean | T`. A call with `"a"` is accepted and returns `number | "a"`, a
-/// call with `"a", 1` returns `boolean | "a"` (TypeScript 7.0.2 under
+/// call with `"a", 1` returns `boolean | "a"` (the pinned TypeScript checker under
 /// `--strict`, the one setting measured).
 #[test]
 fn an_overloaded_plain_arm_beside_a_generic_arm_synthesizes_signatures_in_the_generic_arms_binders()

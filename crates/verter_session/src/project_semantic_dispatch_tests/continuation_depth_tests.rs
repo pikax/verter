@@ -1795,7 +1795,7 @@ fn heritage_chain_signatures(depth: usize) -> (Vec<String>, u64) {
 /// bodies and the 400 own surfaces of the declarations that extend one.
 ///
 /// The order is TypeScript's `resolveObjectTypeMembers`, own signatures
-/// before the bases' (measured on TypeScript 7.0.2 in
+/// before the bases' (measured on the pinned TypeScript checker in
 /// `heritage_signature_tests`).
 #[test]
 fn a_callable_inheriting_through_400_declarations_lists_its_signatures_on_a_small_stack() {
