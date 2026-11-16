@@ -57,19 +57,12 @@ export interface TupleType {
   kind: "tuple";
   elements: TypeDescriptor[];
   /**
-   * Per-element labels for labelled tuple types. Length aligns with `elements`
-   * (so `labels[i]` is the label for `elements[i]`). A `null` entry means the
-   * element at that position is anonymous in the source. When `labels` is
-   * absent, the entire tuple is anonymous (equivalent to all-`null`).
-   *
-   * Example: TS `[id: number, name?: string]` lowers to
-   * `{ kind: "tuple", elements: [number, string], labels: ["id", "name"] }`.
-   *
-   * Renderers walk `labels` to produce labelled output `[id: number, name?: string]`
-   * rather than `[{ label: "id"; }, { label?: "name"; }]` (the previous bug)
-   * or the anonymous `[number, string]` (the legacy lossy form).
+   * Per-element modifiers aligned with `elements`. An empty entry denotes a
+   * plain element; absence means every element is plain. Rest elements retain
+   * their complete type (for example `boolean[]`), separately from `rest`.
    */
-  labels?: (string | null)[];
+  modifiers?: { label?: string; optional?: true; rest?: true }[];
+  readonly?: true;
 }
 
 // ── Object ───────────────────────────────────────────────────────
@@ -266,8 +259,20 @@ export function array(element: TypeDescriptor): ArrayType {
   return { kind: "array", element };
 }
 
-export function tuple(elements: TypeDescriptor[]): TupleType {
-  return { kind: "tuple", elements };
+/** Build a tuple, omitting modifiers when every element is plain. */
+export function tuple(
+  elements: TypeDescriptor[],
+  modifiers?: TupleType["modifiers"],
+  readonly = false,
+): TupleType {
+  return {
+    kind: "tuple",
+    elements,
+    ...(modifiers?.some((element) => element.label !== undefined || element.optional || element.rest)
+      ? { modifiers }
+      : {}),
+    ...(readonly ? { readonly: true as const } : {}),
+  };
 }
 
 export function object(

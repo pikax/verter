@@ -5,6 +5,7 @@
 import type { ComponentMeta, PropMeta, EventMeta } from "../types.js";
 import type { TypeDescriptor } from "@verter/type-ir";
 import { intrinsicDisplayName } from "@verter/type-ir";
+import { tupleDescriptorToString } from "../type-expr-bridge.js";
 
 export interface StorybookArgType {
   name?: string;
@@ -170,12 +171,7 @@ function typeToSummary(type: TypeDescriptor): string {
     case "array":
       return `${typeToSummary(type.element)}[]`;
     case "tuple": {
-      const rendered = type.elements.map((entry, i) => {
-        const text = typeToSummary(entry);
-        const label = type.labels?.[i] ?? null;
-        return label ? `${label}: ${text}` : text;
-      });
-      return `[${rendered.join(", ")}]`;
+      return tupleDescriptorToString(type, typeToSummary);
     }
     case "object":
       return "object";

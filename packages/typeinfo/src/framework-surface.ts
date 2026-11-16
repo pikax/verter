@@ -50,6 +50,7 @@ import {
   type TypeInfoRequestError,
 } from "@verter/proto";
 import {
+  array,
   func,
   literal,
   object,
@@ -390,8 +391,18 @@ function walkMemberType(
     }
     case "union":
       return union(kind.value.memberNodeIds.map(walk));
+    case "array":
+      return array(walk(kind.value.elementNodeId));
     case "tuple":
-      return tuple(kind.value.elements.map((element) => walk(element.valueNodeId)));
+      return tuple(
+        kind.value.elements.map((element) => walk(element.valueNodeId)),
+        kind.value.elements.map((element) => ({
+          ...(element.labelNameId ? { label: strings[element.labelNameId] } : {}),
+          ...(element.optional ? { optional: true } : {}),
+          ...(element.rest ? { rest: true } : {}),
+        })),
+        kind.value.readonly,
+      );
     case "opaque":
       return unknown(opaqueMessage(strings, kind.value.error));
     default:

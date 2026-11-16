@@ -22,6 +22,7 @@ import {
   NODE_OBJECT,
   NODE_PRIMITIVE,
   NODE_REF,
+  NODE_TUPLE,
   NODE_UNION,
 } from "./type-graph-core.js";
 
@@ -323,6 +324,51 @@ describe("typeExprToDescriptor", () => {
     });
     expect(result.kind).toBe("tuple");
     expect((result as { elements: unknown[] }).elements).toHaveLength(2);
+  });
+
+  it.each(["native JSON", "graph"])("keeps tuple modifiers from %s", (arm) => {
+    const graph = new DecodedTypeGraph(
+      ["id", "name", "rest"],
+      [
+        { kind: NODE_PRIMITIVE, primitive: 2 },
+        { kind: NODE_PRIMITIVE, primitive: 1 },
+        { kind: NODE_PRIMITIVE, primitive: 3 },
+        { kind: NODE_ARRAY, elementNodeId: 3, readonly: false },
+        {
+          kind: NODE_TUPLE,
+          readonly: true,
+          elements: [
+            { labelId: 1, typeNodeId: 1, optional: false, rest: false },
+            { labelId: 2, typeNodeId: 2, optional: true, rest: false },
+            { labelId: 3, typeNodeId: 4, optional: false, rest: true },
+          ],
+        },
+      ],
+    );
+    const native: NativeTypeExpr = {
+      kind: "tuple",
+      readonly: true,
+      elements: [
+        { label: "id", ty: { kind: "primitive", name: "number" }, optional: false, rest: false },
+        { label: "name", ty: { kind: "primitive", name: "string" }, optional: true, rest: false },
+        {
+          label: "rest",
+          ty: { kind: "array", element: { kind: "primitive", name: "boolean" }, readonly: false },
+          optional: false,
+          rest: true,
+        },
+      ],
+    };
+    expect(typeExprToDescriptor(arm === "graph" ? createGraphTypeExprRef(graph, 5) : native)).toEqual({
+      kind: "tuple",
+      elements: [
+        { kind: "primitive", name: "number" },
+        { kind: "primitive", name: "string" },
+        { kind: "array", element: { kind: "primitive", name: "boolean" } },
+      ],
+      modifiers: [{ label: "id" }, { label: "name", optional: true }, { label: "rest", rest: true }],
+      readonly: true,
+    });
   });
 
   it("converts native recursiveRef types without degrading to unknown", () => {
