@@ -2,7 +2,9 @@
 //! continuation while asking it, and owns the suspended collector while a
 //! callback body evaluates. No collector is active during that body demand.
 
+use super::super::helper_continuation::DeliveredRead;
 use super::super::inference::session::InferenceSession;
+use super::super::query_frames::OperandDemand;
 use super::*;
 use crate::semantic_query::{InferBinding, RelationKind, TypeParamDecl};
 use rustc_hash::FxHashSet;
@@ -27,9 +29,9 @@ impl From<ContextualCandidateFailure> for CandidateVerdict {
 pub(super) enum PreparationStop {
     /// The candidate mismatched, or its preparation failed.
     Failed(ContextualCandidateFailure),
-    /// A signature list its mapping reads is the request the walk waits
-    /// on; the candidate, its collector and its mapping are held in the
-    /// call's contextual continuation.
+    /// A signature list its mapping reads, or an operand of its typed
+    /// callback's relation, is the request the walk waits on; the candidate,
+    /// its collector and its mapping are held in the call's continuation.
     Waiting(Box<HelperRequest>),
 }
 
@@ -190,7 +192,7 @@ struct ContextualCandidate {
     fixed: FxHashMap<SemanticNodeId, SemanticNodeId>,
     pending_target: Option<SemanticNodeId>,
     /// The mapping of the deferred argument at the cursor, held while a
-    /// signature list it reads is requested.
+    /// signature list it reads or a typed relation's operand is requested.
     mapping: Option<Box<CandidateMapping>>,
 }
 
@@ -199,7 +201,6 @@ struct ContextualCandidate {
 /// reads: the fixation and the mappers it computed once, the contextual
 /// type and inference target computed so far, the type walk it stands in,
 /// and the signature list it waits on.
-#[derive(Debug)]
 struct CandidateMapping {
     target: SemanticNodeId,
     fixed: CanonicalTypeSubstitution,
@@ -209,7 +210,30 @@ struct CandidateMapping {
     inference_target: Option<SemanticNodeId>,
     walk: ContextualTypeWalk,
     awaiting: Option<SemanticQueryKey>,
+    /// The mapping is finished and stands at its typed callback's relation,
+    /// holding the operand demand until its instantiations are delivered.
+    relating: Option<Box<OperandDemand>>,
 }
+
+impl std::fmt::Debug for CandidateMapping {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CandidateMapping")
+            .field("target", &self.target)
+            .field("fixed", &self.fixed)
+            .field("inference_mapper", &self.inference_mapper)
+            .field("contextual_mapper", &self.contextual_mapper)
+            .field("contextual", &self.contextual)
+            .field("inference_target", &self.inference_target)
+            .field("walk", &self.walk)
+            .field("awaiting", &self.awaiting)
+            .field("relating", &self.relating.is_some())
+            .finish()
+    }
+}
+
+// A candidate holds its mapping and the relation it stands at behind one pointer.
+const _: () =
+    assert!(std::mem::size_of::<Option<Box<CandidateMapping>>>() == std::mem::size_of::<usize>());
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// Type properties that produce a marker's receiver binders before the
@@ -405,7 +429,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     None,
                     HelperDrive::InPlace,
                 ) {
-                    Ok((contextual, _)) => Ok(Some(contextual)),
+                    Ok((contextual, _, _)) => Ok(Some(contextual)),
                     Err(MapperStop::Failed(failure)) => Err(failure),
                     Err(MapperStop::Waiting(_)) => {
                         unreachable!("a mapping driven in place makes no request")
@@ -654,11 +678,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// candidate rejects.
     ///
     /// Driven by a frame (`drive`), a signature list a deferred argument's
-    /// mapping reads that the memo does not serve warm stops the
+    /// mapping reads or an operand instantiation of its typed callback's
+    /// relation that the memo does not serve warm stops the
     /// preparation ([`PreparationStop::Waiting`]) with the candidate, its
     /// collector and its mapping held in the call's continuation; the next
-    /// call for the candidate re-enters the mapping with the list's
-    /// `delivery`.
+    /// call for the candidate re-enters the mapping or relation with that
+    /// read's `delivery`.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare_contextual_candidate(
         &self,
@@ -841,12 +866,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.restore_collecting_session(&mut progress.session);
         verter_debug_assert!(
             delivery.is_none() || progress.mapping.is_some(),
-            "a preparation is delivered only the list its mapping waited on"
+            "a preparation is delivered only the read its mapping waited on"
         );
         let result = (|| -> Result<Vec<CallArgument>, PreparationStop> {
             if progress.mapping.is_some() {
-                // A mapping that stopped at a signature list resumes in the
-                // deferred loop below, at the position it stood at.
+                // A mapping that stopped at a signature list or its typed
+                // relation resumes below, at the position it stood at.
                 verter_debug_assert!(
                     progress.pending_target.is_none(),
                     "a mapping waits after its callback's delivery was taken"
@@ -1048,20 +1073,41 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
             }
             while let Some(&(position, target)) = progress.deferred.get(progress.cursor) {
-                let (contextual, inference_target) = match self.contextual_candidate_mapper(
-                    &mut progress,
-                    target,
-                    session_id,
-                    budget,
-                    delivery.take(),
-                    drive,
-                ) {
-                    Ok(mapped) => mapped,
-                    Err(MapperStop::Failed(failure)) => {
-                        return Err(ContextualCandidateFailure::Degraded(failure).into())
-                    }
-                    Err(MapperStop::Waiting(request)) => {
-                        return Err(PreparationStop::Waiting(request))
+                let (contextual, inference_target, mut mapping) = if progress
+                    .mapping
+                    .as_ref()
+                    .is_some_and(|mapping| mapping.relating.is_some())
+                {
+                    let mapping = progress.mapping.take().expect("a held relation's mapping");
+                    verter_debug_assert!(
+                        mapping.target == target,
+                        "a held mapping resumes for the argument it maps"
+                    );
+                    (
+                        mapping
+                            .contextual
+                            .expect("a finished mapping's contextual type"),
+                        mapping
+                            .inference_target
+                            .expect("a finished mapping's inference target"),
+                        mapping,
+                    )
+                } else {
+                    match self.contextual_candidate_mapper(
+                        &mut progress,
+                        target,
+                        session_id,
+                        budget,
+                        delivery.take(),
+                        drive,
+                    ) {
+                        Ok(mapped) => mapped,
+                        Err(MapperStop::Failed(failure)) => {
+                            return Err(ContextualCandidateFailure::Degraded(failure).into())
+                        }
+                        Err(MapperStop::Waiting(request)) => {
+                            return Err(PreparationStop::Waiting(request))
+                        }
                     }
                 };
                 // The once-assigned context decides the candidate's
@@ -1069,13 +1115,37 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 // parameter context is assigned once, by the first candidate
                 // that types it, and later candidates relate by that typing).
                 if let Some(assigned) = state.typed_arguments.get(&position).cloned() {
-                    if self.collect_contextual_argument(
-                        &assigned,
-                        inference_target,
-                        budget,
-                        &declared,
-                        None,
-                    )? {
+                    let related = match drive {
+                        HelperDrive::InPlace => self.collect_contextual_argument(
+                            &assigned,
+                            inference_target,
+                            budget,
+                            &declared,
+                            None,
+                        ),
+                        HelperDrive::Frame { depth } => {
+                            let demand = mapping.relating.take().unwrap_or_else(|| {
+                                Box::new(OperandDemand::new([assigned.node, inference_target]))
+                            });
+                            match self.collect_typed_callback_on_frame(
+                                &assigned,
+                                inference_target,
+                                budget,
+                                &declared,
+                                demand,
+                                delivery.take(),
+                                depth,
+                            ) {
+                                Ok(result) => result,
+                                Err((demand, request)) => {
+                                    mapping.relating = Some(demand);
+                                    progress.mapping = Some(mapping);
+                                    return Err(PreparationStop::Waiting(request));
+                                }
+                            }
+                        }
+                    };
+                    if related? {
                         progress.arguments[position] = assigned;
                         progress.cursor += 1;
                         continue;
@@ -1134,8 +1204,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Ok(std::mem::take(&mut progress.arguments))
         })();
         progress.session = Some(self.take_collecting_session(session_id));
-        // A candidate waiting on its callback, or on a signature list its
-        // mapping reads, is held with its collector.
+        // A candidate waiting on its callback, a mapping list or its typed
+        // relation's operand is held with its collector.
         if matches!(
             result,
             Err(
@@ -1300,6 +1370,29 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         txn.relation.sessions.insert(position, active);
     }
 
+    /// Relate a typed callback on a frame after demanding its operands'
+    /// first instantiations. The member relation itself still computes in
+    /// place, with those reads answered by the deliveries.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn collect_typed_callback_on_frame(
+        &self,
+        assigned: &CallArgument,
+        inference_target: SemanticNodeId,
+        budget: &mut CallResolutionBudget<'_>,
+        declared: &[TypeParamDecl],
+        mut demand: Box<OperandDemand>,
+        delivery: Option<Box<DeliveredRead>>,
+        depth: u32,
+    ) -> Result<Result<bool, ContextualCandidateFailure>, (Box<OperandDemand>, Box<HelperRequest>)>
+    {
+        if let Some(request) = self.advance_operand_demand(&mut demand, delivery, depth) {
+            return Err((demand, Box::new(request)));
+        }
+        let _answers = self.operand_answers_scope(*demand, depth);
+        Ok(self.collect_contextual_argument(assigned, inference_target, budget, declared, None))
+    }
+
     /// The contextual type and the inference target of the deferred argument
     /// whose parameter type is `target`, and the parameter-position binders
     /// its typing fixes. The mapping is begun once per argument
@@ -1315,7 +1408,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         budget: &mut CallResolutionBudget<'_>,
         delivery: Option<Box<super::super::helper_continuation::DeliveredRead>>,
         drive: HelperDrive,
-    ) -> Result<(SemanticNodeId, SemanticNodeId), MapperStop> {
+    ) -> Result<(SemanticNodeId, SemanticNodeId, Box<CandidateMapping>), MapperStop> {
         let mut mapping = match progress.mapping.take() {
             Some(mapping) => {
                 verter_debug_assert!(
@@ -1362,7 +1455,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
             }
         }
-        Ok((contextual, inference_target))
+        Ok((contextual, inference_target, mapping))
     }
 
     /// Begin the mapping of the deferred argument whose parameter type is
@@ -1496,6 +1589,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             inference_target: None,
             walk: ContextualTypeWalk::new(target),
             awaiting: None,
+            relating: None,
         }))
     }
 
@@ -1526,6 +1620,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             inference_target,
             walk,
             awaiting,
+            relating: _,
         } = mapping;
         let target = *target;
         let mut read = ListRead {
