@@ -393,6 +393,15 @@ pub(crate) fn component_meta_resolved_macros<M: verter_audit::observe::ObserveEx
             // authority the extraction publishes (the flat evaluated lanes
             // contribute metadata only).
             match mac.kind {
+                AnalyzedMacroKind::DefineProps => {
+                    input.props_guarantee = dtos.domain_guarantee.clone()
+                }
+                AnalyzedMacroKind::DefineEmits => {
+                    input.events_guarantee = dtos.domain_guarantee.clone()
+                }
+                AnalyzedMacroKind::DefineSlots => {
+                    input.slots_guarantee = dtos.domain_guarantee.clone()
+                }
                 AnalyzedMacroKind::DefineModel => {
                     input.models_guarantee = dtos.domain_guarantee.clone()
                 }

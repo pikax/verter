@@ -972,6 +972,28 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
             let _builder = dispatch.enter_construction_scope();
             let fact = resolve_vue_macro_surface_fact_with_ctx(ctx, dispatch, &validated_request);
             let (surface, domain_guarantee) = adopt_macro_surface_fact(fact);
+            let domain_guarantee = if !mac.is_type_based {
+                match mac.kind {
+                    AnalyzedMacroKind::DefineProps
+                    | AnalyzedMacroKind::DefineExpose
+                    | AnalyzedMacroKind::DefineEmits
+                    | AnalyzedMacroKind::DefineSlots => {
+                        Some(if mac.runtime_members_fully_enumerated {
+                            verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(false)
+                        } else {
+                            verter_session_query::analysis::component_meta::MetadataFactGuarantee {
+                                kind: 2,
+                                causes: vec![103],
+                                open: true,
+                            }
+                        })
+                    }
+                    AnalyzedMacroKind::DefineOptions | AnalyzedMacroKind::WithDefaults => None,
+                    AnalyzedMacroKind::DefineModel => Some(domain_guarantee),
+                }
+            } else {
+                Some(domain_guarantee)
+            };
             match surface {
                 Some(macro_surface) => {
                     // Mint the policy-admitted framework-surface token from the
@@ -1114,11 +1136,11 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
                         // this arm is unreachable.
                         AnalyzedMacroKind::WithDefaults => MacroSurfaceDtos::default(),
                     };
-                    dtos.domain_guarantee = Some(domain_guarantee);
+                    dtos.domain_guarantee = domain_guarantee;
                     dtos
                 }
                 None => MacroSurfaceDtos {
-                    domain_guarantee: Some(domain_guarantee),
+                    domain_guarantee,
                     ..MacroSurfaceDtos::default()
                 },
             }

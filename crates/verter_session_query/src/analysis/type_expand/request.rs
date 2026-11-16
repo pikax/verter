@@ -25,6 +25,7 @@ pub type ExpansionExecutionStatus = ExecutionStatus;
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedObjectShape {
+    /// Output-only mirror retained by the public type-evaluation JSON shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain_guarantee: Option<crate::analysis::component_meta::MetadataFactGuarantee>,
     pub properties: Vec<ExpandedProperty>,

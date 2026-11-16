@@ -262,8 +262,7 @@ pub struct ResolvedMacroInput {
     pub exposed: Vec<ResolvedExposeInput>,
     /// Producer-owned prop names with authored runtime defaults.
     pub default_keys: Vec<String>,
-    /// Producer-owned props-lane claim. `None` makes no claim, so a Vue row
-    /// does not override the expansion-row classifier.
+    /// Producer-owned props-lane claim. `None` makes no claim.
     pub props_guarantee:
         Option<verter_session_query::analysis::component_meta::MetadataFactGuarantee>,
     /// Producer-owned events-lane claim. `None` makes no claim.
@@ -922,7 +921,6 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
 
     ComponentMetaAnalysis {
         domain_guarantees: component_domain_guarantees(
-            evaluated_types,
             input.macros,
             input.resolved_macros,
             input.template,
@@ -3018,7 +3016,6 @@ fn extract_flags(input: &ComponentMetaInput<'_>) -> (ComponentMetaFlags, bool) {
 mod component_meta_tests;
 
 fn component_domain_guarantees(
-    evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     macros: &[AnalyzedMacro],
     resolved_macros: &[ResolvedMacroInput],
     template: Option<&verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
@@ -3027,59 +3024,15 @@ fn component_domain_guarantees(
     use verter_session_query::analysis::component_meta::{
         ComponentDomainGuarantees, MetadataFactGuarantee, PublicInstanceEnumeration,
     };
-    fn lane(
-        fully_enumerated: &mut bool,
-        input_enumerated: bool,
-        macros: &[AnalyzedMacro],
-        kind: AnalyzedMacroKind,
-        rows: Option<&[verter_session_query::analysis::type_expand::ExpandedMacroObjectShape]>,
-        props: Option<&[verter_session_query::analysis::type_expand::ExpandedMacroProps]>,
-    ) -> MetadataFactGuarantee {
-        *fully_enumerated = input_enumerated;
-        let mut result = MetadataFactGuarantee::complete(false);
-        for (index, item) in macros
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| item.kind == kind)
-        {
-            if !item.is_type_based {
-                *fully_enumerated &= item.runtime_members_fully_enumerated;
-                continue;
-            }
-            let next = rows
-                .and_then(|rows| {
-                    rows.iter()
-                        .find(|row| row.macro_index == index)
-                        .and_then(|row| row.result.value.domain_guarantee.as_ref())
-                })
-                .or_else(|| {
-                    props.and_then(|rows| {
-                        rows.iter()
-                            .find(|row| row.macro_index == index)
-                            .and_then(|row| row.result.value.domain_guarantee.as_ref())
-                    })
-                })
-                .cloned()
-                .unwrap_or_default();
-            *fully_enumerated &= next.kind == 1 && !next.open;
-            result.kind = result.kind.max(next.kind);
-            result.open |= next.open;
-            for cause in next.causes {
-                if !result.causes.contains(&cause) {
-                    result.causes.push(cause);
-                }
-            }
-        }
-        result
-    }
     fn producer_lane(
         fully_enumerated: &mut bool,
+        input_enumerated: bool,
         macros: &[AnalyzedMacro],
         resolved: &[ResolvedMacroInput],
         kind: AnalyzedMacroKind,
         claim: impl Fn(&ResolvedMacroInput) -> Option<&MetadataFactGuarantee>,
     ) -> MetadataFactGuarantee {
-        *fully_enumerated = true;
+        *fully_enumerated = input_enumerated;
         let mut result = MetadataFactGuarantee::complete(false);
         for (index, mac) in macros
             .iter()
@@ -3090,26 +3043,37 @@ fn component_domain_guarantees(
             if kind == AnalyzedMacroKind::DefineModel {
                 *fully_enumerated = false;
             }
-            if kind == AnalyzedMacroKind::DefineExpose && !mac.is_type_based {
-                *fully_enumerated &= mac.runtime_members_fully_enumerated;
-                result.absorb(&if mac.runtime_members_fully_enumerated {
-                    MetadataFactGuarantee::complete(false)
-                } else {
-                    MetadataFactGuarantee {
-                        kind: 2,
-                        causes: vec![103],
-                        open: true,
-                    }
-                });
-                continue;
-            }
             let mut joined = None;
             for row in resolved.iter().filter(|row| row.macro_index == index) {
                 MetadataFactGuarantee::absorb_option(&mut joined, claim(row).cloned());
             }
-            let next = joined.unwrap_or_default();
+            let next = joined.unwrap_or_else(|| {
+                if !mac.is_type_based {
+                    if mac.runtime_members_fully_enumerated {
+                        MetadataFactGuarantee::complete(false)
+                    } else {
+                        MetadataFactGuarantee {
+                            kind: 2,
+                            causes: vec![103],
+                            open: true,
+                        }
+                    }
+                } else {
+                    MetadataFactGuarantee::default()
+                }
+            });
             *fully_enumerated &= next.kind == 1 && !next.open;
             result.absorb(&next);
+        }
+        // Adapter-native domains have no Vue macro inventory entry.
+        for row in resolved
+            .iter()
+            .filter(|row| row.macro_index >= macros.len())
+        {
+            if let Some(next) = claim(row) {
+                *fully_enumerated &= next.kind == 1 && !next.open;
+                result.absorb(next);
+            }
         }
         result
     }
@@ -3117,33 +3081,34 @@ fn component_domain_guarantees(
         options_member_free,
         ..Default::default()
     };
-    let mut guarantees = ComponentDomainGuarantees {
-        props: lane(
+    ComponentDomainGuarantees {
+        props: producer_lane(
             &mut enumeration.props,
             true,
             macros,
+            resolved_macros,
             AnalyzedMacroKind::DefineProps,
-            None,
-            evaluated.map(|value| value.define_props.as_slice()),
+            |row| row.props_guarantee.as_ref(),
         ),
-        events: lane(
+        events: producer_lane(
             &mut enumeration.emits,
             true,
             macros,
+            resolved_macros,
             AnalyzedMacroKind::DefineEmits,
-            evaluated.map(|value| value.define_emits.as_slice()),
-            None,
+            |row| row.events_guarantee.as_ref(),
         ),
-        slots: lane(
+        slots: producer_lane(
             &mut enumeration.slots,
             template.is_none_or(|template| !template.has_dynamic_slot_outlet),
             macros,
+            resolved_macros,
             AnalyzedMacroKind::DefineSlots,
-            evaluated.map(|value| value.define_slots.as_slice()),
-            None,
+            |row| row.slots_guarantee.as_ref(),
         ),
         models: producer_lane(
             &mut enumeration.models,
+            true,
             macros,
             resolved_macros,
             AnalyzedMacroKind::DefineModel,
@@ -3151,6 +3116,7 @@ fn component_domain_guarantees(
         ),
         exposed: producer_lane(
             &mut enumeration.exposed,
+            true,
             macros,
             resolved_macros,
             AnalyzedMacroKind::DefineExpose,
@@ -3162,20 +3128,5 @@ fn component_domain_guarantees(
             verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Exact
                 .guarantee(),
         type_registry: MetadataFactGuarantee::complete(false),
-    };
-    for resolved in resolved_macros {
-        if let Some(next) = &resolved.props_guarantee {
-            guarantees.enumeration.props &= next.kind == 1 && !next.open;
-            guarantees.props.absorb(next);
-        }
-        if let Some(next) = &resolved.events_guarantee {
-            guarantees.enumeration.emits &= next.kind == 1 && !next.open;
-            guarantees.events.absorb(next);
-        }
-        if let Some(next) = &resolved.slots_guarantee {
-            guarantees.enumeration.slots &= next.kind == 1 && !next.open;
-            guarantees.slots.absorb(next);
-        }
     }
-    guarantees
 }

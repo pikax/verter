@@ -4809,30 +4809,78 @@ fn ffi_component_meta_distinguishes_unresolved_import_from_empty_surface() {
 #[test]
 fn native_member_domains_preserve_producer_guarantees() {
     use prost::Message;
-    for (source, kind, open, names) in [
+    for (source, kind, open, names, cause, event_names) in [
         (
             r#"<script setup lang="ts" generic="T extends { known: string }">defineProps<T>(); defineEmits<{saved: []}>()</script><template><div/></template>"#,
             1,
             true,
             vec!["known"],
+            None,
+            vec!["saved"],
         ),
         (
             r#"<script setup lang="ts">import type { Missing } from './absent'; defineProps<Missing>(); defineEmits<{saved: []}>()</script><template><div/></template>"#,
             3,
             true,
             vec![],
+            Some(14),
+            vec!["saved"],
         ),
         (
             r#"<script setup lang="ts">import type { Missing } from './absent'; defineProps<{known:string} & Missing>(); defineEmits<{saved: []}>()</script><template><div/></template>"#,
             2,
             true,
             vec!["known"],
+            Some(14),
+            vec!["saved"],
         ),
         (
             r#"<script setup lang="ts">defineProps<string>(); defineEmits<{saved: []}>()</script><template><div/></template>"#,
             1,
             false,
             vec![],
+            None,
+            vec!["saved"],
+        ),
+        (
+            r#"<script setup lang="ts">const shared = { hidden: Number }; defineProps({ ...shared, a: String }); defineEmits(['saved'])</script>"#,
+            2,
+            true,
+            vec!["a"],
+            Some(103),
+            vec!["saved"],
+        ),
+        (
+            r#"<script setup lang="ts">const key = 'hidden'; defineProps({ [key]: Number, a: String }); defineEmits(['saved'])</script>"#,
+            2,
+            true,
+            vec!["a"],
+            Some(103),
+            vec!["saved"],
+        ),
+        (
+            r#"<script setup lang="ts">const shared = { hidden: Number }; defineProps(shared); defineEmits(['saved'])</script>"#,
+            2,
+            true,
+            vec![],
+            Some(103),
+            vec!["saved"],
+        ),
+        (
+            r#"<script setup lang="ts">defineProps(); defineEmits(); defineExpose()</script>"#,
+            1,
+            false,
+            vec![],
+            None,
+            vec![],
+        ),
+        (
+            r#"<script setup lang="ts">defineProps<{ [k: string]: string }>(); defineEmits(['saved'])</script>"#,
+            1,
+            true,
+            vec![],
+            None,
+            vec!["saved"],
         ),
     ] {
         let canonical = "/Domain.vue";
@@ -4843,10 +4891,10 @@ fn native_member_domains_preserve_producer_guarantees() {
         let bytes = session
             .get_component_meta_payload(canonical, |output| {
                 let ffi = super::component_meta_output_to_ffi(output);
-                if kind != 1 {
+                if let Some(cause) = cause {
                     assert!(
-                        ffi.facts().props.causes().contains(&14),
-                        "missing imported domain retains its machine cause"
+                        ffi.facts().props.causes().contains(&cause),
+                        "the domain retains its producer cause"
                     );
                 }
                 let json = serde_json::to_value(&ffi).unwrap();
@@ -4881,7 +4929,16 @@ fn native_member_domains_preserve_producer_guarantees() {
                     }
                 }
                 assert_eq!(json["facts"]["events"]["kind"], "complete");
-                assert_eq!(json["facts"]["events"]["value"][0]["name"], "saved");
+                assert_eq!(json["facts"]["events"]["open"], false);
+                assert_eq!(
+                    json["facts"]["events"]["value"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|entry| entry["name"].as_str().unwrap())
+                        .collect::<Vec<_>>(),
+                    event_names
+                );
                 verter_protocol::component_meta::encode_component_meta_payload(&ffi)
             })
             .unwrap()
@@ -4916,7 +4973,7 @@ fn native_member_domains_preserve_producer_guarantees() {
             1,
             "unrelated event domain stays exact: {source}"
         );
-        assert_eq!(events.value.unwrap().entries.len(), 1);
+        assert_eq!(events.value.unwrap().entries.len(), event_names.len());
     }
 }
 
@@ -5125,6 +5182,7 @@ fn public_instance_expose_unnamed_members_leave_the_domain_open() {
 fn public_instance_props_requires_full_enumeration() {
     use verter_session_query::analysis::component_meta::PublicInstanceCompleteness;
     for (declaration, exact) in [
+        ("defineProps()", true),
         ("defineProps({ label: String, ...extra })", false),
         ("defineProps({ label: String })", true),
         ("defineProps({ label: String, size: Number })", true),
@@ -5180,6 +5238,7 @@ fn public_instance_props_requires_full_enumeration() {
 fn public_instance_emits_requires_full_enumeration() {
     assert_public_instance_domain_enumeration(
         &[
+            ("defineEmits()", true),
             ("defineEmits({ change: null, ...extra })", false),
             ("defineEmits({ [key]: null })", false),
             ("defineEmits(emitsVar)", false),
