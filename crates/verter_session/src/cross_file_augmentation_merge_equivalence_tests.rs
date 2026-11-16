@@ -624,29 +624,18 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
     );
 }
 
-/// END-TO-END warm-parent source-env discriminator through the REAL memo
-/// warm-read path: warm a parent augmented `Instantiate` under a
-/// contributor, then serve the SAME demand under a view whose ONLY change
-/// is the contributor's source-env identity row (content / whole hash /
-/// augmenter-set untouched) — the warm parent must MISS and recompute
-/// through the genuine `MemoEntry` validation, not a hand-built
-/// store-view probe.
-///
-/// Discrimination: the cold parent build must RECORD the contributor
-/// `FileSourceEnv` observation (asserted from the traced production
-/// resolve), and the memo warm read must VALIDATE it strictly — if the
-/// observation were not recorded, or the strict source-env branch were not
-/// consulted on the live warm path, the moved-row view would warm-hit and
-/// the cold-build counter would stay flat, failing the final assertion.
-/// The store-view sibling test above pins the validation branch in
-/// isolation; this one drives it through the end-to-end warm-read rail.
+/// A warm augmented parent rejects a contributor language change with
+/// unchanged content. The host publishes the change and captures a new token;
+/// the parent demand keeps exactly the same query key. The traced production
+/// resolve must record the contributor's `FileSourceEnv`, its strict check
+/// must reject the changed language, and the warm parent must recompute.
+/// The store-view sibling above pins that validation branch in isolation.
 #[test]
 fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
-    use verter_session_query::facts::fact_cache::ParseEnvHash;
+    use verter_session_query::facts::store_view::StoreView;
     use verter_session_query::facts::{
         fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
     };
-    use verter_session_query::source::env_identity::SourceEnvIdentity;
     use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     use verter_type_engine::semantic_query::{
         ProjectionReductionContext, QueryResult, SemanticQueryApi, SemanticQueryKey,
@@ -686,9 +675,8 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
              contributor /aug.ts",
         );
 
-    // The identical parent demand, driven directly so the SAME query key
-    // executes under two views that differ ONLY in the contributor's
-    // source-env identity row.
+    // Drive the parent directly and retain the key so a contributor language
+    // change must invalidate the same memo candidate.
     let graph = host.project_type_store().semantic_graph();
     let view = host.resolver_store_view_read().into_owned_view();
     let demand = |view: &crate::resolver_store::HostStoreView| {
@@ -714,17 +702,18 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
                     ProjectionReductionContext::published(ProjectionMode::Expanded),
                 ),
             ));
-        match dispatch.execute_type_node(key) {
-            QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        match dispatch.execute_type_node(key.clone()) {
+            QueryResult::Value(SemanticQueryOutput { value, .. }) => (value, key),
             other => panic!("the augmented parent demand must produce a value, got {other:?}"),
         }
     };
 
     // Cold-or-warm baseline for THIS key, then the warm control: the same
     // demand under the SAME view is a memo hit (no new parent build).
-    demand(&view);
+    let (_, original_key) = demand(&view);
     let builds_after_first = graph.stats_snapshot().instantiate_count;
-    demand(&view);
+    let (_, repeated_key) = demand(&view);
+    assert_eq!(repeated_key, original_key);
     assert_eq!(
         graph.stats_snapshot().instantiate_count,
         builds_after_first,
@@ -732,23 +721,39 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
          memo hit (no new parent build)"
     );
 
-    // The contributor source-env identity MOVE, in isolation: same content,
-    // same whole hashes, same augmenter set — only the /aug.ts identity row
-    // differs from the recorded one.
-    let moved_parse_env = ParseEnvHash::from_env_hash([0xA7u8; 16]);
-    assert_ne!(
-        moved_parse_env, recorded_parse_env,
-        "the moved parse env must differ from the recorded contributor identity"
+    let source = host.get_source("/aug.ts").expect("contributor source");
+    let whole_hash = host
+        .authoritative_current_content_hash("/aug.ts")
+        .expect("contributor hash");
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some("/aug.ts".to_owned()),
+            input_id: "/aug.ts".to_owned(),
+            source: Arc::clone(&source),
+            file_language: FileLanguage::script(verter_language::ScriptSourceType::Tsx),
+            aliases: Vec::new(),
+        })
+        .expect("contributor language changed");
+    host.ensure_indexed_ready("/aug.ts")
+        .expect("contributor indexed");
+    assert_eq!(host.get_source("/aug.ts"), Some(source));
+    assert_eq!(
+        host.authoritative_current_content_hash("/aug.ts"),
+        Some(whole_hash)
     );
-    let moved_view = view.with_replaced_source_env_for_tests(
+    let moved_view = host.resolver_store_view_read().into_owned_view();
+    assert_ne!(view.validation_token(), moved_view.validation_token());
+    assert!(!moved_view.validates_file_source_env(
         "/aug.ts",
-        SourceEnvIdentity {
-            parse_env_hash: moved_parse_env,
-            parse_key: recorded_parse_key,
-            file_language_id: recorded_language,
-        },
+        recorded_parse_env,
+        &recorded_parse_key,
+        &recorded_language,
+    ));
+    let (_, moved_key) = demand(&moved_view);
+    assert_eq!(
+        moved_key, original_key,
+        "the same candidate must be checked"
     );
-    demand(&moved_view);
     assert_eq!(
         graph.stats_snapshot().instantiate_count,
         builds_after_first + 1,

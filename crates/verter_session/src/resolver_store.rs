@@ -2354,6 +2354,24 @@ impl HostStoreView {
         self.canonical_view(canonical_id).whole_hash
     }
 
+    /// Whether a completion would expose exactly the inputs already captured
+    /// here. Fact allocation identity keeps this a bounded comparison.
+    pub(crate) fn covers_canonical_completion(
+        &self,
+        canonical: &str,
+        whole_hash: Hash16,
+        facts: &Arc<crate::file_artifact_store::FileFacts>,
+        route_hash: Option<Hash16>,
+    ) -> bool {
+        let captured = self.canonical_view(canonical);
+        captured.whole_hash == Some(whole_hash)
+            && captured
+                .file_facts
+                .as_ref()
+                .is_some_and(|held| Arc::ptr_eq(held, facts))
+            && route_hash.is_none_or(|hash| captured.route_hash == Some(hash))
+    }
+
     /// Per-canonical project identity under this view's captured published
     /// root. A live workspace republish cannot change the answer.
     #[must_use]
@@ -4588,47 +4606,6 @@ impl HostStoreView {
                 roots,
             }),
             ..Self::default()
-        }
-    }
-
-    /// Test-only: a clone of this (fully-built) view with the ONE
-    /// per-canonical source-env identity row replaced — every other
-    /// snapshot dimension (whole hashes, facts, derived hashes, epoch,
-    /// token) preserved. Models a contributor SOURCE-ENV identity move
-    /// with unchanged content against the real memo warm-read path: the
-    /// only movable axis of the strict `FileSourceEnv` validation branch
-    /// is moved in isolation, so a warm candidate recorded under the
-    /// original identity must reject and recompute under this view.
-    pub(crate) fn with_replaced_source_env_for_tests(
-        &self,
-        canonical: &str,
-        identity: SourceEnvIdentity,
-    ) -> Self {
-        use crate::store_view_roots::{OverlayCanonical, Override};
-        let mut snapshot = (*self.snapshot).clone();
-        let mut session = snapshot
-            .roots
-            .session_root
-            .as_ref()
-            .map(|root| (**root).clone())
-            .unwrap_or_default();
-        session
-            .canonicals
-            .entry(canonical.to_owned())
-            .or_insert_with(|| OverlayCanonical {
-                whole_hash: Override::Inherit,
-                file_facts: Override::Inherit,
-                route_hash: Override::Inherit,
-                source_env: Override::Inherit,
-            })
-            .source_env = Override::Value(identity);
-        snapshot.roots.with_session(session);
-        Self {
-            snapshot: Arc::new(snapshot),
-            // The replaced identity changes what this view answers, so it
-            // must not inherit the source view's memo.
-            memo: Arc::new(crate::store_view_roots::StoreViewMemo::default()),
-            ..self.clone()
         }
     }
 

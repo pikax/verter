@@ -599,6 +599,7 @@ impl SemanticGraphStore {
         let result = QueryResult::Value(value);
         let walker_diagnostics = super::empty_diagnostics();
         Ok(MemoEntry {
+            evidence: super::family::MemoEvidence::new(Arc::clone(cost_receipt)),
             // The staged member is in-flight work until the batch's
             // reservation adopts its charges or the batch is refused.
             lease: self.lease_delivery_in_flight(
@@ -617,7 +618,6 @@ impl SemanticGraphStore {
             retention: None,
             validated_at_generation,
             admission_seq: 0,
-            cost_receipt: Arc::clone(cost_receipt),
         })
     }
 
@@ -652,6 +652,7 @@ impl SemanticGraphStore {
         // Each member's receipt is charged once, for as long as it lives.
         for (_, entry) in members {
             entry
+                .evidence
                 .cost_receipt
                 .reserve_retention(account)
                 .map_err(refuse)?;

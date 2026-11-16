@@ -11,7 +11,6 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 
-use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::semantic_query::demand::{
     cached_satisfies, Demand, MaterializedPoint, MaterializedSet, ProjectionPath,
 };
@@ -21,6 +20,25 @@ use crate::semantic_query::{
     SemanticQueryValue, VueHeritagePolicy,
 };
 use verter_session_query::facts::fact_cache::ReadSetSignature;
+
+/// Candidate-local proof metadata shared by snapshots and backfills.
+pub(super) struct MemoEvidence {
+    pub(super) validation_stamp: verter_session_query::facts::receipt::PositiveValidationStamp,
+    /// What computing this candidate cost: replayed on every read.
+    /// A candidate cannot be admitted without this receipt.
+    pub(super) cost_receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+}
+
+impl MemoEvidence {
+    pub(super) fn new(
+        cost_receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            validation_stamp: Default::default(),
+            cost_receipt,
+        })
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct MemoEntry {
@@ -35,6 +53,9 @@ pub(super) struct MemoEntry {
     /// every canonical yielded by `read_set_signature.canonical_ids()`
     /// so `invalidate_canonical` drains every fact dependency.
     pub(super) read_set_signature: ReadSetSignature,
+    /// The positive validation stamp and priced computation receipt share
+    /// one allocation, keeping their metadata outside the persisted record.
+    pub(super) evidence: Arc<MemoEvidence>,
     /// The cold build's dispatch-return signature — the
     /// `QueryBuildOutput.dep_signature` the build produced. NOT a
     /// cache-validity rail (the carrier above is the sole validity
@@ -57,7 +78,8 @@ pub(super) struct MemoEntry {
     /// store view no longer tracks — rejects the entry. The
     /// `FileWholeHash` fact for any *non-listed* canonical (a cross-file
     /// dependency loaded after the view snapshot) keeps the lazy
-    /// `validates` "untracked → optimistically accept" rule.
+    /// `validates` "untracked → optimistically accept" rule. Tracked dependencies
+    /// can furnish a strict positive stamp; untracked lazy dependencies cannot.
     ///
     /// Empty for entries published outside an observable cold-compute
     /// pass (synthetic / test fixtures); validation then degrades to the
@@ -111,11 +133,6 @@ pub(super) struct MemoEntry {
     /// `warm_publish_one_if_absent` / the test publish helpers — the
     /// only paths that create a `MemoEntry`.
     pub(super) admission_seq: u64,
-    /// What computing this candidate cost: the receipt every read of it
-    /// replays, so a warm read charges its consumer what the cold build
-    /// charged. Shared by the backfills and SCC members the same build
-    /// produced. A candidate cannot be admitted without one.
-    pub(super) cost_receipt: Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
 }
 
 impl MemoEntry {
@@ -149,6 +166,9 @@ impl MemoEntry {
         };
         let bytes = populated_slots
             * (std::mem::size_of::<Self>() + verter_session_query::retention::ENTRY_OVERHEAD_BYTES)
+            + verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<
+                MemoEvidence,
+            >())
             + self.satisfied_projection.owned_heap_bytes(&mut aliases)
             + registration.bytes;
         verter_session_query::retention::Footprint {
@@ -164,7 +184,7 @@ impl MemoEntry {
     /// self-root `FileWholeHash` *strictly*.
     ///
     /// Returns `true` only when the path-precise fact rail validates
-    /// (self-roots strict, cross-file dependency facts lazy), every
+    /// (self-roots strict, untracked cross-file dependency facts lazy), every
     /// fact of a wide carrier included. An empty carrier with no self-roots validates vacuously.
     ///
     /// This is the strict warm-read validation entry point: a
@@ -185,8 +205,11 @@ impl MemoEntry {
         // [`super::SemanticGraphStore::arm_validate_running_probe_for_tests`].
         #[cfg(any(test, feature = "test-support"))]
         super::validate_running_probe();
-        self.read_set_signature
-            .validate_with_self_roots(ctx, &self.self_root_canonicals)
+        ctx.validates_stamped_signature_with_self_roots(
+            &self.read_set_signature.facts,
+            &self.self_root_canonicals,
+            &self.evidence.validation_stamp,
+        )
     }
 }
 
