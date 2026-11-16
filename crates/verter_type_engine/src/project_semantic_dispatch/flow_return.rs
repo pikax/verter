@@ -2977,60 +2977,43 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )))
     }
 
-    /// Read what a flow body requested: a frame read's type node
-    /// or an entered read's whole answer. A request is read under the
+    /// Read what a flow body requested in its delivery shape. A request is read under the
     /// checking site it was made under, as the body would read it at the
     /// place it made it.
-    pub(super) fn read_requested(&self, wait: ReadWait) -> ReadDelivery {
+    pub(super) fn read_requested(&self, wait: ReadWait, canonical: &str) -> ReadDelivery {
         let ReadWait {
             key,
             nesting,
+            shape,
             checking_site,
+            lexical,
+            ..
         } = wait;
-        match nesting {
-            ReadNesting::Frame => verter_debug_assert!(
-                matches!(
+        verter_debug_assert!(
+            nesting == ReadNesting::of(&key)
+                && !matches!(
                     *key,
-                    SemanticQueryKey::Instantiate(_) | SemanticQueryKey::TypeOf { .. }
+                    SemanticQueryKey::ResolveCall(_)
+                        | SemanticQueryKey::FlowReturn(_)
+                        | SemanticQueryKey::Relate { .. }
                 ),
-                "a body's own frame requests an instantiation or a `typeof`, not {:?}",
-                key.tag()
-            ),
-            ReadNesting::Entered => verter_debug_assert!(
-                matches!(
-                    *key,
-                    SemanticQueryKey::SignaturesOfType { .. }
-                        | SemanticQueryKey::ReadSignatureResult(_)
-                        | SemanticQueryKey::AwaitedNormalize { .. }
-                ),
-                "an entered body read requests signatures, a signature result or awaited normalization, not {:?}",
-                key.tag()
-            ),
-        }
+            "a body request derives its nesting from a family served by the read driver"
+        );
         verter_debug_assert!(
             self.checking_site.get() == checking_site,
             "a request is answered under the checking site it was made under"
         );
-        match nesting {
-            ReadNesting::Frame => match self.execute_type_node(*key) {
+        let _demand_scope = lexical.then(|| self.enter_lexical_demand(Arc::from(canonical)));
+        match shape {
+            ReadShape::Node => match self.execute_type_node(*key) {
                 QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
                     value, ..
                 }) => ReadDelivery::Node(value),
                 _ => ReadDelivery::None,
             },
-            ReadNesting::Entered => {
+            ReadShape::Whole => {
                 ReadDelivery::Value(Box::new(self.execute_via_cold_build_helper(*key)))
             }
-        }
-    }
-
-    /// A joined family's read, requested under the current checking site.
-    #[inline(never)]
-    fn entered_read(&self, key: SemanticQueryKey) -> ReadWait {
-        ReadWait {
-            key: Box::new(key),
-            nesting: ReadNesting::Entered,
-            checking_site: self.checking_site.get(),
         }
     }
 
@@ -10891,6 +10874,9 @@ pub mod body_reads;
 mod branches;
 #[path = "flow_return_call_stack.rs"]
 mod call_stack;
+#[path = "flow_return_helper_run.rs"]
+mod helper_run;
+use helper_run::{HelperWait, MemberPathFrame, PendingHelper};
 #[path = "flow_return_nested.rs"]
 mod nested;
 #[path = "flow_return_rails.rs"]
@@ -10903,7 +10889,7 @@ pub(super) use rails::{
     ClosedObservation, ClosedRecording, CompletenessRailId, ObservationRail, RailExtent, ReadRails,
     RecordingRail,
 };
-use read::{ReadDelivery, ReadNesting, ReadStep, ReadWait};
+use read::{ReadDelivery, ReadNesting, ReadOrigin, ReadShape, ReadStep, ReadWait};
 #[path = "flow_return_operators.rs"]
 mod operators;
 pub(super) use call_stack::HeldContextualRoute;
@@ -10978,6 +10964,8 @@ fn finish_awaited_normalize_for_flow(
 /// ([`ReadStep::Wait`]), which the body's evaluation suspends at and its
 /// root read answers ([`Self::answer_read`]).
 pub(super) trait FlowReadDriver {
+    /// Request a read under the current checking site.
+    fn request(&self, key: SemanticQueryKey, shape: ReadShape, origin: ReadOrigin) -> ReadWait;
     /// Request the whole read that normalizes an awaited operand.
     fn request_awaited_normalize(&self, node: SemanticNodeId) -> ReadWait;
     /// The value a body type's lowered carrier `node` denotes when it is a
@@ -11004,7 +10992,7 @@ pub(super) trait FlowReadDriver {
         delivery: ReadDelivery,
     ) -> ReadStep<Option<Vec<SemanticNodeId>>>;
     /// Answer a read the body requested and its root read answers.
-    fn answer_read(&self, wait: ReadWait) -> ReadDelivery;
+    fn answer_read(&self, wait: ReadWait, canonical: &str) -> ReadDelivery;
     /// Drive a call not yet begun to its first answer.
     fn begin_call(
         &self,
@@ -11027,7 +11015,7 @@ pub(super) trait FlowReadDriver {
 pub(super) trait FlowDemandDriver: FlowReadDriver {
     /// Answer a read the body requested at once, where its evaluation
     /// cannot suspend.
-    fn read_in_place(&self, wait: ReadWait) -> ReadDelivery;
+    fn read_in_place(&self, wait: ReadWait, canonical: &str) -> ReadDelivery;
     fn substitute_canonical(
         &self,
         node: SemanticNodeId,
@@ -11602,9 +11590,27 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
 impl<C: crate::resolver_core::ResolverCapabilities> FlowReadDriver
     for ProjectSemanticDispatch<'_, C>
 {
+    #[inline(never)]
+    fn request(&self, key: SemanticQueryKey, shape: ReadShape, origin: ReadOrigin) -> ReadWait {
+        #[cfg(not(any(test, feature = "test-support")))]
+        let _ = origin;
+        ReadWait {
+            nesting: ReadNesting::of(&key),
+            key: Box::new(key),
+            shape,
+            checking_site: self.checking_site.get(),
+            lexical: false,
+            #[cfg(any(test, feature = "test-support"))]
+            origin,
+        }
+    }
     fn request_awaited_normalize(&self, node: SemanticNodeId) -> ReadWait {
         body_read_site!("request_awaited_normalize");
-        self.entered_read(self.awaited_normalize_key(node))
+        self.request(
+            self.awaited_normalize_key(node),
+            ReadShape::Whole,
+            ReadOrigin::Awaited,
+        )
     }
     fn closed_signature_utility(
         &self,
@@ -11614,11 +11620,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowReadDriver
         body_read_site!("closed_signature_utility");
         match ProjectSemanticDispatch::closed_signature_utility_read(self, node, context) {
             None => ReadStep::Ready(node),
-            Some(key) => ReadStep::Wait(ReadWait {
-                key,
-                nesting: ReadNesting::Frame,
-                checking_site: self.checking_site.get(),
-            }),
+            Some(key) => {
+                ReadStep::Wait(self.request(*key, ReadShape::Node, ReadOrigin::ClosedUtility))
+            }
         }
     }
     fn request_signature_list(
@@ -11629,7 +11633,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowReadDriver
         body_read_site!("request_signature_list");
         let (list, key) =
             super::continuation_stages::SignatureListRead::begin(subject, kind, false);
-        (list, self.entered_read(key))
+        (
+            list,
+            self.request(key, ReadShape::Whole, ReadOrigin::SignatureList),
+        )
     }
     fn deliver_signature_list(
         &self,
@@ -11644,18 +11651,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowReadDriver
             .continuation_stage()
             .advance_signature_list(list, delivery.into_value())
         {
-            ListProgress::Read(key) => ReadStep::Wait(self.entered_read(key)),
+            ListProgress::Read(key) => {
+                ReadStep::Wait(self.request(key, ReadShape::Whole, ReadOrigin::SignatureList))
+            }
             ListProgress::Nodes(nodes) => ReadStep::Ready(Some(nodes)),
             ListProgress::Unsettled => ReadStep::Ready(None),
         }
     }
-    fn answer_read(&self, wait: ReadWait) -> ReadDelivery {
+    fn answer_read(&self, wait: ReadWait, canonical: &str) -> ReadDelivery {
         body_read_site!("answer_read");
         // The read answers a request that reached the root read: the
         // count of body reads leaves it out.
         #[cfg(any(test, feature = "test-support"))]
         let _answer = body_reads::enter_request_answer();
-        self.read_requested(wait)
+        self.read_requested(wait, canonical)
     }
     fn begin_call(
         &self,
@@ -11705,9 +11714,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowReadDriver
 impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     for ProjectSemanticDispatch<'_, C>
 {
-    fn read_in_place(&self, wait: ReadWait) -> ReadDelivery {
-        body_read_site!("read_in_place");
-        self.read_requested(wait)
+    fn read_in_place(&self, wait: ReadWait, canonical: &str) -> ReadDelivery {
+        #[cfg(any(test, feature = "test-support"))]
+        let _stage = body_reads::enter_in_place();
+        #[cfg(any(test, feature = "test-support"))]
+        let _site = body_reads::enter_site(wait.origin.name());
+        self.read_requested(wait, canonical)
     }
     fn substitute_canonical(
         &self,
@@ -12791,6 +12803,9 @@ impl<D: FlowDemandDriver> FlowCx<'_, D> {
     }
 }
 impl<D: FlowDemandDriver> FlowReadDriver for FlowCx<'_, D> {
+    fn request(&self, key: SemanticQueryKey, shape: ReadShape, origin: ReadOrigin) -> ReadWait {
+        self.driver.request(key, shape, origin)
+    }
     fn request_awaited_normalize(&self, node: SemanticNodeId) -> ReadWait {
         self.driver.request_awaited_normalize(node)
     }
@@ -12815,8 +12830,8 @@ impl<D: FlowDemandDriver> FlowReadDriver for FlowCx<'_, D> {
     ) -> ReadStep<Option<Vec<SemanticNodeId>>> {
         self.driver.deliver_signature_list(list, delivery)
     }
-    fn answer_read(&self, wait: ReadWait) -> ReadDelivery {
-        self.driver.answer_read(wait)
+    fn answer_read(&self, wait: ReadWait, canonical: &str) -> ReadDelivery {
+        self.driver.answer_read(wait, canonical)
     }
     fn begin_call(
         &self,
@@ -12837,8 +12852,8 @@ impl<D: FlowDemandDriver> FlowReadDriver for FlowCx<'_, D> {
 }
 impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     type Caps = D::Caps;
-    fn read_in_place(&self, wait: ReadWait) -> ReadDelivery {
-        self.driver.read_in_place(wait)
+    fn read_in_place(&self, wait: ReadWait, canonical: &str) -> ReadDelivery {
+        self.driver.read_in_place(wait, canonical)
     }
     fn probe_optional<T>(&self, probe: impl FnOnce() -> Option<T>) -> Option<T> {
         self.driver.probe_optional(probe)
@@ -15248,6 +15263,8 @@ enum Waiting<'e> {
 /// A site of an expression run waiting on the answer of a read it
 /// requested, with what its value is finished from.
 enum ReadSite<'e> {
+    /// A reading helper chain, retained where its next answer is needed.
+    Helper(Box<HelperWait<'e>>),
     /// An awaited operand waiting on its normalization's whole read.
     Awaited,
     /// A call waiting on one of its signature lists.
@@ -15405,6 +15422,7 @@ struct RegionEvalFrame<'r> {
 
 /// A statement suspended at a nested function value in its expression.
 enum Pending<'r> {
+    Helper(Box<PendingHelper<'r>>),
     Return(Box<PendingReturn<'r>>),
     Binding(Box<PendingBinding<'r>>),
     ConditionalConst(Box<PendingConditionalConst<'r>>),
@@ -19646,7 +19664,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// spelling carries none — annotations, assertions, and structural
     /// values are pinned.
     fn position_fresh_values(
-        &self,
+        &mut self,
         expr: &verter_session_query::flow::slice::SliceExpr,
         node: SemanticNodeId,
         freshness: &verter_session_query::flow::slice::SliceFreshness,
@@ -21736,40 +21754,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         base: SemanticNodeId,
         segments: &[Arc<str>],
     ) -> Option<SemanticNodeId> {
-        // The TERMINAL hop's member optionality folds into the read's
-        // value: reading `x.k` where `k` is declared optional includes
-        // the absent-key `undefined` — the checker's member-READ rule
-        // (indexed access included; measured under `--strict`,
-        // `exactOptionalPropertyTypes` off — the oracle profile).
-        // Presence of a key and non-`undefined`-ness of its value are two
-        // different facts: an `in` guard establishes the first and never
-        // strips the second, so the fold lives HERE, on the read, not in
-        // any guard. Terminal ONLY: an intermediate optional hop read
-        // without a discharging narrow is an error program, and the
-        // checker's own recovery projects the tail off the non-`undefined`
-        // part — folding mid-path would instead miss the tail on the
-        // fabricated `undefined` arm. The fold is PROOF-gated
-        // ([`Self::member_read_optionality`]): only a surface that
-        // provably declares the member optional folds; an undecidable
-        // surface keeps the shared projection's answer unchanged.
-        let Some((terminal, prefix)) = segments.split_last() else {
+        if segments.is_empty() {
             return Some(base);
-        };
-        let parent = if prefix.is_empty() {
-            base
-        } else {
-            self.project_path_navigate(base, prefix)?
-        };
-        let optional = self.member_read_optionality(
-            self.member_declaring_surface(parent, terminal),
-            terminal.as_ref(),
-        ) == Some(true);
-        let value = self.project_path_navigate(parent, std::slice::from_ref(terminal))?;
-        Some(if optional {
-            self.fold_optional_read_undefined(value)
-        } else {
-            value
-        })
+        }
+        self.member_path_in_place(MemberPathFrame::Segments(base, segments))
     }
 
     /// The shared `ProjectPath { mode: Navigate }` walk over a non-empty
@@ -21793,63 +21781,14 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         segments: &[Arc<str>],
         bind_this: bool,
     ) -> Option<SemanticNodeId> {
-        // A member of a class reference reads where the class declares it,
-        // binding the member's polymorphic `this` to the reference: a body
-        // reading its own class through a parameter (`h.v` over `h: H`)
-        // never lowers the class's other members, one of which is the body
-        // being evaluated. A declaration's self-reference (the class body
-        // lowering the class's own name) is the application it records.
-        if let Some((first, rest)) = segments.split_first() {
-            let base = self
-                .dispatch
-                .self_reference_declaration(base)
-                .unwrap_or(base);
-            // A member of a type parameter reads through its constraint.
-            let receiver = self.dispatch.type_parameter_apparent_receiver(base);
-            if receiver != base {
-                return self.project_path_navigate(receiver, segments);
-            }
-            // A member of a union of class references is each arm's member,
-            // and the read is their union.
-            if let Some(arms) = self.class_reference_union_arms(base, first) {
-                let mut reads = Vec::with_capacity(arms.len());
-                for arm in arms {
-                    reads.push(self.project_path_navigate(arm, segments)?);
-                }
-                return Some(
-                    self.dispatch
-                        .intern_normalized_union_or_intersection(&reads, true),
-                );
-            }
-            if let Some(source) = self.class_reference_member_source(base, first) {
-                let read =
-                    self.project_path_navigate_through(source, std::slice::from_ref(first))?;
-                let read = self.dispatch.bind_this_receiver(read, base);
-                return if rest.is_empty() {
-                    Some(read)
-                } else {
-                    self.project_path_navigate(read, rest)
-                };
-            }
+        if bind_this && segments.is_empty() {
+            return Some(base);
         }
-        // A member read through a reference binds the member's declared
-        // polymorphic `this` to it (`t.self` over `self(): this` is
-        // `() => T`), one segment at a time: each segment's object is the
-        // reference its member is read through.
-        if !bind_this {
-            return self.project_path_navigate_through(base, segments);
-        }
-        let mut current = base;
-        for segment in segments {
-            let read =
-                self.project_path_navigate_through(current, std::slice::from_ref(segment))?;
-            current = if self.dispatch.receiver_this_types(read).is_empty() {
-                read
-            } else {
-                self.dispatch.bind_callee_receiver(read, current)
-            };
-        }
-        Some(current)
+        self.member_path_in_place(if bind_this {
+            MemberPathFrame::Navigate(base, segments)
+        } else {
+            MemberPathFrame::Unbound(base, segments)
+        })
     }
 
     /// The surface that declares member `name` of `base` — the class's own
@@ -21865,10 +21804,6 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             .unwrap_or(base)
     }
 
-    /// [`Self::project_path_navigate`]'s walk: a NUMERIC name no member
-    /// declares reads through the numeric index, and every other path is
-    /// the shared `ProjectPath { mode: Navigate }` walk
-    /// ([`Self::project_member_path`]).
     /// The arms of the union `base` when every arm reads `first` as a
     /// member of a class reference (through a constrained type parameter
     /// arm's constraint); `None` otherwise.
@@ -21892,42 +21827,6 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             .then_some(arms)
     }
 
-    fn project_path_navigate_through(
-        &mut self,
-        base: SemanticNodeId,
-        segments: &[Arc<str>],
-    ) -> Option<SemanticNodeId> {
-        // A NUMERIC name (`t[1]`, `xs["0"]`) that no member declares is
-        // read through the numeric index — a tuple's element, an array's
-        // element type — exactly as the checker's indexed access of the
-        // name's numeric literal type.
-        if segments
-            .iter()
-            .any(|segment| numeric_member_name(segment).is_some())
-        {
-            let mut current = base;
-            for segment in segments {
-                let member = self.project_member_path(current, std::slice::from_ref(segment))?;
-                current = match numeric_member_name(segment) {
-                    Some(value)
-                        if matches!(
-                            self.dispatch.arena().node_data(member).as_deref(),
-                            Some(SemanticNodeData::Opaque(_))
-                        ) =>
-                    {
-                        let index = self.dispatch.graph().intern_node(SemanticNodeData::Literal(
-                            crate::semantic_query::LiteralValue::Number(value),
-                        ));
-                        self.indexed_access(current, index)?
-                    }
-                    _ => member,
-                };
-            }
-            return Some(current);
-        }
-        self.project_member_path(base, segments)
-    }
-
     /// The type of `base[index]` for an index TYPE — the shared
     /// `IndexedAccess` authority.
     fn indexed_access(
@@ -21947,13 +21846,8 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         }
     }
 
-    /// The shared `ProjectPath { mode: Navigate }` member walk of
-    /// [`Self::project_path_navigate_through`].
-    pub(super) fn project_member_path(
-        &mut self,
-        base: SemanticNodeId,
-        segments: &[Arc<str>],
-    ) -> Option<SemanticNodeId> {
+    /// The shared member projection's key, built without reading it.
+    fn member_path_key(base: SemanticNodeId, segments: &[Arc<str>]) -> SemanticQueryKey {
         // A segment spelled as a canonical integer is an element read
         // (`a[0]`), which indexes an array, a tuple or a numeric index
         // signature as the type-level `T[0]` does; no identifier spells one.
@@ -21981,24 +21875,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
             );
-        // The member walk may widen a ROOTLESS callable (a function-typed
-        // parameter's signature) to its ambient apparent surface; that
-        // widening scopes its registry lookup by the lexical demand site,
-        // which rides this guard (see `apparent_type.rs`).
-        let _demand_scope = self
-            .dispatch
-            .enter_lexical_demand(Arc::from(self.st.canonical));
-        match self
-            .dispatch
-            .demand_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
-                base,
-                path,
-                context: crate::semantic_query::ProjectionReductionContext::published(
-                    crate::semantic_query::ProjectionMode::Navigate,
-                ),
-            }) {
-            crate::semantic_query::QueryResult::Value(output) => Some(output.value),
-            _ => None,
+        SemanticQueryKey::ProjectPath {
+            base,
+            path,
+            context: crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Navigate,
+            ),
         }
     }
 
@@ -26981,7 +26863,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// union-carried one). Authored pins, annotated initializers, and
     /// every other spelling establish none.
     fn binding_init_membership(
-        &self,
+        &mut self,
         kind: verter_session_query::flow::slice::SliceBindingKind,
         init: &verter_session_query::flow::slice::SliceExpr,
         node: SemanticNodeId,
@@ -27352,11 +27234,28 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     ///
     /// A closed signature utility's answer is read at once
     /// ([`FlowDemandDriver::read_in_place`]).
-    fn lower_body_type(&self, ty: &verter_type_expr::TypeExpr) -> SemanticNodeId {
+    fn lower_body_type(&mut self, ty: &verter_type_expr::TypeExpr) -> SemanticNodeId {
         let carrier = self.lower_body_type_carrier(ty);
-        match self.body_type_read(carrier) {
-            ReadStep::Ready(node) => node,
-            ReadStep::Wait(wait) => self.dispatch.read_in_place(wait).node().unwrap_or(carrier),
+        self.settle_now(self.body_type_read(carrier), |_, delivery| {
+            ReadStep::Ready(delivery.node().unwrap_or(carrier))
+        })
+    }
+
+    /// Carry a reading operation to its value where nothing suspends: each
+    /// read it waits on is answered at once.
+    fn settle_now<T>(
+        &mut self,
+        mut step: ReadStep<T>,
+        mut resume: impl FnMut(&mut Self, ReadDelivery) -> ReadStep<T>,
+    ) -> T {
+        loop {
+            match step {
+                ReadStep::Ready(value) => return value,
+                ReadStep::Wait(wait) => {
+                    let delivery = self.dispatch.read_in_place(wait, self.st.canonical);
+                    step = resume(self, delivery);
+                }
+            }
         }
     }
 
@@ -27728,6 +27627,13 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 .expect("the statement the region is suspended at")
             {
                 Pending::Return(pending) => pending,
+                Pending::Helper(pending) => {
+                    let PendingHelper { helper, mut then } = *pending;
+                    then.run
+                        .waiting
+                        .push(Waiting::Read(ReadSite::Helper(helper)));
+                    then
+                }
                 Pending::ConditionalConst(mut pending) => {
                     if let Some(wait) = self.run_arm_walk(&mut pending.walk, Some(delivery), true) {
                         frame.pending = Some(Pending::ConditionalConst(pending));
@@ -27777,7 +27683,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             };
             match self.run_expr(&mut pending.run, Some(delivery), true) {
                 ExprProgress::Wait(wait) => {
-                    frame.pending = Some(Pending::Return(pending));
+                    frame.pending = Some(Pending::returning(pending));
                     frame.contributors = contributors;
                     frame.path_alive = path_alive;
                     return RegionEvalStep::Wait(wait);
@@ -28124,7 +28030,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                             match self.run_expr(&mut run, None, true) {
                                                 ExprProgress::Done(outcome) => outcome,
                                                 ExprProgress::Wait(wait) => {
-                                                    frame.pending = Some(Pending::Return(
+                                                    frame.pending = Some(Pending::returning(
                                                         Box::new(PendingReturn {
                                                             expr,
                                                             freshness,
@@ -30232,8 +30138,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         object: SemanticNodeId,
         member: &Arc<str>,
         span: verter_span::Span,
+        read: Option<SemanticNodeId>,
     ) -> Positional<SemanticNodeId> {
-        match self.project_segments_navigate(object, std::slice::from_ref(member)) {
+        match read {
             Some(node)
                 if !matches!(
                     self.dispatch.arena().node_data(node).as_deref(),
@@ -30292,6 +30199,14 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 Some(BodyDelivery::Nested(node)) => Positional::Value(node),
                 // The site that requested the read resumes with its answer.
                 Some(BodyDelivery::Read(delivery)) => match run.waiting.pop() {
+                    Some(Waiting::Read(ReadSite::Helper(helper))) => {
+                        match self.helper_step_on_run(run, helper, Some(delivery), suspend) {
+                            ReadStep::Ready(value) => value,
+                            ReadStep::Wait(wait) => {
+                                return ExprProgress::Wait(BodyWait::Read(wait))
+                            }
+                        }
+                    }
                     Some(Waiting::Read(ReadSite::Awaited)) => self.finish_awaited_read(delivery),
                     Some(Waiting::Read(ReadSite::ClosedUtility { leaf, carrier })) => {
                         self.finish_type_leaf(leaf, delivery.node().unwrap_or(carrier))
@@ -30482,7 +30397,13 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     Some(Waiting::NonNull) => value = self.finish_non_null(value),
                     Some(Waiting::MemberOf(member, span)) => {
                         if let Positional::Value(object) = value {
-                            value = self.finish_member_of(object, member, span);
+                            let helper = Box::new(HelperWait::member_of(object, member, span));
+                            match self.helper_step_on_run(run, helper, None, suspend) {
+                                ReadStep::Ready(done) => value = done,
+                                ReadStep::Wait(wait) => {
+                                    return ExprProgress::Wait(BodyWait::Read(wait))
+                                }
+                            }
                         }
                     }
                     Some(Waiting::Awaited) => {
@@ -30492,7 +30413,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                 run.waiting.push(Waiting::Read(ReadSite::Awaited));
                                 return ExprProgress::Wait(BodyWait::Read(request));
                             }
-                            value = self.finish_awaited_read(self.dispatch.read_in_place(request));
+                            value = self.settle_now(ReadStep::Wait(request), |this, delivery| {
+                                ReadStep::Ready(this.finish_awaited_read(delivery))
+                            });
                         }
                     }
                     Some(Waiting::Sequence(after)) => {
@@ -30699,8 +30622,21 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         run.waiting.push(Waiting::Read(ReadSite::CallList(wait)));
                         return ResumedCall::Wait(BodyWait::Read(request));
                     }
-                    let delivery = self.dispatch.read_in_place(request);
-                    step = self.resume_call_list(wait, delivery);
+                    let mut waiting = Some(wait);
+                    step = self.settle_now(ReadStep::Wait(request), |this, delivery| {
+                        let next = this.resume_call_list(
+                            waiting.take().expect("the call keeps its waiting list"),
+                            delivery,
+                        );
+                        match next {
+                            CallStep::Read(mut next) => {
+                                let request = next.take_wait();
+                                waiting = Some(next);
+                                ReadStep::Wait(request)
+                            }
+                            next => ReadStep::Ready(next),
+                        }
+                    });
                 }
             }
         }
@@ -31113,7 +31049,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 member,
                 span,
             } => match self.eval_expr(object) {
-                Positional::Value(object) => self.finish_member_of(object, member, *span),
+                Positional::Value(object) => self.member_of_in_place(object, member, *span),
                 other => other,
             },
             verter_session_query::flow::slice::SliceExpr::ParamValue { ordinal } => {
@@ -31866,7 +31802,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         loop {
             match progress {
                 call_stack::ResolveCallProgress::List(list) => {
-                    let nodes = self.read_list_in_place(list.subject, list.kind);
+                    let (mut read, wait) = self
+                        .dispatch
+                        .request_signature_list(list.subject, list.kind);
+                    let nodes = self.settle_now(ReadStep::Wait(wait), |this, delivery| {
+                        this.dispatch.deliver_signature_list(&mut read, delivery)
+                    });
                     progress = self.deliver_route_list(list, nodes.as_deref());
                 }
                 call_stack::ResolveCallProgress::Done(step) => return step,

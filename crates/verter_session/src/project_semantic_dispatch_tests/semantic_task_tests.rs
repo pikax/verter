@@ -3203,18 +3203,19 @@ fn a_calls_signature_lists_are_read_by_request() {
         assert!(requested > 0, "{name} requests its lists: {rows:?}");
         let below: Vec<_> = rows
             .iter()
-            .filter(|((_, site, family), _)| {
-                matches!(
-                    *site,
-                    "shared_signature_buckets"
-                        | "shared_signature_nodes"
-                        | "read_in_place"
-                        | "deliver_signature_list"
-                ) && matches!(
-                    family,
-                    SemanticQueryKeyTag::SignaturesOfType
-                        | SemanticQueryKeyTag::ReadSignatureResult
-                )
+            .filter(|((stage, site, family), _)| {
+                (*stage == Some("read_in_place")
+                    || matches!(
+                        *site,
+                        "shared_signature_buckets"
+                            | "shared_signature_nodes"
+                            | "deliver_signature_list"
+                    ))
+                    && matches!(
+                        family,
+                        SemanticQueryKeyTag::SignaturesOfType
+                            | SemanticQueryKeyTag::ReadSignatureResult
+                    )
             })
             .collect();
         assert!(
@@ -3255,8 +3256,12 @@ fn a_call_asked_where_nothing_suspends_reads_its_lists_in_place() {
     assert_eq!(evidence.0 .0, "number");
     let count = |site: &str| {
         rows.iter()
-            .filter(|((_, at, family), _)| {
-                *at == site && *family == SemanticQueryKeyTag::SignaturesOfType
+            .filter(|((stage, at, family), _)| {
+                (if site == "read_in_place" {
+                    *stage == Some("read_in_place")
+                } else {
+                    *at == site
+                }) && *family == SemanticQueryKeyTag::SignaturesOfType
             })
             .map(|(_, count)| *count)
             .sum::<u64>()
@@ -3322,8 +3327,8 @@ fn a_retyped_callback_reads_its_contextual_signature_by_request() {
     );
     let arms = in_place_rows
         .iter()
-        .filter(|((_, site, family), _)| {
-            *site == "read_in_place" && *family == SemanticQueryKeyTag::SignaturesOfType
+        .filter(|((stage, _, family), _)| {
+            *stage == Some("read_in_place") && *family == SemanticQueryKeyTag::SignaturesOfType
         })
         .map(|(_, count)| *count)
         .sum::<u64>();
@@ -3332,12 +3337,10 @@ fn a_retyped_callback_reads_its_contextual_signature_by_request() {
         "the retyping's arm reads become requests: {in_place_rows:?}"
     );
     assert!(
-        rows.iter().all(|((_, site, family), _)| {
+        rows.iter().all(|((stage, site, family), _)| {
             *family != SemanticQueryKeyTag::SignaturesOfType
-                || !matches!(
-                    *site,
-                    "shared_signature_nodes" | "read_in_place" | "deliver_signature_list"
-                )
+                || !(*stage == Some("read_in_place")
+                    || matches!(*site, "shared_signature_nodes" | "deliver_signature_list"))
         }),
         "the retyping route requests each contextual arm: {rows:?}"
     );
@@ -3511,7 +3514,7 @@ fn root_return_key(
 }
 
 /// The counted body reads a request answered below the root would leave:
-/// a request answered in place, or the request's own driver methods.
+/// the in-place answer stage, or the request's own driver methods.
 fn rows_answered_below_the_root(
     counted: &[(
         verter_type_engine::project_semantic_dispatch::flow_return::body_reads::BodyReadSite,
@@ -3520,11 +3523,9 @@ fn rows_answered_below_the_root(
 ) -> Vec<String> {
     counted
         .iter()
-        .filter(|((_, site, _), _)| {
-            matches!(
-                *site,
-                "read_in_place" | "closed_signature_utility" | "answer_read"
-            )
+        .filter(|((stage, site, _), _)| {
+            *stage == Some("read_in_place")
+                || matches!(*site, "closed_signature_utility" | "answer_read")
         })
         .map(|row| format!("{row:?}"))
         .collect()
@@ -3607,8 +3608,8 @@ fn a_declared_annotations_closed_signature_utility_is_counted_as_read_in_place()
     let _ = dispatch.execute_via_cold_build_helper(utility_return_key(&dispatch, "declared"));
     let cold = body_reads::take();
     assert!(
-        cold.iter().any(|((_, site, family), _)| {
-            *site == "read_in_place" && *family == SemanticQueryKeyTag::Instantiate
+        cold.iter().any(|((stage, _, family), _)| {
+            *stage == Some("read_in_place") && *family == SemanticQueryKeyTag::Instantiate
         }),
         "the annotation's utility read is counted as answered in place: {cold:?}"
     );
@@ -3652,6 +3653,225 @@ fn a_requested_type_leaf_read_answers_and_charges_what_the_in_place_read_does() 
             );
             assert_eq!(by_request, in_place, "{name} (polled: {polled})");
         }
+    }
+}
+
+const MEMBER_PATH_FILE: &str = "/semantic-task/member-path.ts";
+const MEMBER_PATH_BODY: &str = r#"
+declare const k: ReturnType<() => { v: number }>;
+export function literal() { return ({ value: 1 }).value; }
+export function chain() { return ({ inner: { value: 1 } }).inner.value; }
+export function binding() {
+    const result = ({ value: 1 }).value;
+    return result;
+}
+export function nested() { return () => { return ({ value: 1 }).value; }; }
+export function mixed() { return ({ value: k }).value; }
+export function rootless(f: () => void) { return ({ f }).f.marker; }
+export function optional(value: { v?: number }) { return ({ value }).value.v; }
+class Box { readonly value = 1; }
+export function constructed() { return new Box().value; }
+class Left { value = 1; }
+class Right { value = 2; }
+export function classUnion(value: Left | Right) { return ({ value }).value.value; }
+"#;
+
+type CountedBodyReads = Vec<(
+    verter_type_engine::project_semantic_dispatch::flow_return::body_reads::BodyReadSite,
+    u64,
+)>;
+
+type BodyReadReceipt = (
+    String,
+    Vec<verter_type_engine::project_semantic_dispatch::cost_receipt::Nesting>,
+);
+
+/// A fresh member read, with both the joined comparison and its complete
+/// receipt tree. The small ambient surface makes the rootless callable's
+/// lexical scope observable without depending on an installed SDK.
+fn member_path_read(
+    name: &str,
+    polled: bool,
+) -> (
+    usize,
+    semantic_poll_contract::JoinedEvidence,
+    CountedBodyReads,
+    Option<BodyReadReceipt>,
+) {
+    use verter_type_engine::project_semantic_dispatch::flow_return::{
+        body_reads, flow_read_requests_for_tests,
+    };
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host_with_lib(
+        "/semantic-task",
+        "interface Function { marker: number; }",
+    );
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        MEMBER_PATH_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(MEMBER_PATH_BODY),
+        crate::FileLanguage::script_ts(),
+    );
+    let mut dispatch = ProjectSemanticDispatch::new(&*host);
+    let key = root_return_key(&dispatch, MEMBER_PATH_FILE, name);
+    let _ = body_reads::take();
+    let requests = flow_read_requests_for_tests();
+    let read = if polled {
+        let mut entry = dispatch.poll_query(key);
+        let read = semantic_poll_contract::poll_until_ready(|waker| entry.poll(waker));
+        drop(entry);
+        read
+    } else {
+        dispatch.execute_via_cold_build_helper(key)
+    };
+    let requested = flow_read_requests_for_tests() - requests;
+    let rows = body_reads::take();
+    let evidence = semantic_poll_contract::joined_evidence(&dispatch, &read, |answer| {
+        display_return(&host, answer)
+    });
+    let receipt = read.receipt().priced().map(|receipt| {
+        (
+            read_summary(&dispatch, &read)
+                .5
+                .expect("a priced read has a receipt summary"),
+            receipt
+                .prerequisites()
+                .iter()
+                .map(|dependency| dependency.nesting)
+                .collect(),
+        )
+    });
+    (requested, evidence, rows, receipt)
+}
+
+#[test]
+fn a_member_path_is_read_by_request() {
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    for (name, expected) in [("literal", 1), ("chain", 2), ("binding", 1)] {
+        let (requests, evidence, rows, _) = member_path_read(name, false);
+        assert_eq!(
+            requests, expected,
+            "{name} requests each member once: {rows:?}"
+        );
+        assert_eq!(evidence.0 .0, "number", "{name} reads the member");
+        assert!(
+            rows.iter().all(|((stage, site, family), _)| {
+                *family != SemanticQueryKeyTag::ProjectPath
+                    || (*site != "demand_type_node" && *stage != Some("read_in_place"))
+            }),
+            "{name}'s member is answered by the root: {rows:?}"
+        );
+    }
+}
+
+#[test]
+fn a_requested_member_path_reads_as_the_member_read_in_place() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::with_body_reads_in_place_for_tests;
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    for name in [
+        "literal",
+        "chain",
+        "binding",
+        "nested",
+        "optional",
+        "constructed",
+        "classUnion",
+    ] {
+        for polled in [false, true] {
+            let (requests, requested, _, receipt) = member_path_read(name, polled);
+            let (in_place_requests, in_place, rows, in_place_receipt) =
+                with_body_reads_in_place_for_tests(|| member_path_read(name, polled));
+            assert!(requests > 0, "{name} requests its member reads");
+            assert_eq!(in_place_requests, 0);
+            assert_eq!(requested, in_place, "{name} (polled: {polled}) preserves values, facts, diagnostics, receipt footprint and work");
+            assert_eq!(
+                receipt, in_place_receipt,
+                "{name} preserves the whole receipt tree"
+            );
+            assert!(
+                rows.iter().any(|((stage, site, family), count)| {
+                    *stage == Some("read_in_place")
+                        && *site == "member_path"
+                        && *family == SemanticQueryKeyTag::ProjectPath
+                        && *count > 0
+                }),
+                "{name}'s forced in-place read carries its origin: {rows:?}"
+            );
+            assert!(
+                rows.iter()
+                    .all(|((_, site, _), _)| *site != "read_in_place"),
+                "every in-place answer is attributed to its origin: {rows:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_polled_member_path_answers_what_the_synchronous_member_answers() {
+    for name in ["literal", "chain", "binding", "nested"] {
+        let (requests, synchronous, _, receipt) = member_path_read(name, false);
+        let (polled_requests, polled, _, polled_receipt) = member_path_read(name, true);
+        assert!(requests > 0);
+        assert_eq!(polled_requests, requests);
+        semantic_poll_contract::assert_joined_matches(polled, &synchronous);
+        assert_eq!(
+            polled_receipt, receipt,
+            "{name} preserves the whole receipt tree"
+        );
+    }
+}
+
+#[test]
+fn frame_and_entered_body_reads_keep_their_receipt_nesting() {
+    use verter_type_engine::project_semantic_dispatch::cost_receipt::Nesting;
+    use verter_type_engine::project_semantic_dispatch::flow_return::with_body_reads_in_place_for_tests;
+    let (requests, synchronous, rows, receipt) = member_path_read("mixed", false);
+    let (polled_requests, polled, _, polled_receipt) = member_path_read("mixed", true);
+    let (in_place_requests, in_place, _, in_place_receipt) =
+        with_body_reads_in_place_for_tests(|| member_path_read("mixed", false));
+    assert_eq!(
+        requests, 2,
+        "the utility and member each request once: {rows:?}"
+    );
+    assert_eq!(polled_requests, requests);
+    assert_eq!(in_place_requests, 0);
+    assert!(synchronous.0 .0.contains("v: number"));
+    assert_eq!(synchronous, in_place);
+    semantic_poll_contract::assert_joined_matches(polled, &synchronous);
+    assert_eq!(polled_receipt, receipt);
+    assert_eq!(in_place_receipt, receipt);
+    let (receipt, root_nesting) = receipt.expect("the mixed read has a priced receipt");
+    // Reading k's TypeOf and then its closed Instantiate starts two drives.
+    // The final member ProjectPath is entered directly by the flow body.
+    // Check the root edges: either drive has Entered descendants of its own.
+    assert_eq!(
+        root_nesting,
+        [Nesting::Drive, Nesting::Drive, Nesting::Entered],
+        "TypeOf, the closed utility, and the member keep their adoption order: {receipt}"
+    );
+}
+
+#[test]
+fn a_rootless_callable_member_keeps_its_lexical_demand() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::with_body_reads_in_place_for_tests;
+    for polled in [false, true] {
+        let (requests, requested, rows, receipt) = member_path_read("rootless", polled);
+        let (in_place_requests, in_place, _, in_place_receipt) =
+            with_body_reads_in_place_for_tests(|| member_path_read("rootless", polled));
+        assert_eq!(
+            requests, 2,
+            "the object and apparent members request once: {rows:?}"
+        );
+        assert_eq!(in_place_requests, 0);
+        assert_eq!(
+            requested.0 .0, "number",
+            "the anonymous callable finds the lexical project's Function surface"
+        );
+        assert!(
+            requested.0 .2,
+            "the rootless apparent surface stays cache suppressed"
+        );
+        assert_eq!(requested, in_place);
+        assert_eq!(receipt, in_place_receipt);
     }
 }
 
@@ -3702,9 +3922,9 @@ fn an_awaited_operand_is_normalized_by_request() {
         "the awaited operand requests its read: {rows:?}"
     );
     assert!(
-        rows.iter().all(|((_, site, family), _)| {
+        rows.iter().all(|((stage, site, family), _)| {
             *family != SemanticQueryKeyTag::AwaitedNormalize
-                || !matches!(*site, "awaited_normalize_for_flow" | "read_in_place")
+                || !(*stage == Some("read_in_place") || *site == "awaited_normalize_for_flow")
         }),
         "the root answers the awaited operand's normalization: {rows:?}"
     );
@@ -3726,8 +3946,8 @@ fn a_requested_awaited_operand_reads_as_the_operand_read_in_place() {
             "polled: {polled} preserves value, facts, diagnostics and receipt footprint"
         );
         assert!(
-            in_place_rows.iter().any(|((_, site, family), count)| {
-                *site == "read_in_place"
+            in_place_rows.iter().any(|((stage, _, family), count)| {
+                *stage == Some("read_in_place")
                     && *family == SemanticQueryKeyTag::AwaitedNormalize
                     && *count > 0
             }),

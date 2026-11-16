@@ -11,7 +11,7 @@
 
 use super::differential_harness_tests::{Matrix, Read, ALL};
 
-/// TypeScript 7.0.2, measured with `tsc --noEmit --strict oracle.ts`:
+/// The pinned TypeScript checker, measured with `tsc --noEmit --strict oracle.ts`:
 /// TS2322 displays `any` for both property reads and `R` for both object
 /// reads. TypeScript 5.9.3's checker.ts lines 25416-25424 specify the
 /// strict-subtype fold, its all-candidates check, and regular fallback:

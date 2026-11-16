@@ -44,12 +44,29 @@ edit still forces a fresh inference. When a completed transaction member exists
 and the shared candidate is absent, transaction reuse precedes the dispatcher's
 own publication so its recorded reads, self-roots and refusal are replayed.
 
+Flow-body requests carry their delivery shape independently of receipt nesting:
+`Node` (its type node) or `Whole` (its whole cache read) selects the answer, while `ReadNesting::of` derives
+frame adoption for `Instantiate` and `TypeOf` and entered adoption for other
+families. Calls, nested flow returns and relations use their own owned helpers.
+The request also retains its checking site, lexical-demand flag and operation
+origin. Both answerers receive the root activation's canonical file; lexical
+requests enter that file's demand scope while answering.
+
 An awaited operand on the expression run requests `AwaitedNormalize` when its
-position can suspend. The root answers it as an entered read and delivers the
-whole cache envelope, so the shared finish rejects partial results. Positions
-that cannot suspend answer the same request through `read_in_place`; async
-generator wrapping and operands evaluated outside that run retain their direct
-reads. Key construction and result finishing are shared by both routes.
+position can suspend. Its direct `ReadSite::Awaited` keeps the whole cache
+envelope, so the shared finish rejects partial results. A value-rooted member
+read instead retains its helper chain in `HelperRun`: optionality, class/union
+navigation, numeric fallback and receiver binding advance in their existing
+order, stopping at each lexical `ProjectPath` read. `ReadSite::Helper` holds the
+chain between expression steps; `Pending::Helper` holds a return statement
+suspended at that chain. Only the delivered node finishes the member read.
+
+Positions that cannot suspend carry the same reading steps through `settle_now`.
+Their reads are counted under stage `read_in_place` and the requesting
+operation's origin, such as `member_path`, rather than a bare in-place site.
+Async generator wrapping and awaited operands evaluated outside the expression
+run retain their direct reads. Key construction and result finishing are shared
+by both routes.
 
 Literal switch narrowing partitions the entering parent union once in
 `flow_return_branches.rs`. When every projected discriminant and case test is

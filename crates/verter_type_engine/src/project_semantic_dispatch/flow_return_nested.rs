@@ -551,7 +551,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 DriveStep::Continue => {}
                 // A drive that cannot suspend answers its body's read at once.
                 DriveStep::Request(wait) => {
-                    let delivery = self.dispatch.read_in_place(wait);
+                    let delivery = self.dispatch.read_in_place(wait, self.st.canonical);
                     delivered = Some(RegionDelivery::Wait(BodyDelivery::Read(delivery)));
                 }
                 DriveStep::End(end) => return end,
