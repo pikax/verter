@@ -11,6 +11,37 @@
 
 use super::differential_harness_tests::{Matrix, Read, ALL};
 
+/// TypeScript 7.0.2, measured with `tsc --noEmit --strict oracle.ts`:
+/// TS2322 displays `any` for both property reads and `R` for both object
+/// reads. TypeScript 5.9.3's checker.ts lines 25416-25424 specify the
+/// strict-subtype fold, its all-candidates check, and regular fallback:
+/// https://github.com/microsoft/TypeScript/blob/v5.9.3/src/compiler/checker.ts#L25416-L25424
+#[test]
+fn a_common_supertype_prefers_the_strict_supertype_in_either_candidate_order() {
+    let source = r#"
+type A = { p: any };
+type B = { p: unknown };
+declare const a: A;
+declare const b: B;
+declare function three<T>(x: T, y: T, z: T): T;
+export function aba() { return three(a, b, a).p; }
+export function bab() { return three(b, a, b).p; }
+type R = { readonly p: string };
+type W = { p: string };
+declare const r: R;
+declare const w: W;
+export function rwr() { return three(r, w, r); }
+export function wrw() { return three(w, r, w); }
+"#;
+    let failures = Matrix::new(source).settings(&ALL).returns(&[
+        ("aba", "any"),
+        ("bab", "any"),
+        ("rwr", "R"),
+        ("wrw", "R"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 const SOURCE: &str = r##"
 type MV<T> = T extends { a: infer U; b: (x: infer U) => void } ? U : 0;
 type CO<T> = T extends { a: (x: infer U) => void; b: (x: infer U) => void } ? U : 0;
