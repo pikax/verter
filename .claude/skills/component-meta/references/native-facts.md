@@ -13,6 +13,12 @@ gate. Binding error mapping preserves native argument/serialization statuses
 and WASM string errors. Response-byte attribution fires once in the shared
 encoder; its observation gate is owned by `verter_audit`.
 
+JavaScript consumers decode scalar WASM metadata bytes and each non-null batch
+slot with `decodeComponentMetaPayload` from `@verter/component-meta/browser`.
+The same decoder and its `NativeComponentMetaResult` return type are also
+exported by `@verter/component-meta`. The browser entry re-exports the shared
+decoder directly; its native-result imports are type-only.
+
 `component_meta.proto` defines one schema, versioned by the single
 `COMPONENT_META_SCHEMA_VERSION` constant (currently 15). Protobuf and the JSON
 rendering both state that version (`schemaVersion` in JSON). JSON has no
