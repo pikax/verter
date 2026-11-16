@@ -37,8 +37,8 @@
 //!    `X & unknown = X`, error-carrier domination on both operators),
 //!    checker-mirroring literal subsumption on unions (`string | "a"` is
 //!    `string`), structural `T | T = T` / `T & T = T` via the comparator,
-//!    and PROVEN-disjoint scalar intersection collapse to `never` via
-//!    [`tag_level_disjoint`] — an undecided relation is never guessed. A
+//!    and the checker's pre-Any intersection contradictions via
+//!    [`intersection_domains_conflict`] — an undecided relation is never guessed. A
 //!    union is built under an explicit [`NullabilityPolicy`]: with
 //!    `strictNullChecks` off it erases its `null` / `undefined` members
 //!    beside any other member, exactly as the checker's `getUnionType`
@@ -1302,15 +1302,12 @@ fn canonicalize_with<M: verter_audit::observe::ObserveExec>(
         } else {
             None
         }
+    } else if has_never {
+        // `X & never = never`. The `any` shortcut follows the disjointness
+        // check below, as in the checker's `getIntersectionType`.
+        Some(PrimitiveKind::Never)
     } else {
-        // `X & never = never`, `X & any = any` (never dominates any).
-        if has_never {
-            Some(PrimitiveKind::Never)
-        } else if has_any {
-            Some(PrimitiveKind::Any)
-        } else {
-            None
-        }
+        None
     };
     if let Some(kind) = extreme {
         return CanonicalComposite {
@@ -1768,16 +1765,36 @@ fn canonicalize_with<M: verter_audit::observe::ObserveExec>(
         }
     }
 
-    // 5. Intersection proven-disjoint scalar collapse: only a PROVEN empty
-    //    tag-level domain collapses (`string & number = never`); an
-    //    undecided relation is never guessed. Single pass over the deduped
-    //    arms — exactly the pairwise [`tag_level_disjoint`] judgement,
-    //    computed in O(n) over the childless scalar domain.
+    // 5. `getIntersectionType` checks strict nullable/object conflicts,
+    //    its listed primitive-domain pairs, then template/string conflicts
+    //    before Any. General scalar emptiness is broader: Boolean and Null
+    //    alone trigger none of those flag pairs (`boolean & null & any`
+    //    is Any), because Boolean is the union `true | false`.
     if !is_union
-        && (scalar_domain_provably_empty(graph.store(), &kept)
-            || (nullability.is_strict()
-                && nullable_beside_object_type(graph.store(), &kept, &mut evidence)))
+        && ((nullability.is_strict()
+            && nullable_beside_object_type(graph.store(), &kept, &mut evidence))
+            || intersection_domains_conflict(graph.store(), &kept, nullability)
+            || intersection_template_literals_conflict(graph.store(), &kept, &mut evidence))
     {
+        return CanonicalComposite {
+            node: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
+            evidence,
+        };
+    }
+
+    // `getIntersectionType` checks disjoint domains before `Any`:
+    // `string & number & any` is `never`, as is `(string & number) & any`.
+    if !is_union && has_any {
+        return CanonicalComposite {
+            node: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any)),
+            evidence,
+        };
+    }
+
+    // Once Any has been absorbed, the full scalar domain can prove empty
+    // intersections such as Boolean/Null (which the checker distributes
+    // over Boolean's `true | false` members).
+    if !is_union && scalar_domain_provably_empty(graph.store(), &kept) {
         return CanonicalComposite {
             node: graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
             evidence,
@@ -3500,10 +3517,10 @@ fn peek_nullable_via_graph(
     None
 }
 
-/// O(tag) disjointness — the sole proven-disjoint authority for both the
-/// canonical intersection collapse and the relation engine's
-/// contravariant-candidate intersection collapse (`relation.rs` delegates
-/// here). `true` ONLY for pairs whose intersection is provably empty at tag
+/// General O(tag) disjointness for the relation engine's
+/// contravariant-candidate intersection collapse. Canonical construction's
+/// pre-Any check uses the narrower [`intersection_domains_conflict`].
+/// `true` ONLY for pairs whose intersection is provably empty at tag
 /// level — distinct concrete primitives (modulo the `undefined`/`void`
 /// widening pair), distinct literals, or a literal against a mismatched base
 /// primitive. Conservative `false` for every other shape: an undecided
@@ -4022,6 +4039,189 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
         | D::ObjectSpreadProgram(_)
         | D::DeferredCallable(_) => data.hash(hasher),
     }
+}
+
+/// The identity under which the checker interns a regular unit type.
+/// This is independent of structural payload identity and authored heads.
+#[derive(PartialEq, Eq, Hash)]
+enum IntersectionUnitKey {
+    Literal(LiteralValue),
+    Enum {
+        declaration: crate::semantic_query::DeclIdentity,
+        module_specifier: Option<OwnedStr>,
+        value: EnumUnitValue,
+    },
+    UniqueSymbol(verter_type_expr::facts::ValueDeclIdentityPart),
+    Nullable(PrimitiveKind),
+}
+
+#[derive(PartialEq, Eq, Hash)]
+enum EnumUnitValue {
+    Literal(LiteralValue),
+    MemberDeclaration(OwnedStr),
+}
+
+/// Project the existing canonical identities, as `getRegularTypeOfLiteralType`,
+/// `getEnumLiteralType` and `getESSymbolLikeTypeForNode` do in the checker.
+/// Constant enum members share a unit by enum and value; a computed member
+/// instead has its own cached declaration type. Void is not a Unit.
+fn intersection_unit_key(
+    graph: &SemanticGraphStore,
+    data: &SemanticNodeData,
+) -> Option<IntersectionUnitKey> {
+    match data {
+        SemanticNodeData::Literal(value) => Some(IntersectionUnitKey::Literal(value.clone())),
+        SemanticNodeData::EnumLiteral(member) => {
+            let value = match graph.node_data(member.base).as_deref() {
+                Some(SemanticNodeData::Literal(value)) => EnumUnitValue::Literal(value.clone()),
+                Some(_) => EnumUnitValue::MemberDeclaration(member.member.clone()),
+                None => return None,
+            };
+            Some(IntersectionUnitKey::Enum {
+                declaration: member.enum_decl.clone(),
+                module_specifier: member.module_specifier.clone(),
+                value,
+            })
+        }
+        SemanticNodeData::TypeOfNominal(_) => data
+            .typeof_nominal_identity()
+            .cloned()
+            .map(IntersectionUnitKey::UniqueSymbol),
+        SemanticNodeData::Primitive(kind @ (PrimitiveKind::Null | PrimitiveKind::Undefined)) => {
+            Some(IntersectionUnitKey::Nullable(*kind))
+        }
+        _ => None,
+    }
+}
+
+/// The checker's `getIntersectionType` flag pairs over a deduplicated set.
+/// BooleanLike and Null participate on the right of the listed pairs, but
+/// neither starts a pair: Boolean/Null is reduced only after Any absorption.
+/// Two distinct unit types set NonPrimitive in `addTypeToIntersection`,
+/// making the first domain pair fail. Erased nullable types keep their unit
+/// flags for later insertions, but do not themselves enter the type set.
+fn intersection_domains_conflict(
+    graph: &SemanticGraphStore,
+    arms: &[SemanticNodeId],
+    nullability: NullabilityPolicy,
+) -> bool {
+    const NON_PRIMITIVE: u8 = 1;
+    const STRING_LIKE: u8 = 1 << 1;
+    const NUMBER_LIKE: u8 = 1 << 2;
+    const BIGINT_LIKE: u8 = 1 << 3;
+    const SYMBOL_LIKE: u8 = 1 << 4;
+    const VOID_LIKE: u8 = 1 << 5;
+    const BOOLEAN_LIKE: u8 = 1 << 6;
+    const NULL: u8 = 1 << 7;
+
+    let primitive = |kind| match kind {
+        PrimitiveKind::Object => NON_PRIMITIVE,
+        PrimitiveKind::String => STRING_LIKE,
+        PrimitiveKind::Number => NUMBER_LIKE,
+        PrimitiveKind::BigInt => BIGINT_LIKE,
+        PrimitiveKind::Symbol => SYMBOL_LIKE,
+        PrimitiveKind::Void | PrimitiveKind::Undefined => VOID_LIKE,
+        PrimitiveKind::Boolean => BOOLEAN_LIKE,
+        PrimitiveKind::Null => NULL,
+        PrimitiveKind::Any | PrimitiveKind::Unknown | PrimitiveKind::Never => 0,
+    };
+    let literal = |value: &LiteralValue| match value {
+        LiteralValue::String(_) => STRING_LIKE,
+        LiteralValue::Number(_) => NUMBER_LIKE,
+        LiteralValue::BigInt(_) => BIGINT_LIKE,
+        LiteralValue::Boolean(_) => BOOLEAN_LIKE,
+    };
+    let mut includes = 0;
+    let mut seen_unit = false;
+    let mut units = FxHashSet::default();
+    for &arm in arms {
+        let Some(data) = graph.node_data(arm) else {
+            continue;
+        };
+        let domain = match &*data {
+            SemanticNodeData::Primitive(kind) => primitive(*kind),
+            SemanticNodeData::Literal(value) => literal(value),
+            SemanticNodeData::EnumLiteral(member) => {
+                match graph.node_data(member.base).as_deref() {
+                    Some(SemanticNodeData::Literal(value)) => literal(value),
+                    Some(SemanticNodeData::Primitive(kind)) => primitive(*kind),
+                    _ => 0,
+                }
+            }
+            SemanticNodeData::TypeOfNominal(_) => SYMBOL_LIKE,
+            SemanticNodeData::TemplateLiteral { .. } => STRING_LIKE,
+            _ if super::template_relation::string_mapping(graph, arm).is_some() => STRING_LIKE,
+            _ => 0,
+        };
+        if let Some(key) = intersection_unit_key(graph, &data) {
+            let eligible =
+                nullability.is_strict() || !matches!(key, IntersectionUnitKey::Nullable(_));
+            if eligible && units.insert(key) && seen_unit {
+                includes |= NON_PRIMITIVE;
+            }
+            // IncludesMask retains nullable Unit flags even when erasure omits
+            // the type from the set. Only a later, new insertion checks them.
+            seen_unit = true;
+        }
+        includes |= domain;
+    }
+    // Exactly the checker's left-hand masks, in its order. Every bit above
+    // is a DisjointDomains bit; BooleanLike and Null have no left-hand arm.
+    [
+        NON_PRIMITIVE,
+        STRING_LIKE,
+        NUMBER_LIKE,
+        BIGINT_LIKE,
+        SYMBOL_LIKE,
+        VOID_LIKE,
+    ]
+    .into_iter()
+    .any(|domain| includes & domain != 0 && includes & !domain != 0)
+}
+
+/// `extractRedundantTemplateLiterals` proves an empty intersection when a
+/// string literal fails a pattern literal. A generic template whose holes
+/// are not pattern placeholders supplies no contradiction here.
+fn intersection_template_literals_conflict(
+    graph: &SemanticGraphStore,
+    arms: &[SemanticNodeId],
+    evidence: &mut CanonicalEvidence,
+) -> bool {
+    let is_template = |arm| {
+        matches!(
+            graph.node_data(arm).as_deref(),
+            Some(SemanticNodeData::TemplateLiteral { .. })
+        ) || super::template_relation::string_mapping(graph, arm).is_some()
+    };
+    if !arms.iter().copied().any(is_template) {
+        return false;
+    }
+    let literals: Vec<_> = arms
+        .iter()
+        .filter_map(|arm| match graph.node_data(*arm).as_deref() {
+            Some(SemanticNodeData::Literal(LiteralValue::String(text))) => Some(text.clone()),
+            Some(SemanticNodeData::EnumLiteral(member)) => {
+                match graph.node_data(member.base).as_deref() {
+                    Some(SemanticNodeData::Literal(LiteralValue::String(text))) => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect();
+    !literals.is_empty()
+        && arms.iter().any(|arm| {
+            if !is_template(*arm) {
+                return false;
+            }
+            evidence.record_subtree_roots(graph, *arm);
+            super::template_relation::is_pattern_literal(graph, *arm)
+                && literals.iter().any(|text| {
+                    !super::template_relation::string_literal_matches_pattern(graph, text, *arm)
+                })
+        })
 }
 
 /// Single-pass equivalent of "∃ arm pair with [`tag_level_disjoint`] =
@@ -5323,5 +5523,51 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
             },
             receipt: read.receipt,
         }
+    }
+}
+
+#[cfg(test)]
+mod append_equivalence_tests {
+    use super::*;
+
+    #[test]
+    fn chained_intersection_matches_one_shot_after_disjoint_arms_and_any() {
+        let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
+        let input =
+            crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph);
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
+        let mutable = graph.intern_node(SemanticNodeData::Array {
+            element: string,
+            readonly: false,
+        });
+        let readonly = graph.intern_node(SemanticNodeData::Array {
+            element: string,
+            readonly: true,
+        });
+        let prefix = intern_ordered_intersection(input, &[mutable, readonly]);
+        assert!(prefix.evidence.is_complete_proof());
+        assert!(
+            matches!(graph.node_data(prefix.node).as_deref(), Some(SemanticNodeData::Intersection(arms))
+            if arms.origin_category() == crate::semantic_query::composite::CompositeOriginCategory::Canonical(NullabilityPolicy::Strict))
+        );
+        let mut chained = prefix.node;
+        for arm in [string, number, any] {
+            let next = intern_ordered_intersection(input, &[chained, arm]);
+            assert!(next.evidence.is_complete_proof());
+            chained = next.node;
+        }
+        let one_shot =
+            intern_ordered_intersection(input, &[mutable, readonly, string, number, any]);
+        assert!(one_shot.evidence.is_complete_proof());
+        assert_eq!(
+            chained,
+            one_shot.node,
+            "chained={:?}, one-shot={:?}",
+            graph.node_data(chained),
+            graph.node_data(one_shot.node)
+        );
     }
 }

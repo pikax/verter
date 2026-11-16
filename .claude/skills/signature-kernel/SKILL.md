@@ -129,6 +129,49 @@ an undecided relation is never guessed. Both thread `CanonicalEvidence` to
 `deposit_canonical_evidence`; an incomplete comparison sets `cache_suppress`
 (`ReturnOnly`, never a warm canonical result).
 
+Intersection reduction follows `getIntersectionType` before absorbing `any`:
+explicit `never`, strict nullable/object conflicts, the listed flag-domain
+pairs (NonPrimitive, StringLike, NumberLike, BigIntLike, ESSymbolLike and
+VoidLike, each against the other DisjointDomains flags), then template/string
+conflicts. Distinct unit types contribute NonPrimitive as in
+`addTypeToIntersection`; erased nullable arms keep their domain flags but do
+not themselves enter the type set. Their Unit flags remain visible to a later
+new unit insertion (`null & true & any` is `never` even with null checks off;
+the reverse order is `any` with null checks off). Unit membership is derived
+in one place, `intersection_unit_key`, from the existing semantic identities,
+independently of structural deduplication and authored heads:
+
+| Unit | Checker interning key | Existing engine identity |
+|---|---|---|
+| String literal | String value, `getStringLiteralType` | `LiteralValue::String` value equality. |
+| Number literal | Number value (Map SameValueZero), `getNumberLiteralType` | `LiteralValue::Number` after the graph intern boundary normalizes signed zero. |
+| Bigint literal | `pseudoBigIntToString(value)`, `getBigIntLiteralType` | `LiteralValue::BigInt` signed decimal value; `TypeExpr::bigint_literal` removes the sign of zero. |
+| Boolean literal | Regular true/false singleton after freshness removal | `LiteralValue::Boolean`. |
+| Constant enum member | Enum symbol id, value kind and value, `getEnumLiteralType` | `EnumLiteralType.enum_decl` plus `module_specifier`, and its base `LiteralValue`; member name and member count are not unit identity. |
+| Computed enum member | Member symbol's cached declared type, `createComputedEnumType` | Existing enum/member declaration identity: `enum_decl`, `module_specifier`, `member`. |
+| Unique symbol | Declaration symbol's cached `uniqueESSymbolType` | `typeof_nominal_identity()` / `ValueDeclIdentityPart`, without its authored head. |
+| Null / undefined | Separate intrinsic singleton for each kind | `PrimitiveKind::Null` / `Undefined`; erasure prevents insertion, not Unit history. |
+| Void | Intrinsic singleton, but **not** a Unit | `PrimitiveKind::Void` contributes VoidLike only. |
+
+Checker sources (TypeScript 7.0.2):
+[intrinsic and boolean singletons](https://github.com/microsoft/TypeScript/blob/v7.0.2/src/compiler/checker.ts#L2087-L2111),
+[literal interning and unique symbols](https://github.com/microsoft/TypeScript/blob/v7.0.2/src/compiler/checker.ts#L20276-L20364),
+[enum declaration/member caching](https://github.com/microsoft/TypeScript/blob/v7.0.2/src/compiler/checker.ts#L13544-L13597),
+[regularization and set insertion](https://github.com/microsoft/TypeScript/blob/v7.0.2/src/compiler/checker.ts#L18470-L18512),
+[Unit flag](https://github.com/microsoft/TypeScript/blob/v7.0.2/src/compiler/types.ts#L6371).
+Thus equal-valued members of one enum and two access paths to one unique
+symbol each contribute one unit. An enum member and its plain literal value,
+or equal-valued members of different enums, contribute distinct units.
+General scalar
+emptiness is too broad here:
+`boolean & null & any` is `any`, because BooleanLike and Null start no listed
+pair, while `boolean & undefined & any` is `never` through VoidLike.
+`string & number & any` and `(string & number) & any` both reduce to `never`.
+Structural deduplication precedes the domain checks; the `any` shortcut follows
+them and precedes full scalar emptiness, erased-nullish and object-property
+reductions. Full scalar emptiness still reduces `boolean & null` to `never`
+when no `any` absorbs it. Error/wildcard carriers keep their earlier precedence.
+
 A union is built under an explicit `NullabilityPolicy` — `strictNullChecks`
 as construction input. `Erased` (the option off) drops `null` / `undefined`
 beside any other member, as the checker's `getUnionType` does, and a
