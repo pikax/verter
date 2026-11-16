@@ -283,6 +283,8 @@ inline_copy!(
     verter_type_engine::semantic_query::ResultCompleteness,
     cm::PublicInstanceMemberKind,
     cm::PublicInstanceCompleteness,
+    cm::PublicInstanceStructuralFailure,
+    cm::PublicInstanceEnumeration,
     cm::BindingKindAnalysis,
     cm::AcceptedPropKind,
     cm::AcceptedEventKind,
@@ -869,6 +871,7 @@ impl PayloadHeap for cm::MetadataFactGuarantee {
 impl PayloadHeap for cm::ComponentDomainGuarantees {
     fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
+            enumeration,
             props,
             events,
             slots,
@@ -886,6 +889,7 @@ impl PayloadHeap for cm::ComponentDomainGuarantees {
             + accepted.heap(m)
             + public_instance.heap(m)
             + type_registry.heap(m)
+            + enumeration.heap(m)
     }
 }
 
@@ -1031,9 +1035,10 @@ impl PayloadHeap for cm::PublicInstanceAnalysis {
     fn heap(&self, m: &mut Meter<'_>) -> usize {
         let Self {
             members,
+            structural_failure,
             completeness,
         } = self;
-        members.heap(m) + completeness.heap(m)
+        members.heap(m) + structural_failure.heap(m) + completeness.heap(m)
     }
 }
 

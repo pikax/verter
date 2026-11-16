@@ -142,6 +142,7 @@ mod tests {
             emit_fields: vec![],
             slot_fields,
             default_keys: vec![],
+            runtime_members_fully_enumerated: false,
             expose_fields: vec![],
             default_values: Vec::new(),
             resolved_local_types: Vec::new(),

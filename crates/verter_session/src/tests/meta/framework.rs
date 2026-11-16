@@ -2033,6 +2033,7 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
         tags: Vec::new(),
     });
     analysis.public_instance = Some(cm::PublicInstanceAnalysis {
+        structural_failure: None,
         members: vec![cm::PublicInstanceMemberAnalysis {
             name: "pi".to_string(),
             kind: cm::PublicInstanceMemberKind::Prop,
@@ -2484,5 +2485,254 @@ fn component_meta_output_genuinely_absent_positions_stay_typed_unknown_not_failu
             );
         }
         other => panic!("the function source materializes as a function; got {other:?}"),
+    }
+}
+
+#[test]
+fn public_instance_exact_requires_closed_setup_and_complete_delivery() {
+    use verter_session_query::analysis::component_meta as cm;
+    use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
+    let project = make_project();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+const props = defineProps<{ label: string }>();
+defineSlots<{ default(): unknown }>();
+defineExpose({ label: props.label });
+</script>"#,
+        )
+        .unwrap();
+    let host = project.host();
+    let cached = host.get_component_meta("/App.vue").unwrap();
+    let baseline = cached.analysis().clone();
+    assert_eq!(
+        baseline.domain_guarantees.props,
+        cm::MetadataFactGuarantee::complete(false)
+    );
+    assert_eq!(baseline.domain_guarantees.slots.kind, 1);
+    assert_eq!(baseline.domain_guarantees.exposed.kind, 1);
+    for (condition, expected, causes) in [
+        ("complete", cm::PublicInstanceCompleteness::Exact, vec![]),
+        (
+            "open_props",
+            cm::PublicInstanceCompleteness::Partial,
+            vec![103],
+        ),
+        (
+            "incomplete_props",
+            cm::PublicInstanceCompleteness::Partial,
+            vec![14],
+        ),
+        (
+            "undecided_slots",
+            cm::PublicInstanceCompleteness::Partial,
+            vec![18],
+        ),
+        (
+            "incomplete_exposed",
+            cm::PublicInstanceCompleteness::Partial,
+            vec![10],
+        ),
+        (
+            "options_member",
+            cm::PublicInstanceCompleteness::Partial,
+            vec![103],
+        ),
+        (
+            "no_setup",
+            cm::PublicInstanceCompleteness::Partial,
+            vec![103],
+        ),
+        (
+            "partial_measure",
+            cm::PublicInstanceCompleteness::Partial,
+            vec![14],
+        ),
+        (
+            "failed_publication",
+            cm::PublicInstanceCompleteness::Partial,
+            vec![14],
+        ),
+    ] {
+        let mut analysis = baseline.clone();
+        match condition {
+            "open_props" => analysis.domain_guarantees.props.open = true,
+            "incomplete_props" => {
+                analysis.domain_guarantees.props = cm::MetadataFactGuarantee {
+                    kind: 2,
+                    causes: vec![14],
+                    open: false,
+                }
+            }
+            "undecided_slots" => {
+                analysis.domain_guarantees.slots = cm::MetadataFactGuarantee {
+                    kind: 3,
+                    causes: vec![18],
+                    open: true,
+                }
+            }
+            "incomplete_exposed" => {
+                analysis.domain_guarantees.exposed = cm::MetadataFactGuarantee {
+                    kind: 2,
+                    causes: vec![10],
+                    open: false,
+                }
+            }
+            "options_member" => {
+                analysis.options_api = true;
+                analysis.domain_guarantees.enumeration.options_member_free = false;
+            }
+            "no_setup" => analysis.ordered_sfc_structure = None,
+            _ => {}
+        }
+        crate::host_manage::populate_public_instance_sidecar(&mut analysis);
+        if condition == "failed_publication" {
+            analysis.props[0].publication = crate::test_only::type_publication_fixture(
+                verter_type_expr::facts::SourcePosition::Failed(
+                    verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+                ),
+                verter_type_expr::ResolutionExactness::Incomplete,
+                None,
+                None,
+            );
+        }
+        let completeness = if condition == "partial_measure" {
+            ResultCompleteness::partial(PartialReasonSet::MISSING_DEPENDENCY)
+        } else {
+            ResultCompleteness::Complete
+        };
+        let dispatch =
+            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let output = crate::meta_resolve::projectors::build_component_meta_output(
+            host,
+            &dispatch,
+            "/App.vue",
+            analysis,
+            None,
+            crate::meta_resolve::PublishedCompleteness::merged(
+                completeness,
+                ResultCompleteness::Complete,
+            ),
+        )
+        .unwrap();
+        let (analysis, _, _) = output.into_parts();
+        assert_eq!(
+            analysis.public_instance.unwrap().completeness,
+            expected,
+            "{condition}"
+        );
+        assert_eq!(
+            analysis.domain_guarantees.public_instance,
+            cm::MetadataFactGuarantee {
+                kind: if expected == cm::PublicInstanceCompleteness::Exact {
+                    1
+                } else {
+                    2
+                },
+                causes,
+                open: expected != cm::PublicInstanceCompleteness::Exact,
+            },
+            "{condition}"
+        );
+    }
+    assert_eq!(
+        cached
+            .analysis()
+            .public_instance
+            .as_ref()
+            .unwrap()
+            .completeness,
+        cm::PublicInstanceCompleteness::Partial
+    );
+}
+
+#[test]
+fn public_instance_builtin_exclusions_cover_rendered_constructor_omit_keys() {
+    use verter_compiler::cursor::ScriptLanguage;
+    use verter_compiler::{project_public_constructor, ScriptBlockInput};
+    // Vue's fixed ComponentPublicInstance keys, independent of the sidecar's
+    // exclusions. Omit keeps every key outside its explicit replacement set.
+    let vue_keys = [
+        "$",
+        "$data",
+        "$props",
+        "$attrs",
+        "$refs",
+        "$slots",
+        "$root",
+        "$parent",
+        "$host",
+        "$emit",
+        "$el",
+        "$options",
+        "$forceUpdate",
+        "$nextTick",
+        "$watch",
+    ];
+    for slots in ["", "defineSlots<{ default(): unknown }>();"] {
+        let setup = format!("defineProps<{{ label: string }}>(); {slots}");
+        let rendered = project_public_constructor(
+            None,
+            Some(ScriptBlockInput {
+                content: &setup,
+                content_start: 0,
+                lang: Some(ScriptLanguage::TypeScript),
+            }),
+            None,
+        )
+        .unwrap()
+        .declaration()
+        .unwrap();
+        let project = make_project();
+        project
+            .upsert_base(
+                "/App.vue",
+                &format!("<script setup lang=\"ts\">{setup}</script>"),
+            )
+            .unwrap();
+        let analysis = project.host().get_component_meta("/App.vue").unwrap();
+        let instance = analysis.public_instance.as_ref().unwrap();
+        let omitted = rendered
+            .split_once("ComponentPublicInstance, ")
+            .unwrap()
+            .1
+            .split_once('>')
+            .unwrap()
+            .0;
+        assert!(!omitted.is_empty());
+        let omitted: Vec<_> = omitted
+            .split('|')
+            .map(|key| key.trim().trim_matches('"'))
+            .collect();
+        let kept: Vec<_> = vue_keys
+            .iter()
+            .copied()
+            .filter(|key| !omitted.contains(key))
+            .collect();
+        for key in omitted.iter().chain(&kept).copied() {
+            assert!(
+            crate::host_manage::PUBLIC_INSTANCE_OMITTED_BUILTINS.contains(&key)
+                || instance.members.iter().any(|member| member.name == key),
+            "constructor replaces or keeps {key}, so the sidecar must model it or explicitly exclude it"
+        );
+        }
+        for key in crate::host_manage::PUBLIC_INSTANCE_OMITTED_BUILTINS {
+            assert!(
+                vue_keys.contains(key),
+                "{key} must be a real Vue public-instance key"
+            );
+            assert!(
+                omitted.contains(key) || kept.contains(key),
+                "{key} must be omitted or kept by the real constructor"
+            );
+        }
+        assert_eq!(
+            instance
+                .members
+                .iter()
+                .any(|member| member.name == "$slots"),
+            !slots.is_empty()
+        );
     }
 }

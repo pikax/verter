@@ -1044,6 +1044,7 @@ fn make_macro(
         slot_fields: vec![],
         default_keys: vec![],
         default_values: Vec::new(),
+        runtime_members_fully_enumerated: false,
         expose_fields: vec![],
         resolved_local_types: Vec::new(),
         parsed_type_argument: None,

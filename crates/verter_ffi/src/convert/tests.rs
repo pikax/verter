@@ -4074,8 +4074,16 @@ fn component_meta_producer_guarantees_survive_warm_analysis_and_output() {
     assert_eq!((a.exposed.kind(), a.exposed.open()), (1, true));
     assert_eq!((b.exposed.kind(), b.exposed.open()), (1, true));
     assert_eq!(a.accepted_props.kind(), b.accepted_props.kind());
-    assert_eq!(a.public_instance.causes(), &[103]);
-    assert_eq!(b.public_instance.causes(), &[103]);
+    assert_eq!(
+        (a.public_instance.kind(), a.public_instance.open()),
+        (2, true)
+    );
+    assert_eq!(
+        (b.public_instance.kind(), b.public_instance.open()),
+        (2, true)
+    );
+    assert_eq!(a.public_instance.causes(), vec![103]);
+    assert_eq!(b.public_instance.causes(), vec![103]);
     assert_eq!(a.type_registry.kind(), 1);
     assert_eq!(b.type_registry.kind(), 1);
 }
@@ -5018,4 +5026,277 @@ fn native_fact_refusal_replay_heals_and_invalidates() {
         .entries;
     assert_eq!(entries.len(), 1);
     assert_eq!(strings[entries[0].name_id as usize - 1], "edited");
+}
+
+#[test]
+fn public_instance_wire_facts_finalize_each_delivery() {
+    use verter_session_query::analysis::component_meta::PublicInstanceCompleteness;
+    let session = completeness_host();
+    for (canonical, source, exact, expected_causes) in [
+        ("/Closed.vue", "<script setup lang=\"ts\">defineProps<{ label: string }>(); defineExpose({ ready: true });</script>", true, vec![]),
+        ("/TypedExpose.vue", "<script setup lang=\"ts\">const api = { ready: true }; defineProps<{ label: string }>(); defineExpose<{ ready: boolean }>(api);</script>", true, vec![]),
+        ("/EmptyExpose.vue", "<script setup lang=\"ts\">defineProps<{ label: string }>(); defineExpose();</script>", true, vec![]),
+        ("/Open.vue", "<script setup lang=\"ts\">defineProps<{ label: string; [key: string]: unknown }>()</script>", false, vec![103]),
+        ("/Options.vue", "<script lang=\"ts\">export default { data() { return { hidden: 1 } } };</script>\n<script setup lang=\"ts\">defineProps<{ label: string }>()</script>", false, vec![103]),
+        ("/Extends.vue", "<script setup lang=\"ts\">const Base = { props: { hidden: String } }; defineProps<{ label: string }>(); defineOptions({ extends: Base });</script>", false, vec![103]),
+        ("/Mixins.vue", "<script setup lang=\"ts\">const M = { emits: ['hidden'] }; defineProps<{ label: string }>(); defineOptions({ mixins: [M] });</script>", false, vec![103]),
+        ("/Named.vue", "<script setup lang=\"ts\">defineProps<{ label: string }>(); defineOptions({ name: 'X' });</script>", true, vec![]),
+        ("/IndirectOptions.vue", "<script setup lang=\"ts\">const opts = { name: 'X' }; defineProps<{ label: string }>(); defineOptions(opts);</script>", false, vec![103]),
+        ("/SpreadOptions.vue", "<script setup lang=\"ts\">const opts = { name: 'X' }; defineProps<{ label: string }>(); defineOptions({ ...opts });</script>", false, vec![103]),
+        ("/ComputedOptions.vue", "<script setup lang=\"ts\">defineProps<{ label: string }>(); defineOptions({ ['name']: 'X' });</script>", false, vec![103]),
+        ("/InheritAttrs.vue", "<script setup lang=\"ts\">defineProps<{ label: string }>(); defineOptions({ name: 'X', inheritAttrs: false });</script>", true, vec![]),
+    ] {
+        let _ = session.upsert(host::UpsertRequest {
+            canonical_id: Some(canonical.to_string()), input_id: canonical.to_string(),
+            source: Arc::from(source), file_language: host::FileLanguage::vue(), aliases: Vec::new(),
+        }).unwrap();
+        if canonical == "/Options.vue" {
+            assert!(session.get_component_meta(canonical).unwrap().options_api,
+                "the fixture must supply the Options API producer fact");
+        }
+        for ffi in [wire_payload(&session, canonical), sidecar_less_wire_payload(&session, canonical)] {
+            let fact = ffi.facts();
+            assert_eq!(fact.public_instance.kind(), if exact { 1 } else { 2 }, "{canonical}");
+            assert_eq!(fact.public_instance.open(), !exact, "{canonical}");
+            assert_eq!(fact.public_instance.causes(), expected_causes, "{canonical}");
+            assert_eq!(ffi.public_instance.as_ref().unwrap().completeness,
+                if exact { PublicInstanceCompleteness::Exact } else { PublicInstanceCompleteness::Partial }, "{canonical}");
+            assert!(matches!(ffi.result_completeness, FfiResultCompleteness::Complete), "independent domain approximation does not change the measure: {canonical}");
+        }
+    }
+}
+
+#[test]
+fn public_instance_expose_unnamed_members_leave_the_domain_open() {
+    use verter_session_query::analysis::component_meta::PublicInstanceCompleteness;
+    for (literal, exact) in [
+        ("{ ready: true, ...api }", false),
+        ("{ ready: true, [key]: 1 }", false),
+        ("{ ready: true, ['computed']: 1 }", false),
+        ("{ ready: true, 'named': 1 }", true),
+        ("api", false),
+    ] {
+        let session = completeness_host();
+        let canonical = "/Expose.vue";
+        let _ = session.upsert(host::UpsertRequest {
+            canonical_id: Some(canonical.into()), input_id: canonical.into(),
+            source: Arc::from(format!("<script setup lang=\"ts\">const api = {{ extra: 1 }}; const key = 'dynamic'; defineProps<{{ label: string }}>(); defineExpose({literal});</script>")),
+            file_language: host::FileLanguage::vue(), aliases: Vec::new(),
+        }).unwrap();
+        for ffi in [
+            wire_payload(&session, canonical),
+            sidecar_less_wire_payload(&session, canonical),
+        ] {
+            let facts = ffi.facts();
+            for (kind, open, causes) in [
+                (
+                    facts.exposed.kind(),
+                    facts.exposed.open(),
+                    facts.exposed.causes(),
+                ),
+                (
+                    facts.public_instance.kind(),
+                    facts.public_instance.open(),
+                    facts.public_instance.causes(),
+                ),
+            ] {
+                // Both domains must preserve the producer's lower bound.
+                assert_eq!(kind, if exact { 1 } else { 2 }, "{literal}");
+                assert_eq!(open, !exact, "{literal}");
+                assert_eq!(causes, if exact { vec![] } else { vec![103] }, "{literal}");
+            }
+            assert_eq!(
+                ffi.public_instance.as_ref().unwrap().completeness,
+                if exact {
+                    PublicInstanceCompleteness::Exact
+                } else {
+                    PublicInstanceCompleteness::Partial
+                },
+                "{literal}"
+            );
+            if literal != "api" {
+                assert!(ffi.exposed.iter().any(|member| member.name == "ready"));
+            }
+        }
+    }
+}
+
+#[test]
+fn public_instance_props_requires_full_enumeration() {
+    use verter_session_query::analysis::component_meta::PublicInstanceCompleteness;
+    for (declaration, exact) in [
+        ("defineProps({ label: String, ...extra })", false),
+        ("defineProps({ label: String })", true),
+        ("defineProps({ label: String, size: Number })", true),
+        ("defineProps({ label: String, [key]: Number })", false),
+        ("defineProps(propsVar)", false),
+        ("defineProps<{ label: string }>()", true),
+        (
+            "withDefaults(defineProps<{ label?: string }>(), { label: 'default' })",
+            true,
+        ),
+    ] {
+        let session = completeness_host();
+        let canonical = "/Props.vue";
+        let _ = session.upsert(host::UpsertRequest {
+            canonical_id: Some(canonical.into()), input_id: canonical.into(),
+            source: Arc::from(format!("<script setup lang=\"ts\">const extra = {{ count: Number }}; const key = 'dynamic'; const propsVar = {{ label: String }}; {declaration}; defineExpose({{ ready: true }});</script>")),
+            file_language: host::FileLanguage::vue(), aliases: Vec::new(),
+        }).unwrap();
+        for ffi in [
+            wire_payload(&session, canonical),
+            sidecar_less_wire_payload(&session, canonical),
+        ] {
+            let facts = ffi.facts();
+            assert_eq!(
+                facts.public_instance.kind(),
+                if exact { 1 } else { 2 },
+                "{declaration}"
+            );
+            assert_eq!(facts.public_instance.open(), !exact, "{declaration}");
+            assert_eq!(
+                facts.public_instance.causes(),
+                if exact { vec![] } else { vec![103] },
+                "{declaration}"
+            );
+            assert_eq!(
+                ffi.public_instance.as_ref().unwrap().completeness,
+                if exact {
+                    PublicInstanceCompleteness::Exact
+                } else {
+                    PublicInstanceCompleteness::Partial
+                },
+                "{declaration}"
+            );
+            assert!(
+                matches!(ffi.result_completeness, FfiResultCompleteness::Complete),
+                "domain approximation does not change the measure: {declaration}"
+            );
+        }
+    }
+}
+
+#[test]
+fn public_instance_emits_requires_full_enumeration() {
+    assert_public_instance_domain_enumeration(
+        &[
+            ("defineEmits({ change: null, ...extra })", false),
+            ("defineEmits({ [key]: null })", false),
+            ("defineEmits(emitsVar)", false),
+            ("defineEmits(['change', ...names])", false),
+            ("defineEmits({ change: null })", true),
+            ("defineEmits(['change'])", true),
+            ("defineEmits<{ change: [] }>()", true),
+        ],
+        "",
+    );
+}
+
+#[test]
+fn public_instance_slots_requires_full_enumeration() {
+    assert_public_instance_domain_enumeration(
+        &[
+            (
+                "defineSlots<{ [key: string]: (props: {}) => any }>()",
+                false,
+            ),
+            ("defineSlots<{ default(props: {}): any }>()", true),
+        ],
+        "",
+    );
+    for (template, exact) in [
+        (
+            r#"<template><slot name="header"/><slot :name="key"/></template>"#,
+            false,
+        ),
+        (r#"<template><slot :name="key"/></template>"#, false),
+        (r#"<template><slot name="header"/><slot/></template>"#, true),
+    ] {
+        assert_public_instance_domain_enumeration(&[("", exact)], template);
+    }
+}
+
+fn assert_public_instance_domain_enumeration(declarations: &[(&str, bool)], template: &str) {
+    use verter_session_query::analysis::component_meta::PublicInstanceCompleteness;
+    for (declaration, exact) in declarations {
+        let session = completeness_host();
+        let canonical = "/Enumeration.vue";
+        let _ = session.upsert(host::UpsertRequest {
+            canonical_id: Some(canonical.into()), input_id: canonical.into(),
+            source: Arc::from(format!("<script setup lang=\"ts\">const extra = {{ hidden: null }}; const key = 'dynamic'; const names = ['hidden']; const emitsVar = ['hidden']; defineProps<{{ label: string }}>(); {declaration};</script>{template}")),
+            file_language: host::FileLanguage::vue(), aliases: Vec::new(),
+        }).unwrap();
+        for ffi in [
+            wire_payload(&session, canonical),
+            sidecar_less_wire_payload(&session, canonical),
+        ] {
+            if template.contains(r#"name="header""#) {
+                assert!(
+                    ffi.slots.iter().any(|slot| slot.name == "header"),
+                    "{template}"
+                );
+            }
+            let facts = ffi.facts();
+            assert_eq!(
+                facts.public_instance.kind(),
+                if *exact { 1 } else { 2 },
+                "{declaration} {template}"
+            );
+            assert_eq!(
+                facts.public_instance.open(),
+                !exact,
+                "{declaration} {template}"
+            );
+            assert_eq!(
+                facts.public_instance.causes(),
+                if *exact { vec![] } else { vec![103] },
+                "{declaration} {template}"
+            );
+            assert_eq!(
+                ffi.public_instance.as_ref().unwrap().completeness,
+                if *exact {
+                    PublicInstanceCompleteness::Exact
+                } else {
+                    PublicInstanceCompleteness::Partial
+                },
+                "{declaration} {template}"
+            );
+        }
+    }
+}
+
+#[test]
+fn public_instance_models_requires_full_enumeration() {
+    use verter_session_query::analysis::component_meta::PublicInstanceCompleteness;
+    for model in ["defineModel<string>()", "defineModel('title')"] {
+        let session = completeness_host();
+        let canonical = "/Model.vue";
+        let _ = session.upsert(host::UpsertRequest {
+            canonical_id: Some(canonical.into()), input_id: canonical.into(),
+            source: Arc::from(format!("<script setup lang=\"ts\">defineProps<{{ label: string }}>(); const value = {model};</script>")),
+            file_language: host::FileLanguage::vue(), aliases: Vec::new(),
+        }).unwrap();
+        let analysis = session.get_component_meta(canonical).unwrap();
+        assert_eq!(analysis.models.len(), 1, "{model}");
+        for ffi in [
+            wire_payload(&session, canonical),
+            sidecar_less_wire_payload(&session, canonical),
+        ] {
+            let facts = ffi.facts();
+            assert_eq!(facts.public_instance.kind(), 2, "{model}");
+            assert!(facts.public_instance.open(), "{model}");
+            assert_eq!(facts.public_instance.causes(), vec![103], "{model}");
+            let instance = ffi.public_instance.as_ref().unwrap();
+            assert_eq!(
+                instance.completeness,
+                PublicInstanceCompleteness::Partial,
+                "{model}"
+            );
+            assert!(!instance
+                .members
+                .iter()
+                .any(|member| member.name.ends_with("Modifiers")));
+        }
+        assert!(!analysis.domain_guarantees.enumeration.models, "{model}");
+    }
 }

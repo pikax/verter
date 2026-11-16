@@ -1831,6 +1831,10 @@ pub struct AnalyzedMacro {
     /// Individual exposed fields from `defineExpose({ ... })`.
     /// Only populated for `DefineExpose` macros with an object literal argument.
     pub expose_fields: Vec<AnalyzedExposeField>,
+    /// The runtime extractor positively enumerated every member. Type-based
+    /// macros use the resolved surface producer's membership claim instead.
+    /// For `DefineOptions`, certifies that every argument is member-free.
+    pub runtime_members_fully_enumerated: bool,
     /// Locally resolved type expansions referenced by macro type parameters.
     pub resolved_local_types: Vec<ResolvedLocalType>,
     /// Content-free locator of the macro call's first authored type argument
@@ -1870,6 +1874,7 @@ impl serde::Serialize for AnalyzedMacro {
             + usize::from(!self.default_keys.is_empty())
             + usize::from(!self.default_values.is_empty())
             + usize::from(!self.expose_fields.is_empty())
+            + usize::from(self.runtime_members_fully_enumerated)
             + usize::from(!self.resolved_local_types.is_empty())
             + usize::from(self.parsed_type_argument.is_some())
             + usize::from(self.parsed_type_argument_scope.is_some())
@@ -1901,6 +1906,9 @@ impl serde::Serialize for AnalyzedMacro {
         }
         if !self.expose_fields.is_empty() {
             s.serialize_field("exposeFields", &self.expose_fields)?;
+        }
+        if self.runtime_members_fully_enumerated {
+            s.serialize_field("runtimeMembersFullyEnumerated", &true)?;
         }
         if !self.resolved_local_types.is_empty() {
             s.serialize_field("resolvedLocalTypes", &self.resolved_local_types)?;
@@ -1955,6 +1963,8 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             #[serde(default)]
             expose_fields: Vec<AnalyzedExposeField>,
             #[serde(default)]
+            runtime_members_fully_enumerated: bool,
+            #[serde(default)]
             resolved_local_types: Vec<ResolvedLocalType>,
             // Absent-key back-compat: payloads with no parsedTypeArgument
             // key deserialize with `None`; manual-serde impls don't pick up
@@ -1989,6 +1999,7 @@ impl<'de> serde::Deserialize<'de> for AnalyzedMacro {
             default_keys: w.default_keys,
             default_values: w.default_values,
             expose_fields: w.expose_fields,
+            runtime_members_fully_enumerated: w.runtime_members_fully_enumerated,
             resolved_local_types: w.resolved_local_types,
             parsed_type_argument: w.parsed_type_argument,
             parsed_type_argument_scope: w.parsed_type_argument_scope,

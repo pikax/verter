@@ -112,6 +112,13 @@ pub use template::code_gen::vdom::props::emit_static_style_object;
 #[cfg(any(test, feature = "test-support"))]
 pub use ide::template::flow_check;
 
+// Test-only access to the real constructor renderer for cross-crate public
+// instance contract checks; IDE implementation modules remain private.
+#[cfg(any(test, feature = "test-support"))]
+pub use ide::vue_projection::public_constructor::project_public_constructor;
+#[cfg(any(test, feature = "test-support"))]
+pub use ide::vue_projection::script_setup::ScriptBlockInput;
+
 #[cfg(test)]
 mod compile_ported_tests;
 #[cfg(test)]

@@ -1261,16 +1261,52 @@ fn with_defaults_non_string_defaults_stay_byte_identical() {
 
 #[test]
 fn define_expose_extracts_fields() {
-    let code = "defineExpose({ foo, bar, baz: computed(() => 1) })";
-    let macros = parse_macros(code);
-    let de = macros
-        .iter()
-        .find(|m| m.kind == AnalyzedMacroKind::DefineExpose)
-        .unwrap();
-    assert_eq!(de.expose_fields.len(), 3, "should extract 3 expose fields");
-    assert_eq!(de.expose_fields[0].name, "foo");
-    assert_eq!(de.expose_fields[1].name, "bar");
-    assert_eq!(de.expose_fields[2].name, "baz");
+    for (code, unnamed, names) in [
+        (
+            "defineExpose({ foo, bar, baz: computed(() => 1) })",
+            false,
+            vec!["foo", "bar", "baz"],
+        ),
+        (
+            "defineExpose({ foo, bar, baz: 1, ...api })",
+            true,
+            vec!["foo", "bar", "baz"],
+        ),
+        (
+            "defineExpose({ foo, bar, baz: 1, [key]: 2 })",
+            true,
+            vec!["foo", "bar", "baz"],
+        ),
+        (
+            "defineExpose({ foo, bar, baz: 1, ['computed']: 2 })",
+            true,
+            vec!["foo", "bar", "baz"],
+        ),
+        ("defineExpose(api)", true, vec![]),
+        ("defineExpose<{ ready: boolean }>(api)", true, vec![]),
+        ("defineExpose()", false, vec![]),
+    ] {
+        let macros = parse_macros(code);
+        let de = macros
+            .iter()
+            .find(|m| m.kind == AnalyzedMacroKind::DefineExpose)
+            .unwrap();
+        assert_eq!(
+            de.expose_fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            names,
+            "{code}"
+        );
+        assert_eq!(de.runtime_members_fully_enumerated, !unnamed, "{code}");
+        let roundtrip: AnalyzedMacro =
+            serde_json::from_value(serde_json::to_value(de).unwrap()).unwrap();
+        assert_eq!(
+            roundtrip.runtime_members_fully_enumerated, !unnamed,
+            "{code}"
+        );
+    }
 }
 
 #[test]

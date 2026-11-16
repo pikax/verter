@@ -78,7 +78,14 @@ Every variable component domain retains its producer claim on
 public instance, and type registry. Model membership proves the syntactic
 names; an unresolved model value is independently unavailable. Type-based
 expose preserves the bundle's openness and availability; object-literal
-expose states its analyzer-owned complete closed names. Accepted props, events
+expose states its analyzer-owned complete closed names only when every literal
+member has a static name. A spread, computed key, or another unnameable key
+withholds the runtime enumeration certificate and makes analyzer-owned exposed
+membership
+approximate/open with cause 103, while preserving known members. A present
+non-object expose argument likewise withholds enumeration; an absent
+argument certifies an empty domain. Type-based expose keeps the resolved
+surface producer's claim, including when a runtime argument is present. Accepted props, events
 and fallthrough share the resolver claim and absorb surrounding partial-compute
 causes. Public-instance completeness stays typed through the wire DTO.
 
@@ -99,3 +106,45 @@ semantic-query-fault cause. Independent approximate domains, including the
 public-instance lower bound, do not add reasons to this summary. This summary
 never authorizes a domain; current TypeScript decoding still derives its own
 compatibility summary from the independent facts.
+
+Public-instance exactness is finalized per delivery at the terminal output
+sink, after it merges the measured completeness with materialization failures.
+Each input domain positively reports fully enumerated membership through
+`ComponentDomainGuarantees::enumeration`: props, emits, slots, exposed and
+models. Missing reports default to false. The existing macro inventory fold
+certifies absent domains; runtime props, emits and expose extractors record
+`AnalyzedMacro::runtime_members_fully_enumerated` during their existing
+member traversal. Literal objects with static names and literal name arrays
+can certify enumeration; an omitted member or non-literal input cannot.
+Type-based domains use their existing complete, closed producer claims.
+Type-based expose retains the resolved surface producer's authority.
+The model producer withholds its certificate because the sidecar lists model
+value props but omits their modifiers props.
+The slots fold also reads the template's existing `has_dynamic_slot_outlet`
+report: a dynamic-name outlet withholds slot enumeration, including when no
+`defineSlots` macro is present. Static-name outlets retain their enumeration.
+
+The sidecar builder records only registered script-setup geometry and the
+positive `options_member_free` geometry report. The existing macro-flags fold
+certifies that report only without an export-default options object and when
+every `defineOptions` call reports member-free arguments. The options extractor
+uses its existing property traversal and the fixed key set `name`, `inheritAttrs`;
+every argument must be an object literal containing only non-computed keys
+from that set. A spread, any other key or a non-literal argument withholds the
+report. The terminal sink alone reads all five
+certificates and domain claims together with that geometry and the merged
+measure. Only a complete delivery with every certificate and a complete,
+closed domain claim becomes Exact. Otherwise the instance stays Partial with
+approximation cause 103, or the failed domain producer's more specific causes;
+measured partiality is merged into the same lane. Plain literal runtime
+`defineProps({ label: String, size: Number })` is eligible. The props-domain
+runtime claim remains independent of the enumeration certificate.
+The cached sidecar stays Partial; finalization operates on the delivery clone.
+The fixed Vue built-ins excluded from this claim are enumerated beside the
+sidecar builder; a test renders the real IDE public-constructor projection and
+checks its omitted and retained built-in keys against that list and the
+sidecar's own members, then checks every exclusion is a real Vue built-in
+omitted or retained by the constructor. `$slots` is excluded only when the
+sidecar has no slots; otherwise it is listed as a sidecar member. The constant
+and its re-export are test-only; production inserts `$slots` directly when
+slots exist.

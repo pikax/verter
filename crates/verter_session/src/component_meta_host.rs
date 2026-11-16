@@ -874,8 +874,8 @@ fn extract_component_meta_from_resolved_with_evaluated<M: verter_audit::observe:
             ),
         );
     }
-    crate::host_manage::populate_public_instance_sidecar(&mut meta);
     crate::host_resolve::populate_ordered_sfc_structure(host, canonical_id, &mut meta);
+    crate::host_manage::populate_public_instance_sidecar(&mut meta);
     meta
 }
 

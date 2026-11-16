@@ -140,6 +140,7 @@ fn make_define_props(fields: Vec<AnalyzedPropField>) -> AnalyzedMacro {
         slot_fields: Vec::new(),
         default_keys: Vec::new(),
         default_values: Vec::new(),
+        runtime_members_fully_enumerated: false,
         expose_fields: Vec::new(),
         resolved_local_types: Vec::new(),
         parsed_type_argument: None,
@@ -3552,6 +3553,7 @@ fn extracts_exposed_from_define_expose() {
     let macros = vec![AnalyzedMacro {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineExpose,
+        runtime_members_fully_enumerated: false,
         expose_fields: vec![AnalyzedExposeField {
             name: "focus".to_string(),
             span: Some(verter_span::Span::new(0, 5)),
@@ -3583,6 +3585,7 @@ fn extract_exposed_matches_resolved_binding_owner_not_first_name() {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineExpose,
         owner: instance,
+        runtime_members_fully_enumerated: false,
         expose_fields: vec![AnalyzedExposeField {
             name: "String".to_string(),
             span: Some(verter_span::Span::new(0, 6)),
@@ -3664,6 +3667,7 @@ fn extract_exposed_type_arg_only_expansion_ignores_same_spelling_bindings_row() 
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineExpose,
         owner: instance,
+        runtime_members_fully_enumerated: false,
         expose_fields: Vec::new(),
         ..make_define_props(vec![])
     }];
