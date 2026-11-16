@@ -18,6 +18,39 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { decodeAuditBundle } from "./audit";
+
+const native = require("./index.js") as typeof import("./index");
+
+describe("component audit bundle", () => {
+  it("audit-disabled type resolution returns no stored record", () => {
+    const host = new native.VerterHost({ auditEnabled: false });
+    try {
+      host.upsert({
+        canonicalId: "/types.ts",
+        inputId: "/types.ts",
+        source: Buffer.from("export type Flag = boolean;"),
+      });
+      expect(host.resolveTypeWithAudit("/types.ts", "Flag")).toBeNull();
+    } finally {
+      host.close();
+    }
+  });
+  it.runIf(native.captureAvailability() === "Available")("contains exactly analysis and its record", () => {
+    const project = new native.ComponentMetaHost({ auditEnabled: true, footprintCapture: true });
+    project.upsertBase("/Flag.vue", '<script setup lang="ts">defineProps<{ on: boolean }>()</script>');
+    const session = project.openSession();
+    try {
+      const bundle = decodeAuditBundle(session.getComponentMetaWithAudit("/Flag.vue"));
+      expect(Object.keys(bundle!).sort()).toEqual(["analysis", "record"]);
+      expect(bundle!.analysis).toHaveProperty("resolution");
+    } finally {
+      session.close();
+      project.shutdown();
+    }
+  });
+});
+
 const NATIVE_AUDIT_TS = resolve(import.meta.dirname, "audit.ts");
 const WASM_AUDIT_TS = resolve(import.meta.dirname, "../wasm/src/audit.ts");
 

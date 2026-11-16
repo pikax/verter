@@ -29,6 +29,33 @@ struct ComponentMetaAuditScope {
 }
 
 impl VerterHost {
+    /// Run a component-meta request and return its own captured audit record.
+    ///
+    /// The record is drained at the audited entry, so consumers never recover
+    /// it from a separately retained request id. Disabled or filtered capture
+    /// returns no record while the semantic request keeps its usual behavior.
+    pub fn get_component_meta_with_audit(
+        &self,
+        canonical_or_alias: &str,
+    ) -> (
+        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
+        Option<verter_audit::RequestAuditRecord>,
+    ) {
+        let Some((analysis, resolution)) =
+            self.get_component_meta_with_resolution(canonical_or_alias)
+        else {
+            return (None, None);
+        };
+        #[cfg(feature = "semantic-observe")]
+        let record = self.host_audit_runtime().take_record(resolution.request_id);
+        #[cfg(not(feature = "semantic-observe"))]
+        let record = {
+            let _ = resolution;
+            None
+        };
+        (Some(analysis), record)
+    }
+
     /// Install the audited component-meta request scope shared by the
     /// resolution-bearing entries: the `RequestContext` (kind
     /// `ComponentMeta`, projection budget, optional footprint accumulator),

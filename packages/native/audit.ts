@@ -41,12 +41,11 @@ export type RustSemanticFootprintAudit = RequestFootprintAudit;
 /**
  * JSON-shaped audit bundle returned by
  * `ComponentMetaSession.getComponentMetaWithAudit`. Mirrors the Rust
- * `AuditBundle`. `analysis` and `resolution` are
- * FFI projections; `record` is the full ts-rs–generated record.
+ * `AuditBundle`. `analysis` contains the FFI resolution projection;
+ * `record` is the full ts-rs–generated record.
  */
 export interface AuditBundle {
   analysis: unknown;
-  resolution: unknown;
   record: RequestAuditRecord;
 }
 

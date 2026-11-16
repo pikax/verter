@@ -59,9 +59,9 @@ pub(crate) struct BundlerBatchSummaryArgsWasm {
 
 /// Convert a `RequestAuditRecord` into a JSON string `JsValue`.
 pub(crate) fn audit_record_to_json_string(record: &RequestAuditRecord) -> Result<JsValue, JsValue> {
-    serde_json::to_string(record)
-        .map(|s| JsValue::from_str(&s))
-        .map_err(|e| JsValue::from_str(&format!("audit record serialization error: {e}")))
+    verter_ffi::typeinfo::encode_audit_record(record)
+        .map(|json| JsValue::from_str(&json))
+        .map_err(|error| JsValue::from_str(&error))
 }
 
 /// Convert a record into a JSON string `JsValue`, projecting the host
@@ -72,12 +72,9 @@ pub(crate) fn audit_record_to_json_string(record: &RequestAuditRecord) -> Result
 pub(crate) fn stored_audit_record_to_json_string(
     record: &RequestAuditRecord,
 ) -> Result<JsValue, JsValue> {
-    match record.capture_state {
-        verter_audit::AuditCaptureState::ActiveStored => audit_record_to_json_string(record),
-        verter_audit::AuditCaptureState::FilteredNoop
-        | verter_audit::AuditCaptureState::AuditDisabled
-        | verter_audit::AuditCaptureState::Unavailable => Ok(JsValue::NULL),
-    }
+    verter_ffi::typeinfo::encode_stored_audit_record(record)
+        .map(|json| json.map_or(JsValue::NULL, |json| JsValue::from_str(&json)))
+        .map_err(|error| JsValue::from_str(&error))
 }
 
 #[cfg(feature = "semantic-observe")]

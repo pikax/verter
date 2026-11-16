@@ -642,8 +642,8 @@ pub enum AuditRequestRegistration {
     /// Active registration — the request will produce a record on
     /// finalize.
     Active(ActiveRegistration),
-    /// No-op registration — the audit-config filter rejected the
-    /// request kind. No record will be produced.
+    /// No-op registration — host capture is disabled or the audit-config
+    /// filter rejected the request kind. No record will be produced.
     Noop,
 }
 
@@ -654,8 +654,8 @@ impl verter_type_engine::request_context::RequestAuditFinalization for AuditRequ
 }
 
 impl AuditRequestRegistration {
-    /// Construct a new registration. Reads the audit-config filter
-    /// ONCE; if the filter rejects the request's kind, returns the
+    /// Construct a new registration. Reads the host capture gate and filter
+    /// ONCE; if capture is off or the filter rejects the kind, returns the
     /// `Noop` variant without entering the active-request registry.
     /// Otherwise inserts into the registry and returns `Active(...)`.
     /// On native targets with `audit_timing_capture` enabled, the
@@ -665,7 +665,7 @@ impl AuditRequestRegistration {
     pub fn new(host: &crate::VerterHost, ctx: Arc<RequestContext>) -> Self {
         let runtime = host.host_audit_runtime();
         let cfg = runtime.audit_config();
-        if !cfg.consumer_filter.allows(&ctx.kind()) {
+        if !host.config().audit_enabled || !cfg.consumer_filter.allows(&ctx.kind()) {
             return Self::Noop;
         }
         runtime.register_active_request(ctx.request_id, &ctx);
@@ -707,6 +707,25 @@ impl AuditRequestRegistration {
             Self::Noop => None,
             Self::Active(active) => Some(active.request_id),
         }
+    }
+}
+
+#[cfg(test)]
+mod registration_gate_tests {
+    use super::*;
+
+    #[test]
+    fn audit_disabled_registration_never_stores_a_record() {
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        let ctx = RequestContext::new(1, Arc::<str>::from("/disabled.vue"), false, None);
+        let registration = AuditRequestRegistration::new(&host, ctx);
+        assert!(matches!(registration, AuditRequestRegistration::Noop));
+        assert_eq!(host.host_audit_runtime().snapshot().active_request_count, 0);
+        let record = host.audit_workspace_op(verter_audit::WorkspaceOp::DepGraphTraverse {
+            root: "/disabled.vue".into(),
+        });
+        assert!(!registration.finalize(record));
+        assert_eq!(host.host_audit_runtime().snapshot().records_store_size, 0);
     }
 }
 

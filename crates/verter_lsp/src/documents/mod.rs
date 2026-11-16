@@ -1,7 +1,6 @@
 mod analysis;
 mod diagnostics;
 mod foreground;
-pub(crate) use analysis::type_expr_contains_boolean;
 pub(crate) use analysis::SemanticReady;
 #[cfg(test)]
 pub(crate) use analysis::SEMANTIC_ANALYSIS_QUIET_WINDOW;

@@ -3941,7 +3941,9 @@ impl NapiVerterHost {
                 .resolve_type_with_audit(key, &canonical_id)
                 .audit()
                 .clone();
-            audit::encode_stored_record(&record)
+            verter_ffi::typeinfo::encode_stored_audit_record(&record)
+                .map(|json| json.map(|json| Buffer::from(json.into_bytes())))
+                .map_err(|error| Error::new(Status::GenericFailure, error))
         }))?
     }
 
@@ -3962,7 +3964,9 @@ impl NapiVerterHost {
                 .compile_with_audit(&canonical_id, target)
                 .audit()
                 .clone();
-            audit::encode_stored_record(&record)
+            verter_ffi::typeinfo::encode_stored_audit_record(&record)
+                .map(|json| json.map(|json| Buffer::from(json.into_bytes())))
+                .map_err(|error| Error::new(Status::GenericFailure, error))
         }))?
     }
 
@@ -3975,7 +3979,9 @@ impl NapiVerterHost {
         let host = std::sync::Arc::clone(&self.inner);
         catch_panic(std::panic::AssertUnwindSafe(move || {
             let record = host.analyze_with_audit(&canonical_id).audit().clone();
-            audit::encode_stored_record(&record)
+            verter_ffi::typeinfo::encode_stored_audit_record(&record)
+                .map(|json| json.map(|json| Buffer::from(json.into_bytes())))
+                .map_err(|error| Error::new(Status::GenericFailure, error))
         }))?
     }
 
@@ -3990,7 +3996,9 @@ impl NapiVerterHost {
         let host = std::sync::Arc::clone(&self.inner);
         catch_panic(std::panic::AssertUnwindSafe(move || {
             let record = host.audit_workspace_op(arg);
-            audit::encode_record(&record)
+            verter_ffi::typeinfo::encode_audit_record(&record)
+                .map(|json| Buffer::from(json.into_bytes()))
+                .map_err(|error| Error::new(Status::GenericFailure, error))
         }))?
     }
 
@@ -4025,7 +4033,10 @@ impl NapiVerterHost {
                     return Ok(None);
                 };
                 match store.take(id) {
-                    Some(rec) => audit::encode_record(&rec).map(Some),
+                    Some(rec) => verter_ffi::typeinfo::encode_audit_record(&rec)
+                        .map(|json| Buffer::from(json.into_bytes()))
+                        .map_err(|error| Error::new(Status::GenericFailure, error))
+                        .map(Some),
                     None => Ok(None),
                 }
             }))?

@@ -79,7 +79,6 @@ interface AuditRecord {
 interface AuditBundle {
   record?: AuditRecord;
   analysis?: unknown;
-  resolution?: unknown;
 }
 
 function buildFixture(): {

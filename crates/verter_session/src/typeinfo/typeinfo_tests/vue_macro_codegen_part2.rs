@@ -8,6 +8,90 @@
 
 use super::*;
 
+#[test]
+fn prop_runtime_read_keeps_available_rows_beside_missing_types() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_ts(&host, "/src/flags.ts", "export type Flag = boolean;");
+    upsert(
+        &host,
+        "/src/Facts.vue",
+        r#"<script setup lang="ts">
+import type { Missing } from './missing'
+import type { Flag } from './flags'
+defineProps<{ on: Flag; absent: Missing; unknownValue: unknown }>()
+</script>"#,
+    );
+    let facts = host
+        .vue_prop_runtime_constructors("/src/Facts.vue")
+        .unwrap();
+    let props = &facts.constructors;
+    assert_eq!(props["on"].as_slice(), [RuntimeConstructor::Boolean]);
+    assert!(!props.contains_key("absent"));
+    assert!(props["unknownValue"].is_empty());
+    assert!(facts
+        .fact_versions
+        .iter()
+        .any(|fact| fact.canonical_id() == Some("/src/flags.ts")));
+    upsert_ts(&host, "/src/ordinary.ts", "export type Flag = boolean;");
+    assert!(host
+        .vue_prop_runtime_constructors("/src/ordinary.ts")
+        .unwrap()
+        .constructors
+        .is_empty());
+}
+
+#[test]
+fn prop_runtime_read_model_rows_override_declared_props_in_both_macro_orders() {
+    for body in [
+        "defineModel<Flag>('on'); defineProps<{ on: string }>();",
+        "defineProps<{ on: string }>(); defineModel<Flag>('on');",
+    ] {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert(
+            &host,
+            "/src/Model.vue",
+            &format!("<script setup lang=\"ts\">type Flag = boolean; {body}</script>"),
+        );
+        let facts = host
+            .vue_prop_runtime_constructors("/src/Model.vue")
+            .unwrap();
+        let props = &facts.constructors;
+        assert_eq!(
+            props["on"].as_slice(),
+            &[RuntimeConstructor::Boolean],
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn wide_props_runtime_read_demands_one_classifier_per_member() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let fields = (0..64).map(|i| format!("p{i}: Flag;")).collect::<String>();
+    upsert(
+        &host,
+        "/src/Wide.vue",
+        &format!(
+            "<script setup lang=\"ts\">type Flag = boolean; defineProps<{{ {fields} }}>()</script>"
+        ),
+    );
+    let before = produce(
+        &host,
+        "/src/Wide.vue",
+        VueMacroCodegenDemand::RuntimeBindingNames,
+    );
+    let after = produce(&host, "/src/Wide.vue", VueMacroCodegenDemand::Runtime);
+    assert_eq!(before.counters.runtime_classifier_calls, 0);
+    assert_eq!(after.counters.runtime_classifier_calls, 64);
+    assert_eq!(after.counters.tsc_materializations, 0);
+    let facts = host.vue_prop_runtime_constructors("/src/Wide.vue").unwrap();
+    let props = &facts.constructors;
+    assert_eq!(props.len(), 64);
+    assert!(props
+        .values()
+        .all(|kinds| kinds.as_slice() == [RuntimeConstructor::Boolean]));
+}
+
 /// Mutation recipe: omit the prepared declaration's file fact from the
 /// runtime-filtered candidate, or admit the filtered value outside the shared
 /// fact-validated family memo. Removing only the directive then reuses the old

@@ -323,8 +323,8 @@ impl NapiMetaSession {
     }
 
     /// Synchronous audit bundle — returns JSON bytes of
-    /// `{ analysis: FfiComponentMeta, resolution: FfiComponentMetaResolution,
-    ///   record: RequestAuditRecord }`. Requires the host to have
+    /// `{ analysis: FfiComponentMeta, record: RequestAuditRecord }`.
+    /// Resolution is carried once, under `analysis`. Requires the host to have
     /// `audit_enabled` + `footprint_capture` set on construction.
     ///
     /// NOT async. Audit capture completes on the same call that produces
@@ -356,14 +356,13 @@ impl NapiMetaSession {
                 return Ok(None);
             };
             let ffi = verter_ffi::convert::component_meta_output_to_ffi(output);
-            let ffi_resolution = ffi.resolution.clone().ok_or_else(|| {
+            ffi.resolution.as_ref().ok_or_else(|| {
                 Error::from_reason(
                     "audited component-meta output carries no resolution sidecar".to_string(),
                 )
             })?;
             let bundle = AuditBundle {
                 analysis: ffi,
-                resolution: ffi_resolution,
                 record,
             };
             let json =
@@ -466,7 +465,7 @@ impl NapiMetaSession {
     /// identical payload). A full type-resolution pass runs and the
     /// payload embeds the resolved type-registry overlay plus the
     /// `resolution` sidecar; `getComponentMetaWithAudit` adds the
-    /// per-request audit record (the `{ analysis, resolution, record }`
+    /// per-request audit record (the `{ analysis, record }`
     /// JSON bundle), not more resolution.
     #[napi(js_name = "getResolvedComponentMeta")]
     pub fn get_resolved_component_meta(
@@ -600,12 +599,12 @@ mod tests {
     // The walker bindings exist only with optional capture.
     #[cfg(feature = "semantic-observe")]
     #[test]
-    fn audit_bundle_for_walker_tolerates_full_bundle_with_analysis_and_resolution() {
+    fn audit_bundle_for_walker_tolerates_full_analysis() {
         // Pin the serde "tolerate unknown fields" posture
         // for `AuditBundleForWalker`. The walker bindings
         // (`whyLoadedFromAuditJson`, `whyInstantiatedFromAuditJson`)
-        // receive a full `AuditBundle` JSON — `{ analysis, resolution,
-        // record }` — but only need `record`. If a future refactor
+        // receive a full `AuditBundle` JSON — `{ analysis, record }` —
+        // but only need `record`. If a future refactor
         // accidentally adds `#[serde(deny_unknown_fields)]` to
         // `AuditBundleForWalker` (or to `RequestAuditRecord`), the walker
         // bindings silently regress: consumers who stringify their
@@ -616,8 +615,7 @@ mod tests {
         // `AuditBundleForWalker` and this test's `.expect("deserialize")`
         // fails with a clear serde message naming the extra field.
         let full_bundle = serde_json::json!({
-            "analysis": { "component": "Widget", "props": [] },
-            "resolution": { "canonicalId": "/Widget.vue", "kind": "some-kind" },
+            "analysis": { "component": "Widget", "props": [], "resolution": { "canonicalId": "/Widget.vue", "kind": "some-kind" } },
             "record": {
                 "request_id": "42",
                 "canonical_id": "/Widget.vue",

@@ -28,7 +28,6 @@ function emptyBundle(overrides: Partial<AuditBundle> = {}): AuditBundle {
       slots: [],
       flags: {},
     },
-    resolution: null,
     record: {
       request_id: "1",
       canonical_id: "/C.vue",

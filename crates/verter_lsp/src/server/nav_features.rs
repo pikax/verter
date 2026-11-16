@@ -43,6 +43,10 @@ use nav_features_support::*;
 
 pub(super) fn child_contract_completion_analysis(
     availability: verter_session::framework::ComponentContractAvailability,
+    runtime: &std::collections::BTreeMap<
+        String,
+        verter_session::typeinfo::OrderedRuntimeConstructors,
+    >,
 ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
     let verter_session::framework::ComponentContractAvailability::Supported(contract) =
         availability
@@ -64,7 +68,11 @@ pub(super) fn child_contract_completion_analysis(
                 }),
                 has_default: prop.has_default,
                 is_required: !prop.optional,
-                is_boolean: materialized.is_some_and(crate::documents::type_expr_contains_boolean),
+                is_boolean: runtime.get(prop.name.as_ref()).is_some_and(|constructors| {
+                    constructors
+                        .as_slice()
+                        .contains(&verter_session::typeinfo::RuntimeConstructor::Boolean)
+                }),
                 used_in_template: false,
                 used_in_script: false,
                 span: verter_span::Span::new(0, 0),
@@ -950,12 +958,21 @@ async fn handle_completion_attempt(
                                 .map(|binding| (import, binding))
                         })?;
 
-                if let Some(contract) = server.cached_barrel_component_contract(
+                if let Some((resolved, contract)) = server.cached_barrel_component_contract(
                     canonical_id,
                     import_source,
                     &binding.name,
                 ) {
-                    let analysis = child_contract_completion_analysis(contract);
+                    let runtime = server
+                        .documents
+                        .host()
+                        .vue_prop_runtime_constructors(&resolved)
+                        .unwrap_or_default();
+                    crate::documents::ForegroundRequest::bracket_native_facts(
+                        &runtime.fact_versions,
+                    );
+                    let analysis =
+                        child_contract_completion_analysis(contract, &runtime.constructors);
                     if analysis.is_none() {
                         recognized_authored_component_contract_miss.set(true);
                     }
@@ -988,7 +1005,16 @@ async fn handle_completion_attempt(
                 };
                 match server.cached_child_public_contract(&resolved) {
                     Some(contract) => {
-                        let analysis = child_contract_completion_analysis(contract);
+                        let runtime = server
+                            .documents
+                            .host()
+                            .vue_prop_runtime_constructors(&resolved)
+                            .unwrap_or_default();
+                        crate::documents::ForegroundRequest::bracket_native_facts(
+                            &runtime.fact_versions,
+                        );
+                        let analysis =
+                            child_contract_completion_analysis(contract, &runtime.constructors);
                         if analysis.is_none() {
                             recognized_authored_component_contract_miss.set(true);
                         }

@@ -66,6 +66,15 @@ use tsc_projection::*;
 const VUE_MACRO_CODEGEN_CACHE_ID: SchedulerCacheId = SchedulerCacheId(0x5655_454D_4143_5231);
 const VUE_MACRO_CODEGEN_KEY_DOMAIN: &[u8] = b"verter:typeinfo:vue-macro-codegen:v1\0";
 
+/// Available Vue runtime prop constructors and the producer facts they read.
+#[derive(Debug, Default)]
+pub struct VuePropRuntimeFacts {
+    /// Available constructor facts by effective runtime prop name.
+    pub constructors: BTreeMap<String, OrderedRuntimeConstructors>,
+    /// Producer observations to validate through the caller's settlement.
+    pub fact_versions: Vec<FactVersionRef>,
+}
+
 /// Which independently materializable handoff bundle the caller demands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VueMacroCodegenDemand {
@@ -922,6 +931,64 @@ fn terminal_partial_vue_macro_codegen_output<M: verter_audit::observe::ObserveEx
 }
 
 impl VerterHost {
+    /// Read available per-prop Vue runtime constructors from the macro producer.
+    ///
+    /// This explicitly demands runtime classification without compiling. Missing,
+    /// degraded, and non-Vue rows make no claim and are absent from the map.
+    /// Other consumers keep their existing, narrower macro demands.
+    pub fn vue_prop_runtime_constructors(
+        &self,
+        canonical_id: &str,
+    ) -> Result<VuePropRuntimeFacts, ExecutionAbort> {
+        let canonical = self.resolve_alias_or_canonical(canonical_id);
+        let is_vue = self
+            .scheduler
+            .try_get_source(&canonical)
+            .is_some_and(|source| {
+                source
+                    .downcast_data::<crate::host_executor::HostSourceData>()
+                    .is_some_and(|data| data.file_language.is_vue())
+            });
+        if !is_vue {
+            return Ok(VuePropRuntimeFacts::default());
+        }
+        let output =
+            self.produce_vue_macro_codegen(canonical_id, VueMacroCodegenDemand::Runtime)?;
+        let fact_versions = output.fact_footprint.facts().iter().cloned().collect();
+        let mut constructors = BTreeMap::new();
+        if let Some(bundle) = output.runtime {
+            let declared = bundle
+                .entries
+                .iter()
+                .filter_map(|entry| match &entry.outcome {
+                    MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(shape)) => Some(shape),
+                    _ => None,
+                })
+                .flat_map(|shape| shape.props.iter());
+            let models = bundle
+                .entries
+                .iter()
+                .filter_map(|entry| match &entry.outcome {
+                    MacroRuntimeOutcome::Complete(MacroRuntimeShape::Model(shape)) => Some(shape),
+                    _ => None,
+                })
+                .flat_map(|shape| [&shape.prop, &shape.modifiers_prop]);
+            // Runtime codegen merges model rows over declared props, regardless
+            // of authored macro order. An unavailable override makes no claim.
+            for prop in declared.chain(models) {
+                if let Some(kinds) = prop.type_shape.constructors() {
+                    constructors.insert(prop.name.clone(), kinds.clone());
+                } else {
+                    constructors.remove(&prop.name);
+                }
+            }
+        }
+        Ok(VuePropRuntimeFacts {
+            constructors,
+            fact_versions,
+        })
+    }
+
     /// Produce the compiler-facing [`VueMacroSemanticInput`] for one carrier and
     /// compile target.
     ///

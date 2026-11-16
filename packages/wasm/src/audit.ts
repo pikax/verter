@@ -52,7 +52,6 @@ export interface AuditCapableMetaSession {
 /** JSON-shaped audit bundle — mirror of the NAPI `AuditBundle`. */
 export interface AuditBundle {
   analysis: unknown;
-  resolution: unknown;
   record: RustAuditRecord;
 }
 

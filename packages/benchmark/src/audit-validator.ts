@@ -51,7 +51,6 @@ export interface AnalysisSideCar {
 /** Audit bundle as emitted by `ComponentMetaSession.getComponentMetaWithAudit`. */
 export interface AuditBundle {
   analysis: AnalysisSideCar;
-  resolution: unknown;
   record: RequestAuditRecord;
 }
 
