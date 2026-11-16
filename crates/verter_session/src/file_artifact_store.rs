@@ -673,6 +673,26 @@ impl Drop for EpochReservation<'_> {
     }
 }
 
+/// Defers contributor publication across a host upsert or ingestion pass.
+/// Artifact membership epochs keep their existing per-mutation boundaries.
+struct GlobalContributorBatch<'a> {
+    store: &'a FileArtifactStore,
+}
+
+impl Drop for GlobalContributorBatch<'_> {
+    fn drop(&mut self) {
+        // Use the same fully-applied membership fence as mutation publication.
+        let state = self.store.live_roots.state.lock();
+        let settled_epoch = state
+            .in_flight
+            .is_empty()
+            .then(|| self.store.membership_epoch());
+        self.store
+            .global_contributors
+            .end_publication_batch(settled_epoch, || self.store.membership_epoch());
+    }
+}
+
 /// An immutable, LEASED root of [`FileArtifactStore`] membership.
 ///
 /// Holding a `FileArtifactRoot` does two inseparable things:
@@ -1243,6 +1263,15 @@ impl FileArtifactStore {
             registry: &self.live_roots,
             epoch,
         }
+    }
+
+    /// Coalesce artifact mutations within a host ingestion/upsert pass, then
+    /// flush when its guard drops, even while another pass remains open.
+    /// No lock or membership reservation is held while a pass loads its files.
+    #[must_use]
+    pub(crate) fn batch_global_contributors(&self) -> impl Drop + '_ {
+        self.global_contributors.begin_publication_batch();
+        GlobalContributorBatch { store: self }
     }
 
     /// Publish only a fully applied membership state. The registry lock also

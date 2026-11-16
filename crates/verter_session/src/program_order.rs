@@ -631,6 +631,12 @@ impl crate::VerterHost {
     /// population, including symbols with no known contributors. Only
     /// shallow reference/contribution inventories enter the artifact store.
     pub(crate) fn ingest_configured_programs(&self) {
+        let _contributors = self
+            .project_type_store()
+            .indexed()
+            .batch_global_contributors();
+        #[cfg(test)]
+        self.test_force.configured_ingestion_batch_hook.fire_once();
         let workspace = self.workspace();
         let mut incomplete = Vec::new();
         for _ in 0..3 {
@@ -1066,6 +1072,10 @@ impl crate::VerterHost {
         snapshot: &WorkspaceSnapshot,
         project: ProjectId,
     ) -> Arc<ProgramFileOrder> {
+        let _contributors = self
+            .project_type_store()
+            .indexed()
+            .batch_global_contributors();
         let ProjectPayload::Configured {
             tsconfig_path,
             membership,
@@ -1407,6 +1417,10 @@ impl crate::VerterHost {
         snapshot: &WorkspaceSnapshot,
         project: ProjectId,
     ) -> Arc<ProgramFileOrder> {
+        let _contributors = self
+            .project_type_store()
+            .indexed()
+            .batch_global_contributors();
         let workspace = self.workspace();
         let Some(published) = workspace
             .published_root()

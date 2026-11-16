@@ -17,6 +17,13 @@ use crate::upsert::{build_upsert_result, UpsertResultData};
 use crate::VerterHost;
 use verter_scheduler::stage::Priority;
 
+#[cfg(test)]
+thread_local! {
+    /// One-shot seam after post-commit work, before the publication guard drops.
+    pub(crate) static UPSERT_BATCH_POST_COMMIT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// One per-request outcome from the shared upsert engine
 /// [`VerterHost::upsert_many_with_priority`]. `result` is the same
 /// `Result<HostUpdateResult, HostError>` the single-file
@@ -402,6 +409,10 @@ impl VerterHost {
         if requests.is_empty() {
             return Vec::new();
         }
+        let _contributors = self
+            .project_type_store()
+            .indexed()
+            .batch_global_contributors();
         // Owner publication and post-await supplied-content admission share
         // one fence. The lock covers scheduler commit plus host publication,
         // so no owner revision can land between an override's current-stamp
@@ -423,6 +434,10 @@ impl VerterHost {
         self.materialize_upsert_carrier_routes(&mut outcomes);
         if !changed.is_empty() {
             self.ingest_changed_program_files(changed);
+        }
+        #[cfg(test)]
+        if let Some(hook) = UPSERT_BATCH_POST_COMMIT_HOOK.with(|slot| slot.borrow_mut().take()) {
+            hook();
         }
         outcomes
     }
