@@ -699,14 +699,12 @@ pub fn current_request_result_reasons() -> PartialReasonSet {
 
 /// Snapshot the request-result completeness signal as a boolean.
 ///
-/// This is the REQUEST-level (cross-thread) partiality accumulator. For
-/// the component-meta entry point request-scope IS result-scope (one
-/// request resolves one component's meta), so this is the per-result
-/// completeness for `synthesis_should_suppress`. The cross-consumer
-/// poisoning hazard for SHARED semantic caches is handled separately and
-/// precisely by the per-cold-compute scope above
-/// ([`current_cold_compute_completeness`]). Returns `false` when no
-/// `RequestContext` is installed.
+/// This is the REQUEST-level (cross-thread) partiality accumulator. A
+/// request can resolve several components, so this sticky signal cannot
+/// determine an individual component's completeness or warm admission.
+/// Resolve and extract phases measure their own observations through
+/// [`current_cold_compute_completeness`] and carry them with their results.
+/// Returns `false` when no `RequestContext` is installed.
 #[must_use]
 pub fn current_request_result_is_partial() -> bool {
     current_request_context()

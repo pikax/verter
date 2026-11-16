@@ -153,6 +153,148 @@ fn mirror_present(host: &VerterHost, canonical: &str) -> bool {
         .is_some_and(|entry| entry.cached_fallthrough.is_some())
 }
 
+#[test]
+fn resolve_only_partial_fallthrough_is_not_admitted_and_reaches_caller_scope() {
+    use verter_type_engine::request_context::{
+        current_cold_compute_completeness, ColdComputeCompletenessScope, RequestContext,
+        RequestContextGuard,
+    };
+    use verter_type_engine::semantic_query::ResultCompleteness;
+
+    const OWNER: &str = "/src/Owner.vue";
+    let build_host = || {
+        let host = VerterHost::new_standalone(HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            ..HostConfig::default()
+        });
+        upsert_vue(
+            &host,
+            OWNER,
+            r#"<script setup lang="ts">
+defineProps<Partial<{ label: string; count: number }>>()
+</script>
+<template><div /></template>"#,
+        );
+        // Prime only the real shallow DTO. Resolve's later evaluated-field
+        // projectors still have cold work; the surface walk can reuse this DTO.
+        crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+            let dispatch =
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let snapshot = host
+                .get_raw_analysis_snapshot(OWNER)
+                .expect("owner snapshot");
+            let scope = ColdComputeCompletenessScope::enter();
+            let macros = crate::resolver_core::component_meta_resolved_macros(
+                &host,
+                ctx,
+                &dispatch,
+                OWNER,
+                &snapshot.macros,
+            );
+            assert!(!macros.is_empty());
+            assert_eq!(
+                current_cold_compute_completeness(),
+                ResultCompleteness::Complete
+            );
+            scope.discard();
+        });
+        host
+    };
+    let budget_context = || {
+        RequestContext::with_kind_timing_and_projection_budget(
+            1,
+            Arc::from(OWNER),
+            verter_audit::RequestKind::ComponentMeta,
+            false,
+            false,
+            None,
+            1,
+        )
+    };
+
+    // Establish that only resolve produces the partiality. An independently
+    // scoped surface walk under the SAME exhausted budget does not repeat it.
+    let probe = build_host();
+    let resolve_completeness = {
+        let request = budget_context();
+        let _guard = RequestContextGuard::install(Arc::clone(&request));
+        let caller_scope = ColdComputeCompletenessScope::enter();
+        let completeness = crate::resolver_core::with_bare_host_ctx_for_test(&probe, |ctx| {
+            let dispatch =
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let resolved = probe
+                .compute_component_meta_state_for_fallthrough(
+                    OWNER,
+                    probe.current_or_read_whole_hash(OWNER).expect("owner hash"),
+                    ctx,
+                    &dispatch,
+                )
+                .expect("owner resolve");
+            assert!(request.projection_budget.is_exhausted());
+            assert!(
+                resolved.completeness.is_partial(),
+                "{:?}",
+                resolved.completeness
+            );
+            assert_eq!(
+                current_cold_compute_completeness(),
+                ResultCompleteness::Complete
+            );
+            let mut visiting = rustc_hash::FxHashSet::default();
+            assert!(probe
+                .compute_fallthrough_surface_from_resolved_state(
+                    OWNER,
+                    &resolved,
+                    None,
+                    &mut visiting,
+                    ctx,
+                    &dispatch,
+                )
+                .is_some());
+            assert_eq!(
+                current_cold_compute_completeness(),
+                ResultCompleteness::Complete
+            );
+            let outcome = probe.compute_fallthrough_outcome_from_resolved_state(
+                OWNER,
+                &resolved,
+                None,
+                &mut visiting,
+                ctx,
+                &dispatch,
+            );
+            assert!(outcome.resolution.is_some());
+            assert_eq!(outcome.completeness, resolved.completeness);
+            assert_eq!(current_cold_compute_completeness(), resolved.completeness);
+            resolved.completeness
+        });
+        caller_scope.discard();
+        completeness
+    };
+
+    let host = build_host();
+    let request = budget_context();
+    let _guard = RequestContextGuard::install(Arc::clone(&request));
+    let caller_scope = ColdComputeCompletenessScope::enter();
+    assert!(host.resolve_fallthrough_surface(OWNER).is_some());
+    assert!(request.projection_budget.is_exhausted());
+    let observed = current_cold_compute_completeness();
+    let generic = FallthroughRequestHost::generic_root_propagation(&host);
+    for key in [
+        fallthrough_cache_key(OWNER, generic, None),
+        root_follow_key(OWNER, FallthroughOverrideIdentity::NoOverrides, generic),
+    ] {
+        assert_eq!(
+            candidates(&host, &key),
+            0,
+            "a resolve-partial surface must stay cold"
+        );
+    }
+    assert!(!mirror_present(&host, OWNER));
+    assert_eq!(observed, resolve_completeness);
+    caller_scope.discard();
+}
+
 /// The MAIN poison guard: a fallthrough compute that consumed a fenced
 /// (non-cacheable) serve is SERVED to its caller but must NOT warm the
 /// fallthrough node cache.

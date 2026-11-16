@@ -1411,6 +1411,182 @@ fn budget_trip_instantiate_suppresses_and_does_not_warm() {
     );
 }
 
+#[test]
+fn analysis_io_budget_tripped_evaluated_types_reach_caller_scope() {
+    const OWNER: &str = "/evaluated.vue";
+    let build_project = || {
+        let project = crate::meta::MetaProject::new(VerterHost::new_standalone(HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            projection_op_budget: 1,
+            ..HostConfig::default()
+        }));
+        project
+            .upsert_base(
+                OWNER,
+                "<script setup lang=\"ts\">defineProps<Partial<{ label: string; count: number }>>()</script>",
+            )
+            .unwrap();
+        project
+            .upsert_base(
+                "/healthy-evaluated.vue",
+                "<script setup lang=\"ts\">const label = 'healthy'</script>",
+            )
+            .unwrap();
+        project
+    };
+    let budget_context = || {
+        RequestContext::with_kind_timing_and_projection_budget(
+            1,
+            Arc::from(OWNER),
+            verter_audit::RequestKind::ComponentMeta,
+            false,
+            false,
+            None,
+            1,
+        )
+    };
+
+    // The resolver owns a separate scope. Its returned claim, rather than
+    // the request sticky, must reach a consumer that returns only the types.
+    let probe = build_project();
+    let expected = {
+        let request = budget_context();
+        let _guard = RequestContextGuard::install(Arc::clone(&request));
+        let scope = ColdComputeCompletenessScope::enter();
+        let resolved = probe
+            .host()
+            .resolve_component_meta(OWNER, ProjectionMode::Expanded)
+            .expect("budget-tripped resolve");
+        assert!(request.projection_budget.is_exhausted());
+        assert!(resolved.evaluated_types.is_some());
+        assert!(resolved.completeness.is_partial());
+        assert_eq!(
+            current_cold_compute_completeness(),
+            ResultCompleteness::Complete
+        );
+        scope.discard();
+        resolved.completeness
+    };
+
+    for via_view in [true, false] {
+        let project = build_project();
+        let host = project.host();
+        let request = budget_context();
+        let _guard = RequestContextGuard::install(Arc::clone(&request));
+        let scope = ColdComputeCompletenessScope::enter();
+        let evaluated = if via_view {
+            host.evaluate_types_via_view(OWNER, &crate::session_view::HostViewRef::new(host))
+        } else {
+            host.evaluate_types(OWNER)
+        };
+        assert!(evaluated.is_some(), "via_view={via_view}");
+        assert!(request.projection_budget.is_exhausted());
+        assert_eq!(
+            current_cold_compute_completeness(),
+            expected,
+            "via_view={via_view}"
+        );
+        scope.discard();
+
+        // A new consumer scope must use the healthy result's own claim,
+        // even though this request's sticky still records the earlier trip.
+        let healthy_scope = ColdComputeCompletenessScope::enter();
+        let healthy = if via_view {
+            host.evaluate_types_via_view(
+                "/healthy-evaluated.vue",
+                &crate::session_view::HostViewRef::new(host),
+            )
+        } else {
+            host.evaluate_types("/healthy-evaluated.vue")
+        };
+        assert!(healthy.is_some(), "via_view={via_view}");
+        assert_eq!(
+            current_cold_compute_completeness(),
+            ResultCompleteness::Complete
+        );
+        healthy_scope.discard();
+    }
+}
+
+#[test]
+fn budget_tripped_resolution_does_not_poison_healthy_resolution_in_same_request() {
+    use verter_type_engine::request_context::current_request_result_is_partial;
+
+    let project = crate::meta::MetaProject::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 1,
+        ..HostConfig::default()
+    }));
+    project
+        .upsert_base(
+            "/partial.vue",
+            "<script setup lang=\"ts\">defineProps<Partial<{ a: string; b: number }>>()</script>",
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/healthy.vue",
+            "<script setup lang=\"ts\">const label = 'healthy'</script>",
+        )
+        .unwrap();
+    let host = project.host();
+    let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        1,
+        Arc::from("/partial.vue"),
+        verter_audit::RequestKind::ComponentMeta,
+        false,
+        false,
+        None,
+        host.config.projection_op_budget,
+    );
+    let _guard = RequestContextGuard::install(Arc::clone(&ctx));
+    let enclosing_scope = ColdComputeCompletenessScope::enter();
+    let partial = host
+        .resolve_component_meta("/partial.vue", ProjectionMode::Expanded)
+        .expect("budget-tripped resolution");
+    assert!(ctx.projection_budget.is_exhausted());
+    assert!(partial.completeness.is_partial());
+    assert!(partial.synthesis_should_suppress);
+    assert!(current_request_result_is_partial());
+    assert!(host
+        .derived_raw_cache()
+        .get("/partial.vue")
+        .is_none_or(|entry| entry.cached_resolved_meta.is_empty()));
+
+    let healthy = host
+        .resolve_component_meta("/healthy.vue", ProjectionMode::Expanded)
+        .expect("healthy resolution under the same context");
+    assert_eq!(healthy.completeness, ResultCompleteness::Complete);
+    assert!(!healthy.synthesis_should_suppress);
+    assert!(current_request_result_is_partial());
+    assert!(host
+        .derived_raw_cache()
+        .get("/healthy.vue")
+        .is_some_and(|entry| !entry.cached_resolved_meta.is_empty()));
+
+    let view = crate::session_view::HostViewRef::new(host);
+    let request_host = crate::host_manage::component_meta_request_impl::ViewBoundRequestHost {
+        host,
+        view: &view,
+        overlay: Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    };
+    // Observe the actual executor source rather than inferring a warm read
+    // from the presence of an admitted candidate.
+    let replay = crate::resolver_core::run_component_meta_request(
+        &request_host,
+        host.resolver_runtime().component_meta.singleflight(),
+        "/healthy.vue",
+        ProjectionMode::Expanded,
+        None,
+        crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS,
+    )
+    .request;
+    assert_eq!(replay.source, crate::resolver_core::RequestSource::Cache);
+    let warm = replay.value.expect("healthy warm replay");
+    assert_eq!(warm.completeness, ResultCompleteness::Complete);
+    enclosing_scope.discard();
+}
+
 /// §5 MANDATORY discrimination proof for the A2 signal split, at the WARM
 /// GATE — the single point the reachability argument converges on.
 ///
@@ -1509,6 +1685,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
             host.config.projection_op_budget,
         );
         let _g = RequestContextGuard::install(ctx);
+        let scope = ColdComputeCompletenessScope::enter();
         assert!(!current_request_result_is_partial());
         verter_type_engine::request_context::observe_component_meta_read_suppress(
             &complete_non_cacheable,
@@ -1519,6 +1696,11 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
              MUST NOT raise the warm-gate suppress flag — it must still be allowed to warm a \
              complete component-meta result"
         );
+        assert_eq!(
+            current_cold_compute_completeness(),
+            ResultCompleteness::Complete
+        );
+        scope.discard();
     }
 
     // Gate behaviour for (1) — under a fresh request — MUST suppress: the
@@ -1534,6 +1716,7 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
             host.config.projection_op_budget,
         );
         let _g = RequestContextGuard::install(ctx);
+        let scope = ColdComputeCompletenessScope::enter();
         assert!(!current_request_result_is_partial());
         verter_type_engine::request_context::observe_component_meta_read_suppress(&value_partial);
         assert!(
@@ -1541,7 +1724,29 @@ fn warm_gate_keys_on_result_is_partial_not_value_kind_or_cache_suppress() {
             "a Value-partial (result_is_partial=true) MUST raise the warm-gate suppress flag — a \
              value-kind gate misses this complete Value and would have warmed the partial"
         );
+        assert!(current_cold_compute_completeness().is_partial());
+        scope.discard();
     }
+
+    // Exercise the resolve boundary too: the gate must read its scope before
+    // discarding it, even without an enclosing completeness scope.
+    let project = crate::meta::MetaProject::new(VerterHost::new_standalone(HostConfig {
+        analysis_level: crate::types::AnalysisLevel::Full,
+        projection_op_budget: 1,
+        ..HostConfig::default()
+    }));
+    project
+        .upsert_base(
+            "/value-partial.vue",
+            "<script setup lang=\"ts\">defineProps<Partial<{ a: string; b: number }>>()</script>",
+        )
+        .unwrap();
+    let resolved = project
+        .host()
+        .resolve_component_meta("/value-partial.vue", ProjectionMode::Expanded)
+        .expect("budget-tripped resolve");
+    assert!(resolved.completeness.is_partial());
+    assert!(resolved.synthesis_should_suppress);
 }
 
 /// Discrimination proof: a COMPLETE result that hits a BENIGN

@@ -982,6 +982,9 @@ impl VerterHost {
         >,
         session_view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<ResolvedComponentMetaState> {
+        // Measure this resolve independently of earlier work in the request.
+        let resolve_scope =
+            verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
         // `ctx` is required, so every production caller supplies the exact
         // request-bound base or session context. The direct-host fixture
         // wrapper is compile-fenced to test support.
@@ -1316,48 +1319,18 @@ impl VerterHost {
         let surface_identities = parts.surface_identities;
         let surface_identities_for_export = surface_identities.clone();
 
-        // Cache-suppression propagation: fold the request-scoped sticky
-        // flag set by reducer / materializer paths (raise.rs reduce_one,
-        // field_types::materialize_*) into the final typed completeness so
-        // the `ComponentMetaResultDb` admission gate at
-        // `cache_component_meta` /
-        // `component_meta_entry::write_published_component_meta` refuses
-        // any partial whose reducer / materializer pipeline observed a
-        // budget-exceeded (or other fatal `QueryError`) read. Without this
-        // fold, a `cache_suppress=true` from field-type materialization
-        // would warm the final-result cache and a subsequent identical
-        // request would replay the poisoned partial instead of re-running
-        // the cold compute against the fresh budget.
-        //
-        // Typed per-result completeness: the partial signal is the union of
-        // the synthesis walk's SEALED suppression claim (with its own typed
-        // reasons) and the request-result partiality accumulator (a partial
-        // macro DTO surface / budget-tripped materialize read folds in
-        // here, carrying the downstream `PROPAGATED` class).
-        // `synthesis_should_suppress` is the bool projection of this — keep
-        // the two in lock-step.
-        let request_result_partial =
-            verter_type_engine::request_context::current_request_result_is_partial();
-        let request_reasons = verter_type_engine::request_context::current_request_result_reasons();
-        let propagated_or_named = if request_reasons.is_empty() {
-            verter_type_engine::semantic_query::PartialReasonSet::PROPAGATED
-        } else {
-            request_reasons
-        };
-        let completeness = match (synthesis_suppression, request_result_partial) {
-            (Some(reasons), true) => {
-                verter_type_engine::semantic_query::ResultCompleteness::partial(
-                    reasons.get().union(propagated_or_named),
-                )
-            }
-            (Some(reasons), false) => {
+        // Combine the synthesis claim with partial reads observed by this
+        // resolve. Carry the result explicitly instead of tainting an enclosing
+        // compute or consulting the request-wide sticky accumulator.
+        let synthesis_completeness = synthesis_suppression.map_or(
+            verter_type_engine::semantic_query::ResultCompleteness::Complete,
+            |reasons| {
                 verter_type_engine::semantic_query::ResultCompleteness::partial(reasons.get())
-            }
-            (None, true) => {
-                verter_type_engine::semantic_query::ResultCompleteness::partial(propagated_or_named)
-            }
-            (None, false) => verter_type_engine::semantic_query::ResultCompleteness::Complete,
-        };
+            },
+        );
+        let completeness = synthesis_completeness
+            .merge(verter_type_engine::request_context::current_cold_compute_completeness());
+        resolve_scope.discard();
         let synthesis_should_suppress = completeness.is_partial();
 
         let state = ResolvedComponentMetaState {

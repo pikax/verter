@@ -68,6 +68,24 @@ failure of a published member produces a failed publication with no type value;
 other members still publish. Execution aborts still publish nothing. Terminal
 partiality also refuses encoded-payload success admission.
 
+Resolve and extract each measure completeness in their own
+`ColdComputeCompletenessScope`. Resolve merges its scope's observations with
+the synthesis claim, then discards the scope; extraction likewise carries its
+measured claim with the outcome. The request-wide sticky flag is diagnostic
+accumulation, never an individual component's completeness authority: an
+earlier partial resolution in the same request must not prevent a healthy
+later component from warming.
+Consumers that build a cached product from a resolved state must fold its
+carried completeness into that product's active compute scope. Fallthrough
+does this both after its own owner resolve and inside the fresh scope used
+when extraction supplies an already-resolved state. The surface walk need
+not repeat the resolve-only work that produced a partial claim.
+Field-only evaluated-type consumers use
+`ResolvedComponentMetaState::into_evaluated_types`: it folds the carried claim
+before moving out the types. Both the base `evaluate_types` entry and the
+view-aware `evaluate_types_via_view` entry use this handoff. Wrappers returning
+the full resolved state retain completeness explicitly with the products.
+
 `@verter/component-meta` exposes `FactResult`, `FactCause`, `FactCauses` and
 `NativeComponentFacts`. Native `ComponentMeta` includes the facts. Compatibility
 arrays are derived projections and confer no independent completeness claim.
