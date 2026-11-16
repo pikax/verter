@@ -2237,7 +2237,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
             //      `InstantiationRef` arm then applies the per-argument rule.
             //   2. RESOLVE the head through the ONE shared self
             //      (`resolve_carrier_subject_node` → `resolve_bare_ref_head` /
-            //      `resolve_import_type_head`) under a non-publication
+            //      `plan_import_type_head_steps`) under a non-publication
             //      `StructuralTransit` context — NOT a second resolver, NOT a
             //      walker-local resolver, no string heuristics. The resolution
             //      re-enters the SAME dispatcher (`self.dispatch`) so its

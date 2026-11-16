@@ -1593,48 +1593,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .is_none()
     }
 
-    /// Resolve an `ImportType` head (`import("specifier").qualifier<args>` /
-    /// `typeof import("specifier")`) to its semantic node — the shared resolver
-    /// for an unresolved dynamic-import reference, reached from BOTH the eager
-    /// `TypeExpr::ImportType` arm AND carrier-subject normalization.
-    ///
-    /// `owner_canonical` is the file the import expression lives in (the
-    /// node-level scope of an `ImportType` carrier); it resolves the relative
-    /// `specifier`. The argument NODES are produced LAZILY (`arg_count` is the
-    /// cheap arity; `lower_args` lowers them on demand) so an UNRESOLVABLE
-    /// specifier / qualifier never lowers + dispatches dead args. Returns
-    /// `Opaque(Miss)` on an unresolvable specifier / qualifier, EXACTLY like the
-    /// eager arm.
-    ///
-    /// The TYPE-position qualifier head segment routes through the SAME
-    /// `resolve_bare_ref_head` (over an injected `name_resolution` entry binding
-    /// the head segment into the imported module's TYPE-export space), so there
-    /// is ONE bare-name resolver — not a parallel import resolver.
-    pub(super) fn resolve_import_type_head(
-        &self,
-        ctx: &CarrierResolverContext<'_>,
-        owner_canonical: &str,
-        specifier: &str,
-        qualifier: &[verter_type_expr::OwnedStr],
-        typeof_query: bool,
-        arg_count: usize,
-        lower_args: impl FnOnce() -> Arc<[SemanticNodeId]>,
-    ) -> SemanticNodeId {
-        match self.plan_import_type_head(
-            ctx,
-            owner_canonical,
-            specifier,
-            qualifier,
-            typeof_query,
-            arg_count,
-        ) {
-            CarrierResolutionPlan::Ready(value) => value.node,
-            CarrierResolutionPlan::NeedsArgs(continuation) => {
-                self.finish_carrier_resolution(continuation, lower_args())
-            }
-        }
-    }
-
     /// [`Self::plan_import_type_head_steps`] settled in place: an eager
     /// head's declaration and a qualified tail's projection read where the
     /// caller stands.
@@ -1793,7 +1751,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         /// `DeclarationScopePayload` + `ScopeShadowing` derived from
         /// `prepared_decl_bundle`, exactly the shape
         /// [`Self::lower_type_expr_in_scope_with_context`] uses in production — then
-        /// calls [`Self::resolve_bare_ref_head`] / [`Self::resolve_import_type_head`]
+        /// calls [`Self::resolve_bare_ref_head`] / [`Self::plan_import_type_head_steps`]
         /// in the query's `context`. A carrier node carries no body-file
         /// `name_resolution` map (that map is a lowering-time local), so this path
         /// recovers the resolution through the `resolve_bare_name_in_scope` fallback;
@@ -1859,7 +1817,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The head resolution performs NESTED reads — the `TypeOf` value-root +
     /// dotted-path `execute_read`s, the `BareRef` builtin `Instantiate`, and the
     /// `ImportType` qualified-path `ProjectPath` (`carrier.rs`
-    /// `resolve_import_type_head`) — whose `CacheRead.cache_suppress` /
+    /// `plan_import_type_head_steps`) — whose `CacheRead.cache_suppress` /
     /// `result_is_partial` the bare `resolve_carrier_subject_node` return type
     /// (a single node) cannot carry. Every one of those FUNNEL reads folds its
     /// rails into the TOP `build_local_taint` frame this variant pushes, making

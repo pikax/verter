@@ -5,7 +5,7 @@
 //! (`Foo` / `Foo<Arg>` / `import("m").G<Arg>`). When such a carrier is a query
 //! SUBJECT, the canonical dispatch entry resolves the head through the SAME
 //! shared resolver the eager `TypeExpr::Ref` / `TypeExpr::ImportType` lowering
-//! path uses (`resolve_bare_ref_head` / `resolve_import_type_head`), rewrites
+//! path uses (`resolve_bare_ref_head` / `plan_import_type_head_steps`), rewrites
 //! the subject to the resolved node, and dispatches the real semantic subject.
 //!
 //! These fixtures CONSTRUCT a carrier directly through the sanctioned

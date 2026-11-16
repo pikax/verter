@@ -294,15 +294,31 @@ intent is recorded when the read is requested, before suspension.
 
 Bare-reference anchors, carrier finishes, reducing `keyof`, reducing indexed
 access, and structural `typeof` positions yield reads. `typeof` lowers its
-arguments from structural frames after the value read succeeds. The other
-leaf forms, spread objects and authored member keys keep their in-place
-recursive behavior. This helper does not itself convert those dependencies or
-make an arbitrary semantic root nonblocking.
+arguments from structural frames after the value read succeeds. Function and
+constructor parameter, return, predicate-target and both binder-bound passes,
+mapped source/value/name-remap positions, and conditional check/extends operands
+(including infer constraints) also use structural frames. Conditional decisions
+and their selected branch callbacks still run in place. Import types use the
+shared import-head planner, suspend on its anchor and finish, lower arguments
+only when consumed under the caller's context, and project qualified tails as
+whole reads. Type-parameter leaf bounds, script-setup bindings, spread objects
+and authored member keys retain native recursion. Applied typeof signature
+discovery and carrier-finish augmentation collection remain in place too.
+This helper does not make an arbitrary semantic root nonblocking.
+
+Binding frames hold owned environments and lend them to their children through
+one scoped cursor transition. The transition retains the previous environment
+until the child finishes, then restores it before resuming the parent. Nested
+frames therefore see the innermost binder across reads without capturing a
+dispatcher borrow. A function without own type parameters keeps borrowing the
+outer environment; it creates no environment clone or shared allocation.
+The shared frame stack keeps two positions inline (a direct child and its
+environment restoration) and spills deeper nesting to heap storage.
 
 `lower_type_expr_with_infer_factory` drives the same cursor advance with the
-caller's borrowed factory and substitution vector; a read-free lowering gains
-no allocation or factory clone. `answer_lower_read` is the one in-place
-answerer. `begin_type_lowering_in_owner_scope_with_context` returns an
+caller's borrowed factory and substitution vector; lending the context and
+inherited environment adds no allocation or factory clone. `answer_lower_read`
+is the one in-place answerer. `begin_type_lowering_in_owner_scope_with_context` returns an
 `OwnerTypeLowerRead` with its scope context by value beside the read, so no borrow
 points into its own owner. The shared context constructor serves both forms;
 the in-place driver borrows the context on the stack without allocating a box.
