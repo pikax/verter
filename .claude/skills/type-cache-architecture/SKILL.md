@@ -1665,6 +1665,30 @@ before any early return, admission decision or memo insertion. Typed
 
 ### Completed results and their receipts
 
+Equal `StoreViewValidationToken` implies an equal validation outcome for every
+fact kind. The complete token is the reuse oracle; the narrower singleflight
+compatibility token cannot identify a reusable validation verdict.
+
+`ResultEvidence` and semantic memo candidates may remember a POSITIVE verdict
+under the complete token only after every reachable fact validated, every
+`FileWholeHash` leaf was checked strictly, the validating population was
+`ViewPopulation::Base`, and the completion overlay remained empty throughout
+validation. A later eligible request with the same token reuses that verdict
+without walking its leaves. Semantic memo candidates also skip validation-input
+preparation. Any token movement takes the ordinary
+full validation path, including its existing early failure and attribution.
+Session populations, shadowing or in-flight completion overlays, and lazily
+checked whole-file leaves never create or reuse these stamps. Refused reads and
+negative verdicts never create them. A missing live cache row supplies no stale
+verdict; domain-movement tests change authoritative facts. Request-local verdicts
+retain their existing exact context rules.
+
+The stamp belongs to the immutable evidence or candidate it proves, shares its
+lifetime and retention charge, and changes neither fact-set identity nor the
+candidate's materialised-point satisfaction gate. It is bounded validation
+metadata on the existing fact rail, never a new fact, receipt-minting path,
+cache key, admission decision or replacement for the complete read set.
+
 An aborted singleflight never delivers its retained completion to a subscriber.
 `Subscription::wait` retires and retries within its retry allowance; exhaustion
 returns a typed `ExecutionAborted(Superseded)` read with suppression, partiality,

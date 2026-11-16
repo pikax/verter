@@ -1663,6 +1663,43 @@ where
 }
 
 impl<L> RequestBoundAdapter<L> {
+    fn validate_retained_candidate(
+        &self,
+        sig: &verter_session_query::facts::fact_set::FactSet,
+        self_root_canonicals: &[&str],
+        stamp: Option<&verter_session_query::facts::receipt::PositiveValidationStamp>,
+    ) -> bool
+    where
+        L: RequestBoundLifecycle,
+        Self: verter_type_engine::resolver_core::request_ports::OwnedLowering,
+    {
+        let view = self.0.request_view();
+        let settled = view.settled_retained_signature(sig, self_root_canonicals);
+        if settled == Some(false) {
+            return false;
+        }
+        // Sample before preparation: a movement during it cannot certify the
+        // request's captured base for a cross-request candidate stamp.
+        let inputs = self.0.host().current_validation_token();
+        let stamp = stamp.filter(|_| inputs == view.base().validation_token());
+        if settled == Some(true) && view.signature_prepared_under(sig, &inputs) {
+            return true;
+        }
+        if self
+            .prepare_validation_inputs(verter_session_query::facts::fact_set::FactsRef::Set(sig))
+            .is_err()
+        {
+            return false;
+        }
+        view.note_signature_prepared(sig, inputs);
+        match stamp {
+            Some(stamp) => {
+                view.validates_retained_signature_with_stamp(sig, self_root_canonicals, Some(stamp))
+            }
+            None => view.validates_retained_signature(sig, self_root_canonicals),
+        }
+    }
+
     /// Complete edited parse facts before the view captures its validation
     /// epoch. Indexing during a leaf check would tear that epoch instead.
     fn prepare_validation_inputs(
@@ -1978,25 +2015,29 @@ where
         verter_type_engine::count_resolver_context_call!(
             "FactValidation::validates_retained_signature_with_self_roots"
         );
+        self.validate_retained_candidate(sig, self_root_canonicals, None)
+    }
+
+    fn validates_stamped_signature_with_self_roots(
+        &self,
+        sig: &verter_session_query::facts::fact_set::FactSet,
+        self_root_canonicals: &[Arc<str>],
+        stamp: &verter_session_query::facts::receipt::PositiveValidationStamp,
+    ) -> bool {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::validates_stamped_signature_with_self_roots"
+        );
         let view = self.0.request_view();
-        let settled = view.settled_retained_signature(sig, self_root_canonicals);
-        if settled == Some(false) {
-            return false;
-        }
-        // Sampled before the walk: a mutation landing during it leaves this
-        // token behind the live one, so the next read walks again.
         let inputs = self.0.host().current_validation_token();
-        if settled == Some(true) && view.signature_prepared_under(sig, &inputs) {
+        if inputs == view.base().validation_token()
+            && view.reuses_positive_validation_stamp(stamp)
+            && self.0.host().current_validation_token() == inputs
+        {
             return true;
         }
-        if self
-            .prepare_validation_inputs(verter_session_query::facts::fact_set::FactsRef::Set(sig))
-            .is_err()
-        {
-            return false;
-        }
-        view.note_signature_prepared(sig, inputs);
-        view.validates_retained_signature(sig, self_root_canonicals)
+        let roots: smallvec::SmallVec<[&str; 4]> =
+            self_root_canonicals.iter().map(AsRef::as_ref).collect();
+        self.validate_retained_candidate(sig, &roots, Some(stamp))
     }
     fn promote_route_completion(
         &self,
@@ -2164,6 +2205,83 @@ mod retained_validation_tests {
                 "a read of the settled verdict"
             );
         }
+    }
+
+    #[test]
+    fn a_positive_memo_candidate_skips_preparation_and_validation_in_later_requests() {
+        use verter_type_engine::semantic_query::{
+            PrimitiveKind, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticQueryKey,
+        };
+        use verter_type_engine::semantic_query_memo::SemanticGraphStore;
+        let (host, route_hash) = served_host();
+        let base = host.resolver_store_view_read().into_owned_view();
+        let graph = SemanticGraphStore::new();
+        let node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: ScopeId::file(
+                CANONICAL,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
+            name: "ButtonProps".into(),
+        });
+        let facts = FactPolicy::production().set_of(vec![
+            FactVersionRef::FileWholeHash {
+                canonical_id: CANONICAL.into(),
+                hash: base
+                    .whole_hash_for_tests(CANONICAL)
+                    .expect("tracked source"),
+            },
+            FactVersionRef::Parse(ParseFactRef {
+                canonical_id: CANONICAL.into(),
+                key: FactKey::SyntacticRouteInterface,
+                lane: FactLane::Semantic,
+                expected_hash: route_hash,
+            }),
+        ]);
+        assert!(
+            graph.publish_with_carrier_for_tests(
+                key.clone(),
+                QueryResult::Value(node),
+                verter_session_query::facts::fact_cache::ReadSetSignature::new(facts),
+                Arc::from([Arc::from(CANONICAL)]),
+            ) > 0
+        );
+        for expected in [2, 0, 0] {
+            let ctx: HostResolverContext<'_> =
+                HostResolverContext::new(&host, &base, Arc::new(CanonicalCompletionOverlay::new()));
+            assert_eq!(
+                graph.execute_cooperative_batch(&ctx, std::slice::from_ref(&key)),
+                vec![Ok(node)]
+            );
+            assert_eq!(ctx.0.request_view().leaf_validations_for_tests(), expected);
+            assert_eq!(
+                ctx.0.request_view().validation_preparations_for_tests(),
+                usize::from(expected != 0)
+            );
+            assert_eq!(
+                ctx.0.request_view().overlay().completion_state_for_tests(),
+                verter_session_query::facts::fact_cache::CompletionOverlayState::Empty,
+                "preparation must leave already captured facts in the base"
+            );
+        }
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: None,
+                input_id: CANONICAL.to_owned(),
+                source: Arc::from("export interface ButtonProps { label: number }"),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("changed source admitted");
+        host.ensure_indexed_ready(CANONICAL)
+            .expect("changed source indexed");
+        let changed = host.resolver_store_view_read().into_owned_view();
+        assert_ne!(base.validation_token(), changed.validation_token());
+        let ctx: HostResolverContext<'_> =
+            HostResolverContext::new(&host, &changed, Arc::new(CanonicalCompletionOverlay::new()));
+        assert!(graph.execute_cooperative_batch(&ctx, &[key])[0].is_err());
+        assert_eq!(ctx.0.request_view().leaf_validations_for_tests(), 1);
+        assert_eq!(ctx.0.request_view().validation_preparations_for_tests(), 1);
     }
 
     /// A settled verdict speaks for the request's base; whether the file is

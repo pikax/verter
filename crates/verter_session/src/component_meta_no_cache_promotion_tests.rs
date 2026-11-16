@@ -1412,6 +1412,103 @@ fn budget_trip_instantiate_suppresses_and_does_not_warm() {
 }
 
 #[test]
+fn analysis_io_budget_tripped_evaluated_types_reach_caller_scope() {
+    const OWNER: &str = "/evaluated.vue";
+    let build_project = || {
+        let project = crate::meta::MetaProject::new(VerterHost::new_standalone(HostConfig {
+            analysis_level: crate::types::AnalysisLevel::Full,
+            projection_op_budget: 1,
+            ..HostConfig::default()
+        }));
+        project
+            .upsert_base(
+                OWNER,
+                "<script setup lang=\"ts\">defineProps<Partial<{ label: string; count: number }>>()</script>",
+            )
+            .unwrap();
+        project
+            .upsert_base(
+                "/healthy-evaluated.vue",
+                "<script setup lang=\"ts\">const label = 'healthy'</script>",
+            )
+            .unwrap();
+        project
+    };
+    let budget_context = || {
+        RequestContext::with_kind_timing_and_projection_budget(
+            1,
+            Arc::from(OWNER),
+            verter_audit::RequestKind::ComponentMeta,
+            false,
+            false,
+            None,
+            1,
+        )
+    };
+
+    // The resolver owns a separate scope. Its returned claim, rather than
+    // the request sticky, must reach a consumer that returns only the types.
+    let probe = build_project();
+    let expected = {
+        let request = budget_context();
+        let _guard = RequestContextGuard::install(Arc::clone(&request));
+        let scope = ColdComputeCompletenessScope::enter();
+        let resolved = probe
+            .host()
+            .resolve_component_meta(OWNER, ProjectionMode::Expanded)
+            .expect("budget-tripped resolve");
+        assert!(request.projection_budget.is_exhausted());
+        assert!(resolved.evaluated_types.is_some());
+        assert!(resolved.completeness.is_partial());
+        assert_eq!(
+            current_cold_compute_completeness(),
+            ResultCompleteness::Complete
+        );
+        scope.discard();
+        resolved.completeness
+    };
+
+    for via_view in [true, false] {
+        let project = build_project();
+        let host = project.host();
+        let request = budget_context();
+        let _guard = RequestContextGuard::install(Arc::clone(&request));
+        let scope = ColdComputeCompletenessScope::enter();
+        let evaluated = if via_view {
+            host.evaluate_types_via_view(OWNER, &crate::session_view::HostViewRef::new(host))
+        } else {
+            host.evaluate_types(OWNER)
+        };
+        assert!(evaluated.is_some(), "via_view={via_view}");
+        assert!(request.projection_budget.is_exhausted());
+        assert_eq!(
+            current_cold_compute_completeness(),
+            expected,
+            "via_view={via_view}"
+        );
+        scope.discard();
+
+        // A new consumer scope must use the healthy result's own claim,
+        // even though this request's sticky still records the earlier trip.
+        let healthy_scope = ColdComputeCompletenessScope::enter();
+        let healthy = if via_view {
+            host.evaluate_types_via_view(
+                "/healthy-evaluated.vue",
+                &crate::session_view::HostViewRef::new(host),
+            )
+        } else {
+            host.evaluate_types("/healthy-evaluated.vue")
+        };
+        assert!(healthy.is_some(), "via_view={via_view}");
+        assert_eq!(
+            current_cold_compute_completeness(),
+            ResultCompleteness::Complete
+        );
+        healthy_scope.discard();
+    }
+}
+
+#[test]
 fn budget_tripped_resolution_does_not_poison_healthy_resolution_in_same_request() {
     use verter_type_engine::request_context::current_request_result_is_partial;
 

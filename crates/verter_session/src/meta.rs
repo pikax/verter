@@ -694,7 +694,6 @@ impl MetaSession {
     /// Single native component-meta query through this session's overlay view.
     ///
     /// Combines enriched analysis + type evaluation in one call.
-    /// Does NOT re-enter the legacy getAnalysis/evaluateTypes workflow.
     ///
     /// **View wiring (R17, R18).** The session constructs an
     /// `OverlaidViewRef` over its current overlay map and threads it

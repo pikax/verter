@@ -1948,7 +1948,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .may_mention_binder()
     }
 
-    fn binder_dependency_proves_absent(
+    pub(super) fn binder_dependency_proves_absent(
         &self,
         node: SemanticNodeId,
         target: SemanticNodeId,

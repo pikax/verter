@@ -583,7 +583,7 @@ impl VerterMcpServer {
     }
 
     #[tool(
-        description = "Get the public API surface of a Vue component: props, emits, slots, models, expose."
+        description = "Get the public API surface of a Vue component: authored props, with_defaults, emits, slots, models, expose. Use get_framework_surface for resolved types."
     )]
     pub async fn get_component_api(
         &self,
@@ -624,6 +624,7 @@ impl VerterMcpServer {
 
                     let mut api = serde_json::json!({
                         "props": [],
+                        "with_defaults": [],
                         "emits": [],
                         "slots": [],
                         "models": [],
@@ -632,22 +633,33 @@ impl VerterMcpServer {
 
                     for m in analysis.macros.iter() {
                         match m.kind {
-                            AnalyzedMacroKind::DefineProps | AnalyzedMacroKind::WithDefaults => {
-                                api["props"] = serde_json::to_value(m).unwrap_or_default();
+                            AnalyzedMacroKind::DefineProps => {
+                                api["props"] =
+                                    serde_json::to_value(m).map_err(|e| mcp_err(e.to_string()))?;
+                            }
+                            AnalyzedMacroKind::WithDefaults => {
+                                api["with_defaults"] =
+                                    serde_json::to_value(m).map_err(|e| mcp_err(e.to_string()))?;
                             }
                             AnalyzedMacroKind::DefineEmits => {
-                                api["emits"] = serde_json::to_value(m).unwrap_or_default();
+                                api["emits"] =
+                                    serde_json::to_value(m).map_err(|e| mcp_err(e.to_string()))?;
                             }
                             AnalyzedMacroKind::DefineModel => {
                                 if let Some(models) = api["models"].as_array_mut() {
-                                    models.push(serde_json::to_value(m).unwrap_or_default());
+                                    models.push(
+                                        serde_json::to_value(m)
+                                            .map_err(|e| mcp_err(e.to_string()))?,
+                                    );
                                 }
                             }
                             AnalyzedMacroKind::DefineSlots => {
-                                api["slots"] = serde_json::to_value(m).unwrap_or_default();
+                                api["slots"] =
+                                    serde_json::to_value(m).map_err(|e| mcp_err(e.to_string()))?;
                             }
                             AnalyzedMacroKind::DefineExpose => {
-                                api["expose"] = serde_json::to_value(m).unwrap_or_default();
+                                api["expose"] =
+                                    serde_json::to_value(m).map_err(|e| mcp_err(e.to_string()))?;
                             }
                             _ => {}
                         }
@@ -655,16 +667,16 @@ impl VerterMcpServer {
 
                     if let Some(tpl) = &analysis.template {
                         if !tpl.defined_slots.is_empty() {
-                            api["template_slots"] =
-                                serde_json::to_value(&tpl.defined_slots).unwrap_or_default();
+                            api["template_slots"] = serde_json::to_value(&tpl.defined_slots)
+                                .map_err(|e| mcp_err(e.to_string()))?;
                         }
                         if !tpl.prop_definitions.is_empty() {
-                            api["runtime_props"] =
-                                serde_json::to_value(&tpl.prop_definitions).unwrap_or_default();
+                            api["runtime_props"] = serde_json::to_value(&tpl.prop_definitions)
+                                .map_err(|e| mcp_err(e.to_string()))?;
                         }
                         if !tpl.emit_definitions.is_empty() {
-                            api["runtime_emits"] =
-                                serde_json::to_value(&tpl.emit_definitions).unwrap_or_default();
+                            api["runtime_emits"] = serde_json::to_value(&tpl.emit_definitions)
+                                .map_err(|e| mcp_err(e.to_string()))?;
                         }
                     }
 
@@ -680,7 +692,7 @@ impl VerterMcpServer {
     }
 
     #[tool(
-        description = "Resolve a component's framework surfaces (props, emits, slots, options, expose, model) through the framework-surface executor. Returns per-kind support status and members. Routes through the host's single validation-first executor — no second resolver."
+        description = "Resolve a component's framework surfaces (props, emits, slots, options, expose, model) through the framework-surface executor. Returns per-kind support and exactness, members with typeNodeId, and their structural graph. Routes through the host's single validation-first executor — no second resolver."
     )]
     pub async fn get_framework_surface(
         &self,
@@ -2966,6 +2978,37 @@ defineProps<{ value: Unsafe }>()
             .expect("missing canonical is ordinary absence");
         let text = absent.content[0].as_text().expect("text result");
         assert_eq!(text.text, "null");
+    }
+
+    #[tokio::test]
+    async fn component_api_keeps_props_and_with_defaults_macros() {
+        let host = make_host();
+        upsert_vue(
+            &host,
+            "/test/Defaults.vue",
+            r#"<script setup lang="ts">
+withDefaults(defineProps<{ a?: string }>(), { a: 'x' })
+</script>"#,
+        );
+        let server = VerterMcpServer::new(
+            Arc::clone(&host),
+            Arc::new(verter_diagnostics::Linter::default()),
+            McpServerConfig::default(),
+        );
+        let result = server
+            .get_component_api(Parameters(FilePathParams {
+                path: "/test/Defaults.vue".to_string(),
+            }))
+            .await
+            .expect("authored API available");
+        let json: serde_json::Value =
+            serde_json::from_str(&result.content[0].as_text().expect("text result").text)
+                .expect("JSON result");
+        assert_eq!(json["props"]["kind"], "DefineProps");
+        assert_eq!(json["props"]["propFields"][0]["name"], "a");
+        assert_eq!(json["with_defaults"]["kind"], "WithDefaults");
+        assert_eq!(json["with_defaults"]["defaultValues"][0]["key"], "a");
+        assert_eq!(json["with_defaults"]["defaultValues"][0]["value"], "'x'");
     }
 
     #[test]

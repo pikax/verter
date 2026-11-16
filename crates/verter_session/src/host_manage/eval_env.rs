@@ -1343,9 +1343,7 @@ impl VerterHost {
             self.component_meta_binding_type_entries(ctx, canonical, &requested_bindings)
         };
         // Appended, never spliced to the front: this vector's order carries
-        // through the expander into `ExpandedComponentTypes.bindings`, which
-        // the `evaluateTypes` NAPI method serializes verbatim. The array
-        // order is externally observable, so it is not a free knob to tune.
+        // through the expander into `ExpandedComponentTypes.bindings`.
         for key in &constructor_binding_keys {
             let entry = verter_semantic::analysis::type_eval_build::BindingExpansionEntry {
                 name: key.name.to_string(),

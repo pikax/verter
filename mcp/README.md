@@ -89,11 +89,24 @@ Options:
 | Tool                 | Description                                                    |
 | -------------------- | -------------------------------------------------------------- |
 | `analyze_file`       | Full analysis snapshot (script, template, styles sections)     |
-| `get_component_api`  | Props, emits, slots, models, expose, inheritsAttrs             |
+| `get_component_api`  | Authored props, with_defaults, emits, slots, models, expose |
 | `get_imports`        | Imports with Vue API classification                            |
 | `get_bindings`       | Bindings with ReactivityKind (Ref/Computed/Reactive/etc.)      |
 | `get_template_usage` | Components, binding refs, slots, template refs, event handlers |
-| `get_framework_surface` | Props/emits/slots/options/expose/model via the framework-surface executor |
+| `get_framework_surface` | Resolved props/emits/slots/options/expose/model, exactness, member type IDs and structural graph |
+
+`get_component_api` returns authored analysis JSON after checking public-API
+availability. Its `props` entry holds `defineProps`; `with_defaults` separately
+holds `withDefaults`, including its authored default values. Missing macros keep
+their empty-array entries. Serialization failures return MCP errors.
+
+Use `get_framework_surface` for resolved types. Each surface reports `support`
+and producer `exactness`; each member's `typeNodeId` indexes `graph.nodes`.
+The graph preserves its string, symbol, signature and supporting tables, with
+camelCase field names and an exhaustive `kind` discriminator on each node.
+References remain IDs. Tuples include labels, optional/rest flags and readonly;
+objects include index signatures. Decoded string IDs outside the string table
+render as `null`. An absent graph or status exactness also renders as `null`.
 
 #### CSS
 

@@ -727,7 +727,14 @@ impl CanonicalCompletionOverlay {
             return;
         };
 
-        self.write_completion_entry(host, canonical, whole_hash, source_version, None);
+        self.write_completion_entry(
+            host,
+            Some(base),
+            canonical,
+            whole_hash,
+            source_version,
+            None,
+        );
     }
 
     /// Write the completion-overlay entries for a session-overlaid
@@ -744,7 +751,7 @@ impl CanonicalCompletionOverlay {
     ) {
         let overlay_identity = host.overlay_artifact_identity(canonical);
         let file_artifacts = overlay_identity.lookup_overlay_artifacts(host, view);
-        self.write_completion_entry(host, canonical, overlay_hash, None, file_artifacts);
+        self.write_completion_entry(host, None, canonical, overlay_hash, None, file_artifacts);
     }
 
     /// Write the completion-overlay entries for `(canonical, whole_hash)`.
@@ -754,6 +761,7 @@ impl CanonicalCompletionOverlay {
     fn write_completion_entry(
         &self,
         host: &crate::VerterHost,
+        base: Option<&HostStoreView>,
         canonical: &str,
         whole_hash: verter_session_query::analysis::types::Hash16,
         source_version: Option<verter_scheduler::node::SourceVersion>,
@@ -797,8 +805,6 @@ impl CanonicalCompletionOverlay {
         {
             return;
         }
-        #[cfg(test)]
-        self.completion_promotions.fetch_add(1, Ordering::Relaxed);
         let route_hash = file_artifacts.as_ref().and_then(|file_artifacts| {
             let indexed = &file_artifacts.indexed;
             // Parse-environment reuse gate. The route surface is authored
@@ -814,10 +820,34 @@ impl CanonicalCompletionOverlay {
             }
         });
 
+        let covered_by_base = base.is_some_and(|base| {
+            base.view_population() == verter_session_query::facts::fact_cache::ViewPopulation::Base
+                && base.validation_token() == host.current_validation_token()
+                && file_artifacts.as_ref().is_some_and(|artifacts| {
+                    base.covers_canonical_completion(
+                        canonical,
+                        whole_hash,
+                        &artifacts.facts,
+                        route_hash,
+                    )
+                })
+        });
+
         // One revision brackets the whole logical promotion even though
         // its effective shadowing spans three maps. A reader can therefore
         // never name a population for a partially-published completion.
         self.revision.mutate(|| {
+            // Decide under the writer lock: a concurrent completion must not
+            // turn an empty-overlay no-op into a lost shadowing write.
+            if covered_by_base
+                && !self.whole_hashes_nonempty.load(Ordering::Acquire)
+                && !self.derived_hashes_nonempty.load(Ordering::Acquire)
+                && !self.file_facts_nonempty.load(Ordering::Acquire)
+            {
+                return ((), false);
+            }
+            #[cfg(test)]
+            self.completion_promotions.fetch_add(1, Ordering::Relaxed);
             let mut changed = self.write_completed_source(canonical, |_| completed);
             if let Some(file_artifacts) = file_artifacts {
                 changed |= self.write_file_facts(canonical, Arc::clone(&file_artifacts.facts));
@@ -1179,8 +1209,9 @@ enum FactOutcome<'r> {
 
 /// What one signature's validation proved.
 enum SignatureOutcome {
-    /// Every fact validates at this state, which held throughout.
-    Valid(CompletionOverlayState),
+    /// Every fact validates at this state, which held throughout; the bool
+    /// proves that every reachable whole-file leaf was checked strictly.
+    Valid(CompletionOverlayState, bool),
     /// The fact at this index does not validate at this state, which held
     /// throughout.
     Stale(usize, CompletionOverlayState),
@@ -1191,7 +1222,7 @@ enum SignatureOutcome {
 impl SignatureOutcome {
     fn into_result(self) -> Result<(), usize> {
         match self {
-            Self::Valid(_) => Ok(()),
+            Self::Valid(..) => Ok(()),
             Self::Stale(index, _) | Self::Refused(index) => Err(index),
         }
     }
@@ -1837,6 +1868,15 @@ impl<'a> RequestStoreView<'a> {
         sig: &verter_session_query::facts::fact_set::FactSet,
         self_root_canonicals: &[&str],
     ) -> bool {
+        self.validates_retained_signature_with_stamp(sig, self_root_canonicals, None)
+    }
+
+    pub(crate) fn validates_retained_signature_with_stamp(
+        &self,
+        sig: &verter_session_query::facts::fact_set::FactSet,
+        self_root_canonicals: &[&str],
+        stamp: Option<&verter_session_query::facts::receipt::PositiveValidationStamp>,
+    ) -> bool {
         let mut roots = None;
         if let Some(settled) =
             self.settled_retained_signature_with_roots(sig, self_root_canonicals, &mut roots)
@@ -1848,7 +1888,13 @@ impl<'a> RequestStoreView<'a> {
             self_root_canonicals,
             &mut roots,
         ) {
-            SignatureOutcome::Valid(state) => (Verdict::Valid, state),
+            SignatureOutcome::Valid(state, fully_strict) => {
+                if let Some((stamp, token)) = stamp.zip(self.token_for_positive_stamp(fully_strict))
+                {
+                    stamp.record_positive(token);
+                }
+                (Verdict::Valid, state)
+            }
             SignatureOutcome::Stale(_, state) => (Verdict::Stale, state),
             SignatureOutcome::Refused(_) => return false,
         };
@@ -1856,6 +1902,54 @@ impl<'a> RequestStoreView<'a> {
         self.signature_verdicts
             .insert(sig, self_root_canonicals, roots, state, verdict);
         verdict == Verdict::Valid
+    }
+
+    fn positive_validation_token(&self) -> Option<crate::resolver_store::StoreViewValidationToken> {
+        if !self.base_is_current
+            || self.base.view_population()
+                != verter_session_query::facts::fact_cache::ViewPopulation::Base
+            || self.overlay.completion_state() != CompletionOverlayState::Empty
+        {
+            return None;
+        }
+        Some(self.base.validation_token())
+    }
+
+    fn token_for_positive_stamp(
+        &self,
+        fully_strict: bool,
+    ) -> Option<crate::resolver_store::StoreViewValidationToken> {
+        if !fully_strict {
+            return None;
+        }
+        self.positive_validation_token()
+    }
+
+    pub(crate) fn reuses_positive_validation_stamp(
+        &self,
+        stamp: &verter_session_query::facts::receipt::PositiveValidationStamp,
+    ) -> bool {
+        let Some(token) = self.positive_validation_token() else {
+            return false;
+        };
+        if !stamp.matches(&token) {
+            return false;
+        }
+        self.note_validation_step();
+        self.positive_validation_token() == Some(token)
+    }
+
+    fn stamp_positive_receipts<'r>(
+        &self,
+        receipts: impl IntoIterator<Item = &'r verter_session_query::facts::fact_cache::ResultReceipt>,
+        fully_strict: bool,
+    ) {
+        let Some(token) = self.token_for_positive_stamp(fully_strict) else {
+            return;
+        };
+        for receipt in receipts {
+            receipt.validation_stamp().record_positive(token);
+        }
     }
 
     /// The env hashes of `canonical`'s owning project, read with `read` the
@@ -1966,29 +2060,48 @@ impl<'a> RequestStoreView<'a> {
         self_root_canonicals: &SelfRootIndex<'_, '_>,
         state: CompletionOverlayState,
         walked: &mut Vec<verter_session_query::facts::fact_cache::ResultReceipt>,
+        fully_strict: &std::cell::Cell<bool>,
     ) -> FactOutcome<'r> {
         use verter_session_query::facts::fact_cache::ReceiptVerdict;
 
         let FactVersionRef::Receipt(receipt) = fact else {
-            return match self.check_leaf_or_self_root(fact, self_root_canonicals, state) {
+            return match self.check_leaf_or_self_root(
+                fact,
+                self_root_canonicals,
+                state,
+                fully_strict,
+            ) {
                 LeafCheck::Valid => FactOutcome::Valid,
                 LeafCheck::Invalid if failure_is_settled(fact) => FactOutcome::Stale(Vec::new()),
                 LeafCheck::Invalid | LeafCheck::Refused => FactOutcome::Uncertain,
             };
         };
+        if self.reuses_positive_validation_stamp(receipt.validation_stamp()) {
+            return FactOutcome::Valid;
+        }
         let mut settled_failure = true;
         let outcome = walk.leaves_with_verdicts(
             receipt,
-            |met| match self.receipt_verdicts.get(met, self_root_canonicals, state) {
-                Some(Verdict::Valid) => ReceiptVerdict::Valid,
-                Some(Verdict::Stale) => ReceiptVerdict::Stale,
-                None => {
-                    walked.push(met.clone());
-                    ReceiptVerdict::Unknown
+            |met| {
+                if self.reuses_positive_validation_stamp(met.validation_stamp()) {
+                    return ReceiptVerdict::Valid;
+                }
+                match self.receipt_verdicts.get(met, self_root_canonicals, state) {
+                    Some(Verdict::Valid) => {
+                        // A request-local verdict does not carry a strictness proof.
+                        fully_strict.set(false);
+                        ReceiptVerdict::Valid
+                    }
+                    Some(Verdict::Stale) => ReceiptVerdict::Stale,
+                    None => {
+                        walked.push(met.clone());
+                        ReceiptVerdict::Unknown
+                    }
                 }
             },
             |leaf| {
-                let check = self.check_leaf_or_self_root(leaf, self_root_canonicals, state);
+                let check =
+                    self.check_leaf_or_self_root(leaf, self_root_canonicals, state, fully_strict);
                 if !check.validates() {
                     settled_failure = check == LeafCheck::Invalid && failure_is_settled(leaf);
                 }
@@ -2071,6 +2184,7 @@ impl<'a> RequestStoreView<'a> {
 
         let mut walk = verter_session_query::facts::fact_cache::ReceiptWalk::default();
         let mut walked = Vec::new();
+        let fully_strict = std::cell::Cell::new(true);
         for (index, fact) in sig.iter().enumerate() {
             self.note_validation_step();
             match self.validate_at_completion_state(
@@ -2079,6 +2193,7 @@ impl<'a> RequestStoreView<'a> {
                 self_root_canonicals,
                 state,
                 &mut walked,
+                &fully_strict,
             ) {
                 FactOutcome::Valid => {}
                 FactOutcome::Stale(chain) => {
@@ -2102,8 +2217,9 @@ impl<'a> RequestStoreView<'a> {
         }
         self.receipt_verdicts
             .insert_all(&walked, self_root_canonicals, state, Verdict::Valid);
+        self.stamp_positive_receipts(&walked, fully_strict.get());
         self_root_canonicals.projection_complete.set(true);
-        SignatureOutcome::Valid(state)
+        SignatureOutcome::Valid(state, fully_strict.get())
     }
 
     /// Test-only: how many receipts this view settled with `stale` as their
@@ -2130,16 +2246,23 @@ impl<'a> RequestStoreView<'a> {
         fact: &FactVersionRef,
         self_root_canonicals: &SelfRootIndex<'_, '_>,
         state: CompletionOverlayState,
+        fully_strict: &std::cell::Cell<bool>,
     ) -> LeafCheck {
         #[cfg(test)]
         self.leaf_validations.fetch_add(1, Ordering::Relaxed);
         match fact {
-            FactVersionRef::FileWholeHash { canonical_id, hash }
-                if root_index_len(self_root_canonicals) != 0 && {
-                    self_root_canonicals.contains(canonical_id, true)
-                } =>
-            {
-                LeafCheck::of(self.validates_self_root_at_completion_state(canonical_id, hash))
+            FactVersionRef::FileWholeHash { canonical_id, hash } => {
+                let is_self_root = root_index_len(self_root_canonicals) != 0
+                    && self_root_canonicals.contains(canonical_id, true);
+                let strict = self.validates_self_root_at_completion_state(canonical_id, hash);
+                if is_self_root || strict {
+                    LeafCheck::of(strict)
+                } else {
+                    // An untracked dependency keeps its lazy answer without
+                    // supplying the strict proof a positive stamp requires.
+                    fully_strict.set(false);
+                    self.check_leaf_at_completion_state(fact, state)
+                }
             }
             other => self.check_leaf_at_completion_state(other, state),
         }
@@ -2399,8 +2522,15 @@ impl<'a> StoreView for RequestStoreView<'a> {
         let mut walk = verter_session_query::facts::fact_cache::ReceiptWalk::default();
         let mut walked = Vec::new();
         let self_roots = SelfRootIndex::default();
-        let outcome =
-            self.validate_at_completion_state(fact, &mut walk, &self_roots, state, &mut walked);
+        let fully_strict = std::cell::Cell::new(true);
+        let outcome = self.validate_at_completion_state(
+            fact,
+            &mut walk,
+            &self_roots,
+            state,
+            &mut walked,
+            &fully_strict,
+        );
         if self.overlay.completion_state() != state {
             return false;
         }
@@ -2408,6 +2538,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
             FactOutcome::Valid => {
                 self.receipt_verdicts
                     .insert_all(&walked, &self_roots, state, Verdict::Valid);
+                self.stamp_positive_receipts(&walked, fully_strict.get());
                 true
             }
             FactOutcome::Stale(chain) => {

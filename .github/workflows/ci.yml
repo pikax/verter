@@ -2451,6 +2451,17 @@ jobs:
       - jetbrains-plugin
       - browser-host
     steps:
+      # The TypeScript pin's reference guard scans the whole tree, so a change
+      # to any path can break it, including a Rust-only change that selects no
+      # JS lane. It needs only Node and the checkout, so it runs here, on
+      # every change, rather than behind the JS lane's path gate.
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          package-manager-cache: false
+      - name: No new TypeScript version reference outside the guard baseline
+        run: node scripts/typescript-pin.mjs --guard
       - name: Verify no dependency failed
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}

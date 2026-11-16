@@ -43,7 +43,7 @@ use crate::resolver_core::bare_name_resolve::{
 use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
     DeclIdentity, FactStatus, HashValue, NodeScopeId, PartialReasonSet, PathSegment,
-    ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ResolveDeclKey, ScopeId,
+    ProjectionMode, ProjectionReductionContext, QueryError, ResolveDeclKey, ScopeId,
     SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 
@@ -370,8 +370,7 @@ enum CarrierStage {
     /// The read finishing a head: an instantiation joined with the head's
     /// status, or a `typeof` import's value with its arguments applied.
     Finish {
-        source_status: FactStatus,
-        apply: Option<Arc<[SemanticNodeId]>>,
+        finish: CarrierFinishRead,
         tail: Option<QualifiedTail>,
     },
     /// A qualified import head's tail projection.
@@ -444,6 +443,21 @@ pub(super) enum CarrierFinish {
     Instantiate(SemanticQueryKey),
 }
 
+/// A resolved head's finish, before making its final query read.
+pub(super) enum CarrierFinishPlan {
+    Ready(CarrierResolution),
+    Read {
+        key: SemanticQueryKey,
+        finish: CarrierFinishRead,
+    },
+}
+
+/// The status and optional typeof arguments retained across a finish read.
+pub(super) struct CarrierFinishRead {
+    source_status: FactStatus,
+    apply: Option<Arc<[SemanticNodeId]>>,
+}
+
 /// Owned second half of a reference resolution whose head consumes arguments.
 /// Keeping this continuation independent of [`CarrierResolverContext`] is what
 /// lets the projection worklist resume it after all argument nodes complete.
@@ -495,15 +509,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         continuation: CarrierArgsContinuation,
         type_args: Arc<[SemanticNodeId]>,
     ) -> CarrierResolution {
+        match self.plan_carrier_resolution_finish(continuation, type_args) {
+            CarrierFinishPlan::Ready(value) => value,
+            CarrierFinishPlan::Read { key, finish } => {
+                let answer = self.carrier_resolution_read(key);
+                self.resume_carrier_finish(finish, answer)
+            }
+        }
+    }
+
+    /// Plan the same finish for in-place and suspended lowering.
+    pub(super) fn plan_carrier_resolution_finish(
+        &self,
+        continuation: CarrierArgsContinuation,
+        type_args: Arc<[SemanticNodeId]>,
+    ) -> CarrierFinishPlan {
         if let CarrierArgsContinuation::ReadTypeof { key } = continuation {
-            let source = self.carrier_resolution_read(*key);
-            return CarrierResolution {
-                node: if type_args.is_empty() {
-                    source.node
-                } else {
-                    self.apply_typeof_instantiation_args(source.node, &type_args)
+            return CarrierFinishPlan::Read {
+                key: *key,
+                finish: CarrierFinishRead {
+                    source_status: FactStatus::Complete,
+                    apply: (!type_args.is_empty()).then_some(type_args),
                 },
-                status: source.status,
             };
         }
         // Outside a projection run the reference keeps its declaration back-edge.
@@ -512,29 +539,45 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             | CarrierArgsContinuation::Instantiate { source_status, .. } => *source_status,
             _ => FactStatus::Complete,
         };
-        let mut result = match self.plan_carrier_finish(continuation, type_args, &|| true) {
-            CarrierFinish::Node(node) => CarrierResolution::complete(node),
-            CarrierFinish::Instantiate(key) => self.carrier_resolution_read(key),
-        };
-        result.status = result.status.join(source_status);
-        result
+        match self.plan_carrier_finish(continuation, type_args, &|| true) {
+            CarrierFinish::Node(node) => CarrierFinishPlan::Ready(CarrierResolution {
+                node,
+                status: FactStatus::Complete.join(source_status),
+            }),
+            CarrierFinish::Instantiate(key) => CarrierFinishPlan::Read {
+                key,
+                finish: CarrierFinishRead {
+                    source_status,
+                    apply: None,
+                },
+            },
+        }
+    }
+
+    pub(super) fn resume_carrier_finish(
+        &self,
+        finish: CarrierFinishRead,
+        answer: CarrierResolution,
+    ) -> CarrierResolution {
+        CarrierResolution {
+            node: match finish.apply {
+                Some(args) => self.apply_typeof_instantiation_args(answer.node, &args),
+                None => answer.node,
+            },
+            status: answer.status.join(finish.source_status),
+        }
+    }
+
+    /// Attribute a carrier read at the position that requests it.
+    pub(super) fn record_carrier_resolution_read_intent(&self, key: &SemanticQueryKey) {
+        if !matches!(key, SemanticQueryKey::TypeOf { .. }) {
+            self.record_dispatch_intent_counters(key);
+        }
     }
 
     fn carrier_resolution_read(&self, key: SemanticQueryKey) -> CarrierResolution {
-        // These consumers previously used execute_type_node; keep their
-        // intent attribution while retaining the full child fact envelope.
-        if !matches!(key, SemanticQueryKey::TypeOf { .. }) {
-            self.record_dispatch_intent_counters(&key);
-        }
-        let read = self.execute_read(key);
-        let node = match read.value {
-            QueryResult::Value(node) | QueryResult::Recursive(node) => node,
-            QueryResult::Error(error) => self.opaque(error),
-        };
-        CarrierResolution {
-            node,
-            status: read.fact_status,
-        }
+        self.record_carrier_resolution_read_intent(&key);
+        self.carrier_resolution_of(self.execute_read(key))
     }
 
     /// A resolved argument has one defining scope when its checking environment
@@ -2278,23 +2321,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
             }
-            CarrierStage::Finish {
-                source_status,
-                apply,
-                tail,
-            } => {
-                let value = match apply {
-                    // A `typeof` import's value, its instantiation arguments
-                    // applied after the read.
-                    Some(args) => CarrierResolution {
-                        node: self.apply_typeof_instantiation_args(answer.node, &args),
-                        status: answer.status,
-                    },
-                    None => CarrierResolution {
-                        node: answer.node,
-                        status: answer.status.join(source_status),
-                    },
-                };
+            CarrierStage::Finish { finish, tail } => {
+                let value = self.resume_carrier_finish(finish, answer);
                 self.carrier_head_settled(read, value, tail)
             }
             CarrierStage::Tail { head_status } => self.settle_carrier_read(
@@ -2322,42 +2350,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: Arc<[SemanticNodeId]>,
         tail: Option<QualifiedTail>,
     ) -> CarrierStep {
-        if let CarrierArgsContinuation::ReadTypeof { key } = continuation {
-            return CarrierStep::Read(
-                *key,
-                Box::new(CarrierRead {
-                    stage: CarrierStage::Finish {
-                        source_status: FactStatus::Complete,
-                        apply: (!args.is_empty()).then_some(args),
-                        tail,
-                    },
-                    ..read
-                }),
-            );
-        }
-        // Outside a projection run the reference keeps its declaration back-edge.
-        let source_status = match &continuation {
-            CarrierArgsContinuation::ApplyTypeof { source_status, .. }
-            | CarrierArgsContinuation::Instantiate { source_status, .. } => *source_status,
-            _ => FactStatus::Complete,
-        };
-        match self.plan_carrier_finish(continuation, args, &|| true) {
-            CarrierFinish::Node(node) => self.carrier_head_settled(
-                read,
-                CarrierResolution {
-                    node,
-                    status: FactStatus::Complete.join(source_status),
-                },
-                tail,
-            ),
-            CarrierFinish::Instantiate(key) => CarrierStep::Read(
+        match self.plan_carrier_resolution_finish(continuation, args) {
+            CarrierFinishPlan::Ready(value) => self.carrier_head_settled(read, value, tail),
+            CarrierFinishPlan::Read { key, finish } => CarrierStep::Read(
                 key,
                 Box::new(CarrierRead {
-                    stage: CarrierStage::Finish {
-                        source_status,
-                        apply: None,
-                        tail,
-                    },
+                    stage: CarrierStage::Finish { finish, tail },
                     ..read
                 }),
             ),

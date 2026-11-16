@@ -1,5 +1,39 @@
 ## Semantic Dispatch (current authority)
 
+A member or nested relation pair that is independent of every visible
+collecting session runs behind the existing binding barrier, including its
+answer-before-compute stages. Every visible session must decide verdicts and
+have no reverse-mapping frame open. The graph's immutable binder-dependency
+summaries must prove both operands absent from every session's inferred
+variables; open value carriers and opaque fallbacks conservatively prevent
+that proof. Candidates-only sessions retain their inference-specific route.
+The barrier restores the ordinary warm reads, literal decisions and indexes
+as well as the pure verdict, including concrete `NoInfer` targets, rigid
+indexed-access constraints and non-strict null erasure. Individual session
+gates remain the authority inside either route.
+
+A pure-key assignability frame opened with an outer collector visible is
+session-local even if it writes no candidates. The existing session-delta rail
+marks it at entry, preventing settled-member reuse and shared publication under
+the pure key; pure warm reads also remain unavailable with a collector visible.
+Existing inference-keyed frames keep their ordinary admission eligibility,
+subject to candidates-only, redischarge and actual-deposit suppression. The
+settled-member index retains its existing exclusion of binding keys. This covers
+`NoInfer` targets, rigid indexed-access constraints, loose-null union erasure,
+signature normalization and withheld call arguments without changing keys or
+cycle classification. Independent pairs arrive behind the binding barrier and
+retain ordinary pure caching. A binding root opens its own collector after this
+admission decision and retains its inference key and deterministic fixation.
+
+The differential harness installs the session-independence shadow only when
+its existing fixture knob requests it. Ordinary answer and work checks run the
+production route; the explicit shadow fixture compares collecting and pure
+steps under rolled-back checkpoints and asserts no deposit. Full fixture
+verification can force that same shadow without changing its comparison or
+admission rules.
+
+tsc's comparable relation is directional for some `never`/`any` cells, while Verter treats Comparable as symmetric with canonicalized memo operands; the tsc CLI cannot discriminate the 16 cells Comparable(X, never) for X in any, unknown, never, string, number, bigint, boolean, symbol, "a", "b", 1, 2, 1n, 2n, true, false. This becomes a fix only when an oracle row shows a difference.
+
 Literal sources against literal-only union targets use an operation-local
 membership index inside the relation authority. Its keys reuse the canonical
 algebra's exact literal-value identity (including SameValueZero numbers),
@@ -14,7 +48,7 @@ demand consuming a newly cached sibling pays preparation in full.
 The checker's small-union recursion classification reuses the literal-only
 proof, so it does not flatten that target again for each source literal.
 Membership never changes the union's stored sequence or `VerterStableV1` order.
-Mixed, deferred, template and enum members, and active inference sessions,
+Mixed, deferred, template and enum members, and session-dependent pairs,
 retain the ordinary ordered relation path. `Exclude` and subset relations use
 this index. Native `Omit` already enumerates canonical `PropertyKey` values into
 an `FxHashSet` and filters by membership; it retains that typed property-key
@@ -75,7 +109,7 @@ before preparing the index or reading apparent `Object`. Tight work allowances
 retain the ordinary worklist so speculative preparation cannot mask its checker
 refusal, partiality or subsequent recovery budget outcome. Unions too small to
 reach that refusal keep their existing cold/partly warm cost accounting.
-Inference sessions, fresh sources, optional properties, signatures, index
+Session-dependent pairs, fresh sources, optional properties, signatures, index
 signatures, deferred values and unit-valued targets retain the general path;
 unit targets may need the existing discriminant-splitting proof.
 

@@ -119,6 +119,15 @@ pub struct ResolvedComponentMetaState {
 }
 
 impl ResolvedComponentMetaState {
+    /// Consume the evaluated types after adopting this resolution's claim
+    /// into the caller's active compute scope.
+    pub(crate) fn into_evaluated_types(
+        self,
+    ) -> Option<verter_session_query::analysis::type_expand::ExpandedComponentTypes> {
+        verter_type_engine::request_context::fold_result_completeness(self.completeness);
+        self.evaluated_types
+    }
+
     /// Fact status of this resolution. A retained refusal is not complete.
     #[must_use]
     pub fn fact_status(&self) -> verter_type_engine::semantic_query::FactStatus {

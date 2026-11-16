@@ -671,13 +671,31 @@ fn a_promise_member_infers_its_payload_beside_the_naked_union_remainder() {
          export function resolved() {{ return resolve(v); }}\n"
     );
     let matrix = Matrix::new(&source).lib(GLOBALS_LIB).settings(&[STRICT]);
-    let failures = matrix.types(&[(
-        "(Promise<1> | 2) extends PL<infer U> | infer U ? U : 0",
-        "1 | 2",
-    )]);
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
-    let failures = matrix.returns(&[("resolved", "1 | 2")]);
-    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let probe = "(Promise<1> | 2) extends PL<infer U> | infer U ? U : 0";
+    for (read, work_bound) in [(Read::Type(probe), 2554), (Read::Return("resolved"), 2548)] {
+        let host = matrix.host(&[(read, vec!["1 | 2"])]);
+        let graph = host.project_type_store().semantic_graph();
+        let before = graph.stats_snapshot().relation_reductions;
+        let frames_before = host
+            .test_force
+            .engine
+            .relation_frames
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let failures = matrix.same_on(&host, &[(read, "1 | 2")]);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        let reductions = graph.stats_snapshot().relation_reductions - before;
+        let frames = host
+            .test_force
+            .engine
+            .relation_frames
+            .load(std::sync::atomic::Ordering::Relaxed)
+            - frames_before;
+        eprintln!(
+            "thenable {} work: reductions={reductions}, frames={frames}",
+            read.text()
+        );
+        assert!(reductions <= work_bound && frames <= work_bound, "repeated thenable relations must reuse their session answers: reductions={reductions}, frames={frames}");
+    }
 }
 
 /// A single thenable source closely matching the authored thenable arm of a

@@ -121,6 +121,15 @@ New fact families add a producer-local schema row and partition; they do not edi
 
 `verter-mcp` binary exposes Verter's full analysis, diagnostics, compilation, and scoring pipeline via MCP for AI agents. `VerterMcpServer` wraps `VerterHost` (with `AnalysisScope::LSP`), `Linter`, and `ActionEngine`. Tools auto-load via `ensure_loaded()`; template analysis triggers `ensure_template_analysis()` transparently. Cross-file tools iterate all loaded files; their move to workspace-index candidates is listed in the inventory of the atomic semantic contributions decision. Scoring engine computes composite 0-100 quality scores from a11y, lint, template complexity, API surface, CSS health, and reactivity dimensions.
 
+`get_component_api` checks public-API availability and returns authored analysis
+JSON: `props` retains `defineProps`, while `with_defaults` retains `withDefaults`.
+Serialization failures propagate as structured MCP errors. Resolved types belong
+to `get_framework_surface`, which projects producer support/exactness, member
+`typeNodeId`s and the complete structural graph (including tuple modifiers and
+object index signatures). `tools/framework_surface/graph.rs` exhaustively
+matches the wire node taxonomy without resolving references. Invalid decoded
+string IDs render as JSON null. See `mcp/README.md` for the tool contract.
+
 Both binaries (`verter-mcp`, and the LSP-decoupling twin `verter-mcp-server`) run the one shared entry body `verter_mcp::run::run`. The HTTP transport binds before its initial scan and announces the real bound port as a one-line stdout readiness record (`verter_mcp::readiness`, mirrored by `packages/vue-vscode/src/mcpServer.ts`); `--client-pid` arms the same `ClientProcessGuard` containment as the LSP. The VS Code extension spawns this standalone binary per LSP start attempt (`createMcpServerLifecycle`: awaited replacement, bounded crash respawn, provider-registration teardown on death) — see `docs/contributing/lsp-mcp-decoupling.md`.
 
 ## verter_semantic::analysis — Static Analysis Types

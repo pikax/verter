@@ -165,6 +165,18 @@ pub trait FactValidation: Sync {
             self_root_canonicals,
         )
     }
+    /// Validate a retained candidate, reusing its positive proof only when
+    /// this request can vouch for the complete validation token and population.
+    fn validates_stamped_signature_with_self_roots(
+        &self,
+        sig: &verter_session_query::facts::fact_set::FactSet,
+        self_root_canonicals: &[std::sync::Arc<str>],
+        _stamp: &verter_session_query::facts::receipt::PositiveValidationStamp,
+    ) -> bool {
+        let roots: smallvec::SmallVec<[&str; 4]> =
+            self_root_canonicals.iter().map(AsRef::as_ref).collect();
+        self.validates_retained_signature_with_self_roots(sig, &roots)
+    }
     fn promote_route_completion(
         &self,
         canonical: &str,

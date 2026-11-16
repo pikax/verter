@@ -378,7 +378,15 @@ function graphNodeToDescriptorWithBudget(
     case "array":
       return array(walk(kind.value.elementNodeId));
     case "tuple":
-      return tuple(kind.value.elements.map((element) => walk(element.valueNodeId)));
+      return tuple(
+        kind.value.elements.map((element) => walk(element.valueNodeId)),
+        kind.value.elements.map((element) => ({
+          ...(element.labelNameId ? { label: strAt(view, element.labelNameId) } : {}),
+          ...(element.optional ? { optional: true } : {}),
+          ...(element.rest ? { rest: true } : {}),
+        })),
+        kind.value.readonly,
+      );
     case "reference":
       return ref(symbolName(view, kind.value.symbolId));
     case "aliasInstantiation":

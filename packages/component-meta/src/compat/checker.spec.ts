@@ -881,7 +881,7 @@ describe("mapEventMeta", () => {
       payload: {
         kind: "tuple",
         elements: [ref("Item"), primitive("boolean")],
-        labels: ["item", "exact"],
+        modifiers: [{ label: "item" }, { label: "exact" }],
       },
       hasValidator: false,
       isDeclared: true,
@@ -930,7 +930,7 @@ describe("mapEventMeta", () => {
           ),
           primitive("boolean"),
         ],
-        labels: ["transform", "exact"],
+        modifiers: [{ label: "transform" }, { label: "exact" }],
       },
       hasValidator: false,
       isDeclared: true,

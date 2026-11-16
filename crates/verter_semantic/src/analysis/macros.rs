@@ -3278,6 +3278,13 @@ fn try_extract_macro(
                 default_keys,
                 expose_fields,
                 runtime_members_fully_enumerated: match kind {
+                    AnalyzedMacroKind::DefineProps
+                    | AnalyzedMacroKind::DefineEmits
+                    | AnalyzedMacroKind::DefineExpose
+                        if !is_type_based && call.arguments.is_empty() =>
+                    {
+                        true
+                    }
                     AnalyzedMacroKind::DefineProps => prop_extraction.fully_enumerated,
                     AnalyzedMacroKind::DefineEmits => emits_fully_enumerated,
                     AnalyzedMacroKind::DefineExpose => runtime_members_fully_enumerated,

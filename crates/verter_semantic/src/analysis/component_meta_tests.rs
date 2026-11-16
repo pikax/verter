@@ -3572,6 +3572,80 @@ fn extracts_exposed_from_define_expose() {
     assert_eq!(result.exposed[0].name, "focus");
 }
 
+#[test]
+fn runtime_macro_domains_require_an_enumeration_certificate() {
+    use verter_session_query::analysis::component_meta::MetadataFactGuarantee;
+    for (source, enumerated) in [
+        ("defineProps({ ...shared, a: String })", false),
+        ("defineProps({ [key]: Number, a: String })", false),
+        ("defineProps(shared)", false),
+        ("defineProps({ a: String })", true),
+        ("defineProps()", true),
+        ("defineEmits(events)", false),
+        ("defineEmits(['saved'])", true),
+        ("defineEmits()", true),
+        ("defineExpose({ ...api, ready: true })", false),
+        ("defineExpose({ ready: true })", true),
+        ("defineExpose()", true),
+    ] {
+        let allocator = oxc_allocator::Allocator::new();
+        let snapshot =
+            crate::analysis::build_script_analysis(source, oxc_span::SourceType::ts(), &allocator);
+        assert_eq!(snapshot.macros.len(), 1, "{source}");
+        let result = extract_component_meta(empty_input(&snapshot.macros));
+        let claim = match snapshot.macros[0].kind {
+            AnalyzedMacroKind::DefineProps => &result.domain_guarantees.props,
+            AnalyzedMacroKind::DefineEmits => &result.domain_guarantees.events,
+            _ => &result.domain_guarantees.exposed,
+        };
+        assert_eq!(
+            claim,
+            &if enumerated {
+                MetadataFactGuarantee::complete(false)
+            } else {
+                MetadataFactGuarantee {
+                    kind: 2,
+                    open: true,
+                    causes: vec![103],
+                }
+            },
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn resolved_macro_domain_claims_do_not_require_expansion_rows() {
+    use verter_session_query::analysis::component_meta::MetadataFactGuarantee;
+    for kind in [
+        AnalyzedMacroKind::DefineProps,
+        AnalyzedMacroKind::DefineEmits,
+        AnalyzedMacroKind::DefineSlots,
+    ] {
+        let macros = [AnalyzedMacro {
+            kind,
+            ..make_define_props(Vec::new())
+        }];
+        let open = MetadataFactGuarantee::complete(true);
+        let mut row = ResolvedMacroInput::default();
+        match kind {
+            AnalyzedMacroKind::DefineProps => row.props_guarantee = Some(open.clone()),
+            AnalyzedMacroKind::DefineEmits => row.events_guarantee = Some(open.clone()),
+            _ => row.slots_guarantee = Some(open.clone()),
+        }
+        let rows = [row];
+        let mut input = empty_input(&macros);
+        input.resolved_macros = &rows;
+        let result = extract_component_meta(input);
+        let claim = match kind {
+            AnalyzedMacroKind::DefineProps => &result.domain_guarantees.props,
+            AnalyzedMacroKind::DefineEmits => &result.domain_guarantees.events,
+            _ => &result.domain_guarantees.slots,
+        };
+        assert_eq!(claim, &open, "{kind:?}");
+    }
+}
+
 /// `.bindings` holds TWO same-spelling rows of different owners. The
 /// expose consumer must join on `(owner, name)` — the same match
 /// constructors already use — never first-name. The module-owned

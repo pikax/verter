@@ -39,17 +39,33 @@ use crate::semantic_query::{
     SurfaceView, TupleElement, ValueRootKey,
 };
 
+/// The query boundary whose exact answer a lowering position consumes.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LowerReadShape {
+    Node,
+    Whole,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub struct TypeLoweringTrace {
+    pub node: SemanticNodeId,
+    pub requested: Vec<(SemanticQueryKey, LowerReadShape)>,
+    pub substitutions: Vec<(Arc<str>, SemanticNodeId)>,
+    pub first_advance_done: bool,
+}
+
 /// The lowering context the explicit-stack positions of
 /// [`ProjectSemanticDispatch::lower_type_expr_with_infer_factory`] share
 /// with their children: everything but the reduction context, which each
 /// position derives for its own children.
-struct TypeExprLowering<'a> {
-    infer_binders: &'a crate::semantic_query::InferBinderFactory,
-    env: &'a FxHashMap<String, SemanticNodeId>,
-    scope: &'a NodeScopeId,
-    name_resolution: &'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
-    scope_payload: Option<&'a DeclarationScopePayload>,
-    shadowing: &'a ScopeShadowing,
+pub(super) struct TypeExprLowering<'a> {
+    pub(super) env: &'a FxHashMap<String, SemanticNodeId>,
+    pub(super) scope: &'a NodeScopeId,
+    pub(super) name_resolution: &'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+    pub(super) scope_payload: Option<&'a DeclarationScopePayload>,
+    pub(super) shadowing: &'a ScopeShadowing,
 }
 
 impl TypeExprLowering<'_> {
@@ -70,11 +86,19 @@ impl TypeExprLowering<'_> {
 enum LowerStep<'e> {
     Value(SemanticNodeId),
     Descend(&'e TypeExpr, ProjectionReductionContext),
+    Read(LowerRead),
 }
 
 /// A node of the explicit-stack lowering waiting for a child's value:
 /// what remains of its own lowering.
 enum LowerFrame<'e> {
+    Read(LowerReadResume<'e>),
+    TypeofArguments {
+        base: SemanticNodeId,
+        arguments: &'e [TypeExpr],
+        context: ProjectionReductionContext,
+        lowered: Vec<SemanticNodeId>,
+    },
     /// A named reference whose resolved head consumes its arguments: the
     /// resolution's owned second half, finished once every argument is
     /// lowered.
@@ -128,6 +152,98 @@ enum LowerFrame<'e> {
         awaiting: ObjectMemberAwait<'e>,
     },
 }
+
+/// A lowering's position and completed structural children.
+struct TypeLowerCursor<'e> {
+    frames: Vec<LowerFrame<'e>>,
+    next: Option<(&'e TypeExpr, ProjectionReductionContext)>,
+}
+
+impl<'e> TypeLowerCursor<'e> {
+    fn new(expr: &'e TypeExpr, context: ProjectionReductionContext) -> Self {
+        Self {
+            frames: Vec::new(),
+            next: Some((expr, context)),
+        }
+    }
+}
+
+/// A type's lowering held between reads. The factory's path cache and root
+/// identity live for the entire lowering, including every suspension.
+pub(super) struct TypeLowerRead<'e> {
+    cursor: TypeLowerCursor<'e>,
+    infer_binders: crate::semantic_query::InferBinderFactory,
+    pub(super) substitutions: Vec<(Arc<str>, SemanticNodeId)>,
+}
+
+static_assertions::assert_impl_all!(TypeLowerRead<'_>: Send);
+static_assertions::assert_not_impl_any!(TypeLowerRead<'_>: Clone, Copy);
+
+pub(super) struct LowerRead {
+    pub(super) key: SemanticQueryKey,
+    pub(super) shape: LowerReadShape,
+}
+
+/// An answer to the last yielded read, retaining its original envelope.
+pub(super) enum LowerDelivery {
+    Node(QueryResult<SemanticQueryOutput<SemanticNodeId>>),
+    Whole(crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>),
+}
+
+pub(super) enum LowerProgress {
+    Done(SemanticNodeId),
+    Read(LowerRead),
+}
+
+/// The operation waiting for a query answer, with its completed inputs.
+enum LowerReadResume<'e> {
+    Anchor {
+        anchor: Box<super::carrier::AnchorRead>,
+        arguments: &'e [TypeExpr],
+        context: ProjectionReductionContext,
+    },
+    CarrierFinish(super::carrier::CarrierFinishRead),
+    KeyOf,
+    Indexed {
+        object: SemanticNodeId,
+        index: crate::semantic_query::IndexKey,
+        origin: crate::semantic_query::IndexedAccessOrigin,
+        context: ProjectionReductionContext,
+    },
+    Typeof {
+        arguments: &'e [TypeExpr],
+        context: ProjectionReductionContext,
+    },
+}
+
+/// Owned scope data for a lowering whose caller did not supply a context.
+pub(super) struct OwnedTypeLoweringContext {
+    pub(super) scope: NodeScopeId,
+    pub(super) env: FxHashMap<String, SemanticNodeId>,
+    pub(super) name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+    pub(super) scope_payload: Option<DeclarationScopePayload>,
+    pub(super) shadowing: ScopeShadowing,
+}
+
+impl OwnedTypeLoweringContext {
+    pub(super) fn as_lowering(&self) -> TypeExprLowering<'_> {
+        TypeExprLowering {
+            env: &self.env,
+            scope: &self.scope,
+            name_resolution: &self.name_resolution,
+            scope_payload: self.scope_payload.as_ref(),
+            shadowing: &self.shadowing,
+        }
+    }
+}
+
+pub(super) struct OwnerTypeLowerRead<'e> {
+    pub(super) context: OwnedTypeLoweringContext,
+    pub(super) read: TypeLowerRead<'e>,
+}
+
+static_assertions::assert_impl_all!(OwnerTypeLowerRead<'_>: Send);
+static_assertions::assert_not_impl_any!(OwnerTypeLowerRead<'_>: Clone, Copy);
 
 /// The object member whose child is being lowered.
 enum ObjectMemberAwait<'e> {
@@ -1152,6 +1268,49 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_type_lowering_for_tests(
+        &self,
+        expr: &TypeExpr,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+        scope_payload: Option<&DeclarationScopePayload>,
+        shadowing: &ScopeShadowing,
+        reduction_context: ProjectionReductionContext,
+    ) -> TypeLoweringTrace {
+        let lowering = TypeExprLowering {
+            env,
+            scope,
+            name_resolution,
+            scope_payload,
+            shadowing,
+        };
+        let mut read = self.begin_type_lowering(expr, scope, reduction_context);
+        let mut requested = Vec::new();
+        let mut progress = self.advance_type_lowering(&lowering, &mut read, None);
+        let first_advance_done = matches!(progress, LowerProgress::Done(_));
+        loop {
+            match progress {
+                LowerProgress::Done(node) => {
+                    return TypeLoweringTrace {
+                        node,
+                        requested,
+                        substitutions: read.substitutions,
+                        first_advance_done,
+                    }
+                }
+                LowerProgress::Read(request) => {
+                    requested.push((request.key.clone(), request.shape));
+                    let delivered = self.answer_lower_read(request);
+                    progress = self.advance_type_lowering(&lowering, &mut read, Some(delivered));
+                }
+            }
+        }
+    }
+
     construction_ordinal_seam! {
         /// Locator-anchored eager lowering for an authored payload that has
         /// already been re-borrowed and validated by its producer.
@@ -1193,8 +1352,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// factory — a named reference's arguments, union and intersection
     /// arms, an array's element, tuple elements, a template's holes, a
     /// parenthesised type, a `keyof` operand, an indexed access's object
-    /// and index, and an object type's property values and index
-    /// signatures — are lowered from an explicit stack of
+    /// and index, a `typeof` position's arguments, and an object type's
+    /// property values and index signatures — are lowered from an explicit stack of
     /// [`LowerFrame`]s, not the native one: each such node records what
     /// remains of its own lowering and resumes when its child's value is
     /// delivered. Children are lowered in the order, and under the
@@ -1216,48 +1375,221 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         reduction_context: ProjectionReductionContext,
     ) -> SemanticNodeId {
         let lowering = TypeExprLowering {
-            infer_binders,
             env,
             scope,
             name_resolution,
             scope_payload,
             shadowing,
         };
-        let mut frames: Vec<LowerFrame<'_>> = Vec::new();
-        let (mut next, mut next_context) = (expr, reduction_context);
+        let mut cursor = TypeLowerCursor::new(expr, reduction_context);
+        let mut delivered = None;
         loop {
-            let mut value = match self.lower_type_expr_step(
+            match self.advance_type_lowering_cursor(
                 &lowering,
-                next,
-                next_context,
+                infer_binders,
+                &mut cursor,
                 substitutions,
-                &mut frames,
+                delivered.take(),
             ) {
-                LowerStep::Value(value) => value,
-                LowerStep::Descend(child, context) => {
-                    (next, next_context) = (child, context);
-                    continue;
-                }
+                LowerProgress::Done(node) => return node,
+                LowerProgress::Read(request) => delivered = Some(self.answer_lower_read(request)),
+            }
+        }
+    }
+
+    pub(super) fn begin_type_lowering<'e>(
+        &self,
+        expr: &'e TypeExpr,
+        scope: &NodeScopeId,
+        context: ProjectionReductionContext,
+    ) -> TypeLowerRead<'e> {
+        TypeLowerRead {
+            cursor: TypeLowerCursor::new(expr, context),
+            infer_binders: crate::semantic_query::InferBinderFactory::new(scope, expr),
+            substitutions: Vec::new(),
+        }
+    }
+
+    /// Lend the context for one advance; no dispatcher borrow survives it.
+    pub(super) fn advance_type_lowering(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        read: &mut TypeLowerRead<'_>,
+        delivered: Option<LowerDelivery>,
+    ) -> LowerProgress {
+        self.advance_type_lowering_cursor(
+            lowering,
+            &read.infer_binders,
+            &mut read.cursor,
+            &mut read.substitutions,
+            delivered,
+        )
+    }
+
+    /// The single in-place answerer for both lowering entry points.
+    pub(super) fn answer_lower_read(&self, request: LowerRead) -> LowerDelivery {
+        match request.shape {
+            LowerReadShape::Node => LowerDelivery::Node(self.execute_type_node(request.key)),
+            LowerReadShape::Whole => LowerDelivery::Whole(self.execute_read(request.key)),
+        }
+    }
+
+    pub(super) fn drive_type_lowering(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        read: &mut TypeLowerRead<'_>,
+    ) -> SemanticNodeId {
+        let mut delivered = None;
+        loop {
+            match self.advance_type_lowering(lowering, read, delivered.take()) {
+                LowerProgress::Done(node) => return node,
+                LowerProgress::Read(request) => delivered = Some(self.answer_lower_read(request)),
+            }
+        }
+    }
+
+    fn advance_type_lowering_cursor(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        infer_binders: &crate::semantic_query::InferBinderFactory,
+        cursor: &mut TypeLowerCursor<'_>,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        delivered: Option<LowerDelivery>,
+    ) -> LowerProgress {
+        let mut step = if let Some(delivery) = delivered {
+            let Some(LowerFrame::Read(resume)) = cursor.frames.pop() else {
+                panic!("lowering received an answer without a pending read");
             };
-            // Deliver the value to the node waiting for it, until one
-            // needs another child or the outermost node completes.
-            loop {
-                let Some(frame) = frames.pop() else {
-                    return value;
-                };
-                match self.resume_type_expr_frame(
-                    &lowering,
-                    frame,
-                    value,
-                    substitutions,
-                    &mut frames,
-                ) {
-                    LowerStep::Value(done) => value = done,
-                    LowerStep::Descend(child, context) => {
-                        (next, next_context) = (child, context);
-                        break;
+            self.resume_lower_read(resume, delivery, &mut cursor.frames)
+        } else {
+            let (expr, context) = cursor
+                .next
+                .take()
+                .expect("lowering needs its pending answer");
+            self.lower_type_expr_step(
+                lowering,
+                infer_binders,
+                expr,
+                context,
+                substitutions,
+                &mut cursor.frames,
+            )
+        };
+        loop {
+            match step {
+                LowerStep::Read(request) => return LowerProgress::Read(request),
+                LowerStep::Descend(expr, context) => {
+                    step = self.lower_type_expr_step(
+                        lowering,
+                        infer_binders,
+                        expr,
+                        context,
+                        substitutions,
+                        &mut cursor.frames,
+                    );
+                }
+                LowerStep::Value(value) => {
+                    let Some(frame) = cursor.frames.pop() else {
+                        return LowerProgress::Done(value);
+                    };
+                    step = self.resume_type_expr_frame(
+                        lowering,
+                        infer_binders,
+                        frame,
+                        value,
+                        substitutions,
+                        &mut cursor.frames,
+                    );
+                }
+            }
+        }
+    }
+
+    fn resume_lower_read<'e>(
+        &self,
+        resume: LowerReadResume<'e>,
+        delivery: LowerDelivery,
+        frames: &mut Vec<LowerFrame<'e>>,
+    ) -> LowerStep<'e> {
+        match (resume, delivery) {
+            (
+                LowerReadResume::Anchor {
+                    anchor,
+                    arguments,
+                    context,
+                },
+                LowerDelivery::Whole(read),
+            ) => {
+                let answer = self.carrier_resolution_of(read);
+                match self.resume_anchor(*anchor, answer) {
+                    super::carrier::CarrierResolutionPlan::Ready(value) => {
+                        LowerStep::Value(value.node)
+                    }
+                    super::carrier::CarrierResolutionPlan::NeedsArgs(continuation) => {
+                        self.lower_ref_arguments(continuation, arguments, context, frames)
                     }
                 }
+            }
+            (LowerReadResume::CarrierFinish(finish), LowerDelivery::Whole(read)) => {
+                let answer = self.carrier_resolution_of(read);
+                LowerStep::Value(self.resume_carrier_finish(finish, answer).node)
+            }
+            (LowerReadResume::KeyOf, LowerDelivery::Node(answer)) => {
+                LowerStep::Value(match answer {
+                    QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+                    _ => self.opaque(QueryError::Miss),
+                })
+            }
+            (
+                LowerReadResume::Indexed {
+                    object,
+                    index,
+                    origin,
+                    context,
+                },
+                LowerDelivery::Node(answer),
+            ) => LowerStep::Value(match answer {
+                QueryResult::Value(SemanticQueryOutput { value, .. }) => self
+                    .absent_read_answer(origin, value, object, &index, context)
+                    .unwrap_or(value),
+                _ => self.opaque(QueryError::Miss),
+            }),
+            (LowerReadResume::Typeof { arguments, context }, LowerDelivery::Node(answer)) => {
+                let QueryResult::Value(SemanticQueryOutput { value: base, .. }) = answer else {
+                    return LowerStep::Value(self.opaque(QueryError::Miss));
+                };
+                match arguments.first() {
+                    None => LowerStep::Value(base),
+                    Some(first) => {
+                        frames.push(LowerFrame::TypeofArguments {
+                            base,
+                            arguments,
+                            context,
+                            lowered: Vec::with_capacity(arguments.len()),
+                        });
+                        LowerStep::Descend(first, context)
+                    }
+                }
+            }
+            _ => panic!("lowering read delivered the wrong answer shape"),
+        }
+    }
+
+    fn lower_carrier_finish<'e>(
+        &self,
+        continuation: super::carrier::CarrierArgsContinuation,
+        args: Arc<[SemanticNodeId]>,
+        frames: &mut Vec<LowerFrame<'e>>,
+    ) -> LowerStep<'e> {
+        match self.plan_carrier_resolution_finish(continuation, args) {
+            super::carrier::CarrierFinishPlan::Ready(value) => LowerStep::Value(value.node),
+            super::carrier::CarrierFinishPlan::Read { key, finish } => {
+                self.record_carrier_resolution_read_intent(&key);
+                frames.push(LowerFrame::Read(LowerReadResume::CarrierFinish(finish)));
+                LowerStep::Read(LowerRead {
+                    key,
+                    shape: LowerReadShape::Whole,
+                })
             }
         }
     }
@@ -1269,6 +1601,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn lower_type_expr_step<'e>(
         &self,
         lowering: &TypeExprLowering<'_>,
+        infer_binders: &crate::semantic_query::InferBinderFactory,
         expr: &'e TypeExpr,
         reduction_context: ProjectionReductionContext,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -1313,64 +1646,56 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     lowering.shadowing,
                     reduction_context,
                 );
-                let continuation = match self.plan_bare_ref_head(&ctx, name, type_arguments.len()) {
-                    crate::project_semantic_dispatch::carrier::CarrierResolutionPlan::Ready(
-                        value,
-                    ) => {
-                        return LowerStep::Value(value.node);
-                    }
-                    crate::project_semantic_dispatch::carrier::CarrierResolutionPlan::NeedsArgs(
+                match self.plan_bare_ref_head_steps(&ctx, name, type_arguments.len()) {
+                    super::carrier::HeadPlan::Ready(value) => LowerStep::Value(value.node),
+                    super::carrier::HeadPlan::NeedsArgs(continuation) => self.lower_ref_arguments(
                         continuation,
-                    ) => continuation,
-                };
-                // Type ARGUMENTS lower as CARRIERS, never eagerly.
-                //
-                // An argument is an operand of the instantiation, and
-                // whether it is a LIVE operand is decided by the callee's
-                // body — a parameter the body never mentions consumes its
-                // argument nowhere. Lowering arguments in the caller's
-                // eager mode resolves every argument at the reference
-                // site, BEFORE any parameter usage is known, so the cost
-                // of `Ignore<A, B> = { only: A }` scales with the
-                // structure of the dead `B` argument.
-                //
-                // Demoting the argument mode to `Navigate` keeps each
-                // argument an addressable carrier (`DeclRef` /
-                // `InstantiationRef`); a LIVE argument is then forced by
-                // the ordinary forcing authority when the substituted
-                // body is evaluated under the caller's own context, and a
-                // DEAD argument is never forced at all. Identity is
-                // unaffected: distinct argument EXPRESSIONS still lower to
-                // distinct carriers, so distinct argument environments
-                // keep distinct instantiation identities — and the
-                // arguments now lower mode-independently, so the same
-                // reference reached from a `Navigate` and an `Expanded`
-                // demand populates ONE family slot instead of two.
-                let context = self.reference_argument_context(
-                    &continuation,
-                    reduction_context.into_structural_provenance().with_mode(
-                        match reduction_context.mode {
-                            ProjectionMode::Expanded | ProjectionMode::Identity => {
-                                ProjectionMode::Navigate
-                            }
-                            other => other,
-                        },
+                        type_arguments,
+                        reduction_context,
+                        frames,
                     ),
-                );
-                match type_arguments.first() {
-                    None => LowerStep::Value(
-                        self.finish_carrier_resolution(continuation, Arc::from(Vec::new())),
-                    ),
-                    Some(first) => {
-                        frames.push(LowerFrame::RefArguments {
-                            continuation,
+                    super::carrier::HeadPlan::ReadsAnchor(anchor) => {
+                        let key = anchor.key().clone();
+                        self.record_carrier_resolution_read_intent(&key);
+                        frames.push(LowerFrame::Read(LowerReadResume::Anchor {
+                            anchor: Box::new(anchor),
                             arguments: type_arguments,
-                            context,
-                            lowered: Vec::with_capacity(type_arguments.len()),
-                        });
-                        LowerStep::Descend(first, context)
+                            context: reduction_context,
+                        }));
+                        LowerStep::Read(LowerRead {
+                            key,
+                            shape: LowerReadShape::Whole,
+                        })
                     }
                 }
+            }
+            TypeExpr::TypeOf(value_ref) => {
+                let NodeScopeId::File {
+                    canonical_id,
+                    owner,
+                    ..
+                } = lowering.scope
+                else {
+                    return LowerStep::Value(self.opaque(QueryError::Miss));
+                };
+                let Some(key) = self.typeof_reference_key_in_scope(
+                    canonical_id,
+                    *owner,
+                    Some(lowering.name_resolution),
+                    lowering.scope_payload,
+                    value_ref,
+                    reduction_context,
+                ) else {
+                    return LowerStep::Value(self.opaque(QueryError::Miss));
+                };
+                frames.push(LowerFrame::Read(LowerReadResume::Typeof {
+                    arguments: &value_ref.type_args,
+                    context: reduction_context,
+                }));
+                LowerStep::Read(LowerRead {
+                    key,
+                    shape: LowerReadShape::Node,
+                })
             }
             TypeExpr::Union(arms) | TypeExpr::Intersection(arms) => match arms.first() {
                 None => LowerStep::Value(
@@ -1504,6 +1829,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             {
                 self.advance_object_lowering(
                     lowering,
+                    infer_binders,
                     object,
                     0,
                     Vec::with_capacity(object.properties.len()),
@@ -1513,7 +1839,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             }
             _ => LowerStep::Value(self.lower_type_expr_leaf(
-                lowering.infer_binders,
+                infer_binders,
                 expr,
                 lowering.env,
                 lowering.scope,
@@ -1526,11 +1852,65 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    fn lower_ref_arguments<'e>(
+        &self,
+        continuation: super::carrier::CarrierArgsContinuation,
+        type_arguments: &'e [TypeExpr],
+        reduction_context: ProjectionReductionContext,
+        frames: &mut Vec<LowerFrame<'e>>,
+    ) -> LowerStep<'e> {
+        // Type ARGUMENTS lower as CARRIERS, never eagerly.
+        //
+        // An argument is an operand of the instantiation, and
+        // whether it is a LIVE operand is decided by the callee's
+        // body — a parameter the body never mentions consumes its
+        // argument nowhere. Lowering arguments in the caller's
+        // eager mode resolves every argument at the reference
+        // site, BEFORE any parameter usage is known, so the cost
+        // of `Ignore<A, B> = { only: A }` scales with the
+        // structure of the dead `B` argument.
+        //
+        // Demoting the argument mode to `Navigate` keeps each
+        // argument an addressable carrier (`DeclRef` /
+        // `InstantiationRef`); a LIVE argument is then forced by
+        // the ordinary forcing authority when the substituted
+        // body is evaluated under the caller's own context, and a
+        // DEAD argument is never forced at all. Identity is
+        // unaffected: distinct argument EXPRESSIONS still lower to
+        // distinct carriers, so distinct argument environments
+        // keep distinct instantiation identities — and the
+        // arguments now lower mode-independently, so the same
+        // reference reached from a `Navigate` and an `Expanded`
+        // demand populates ONE family slot instead of two.
+        let context = self.reference_argument_context(
+            &continuation,
+            reduction_context.into_structural_provenance().with_mode(
+                match reduction_context.mode {
+                    ProjectionMode::Expanded | ProjectionMode::Identity => ProjectionMode::Navigate,
+                    other => other,
+                },
+            ),
+        );
+        match type_arguments.first() {
+            None => self.lower_carrier_finish(continuation, Arc::from(Vec::new()), frames),
+            Some(first) => {
+                frames.push(LowerFrame::RefArguments {
+                    continuation,
+                    arguments: type_arguments,
+                    context,
+                    lowered: Vec::with_capacity(type_arguments.len()),
+                });
+                LowerStep::Descend(first, context)
+            }
+        }
+    }
+
     /// Deliver `value`, the child `frame` descended into, and continue that
     /// node's lowering.
     fn resume_type_expr_frame<'e>(
         &self,
         lowering: &TypeExprLowering<'_>,
+        infer_binders: &crate::semantic_query::InferBinderFactory,
         frame: LowerFrame<'e>,
         value: SemanticNodeId,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -1538,6 +1918,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> LowerStep<'e> {
         let graph = self.graph();
         match frame {
+            LowerFrame::Read(_) => unreachable!("a query frame needs a shaped delivery"),
+            LowerFrame::TypeofArguments {
+                base,
+                arguments,
+                context,
+                mut lowered,
+            } => {
+                lowered.push(value);
+                match arguments.get(lowered.len()) {
+                    Some(next) => {
+                        frames.push(LowerFrame::TypeofArguments {
+                            base,
+                            arguments,
+                            context,
+                            lowered,
+                        });
+                        LowerStep::Descend(next, context)
+                    }
+                    None => LowerStep::Value(self.apply_typeof_instantiation_args(base, &lowered)),
+                }
+            }
+
             LowerFrame::RefArguments {
                 continuation,
                 arguments,
@@ -1555,10 +1957,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         });
                         LowerStep::Descend(next, context)
                     }
-                    None => LowerStep::Value(self.finish_carrier_resolution(
+                    None => self.lower_carrier_finish(
                         continuation,
                         Arc::from(lowered.into_boxed_slice()),
-                    )),
+                        frames,
+                    ),
                 }
             }
             LowerFrame::Composite {
@@ -1658,7 +2061,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             LowerFrame::KeyOf { context } => {
-                LowerStep::Value(self.finish_keyof_lowering(value, context, lowering.scope))
+                self.finish_keyof_lowering(value, context, lowering.scope, frames)
             }
             LowerFrame::IndexedObject { index, context } => {
                 use crate::semantic_query::IndexKey;
@@ -1695,7 +2098,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     computed @ TypeExpr::TypeOf(_) => {
                         let (node, identity) = self.lower_typeof_for_authored_key(
                             computed,
-                            lowering.infer_binders,
+                            infer_binders,
                             lowering.env,
                             lowering.scope,
                             lowering.name_resolution,
@@ -1713,9 +2116,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     _ => None,
                 };
                 match folded_key {
-                    Some(key) => LowerStep::Value(
-                        self.finish_indexed_access_lowering(value, key, context, lowering),
-                    ),
+                    Some(key) => {
+                        self.finish_indexed_access_lowering(value, key, context, lowering, frames)
+                    }
                     None => {
                         frames.push(LowerFrame::IndexedIndex {
                             object: value,
@@ -1725,14 +2128,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
             }
-            LowerFrame::IndexedIndex { object, context } => {
-                LowerStep::Value(self.finish_indexed_access_lowering(
-                    object,
-                    crate::semantic_query::IndexKey::Computed(value),
-                    context,
-                    lowering,
-                ))
-            }
+            LowerFrame::IndexedIndex { object, context } => self.finish_indexed_access_lowering(
+                object,
+                crate::semantic_query::IndexKey::Computed(value),
+                context,
+                lowering,
+                frames,
+            ),
             LowerFrame::Object {
                 object,
                 next,
@@ -1759,7 +2161,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         entries.push(SurfaceEntry::Member(SurfaceMember {
                             key: self.lower_authored_property_key(
                                 &prop.key,
-                                lowering.infer_binders,
+                                infer_binders,
                                 lowering.env,
                                 lowering.scope,
                                 lowering.name_resolution,
@@ -1825,6 +2227,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 self.advance_object_lowering(
                     lowering,
+                    infer_binders,
                     object,
                     next + 1,
                     entries,
@@ -1844,6 +2247,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn advance_object_lowering<'e>(
         &self,
         lowering: &TypeExprLowering<'_>,
+        infer_binders: &crate::semantic_query::InferBinderFactory,
         object: &'e verter_type_expr::ObjectExpr,
         mut next: usize,
         mut entries: Vec<SurfaceEntry>,
@@ -1897,18 +2301,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // fails and the conditional drops to a
                     // deferred shell.
                     let function_expr = TypeExpr::Function(Arc::new(method.function.clone()));
-                    register_eager_function_alias(
-                        lowering.infer_binders,
-                        &function_expr,
-                        &method.function,
-                    );
+                    register_eager_function_alias(infer_binders, &function_expr, &method.function);
                     // Method VALUE (its function shape) lowers
                     // structurally — see the `ObjectMember::Property`
                     // companion note. Only the method's presence on
                     // THIS object is macro-T own-body, not the
                     // function's nested parameter/return objects.
                     let value = self.lower_type_expr_with_infer_factory(
-                        lowering.infer_binders,
+                        infer_binders,
                         &function_expr,
                         lowering.env,
                         lowering.scope,
@@ -1925,7 +2325,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     entries.push(SurfaceEntry::Member(SurfaceMember {
                         key: self.lower_authored_property_key(
                             &method.key,
-                            lowering.infer_binders,
+                            infer_binders,
                             lowering.env,
                             lowering.scope,
                             lowering.name_resolution,
@@ -1974,9 +2374,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     } else {
                         TypeExpr::Function(Arc::new(func.clone()))
                     };
-                    register_eager_function_alias(lowering.infer_binders, &function_expr, func);
+                    register_eager_function_alias(infer_binders, &function_expr, func);
                     let fn_id = self.lower_type_expr_with_infer_factory(
-                        lowering.infer_binders,
+                        infer_binders,
                         &function_expr,
                         lowering.env,
                         lowering.scope,
@@ -2071,23 +2471,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// `keyof` over its lowered operand.
-    fn finish_keyof_lowering(
+    fn finish_keyof_lowering<'e>(
         &self,
         base_id: SemanticNodeId,
         reduction_context: ProjectionReductionContext,
         scope: &NodeScopeId,
-    ) -> SemanticNodeId {
+        frames: &mut Vec<LowerFrame<'e>>,
+    ) -> LowerStep<'e> {
         let graph = self.graph();
         if crate::semantic_query::may_reduce_operator(reduction_context) {
-            match self.execute_type_node(SemanticQueryKey::KeyOf {
-                base: base_id,
-                context: reduction_context,
-            }) {
-                QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                _ => self.opaque(QueryError::Miss),
-            }
+            frames.push(LowerFrame::Read(LowerReadResume::KeyOf));
+            LowerStep::Read(LowerRead {
+                key: SemanticQueryKey::KeyOf {
+                    base: base_id,
+                    context: reduction_context,
+                },
+                shape: LowerReadShape::Node,
+            })
         } else {
-            match graph.node_data(base_id).as_deref() {
+            LowerStep::Value(match graph.node_data(base_id).as_deref() {
                 None => self.opaque(QueryError::Miss),
                 _ if super::raise::node_is_unknown_materializing_failure(self, base_id) => {
                     self.opaque(QueryError::Miss)
@@ -2096,18 +2498,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     SemanticNodeData::KeyOf { base: base_id },
                     scope.clone(),
                 ),
-            }
+            })
         }
     }
 
     /// An indexed access over its lowered object and key.
-    fn finish_indexed_access_lowering(
+    fn finish_indexed_access_lowering<'e>(
         &self,
         obj_id: SemanticNodeId,
         index_key: crate::semantic_query::IndexKey,
         reduction_context: ProjectionReductionContext,
         lowering: &TypeExprLowering<'_>,
-    ) -> SemanticNodeId {
+        frames: &mut Vec<LowerFrame<'e>>,
+    ) -> LowerStep<'e> {
         let graph = self.graph();
         let scope = lowering.scope;
         // A binding the lowering holds may have gone into the operands, so
@@ -2127,14 +2530,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )
             || self.indexed_access_reads_named_declaration(obj_id, &index_key);
         if should_defer {
-            graph.intern_node_with_scope(
+            LowerStep::Value(graph.intern_node_with_scope(
                 SemanticNodeData::IndexedAccess {
                     object: obj_id,
                     index: index_key,
                     origin,
                 },
                 scope.clone(),
-            )
+            ))
         } else {
             // Path-precision rule: the literal `T[K]` single-hop
             // is the TERMINAL projection of THIS indexed access,
@@ -2143,16 +2546,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // only this selected terminal can expand.
             // A structural-transit caller keeps transit/Navigate via
             // its own `reduction_context.mode`.
-            match self.execute_type_node(SemanticQueryKey::IndexedAccess {
+            let key = SemanticQueryKey::IndexedAccess {
                 base: obj_id,
                 index: index_key.clone(),
                 mode: reduction_context.mode,
-            }) {
-                QueryResult::Value(SemanticQueryOutput { value: id, .. }) => self
-                    .absent_read_answer(origin, id, obj_id, &index_key, reduction_context)
-                    .unwrap_or(id),
-                _ => self.opaque(QueryError::Miss),
-            }
+            };
+            frames.push(LowerFrame::Read(LowerReadResume::Indexed {
+                object: obj_id,
+                index: index_key,
+                origin,
+                context: reduction_context,
+            }));
+            LowerStep::Read(LowerRead {
+                key,
+                shape: LowerReadShape::Node,
+            })
         }
     }
 
@@ -2887,57 +3295,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
 
-            TypeExpr::TypeOf(value_ref) => {
-                let NodeScopeId::File {
-                    canonical_id,
-                    owner,
-                    ..
-                } = scope
-                else {
-                    return self.opaque(QueryError::Miss);
-                };
-                let Some(key) = self.typeof_reference_key_in_scope(
-                    canonical_id,
-                    *owner,
-                    Some(name_resolution),
-                    scope_payload,
-                    value_ref,
-                    reduction_context,
-                ) else {
-                    return self.opaque(QueryError::Miss);
-                };
-                let mut result = match self.execute_type_node(key) {
-                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                    _ => return self.opaque(QueryError::Miss),
-                };
-                // Instantiation expression: `typeof C.make<string>` applies
-                // the lowered type arguments to the resolved generic
-                // signature — positional binder substitution through the
-                // shared substitute, yielding the non-generic instantiated
-                // signature (the `ValueRef.type_args` axis from the
-                // producer).
-                if !value_ref.type_args.is_empty() {
-                    let arg_nodes: Vec<SemanticNodeId> = value_ref
-                        .type_args
-                        .iter()
-                        .map(|arg| {
-                            self.lower_type_expr_with_infer_factory(
-                                infer_binders,
-                                arg,
-                                env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context,
-                            )
-                        })
-                        .collect();
-                    result = self.apply_typeof_instantiation_args(result, &arg_nodes);
-                }
-                result
-            }
             // Function-type lowering. Produces a
             // canonical `SemanticNodeData::Signature` carrier with
             // lowered parameters and return type. Type parameters

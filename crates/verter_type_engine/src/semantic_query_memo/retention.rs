@@ -189,6 +189,7 @@ impl SemanticGraphStore {
         direct_edges: usize,
     ) -> Result<Arc<MemoRetention>, RetentionRefusal> {
         let reserved = match entry
+            .evidence
             .cost_receipt
             .reserve_retention(self.retention_account())
         {

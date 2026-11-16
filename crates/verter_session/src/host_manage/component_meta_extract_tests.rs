@@ -27,6 +27,79 @@ fn make_project() -> Arc<MetaProject> {
     MetaProject::new(host)
 }
 
+#[test]
+fn public_instance_indirect_options_exports_report_options_api_members() {
+    use verter_session_query::analysis::component_meta::{
+        PublicInstanceCompleteness, PublicInstanceStructuralFailure,
+    };
+
+    for (script, expected_props) in [
+        (
+            "const opts = { props: ['label'], methods: { hidden() {} } }; export default opts;",
+            vec!["label"],
+        ),
+        (
+            "import { defineComponent as dc } from 'vue'; export default dc({ props: ['label'], methods: { hidden() {} } });",
+            vec!["label"],
+        ),
+        ("export default missing;", vec![]),
+        ("export default makeOptions();", vec![]),
+        ("export default function Component() {}", vec![]),
+    ] {
+        for setup in [
+            "",
+            "<script setup>const opts = { props: ['wrong'] }; defineExpose({ visible: 1 });</script>",
+        ] {
+            let project = make_project();
+            project
+                .upsert_base(
+                    "/App.vue",
+                    &format!("<script>{script}</script>{setup}"),
+                )
+                .unwrap();
+            let output = project
+                .host()
+                .get_component_meta_output("/App.vue")
+                .unwrap()
+                .expect("component output");
+            let (analysis, _, _) = output.into_parts();
+            assert!(analysis.options_api, "{script}");
+            assert_eq!(
+                analysis
+                    .props
+                    .iter()
+                    .map(|prop| prop.name.as_str())
+                    .collect::<Vec<_>>(),
+                expected_props,
+                "{script} {setup}"
+            );
+            assert!(
+                !analysis.domain_guarantees.enumeration.options_member_free,
+                "{script}"
+            );
+            assert_eq!(analysis.domain_guarantees.public_instance.kind, 2, "{script}");
+            assert_eq!(
+                analysis.domain_guarantees.public_instance.causes,
+                vec![103],
+                "{script}"
+            );
+            if !setup.is_empty() {
+                let instance = analysis.public_instance.expect("exposed member sidecar");
+                assert_eq!(
+                    instance.structural_failure,
+                    Some(PublicInstanceStructuralFailure::OptionsApiMembers),
+                    "{script}"
+                );
+                assert_eq!(
+                    instance.completeness,
+                    PublicInstanceCompleteness::Partial,
+                    "{script}"
+                );
+            }
+        }
+    }
+}
+
 /// Discriminating test 4 — scope correctness.
 ///
 /// SFC A imports `Helper` from a sibling file B. A also defines a
