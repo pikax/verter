@@ -35,6 +35,39 @@ use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 /// `MemoEntry`.
 pub use verter_session_query::facts::fact_cache::ReadSetSignature;
 
+/// Index constructions on the current validation thread.
+pub fn root_index_builds_for_tests() -> usize {
+    crate::resolver_core::request_store_view::root_index_builds_for_tests()
+}
+
+/// The source hash captured by the host for a validation fixture.
+pub fn validation_whole_hash_for_tests(
+    host: &crate::VerterHost,
+    canonical: &str,
+) -> Option<[u8; 16]> {
+    host.get_whole_hash(canonical)
+}
+
+/// Run a synchronous measurement through one production request validator.
+pub fn with_request_validation_for_tests<R>(
+    host: &crate::VerterHost,
+    run: impl FnOnce(
+        &dyn Fn(&verter_session_query::facts::fact_set::FactSet, &[&str]) -> bool,
+        &dyn Fn() -> usize,
+    ) -> R,
+) -> R {
+    let read = host.resolver_store_view_read();
+    let base = read.current().expect("a coherent fixture view");
+    let view = crate::resolver_core::RequestStoreView::new(
+        base.view(),
+        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+    run(
+        &|facts, roots| view.validates_retained_signature(facts, roots),
+        &crate::resolver_core::request_store_view::root_membership_work_for_tests,
+    )
+}
+
 /// Fan `sig` into every active tracer on the current thread's TLS
 /// stack. Integration tests use this to verify that the multi-level
 /// fan-out delivers observations into all nested tracer scopes without

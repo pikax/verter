@@ -1613,6 +1613,33 @@ Producers still consume a hierarchical fact (a consumed result's receipt, a
 downstream `semantic_hash`) instead of flattening transitive facts: shared
 storage bounds a signature's memory, never its honesty.
 
+Request validation scans up to seven strict roots directly. A wider set builds
+one borrowed hash index lazily, only when a `FileWholeHash` leaf needs a
+membership decision. Signatures containing only world witnesses or other
+non-whole-file leaves build no index. Seven matching roots need 28 direct
+comparisons, equal to the indexed path's root insertions, name probes,
+membership probes and verdict-key probes. At eight roots the indexed path
+needs 32 operations instead of 36 direct comparisons. Names encountered during
+a small-set walk supply shared verdict-key strings without another projection pass.
+Receipt contexts with no strict roots skip canonical-summary projection. Other
+contexts probe the smaller population when an index exists; a summary never
+constructs the index. Selected names are ordered for the context key.
+`CanonicalSet::iter_unordered` borrows the existing summary without allocating
+the ordered iterator's sort buffer; consumers that publish an ordered result
+continue to use `iter` or sort their projection.
+Receipt contexts with no intersection retain no root allocation. Retained
+signature verdicts also use an empty key for disjoint root lists; intersecting
+lists preserve the full caller order and share canonical strings already held
+by the signature where available. The caller's root keys alone decide strictness;
+the borrowed strings only avoid copying verdict-key storage.
+Retained signature lookups check existing full keys first. Small contexts then
+use the ordinary scan and existing receipt verdicts rather than a separate
+signature-name projection. Repeated disjoint validation reuses the existing
+empty-key entry without allocating another verdict. The ordinary receipt walk
+may still allocate a fixed visited-set block; it does not copy the disjoint
+root list. Shared signature-key
+strings drop before their evidence owner.
+
 ### Non-cacheability marking and source evidence
 
 The reuse vocabulary (`NonCacheableReadReason`, `ReuseClass`,

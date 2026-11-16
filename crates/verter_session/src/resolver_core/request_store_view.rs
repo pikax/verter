@@ -93,6 +93,29 @@ use verter_session_query::facts::fact_cache::{
 use verter_session_query::facts::reuse::ReuseClass;
 use verter_session_query::facts::store_view::{ResolverHash16, StoreView, StoreViewCompatToken};
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static ROOT_MEMBERSHIP_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ROOT_INDEX_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn root_membership_work_for_tests() -> usize {
+    ROOT_MEMBERSHIP_WORK.with(std::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn root_index_builds_for_tests() -> usize {
+    ROOT_INDEX_BUILDS.with(std::cell::Cell::get)
+}
+
+macro_rules! note_root_membership_work {
+    ($amount:expr) => {{
+        #[cfg(any(test, feature = "test-support"))]
+        ROOT_MEMBERSHIP_WORK.with(|work| work.set(work.get() + $amount));
+    }};
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CompletedSource {
     whole_hash: Hash16,
@@ -1174,25 +1197,206 @@ impl SignatureOutcome {
     }
 }
 
+/// Keep small root sets on the allocation-free scan.
+const DIRECT_ROOT_SCAN_MAX: usize = 7;
+
+/// Membership is keyed only by the caller's roots. Shared canonical names
+/// save verdict-key copies; they never supply validation evidence.
+struct SelfRootIndex<'roots, 'facts> {
+    roots: &'roots [&'roots str],
+    signature: verter_session_query::facts::fact_set::FactsRef<'facts>,
+    indexed: std::cell::OnceCell<FxHashMap<&'roots str, Option<&'facts Arc<str>>>>,
+    small_names: std::cell::RefCell<[Option<Arc<str>>; DIRECT_ROOT_SCAN_MAX]>,
+    intersects: std::cell::Cell<bool>,
+    projection_complete: std::cell::Cell<bool>,
+}
+
+impl Default for SelfRootIndex<'_, '_> {
+    fn default() -> Self {
+        index_self_roots((&[] as &[FactVersionRef]).into(), &[])
+    }
+}
+
+impl SelfRootIndex<'_, '_> {
+    fn remember(&self, position: usize, canonical: &Arc<str>) {
+        self.intersects.set(true);
+        if self.roots.len() <= DIRECT_ROOT_SCAN_MAX {
+            let mut names = self.small_names.borrow_mut();
+            if names[position].is_none() {
+                names[position] = Some(Arc::clone(canonical));
+            }
+        }
+    }
+
+    fn contains(&self, canonical: &Arc<str>, leaf: bool) -> bool {
+        if self.roots.len() > DIRECT_ROOT_SCAN_MAX {
+            let indexed = if leaf {
+                Some(
+                    self.indexed
+                        .get_or_init(|| build_root_index(self.signature, self.roots)),
+                )
+            } else {
+                self.indexed.get()
+            };
+            if let Some(indexed) = indexed {
+                note_root_membership_work!(1);
+                let found = indexed.contains_key(canonical.as_ref());
+                if found {
+                    self.intersects.set(true);
+                }
+                return found;
+            }
+        }
+        for (position, root) in self.roots.iter().enumerate() {
+            note_root_membership_work!(1);
+            if *root == canonical.as_ref() {
+                self.remember(position, canonical);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// A failed walk may not have reached every context-bearing fact.
+    /// Complete only the projection needed to decide an empty verdict key.
+    fn complete_projection(&self) {
+        if self.projection_complete.replace(true) || self.intersects.get() {
+            return;
+        }
+        for fact in self.signature.iter() {
+            match fact {
+                FactVersionRef::FileWholeHash { canonical_id, .. } => {
+                    if self.contains(canonical_id, false) {
+                        return;
+                    }
+                }
+                FactVersionRef::Receipt(receipt) => {
+                    for (position, root) in self.roots.iter().enumerate() {
+                        note_root_membership_work!(1);
+                        if let Some(canonical) = receipt.canonicals().get(root) {
+                            self.remember(position, canonical);
+                            return;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn root_index_len(index: &SelfRootIndex<'_, '_>) -> usize {
+    index.roots.len()
+}
+
+fn root_index_canonical(
+    index: &SelfRootIndex<'_, '_>,
+    position: usize,
+    root: &str,
+) -> Option<Arc<str>> {
+    if index.roots.len() <= DIRECT_ROOT_SCAN_MAX {
+        return index.small_names.borrow()[position].clone();
+    }
+    index.indexed.get().and_then(|indexed| {
+        note_root_membership_work!(1);
+        indexed.get(root).copied().flatten().cloned()
+    })
+}
+
+/// Prepare borrowed membership state without constructing an index.
+fn index_self_roots<'roots, 'facts>(
+    signature: verter_session_query::facts::fact_set::FactsRef<'facts>,
+    roots: &'roots [&'roots str],
+) -> SelfRootIndex<'roots, 'facts> {
+    SelfRootIndex {
+        roots,
+        signature,
+        indexed: std::cell::OnceCell::new(),
+        small_names: std::cell::RefCell::new(std::array::from_fn(|_| None)),
+        intersects: std::cell::Cell::new(false),
+        projection_complete: std::cell::Cell::new(roots.is_empty()),
+    }
+}
+
+fn build_root_index<'roots, 'facts>(
+    signature: verter_session_query::facts::fact_set::FactsRef<'facts>,
+    roots: &[&'roots str],
+) -> FxHashMap<&'roots str, Option<&'facts Arc<str>>> {
+    #[cfg(any(test, feature = "test-support"))]
+    ROOT_INDEX_BUILDS.with(|builds| builds.set(builds.get() + 1));
+    note_root_membership_work!(roots.len());
+    let mut index: FxHashMap<_, _> = roots.iter().map(|root| (*root, None)).collect();
+    let mut unmatched = index.len();
+    for fact in signature.iter() {
+        match fact {
+            FactVersionRef::FileWholeHash { canonical_id, .. } => {
+                note_root_membership_work!(1);
+                if let Some(held @ None) = index.get_mut(canonical_id.as_ref()) {
+                    *held = Some(canonical_id);
+                    unmatched -= 1;
+                }
+            }
+            FactVersionRef::Receipt(receipt) => {
+                let canonicals = receipt.canonicals();
+                if index.len() <= canonicals.len() {
+                    for (root, held) in &mut index {
+                        note_root_membership_work!(1);
+                        if held.is_none() {
+                            if let Some(canonical) = canonicals.get(root) {
+                                *held = Some(canonical);
+                                unmatched -= 1;
+                            }
+                        }
+                    }
+                } else {
+                    for canonical in canonicals.iter_unordered() {
+                        note_root_membership_work!(1);
+                        if let Some(held @ None) = index.get_mut(canonical.as_ref()) {
+                            *held = Some(canonical);
+                            unmatched -= 1;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if unmatched == 0 {
+            break;
+        }
+    }
+    index
+}
+
+fn roots_are_disjoint(index: &SelfRootIndex<'_, '_>) -> bool {
+    index.complete_projection();
+    !index.intersects.get()
+}
+
 /// One retained signature a request view settled: the signature itself
 /// (held alive, so its address names it alone), the strict self-roots and
 /// the completion state it was validated under, and its verdict.
 struct SettledSignature {
+    // Drop shared key strings before the signature that owns their evidence.
+    strict: Box<[Arc<str>]>,
     signature: verter_session_query::facts::fact_set::FactSet,
-    strict: Box<[Box<str>]>,
+    disjoint: bool,
     state: CompletionOverlayState,
     verdict: Verdict,
 }
 
 /// The retained signatures one request view settled, so a warm read that
-/// meets a signature again in the same request answers without walking it,
-/// whichever way it was answered.
+/// meets an exact context again answers without walking it, whichever way
+/// it was answered. Small disjoint contexts keep the ordinary scan and
+/// reuse settled receipts.
 ///
 /// Sound for the reasons [`ReceiptVerdicts`] is: a settled answer is a
 /// function of the base (proven current at construction and never
 /// replaced), the completion overlay's exact state and the strict
-/// self-roots, and the last two are part of the key. Request-scoped,
-/// dropped with the view.
+/// self-roots, and the last two are part of the key. A root list disjoint
+/// from the signature's whole-file facts and receipt summaries has no
+/// effect on validation and uses the empty key. Other lists retain their
+/// full caller order, sharing canonical strings the signature already
+/// holds. Request-scoped, dropped with the view.
 #[derive(Default)]
 struct SignatureVerdicts(
     parking_lot::Mutex<rustc_hash::FxHashMap<usize, smallvec::SmallVec<[SettledSignature; 1]>>>,
@@ -1203,46 +1407,81 @@ impl SignatureVerdicts {
         signature.address()
     }
 
-    fn get(
+    fn get<'roots, 'facts>(
         &self,
-        signature: &verter_session_query::facts::fact_set::FactSet,
-        strict: &[&str],
+        signature: &'facts verter_session_query::facts::fact_set::FactSet,
+        strict: &'roots [&'roots str],
+        roots: &mut Option<SelfRootIndex<'roots, 'facts>>,
         state: CompletionOverlayState,
     ) -> Option<Verdict> {
-        self.0
-            .lock()
-            .get(&Self::address(signature))?
+        let entries = self.0.lock();
+        let entries = entries.get(&Self::address(signature))?;
+        let eligible =
+            |entry: &SettledSignature| entry.signature.ptr_eq(signature) && entry.state == state;
+        // An existing full key needs no context projection or transient index.
+        if let Some(entry) = entries.iter().find(|entry| {
+            eligible(entry)
+                && entry.strict.len() == strict.len()
+                && entry.strict.iter().zip(strict).all(|(held, root)| {
+                    note_root_membership_work!(1);
+                    held.as_ref() == *root
+                })
+        }) {
+            return Some(entry.verdict);
+        }
+        // A small context is cheaper to check during the ordinary walk,
+        // which can still reuse every settled receipt it reaches.
+        if strict.len() <= DIRECT_ROOT_SCAN_MAX {
+            return None;
+        }
+        let entry = entries
             .iter()
-            .find(|entry| {
-                entry.signature.ptr_eq(signature)
-                    && entry.state == state
-                    && entry.strict.len() == strict.len()
-                    && entry
-                        .strict
-                        .iter()
-                        .zip(strict)
-                        .all(|(held, root)| held.as_ref() == *root)
-            })
-            .map(|entry| entry.verdict)
+            .find(|entry| eligible(entry) && entry.disjoint)?;
+        let disjoint = roots_are_disjoint(
+            roots.get_or_insert_with(|| index_self_roots(signature.into(), strict)),
+        );
+        disjoint.then_some(entry.verdict)
     }
 
     fn insert(
         &self,
         signature: &verter_session_query::facts::fact_set::FactSet,
         strict: &[&str],
+        roots: &SelfRootIndex<'_, '_>,
         state: CompletionOverlayState,
         verdict: Verdict,
     ) {
-        self.0
-            .lock()
-            .entry(Self::address(signature))
-            .or_default()
-            .push(SettledSignature {
-                signature: signature.clone(),
-                strict: strict.iter().map(|root| Box::from(*root)).collect(),
-                state,
-                verdict,
-            });
+        let disjoint = roots_are_disjoint(roots);
+        let strict = if disjoint {
+            Box::default()
+        } else {
+            strict
+                .iter()
+                .enumerate()
+                .map(
+                    |(position, root)| match root_index_canonical(roots, position, root) {
+                        Some(canonical) => canonical,
+                        None => Arc::from(*root),
+                    },
+                )
+                .collect()
+        };
+        let mut entries = self.0.lock();
+        let entries = entries.entry(Self::address(signature)).or_default();
+        if disjoint
+            && entries.iter().any(|entry| {
+                entry.disjoint && entry.signature.ptr_eq(signature) && entry.state == state
+            })
+        {
+            return;
+        }
+        entries.push(SettledSignature {
+            signature: signature.clone(),
+            strict,
+            disjoint,
+            state,
+            verdict,
+        });
     }
 
     #[cfg(test)]
@@ -1366,17 +1605,40 @@ struct ReceiptVerdicts(parking_lot::Mutex<rustc_hash::FxHashMap<ReceiptContext, 
 impl ReceiptVerdicts {
     fn context(
         receipt: &verter_session_query::facts::fact_cache::ResultReceipt,
-        self_root_canonicals: &[&str],
+        self_root_canonicals: &SelfRootIndex<'_, '_>,
         state: CompletionOverlayState,
     ) -> ReceiptContext {
+        if self_root_canonicals.roots.is_empty() {
+            return ReceiptContext {
+                receipt: receipt.clone(),
+                strict: Box::default(),
+                state,
+            };
+        }
         let canonicals = receipt.canonicals();
-        let mut strict: Vec<Arc<str>> = self_root_canonicals
-            .iter()
-            .filter_map(|root| canonicals.get(root).map(Arc::clone))
-            .collect();
+        let mut strict = smallvec::SmallVec::<[Arc<str>; 4]>::new();
+        if root_index_len(self_root_canonicals) <= canonicals.len() {
+            for (position, root) in self_root_canonicals.roots.iter().enumerate() {
+                note_root_membership_work!(1);
+                if let Some(canonical) = canonicals.get(root) {
+                    self_root_canonicals.remember(position, canonical);
+                    strict.push(Arc::clone(canonical));
+                }
+            }
+        } else {
+            for canonical in canonicals.iter_unordered() {
+                if self_root_canonicals.contains(canonical, false) {
+                    strict.push(Arc::clone(canonical));
+                }
+            }
+        }
         strict.sort_unstable();
         strict.dedup();
-        let strict = strict.into_boxed_slice();
+        let strict = if strict.is_empty() {
+            Box::default()
+        } else {
+            strict.into_vec().into_boxed_slice()
+        };
         ReceiptContext {
             receipt: receipt.clone(),
             strict,
@@ -1387,7 +1649,7 @@ impl ReceiptVerdicts {
     fn get(
         &self,
         receipt: &verter_session_query::facts::fact_cache::ResultReceipt,
-        self_root_canonicals: &[&str],
+        self_root_canonicals: &SelfRootIndex<'_, '_>,
         state: CompletionOverlayState,
     ) -> Option<Verdict> {
         self.0
@@ -1399,7 +1661,7 @@ impl ReceiptVerdicts {
     fn insert_all<'r>(
         &self,
         receipts: impl IntoIterator<Item = &'r verter_session_query::facts::fact_cache::ResultReceipt>,
-        self_root_canonicals: &[&str],
+        self_root_canonicals: &SelfRootIndex<'_, '_>,
         state: CompletionOverlayState,
         verdict: Verdict,
     ) {
@@ -1509,8 +1771,8 @@ impl<'a> RequestStoreView<'a> {
         }
     }
 
-    /// What this view can answer for a retained signature without reading
-    /// any of its facts: the trivial answers, and the verdict it settled
+    /// What this view can answer for a retained signature without
+    /// validating any of its facts: the trivial answers, and the verdict it settled
     /// under the same strict roots and the current completion state (see
     /// [`SignatureVerdicts`]). A caller that must prepare inputs before a
     /// walk asks here first, or the preparation walks the signature the
@@ -1521,6 +1783,15 @@ impl<'a> RequestStoreView<'a> {
         &self,
         sig: &verter_session_query::facts::fact_set::FactSet,
         self_root_canonicals: &[&str],
+    ) -> Option<bool> {
+        self.settled_retained_signature_with_roots(sig, self_root_canonicals, &mut None)
+    }
+
+    fn settled_retained_signature_with_roots<'roots, 'facts>(
+        &self,
+        sig: &'facts verter_session_query::facts::fact_set::FactSet,
+        self_root_canonicals: &'roots [&'roots str],
+        roots: &mut Option<SelfRootIndex<'roots, 'facts>>,
     ) -> Option<bool> {
         if sig.is_empty() {
             return Some(true);
@@ -1533,7 +1804,7 @@ impl<'a> RequestStoreView<'a> {
             return None;
         }
         self.signature_verdicts
-            .get(sig, self_root_canonicals, state)
+            .get(sig, self_root_canonicals, roots, state)
             .map(|verdict| verdict == Verdict::Valid)
     }
 
@@ -1566,19 +1837,24 @@ impl<'a> RequestStoreView<'a> {
         sig: &verter_session_query::facts::fact_set::FactSet,
         self_root_canonicals: &[&str],
     ) -> bool {
-        if let Some(settled) = self.settled_retained_signature(sig, self_root_canonicals) {
+        let mut roots = None;
+        if let Some(settled) =
+            self.settled_retained_signature_with_roots(sig, self_root_canonicals, &mut roots)
+        {
             return settled;
         }
         let (verdict, state) = match self.signature_outcome(
             verter_session_query::facts::fact_set::FactsRef::Set(sig),
             self_root_canonicals,
+            &mut roots,
         ) {
             SignatureOutcome::Valid(state) => (Verdict::Valid, state),
             SignatureOutcome::Stale(_, state) => (Verdict::Stale, state),
             SignatureOutcome::Refused(_) => return false,
         };
+        let roots = roots.get_or_insert_with(|| index_self_roots(sig.into(), self_root_canonicals));
         self.signature_verdicts
-            .insert(sig, self_root_canonicals, state, verdict);
+            .insert(sig, self_root_canonicals, roots, state, verdict);
         verdict == Verdict::Valid
     }
 
@@ -1687,7 +1963,7 @@ impl<'a> RequestStoreView<'a> {
         &self,
         fact: &'r FactVersionRef,
         walk: &mut verter_session_query::facts::fact_cache::ReceiptWalk,
-        self_root_canonicals: &[&str],
+        self_root_canonicals: &SelfRootIndex<'_, '_>,
         state: CompletionOverlayState,
         walked: &mut Vec<verter_session_query::facts::fact_cache::ResultReceipt>,
     ) -> FactOutcome<'r> {
@@ -1728,10 +2004,11 @@ impl<'a> RequestStoreView<'a> {
 
     /// Validate `sig` under `self_root_canonicals` as one completion state,
     /// settling every receipt the answer proves something about.
-    fn signature_outcome(
+    fn signature_outcome<'roots, 'facts>(
         &self,
-        sig: verter_session_query::facts::fact_set::FactsRef<'_>,
-        self_root_canonicals: &[&str],
+        sig: verter_session_query::facts::fact_set::FactsRef<'facts>,
+        self_root_canonicals: &'roots [&'roots str],
+        roots: &mut Option<SelfRootIndex<'roots, 'facts>>,
     ) -> SignatureOutcome {
         if !self.base_is_current {
             return SignatureOutcome::Refused(0);
@@ -1789,6 +2066,9 @@ impl<'a> RequestStoreView<'a> {
             return SignatureOutcome::Stale(index, state);
         }
 
+        let self_root_canonicals =
+            roots.get_or_insert_with(|| index_self_roots(sig, self_root_canonicals));
+
         let mut walk = verter_session_query::facts::fact_cache::ReceiptWalk::default();
         let mut walked = Vec::new();
         for (index, fact) in sig.iter().enumerate() {
@@ -1822,6 +2102,7 @@ impl<'a> RequestStoreView<'a> {
         }
         self.receipt_verdicts
             .insert_all(&walked, self_root_canonicals, state, Verdict::Valid);
+        self_root_canonicals.projection_complete.set(true);
         SignatureOutcome::Valid(state)
     }
 
@@ -1847,14 +2128,16 @@ impl<'a> RequestStoreView<'a> {
     fn check_leaf_or_self_root(
         &self,
         fact: &FactVersionRef,
-        self_root_canonicals: &[&str],
+        self_root_canonicals: &SelfRootIndex<'_, '_>,
         state: CompletionOverlayState,
     ) -> LeafCheck {
         #[cfg(test)]
         self.leaf_validations.fetch_add(1, Ordering::Relaxed);
         match fact {
             FactVersionRef::FileWholeHash { canonical_id, hash }
-                if self_root_canonicals.contains(&&**canonical_id) =>
+                if root_index_len(self_root_canonicals) != 0 && {
+                    self_root_canonicals.contains(canonical_id, true)
+                } =>
             {
                 LeafCheck::of(self.validates_self_root_at_completion_state(canonical_id, hash))
             }
@@ -2115,19 +2398,21 @@ impl<'a> StoreView for RequestStoreView<'a> {
         }
         let mut walk = verter_session_query::facts::fact_cache::ReceiptWalk::default();
         let mut walked = Vec::new();
-        let outcome = self.validate_at_completion_state(fact, &mut walk, &[], state, &mut walked);
+        let self_roots = SelfRootIndex::default();
+        let outcome =
+            self.validate_at_completion_state(fact, &mut walk, &self_roots, state, &mut walked);
         if self.overlay.completion_state() != state {
             return false;
         }
         match outcome {
             FactOutcome::Valid => {
                 self.receipt_verdicts
-                    .insert_all(&walked, &[], state, Verdict::Valid);
+                    .insert_all(&walked, &self_roots, state, Verdict::Valid);
                 true
             }
             FactOutcome::Stale(chain) => {
                 self.receipt_verdicts
-                    .insert_all(chain, &[], state, Verdict::Stale);
+                    .insert_all(chain, &self_roots, state, Verdict::Stale);
                 false
             }
             FactOutcome::Uncertain => false,
@@ -2142,7 +2427,7 @@ impl<'a> StoreView for RequestStoreView<'a> {
         if sig.is_empty() {
             return Ok(());
         }
-        self.signature_outcome(sig, self_root_canonicals)
+        self.signature_outcome(sig, self_root_canonicals, &mut None)
             .into_result()
     }
 

@@ -75,6 +75,82 @@ fn reads(
     (answer, view.leaf_validations_for_tests() - before)
 }
 
+#[test]
+fn an_untracked_own_file_rejects_a_retained_signature() {
+    let base = base_view();
+    let view = RequestStoreView::new(&base, Arc::new(CanonicalCompletionOverlay::new()));
+    let signature =
+        verter_session_query::facts::policy::FactPolicy::production().set_of(vec![whole(99)]);
+    assert!(view.validates_retained_signature(&signature, &[]));
+    assert!(!view.validates_retained_signature(&signature, &["/r/99.ts"]));
+    assert!(view.validates_retained_signature(&signature, &["/unrelated.ts"]));
+}
+
+#[test]
+fn small_strict_root_sets_do_not_build_an_index() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let base = host.resolver_store_view_read().into_owned_view();
+    for roots in [
+        vec![],
+        vec!["/r/99.ts"],
+        vec!["/other.ts", "/r/99.ts"],
+        vec!["/a.ts", "/b.ts", "/c.ts", "/r/99.ts"],
+    ] {
+        let view = RequestStoreView::new(&base, Arc::new(CanonicalCompletionOverlay::new()));
+        let signature =
+            verter_session_query::facts::policy::FactPolicy::production().set_of(vec![whole(99)]);
+        let before = crate::for_tests::root_index_builds_for_tests();
+        assert_eq!(
+            view.validates_retained_signature(&signature, &roots),
+            roots.is_empty(),
+            "an untracked own file rejects strictly"
+        );
+        assert_eq!(crate::for_tests::root_index_builds_for_tests() - before, 0);
+    }
+
+    let world = base
+        .strict_self_root_world_identity()
+        .expect("fixture world");
+    let roots = [
+        "/a.ts", "/b.ts", "/c.ts", "/d.ts", "/e.ts", "/f.ts", "/g.ts", "/h.ts",
+    ];
+    for fact in [
+        FactVersionRef::StrictSelfRootWorld(world),
+        FactVersionRef::Receipt(ResultReceipt::new(vec![
+            FactVersionRef::StrictSelfRootWorld(world),
+        ])),
+    ] {
+        let view = RequestStoreView::new(&base, Arc::new(CanonicalCompletionOverlay::new()));
+        let signature =
+            verter_session_query::facts::policy::FactPolicy::production().set_of(vec![fact]);
+        let before = crate::for_tests::root_index_builds_for_tests();
+        assert!(view.validates_retained_signature(&signature, &roots));
+        assert_eq!(crate::for_tests::root_index_builds_for_tests() - before, 0);
+    }
+
+    for size in [1u8, 2, 4, 7, 8] {
+        let view = RequestStoreView::new(&base, overlay_through(size));
+        let signature = verter_session_query::facts::policy::FactPolicy::production()
+            .set_of((0..size).map(whole).collect::<Vec<_>>());
+        let roots: Vec<_> = (0..size).map(|level| format!("/r/{level}.ts")).collect();
+        let roots: Vec<_> = roots.iter().map(String::as_str).collect();
+        let before = crate::for_tests::root_index_builds_for_tests();
+        let work_before =
+            crate::resolver_core::request_store_view::root_membership_work_for_tests();
+        assert!(view.validates_retained_signature(&signature, &roots));
+        let work = crate::resolver_core::request_store_view::root_membership_work_for_tests()
+            - work_before;
+        let indexes = crate::for_tests::root_index_builds_for_tests() - before;
+        assert_eq!(indexes, usize::from(size > 7));
+        let size = usize::from(size);
+        assert!(
+            work <= size * (size + 1) / 2,
+            "{size} matching roots used {work} operations"
+        );
+        eprintln!("matching_roots={size} membership={work} indexes={indexes}");
+    }
+}
+
 /// A fact that will not validate, deep under a chain of consumed results,
 /// is read once per applicable context however many of its ancestors later
 /// signatures reach it through: the failing walk settles every receipt it

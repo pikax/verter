@@ -99,6 +99,12 @@ impl CanonicalSet {
         names.into_iter()
     }
 
+    /// The canonicals without an ordering guarantee or a temporary sort
+    /// buffer, for membership projections that order their own output.
+    pub fn iter_unordered(&self) -> impl Iterator<Item = &Arc<str>> + '_ {
+        self.0.keys()
+    }
+
     /// How many canonicals the set names.
     #[must_use]
     pub fn len(&self) -> usize {
