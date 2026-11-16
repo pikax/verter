@@ -74,7 +74,7 @@ use compile_request_response::{
 #[cfg(feature = "semantic-observe")]
 /// Minimal decoder for `whyLoadedFromAuditJson` / `whyInstantiatedFromAuditJson`
 /// — only `record` round-trips through the walker path. `analysis`
-/// and `resolution` fields in the JSON are silently ignored by
+/// fields in the JSON are silently ignored by
 /// serde's default unknown-field handling.
 #[derive(Deserialize)]
 struct WasmAuditBundleForWalker {
@@ -2230,13 +2230,11 @@ fn component_meta_audit_json(
         return Ok(None);
     };
     let ffi = verter_ffi::convert::component_meta_output_to_ffi(output);
-    let resolution = ffi
-        .resolution
-        .clone()
+    ffi.resolution
+        .as_ref()
         .ok_or("audited component-meta output carries no resolution sidecar")?;
     let bytes = encode_audit_bundle(&AuditBundle {
         analysis: ffi,
-        resolution,
         record,
     })?;
     String::from_utf8(bytes)

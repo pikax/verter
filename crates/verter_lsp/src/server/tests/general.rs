@@ -2118,7 +2118,7 @@ async fn barrel_component_route_cache_is_binding_exact_and_provenance_fenced() {
     let barrel_uri = workspace_uri(&workspace_id, "src/components.ts");
     let cursor = PARENT.find("<LocalAlpha al").expect("component") + "<LocalAlpha al".len();
     let route_props = |local_binding: &str| {
-        let availability = server
+        let (_, availability) = server
             .cached_barrel_component_contract(&app_id, "./components", local_binding)
             .unwrap_or_else(|| panic!("published route for {local_binding}"));
         let verter_session::framework::ComponentContractAvailability::Supported(contract) =

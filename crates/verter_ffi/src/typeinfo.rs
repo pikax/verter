@@ -51,7 +51,10 @@ pub fn encode_stored_audit_record(rec: &RequestAuditRecord) -> Result<Option<Str
 
 /// Encode a record as UTF-8 JSON, also usable as bytes at native boundaries.
 pub fn encode_audit_record(rec: &RequestAuditRecord) -> Result<String, String> {
-    serde_json::to_string(rec).map_err(|e| format!("audit record serialization error: {e}"))
+    let json =
+        serde_json::to_string(rec).map_err(|e| format!("audit record serialization error: {e}"))?;
+    verter_audit::attribute_n!(AuditRecordEncode, json.len());
+    Ok(json)
 }
 
 /// Decode generic arguments; absent or empty input means no instantiation.
@@ -118,4 +121,30 @@ pub fn type_info_with_audit(
     let response = encode_type_info_graph_response(&response);
     let audit_record = encode_stored_audit_record(&record)?;
     Ok((response, audit_record))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_audit_encoding_rejects_every_uncaptured_state() {
+        let host = VerterHost::new_standalone(Default::default());
+        let mut record = host.audit_workspace_op(verter_audit::WorkspaceOp::DepGraphTraverse {
+            root: "/record.vue".into(),
+        });
+        for state in [
+            AuditCaptureState::FilteredNoop,
+            AuditCaptureState::AuditDisabled,
+            AuditCaptureState::Unavailable,
+        ] {
+            record.capture_state = state;
+            assert!(encode_stored_audit_record(&record).unwrap().is_none());
+        }
+        record.capture_state = AuditCaptureState::ActiveStored;
+        let json = encode_stored_audit_record(&record).unwrap().unwrap();
+        let decoded: RequestAuditRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.capture_state, AuditCaptureState::ActiveStored);
+        assert_eq!(decoded.request_id, record.request_id);
+    }
 }

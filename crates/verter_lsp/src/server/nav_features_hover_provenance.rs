@@ -21,7 +21,7 @@ use super::VerterLanguageServer;
 /// - If the enrichment cache has a payload for `(canonical_id,
 ///   position)` → append it to the hover body.
 /// - On cache miss → spawn a background blocking task to compute
-///   the payload via `VerterHost::get_component_meta_with_resolution`
+///   the payload via `VerterHost::get_component_meta_with_audit`
 ///   and insert it into the cache. The current hover call returns
 ///   the legacy payload immediately.
 ///
@@ -59,9 +59,8 @@ pub(super) fn enrich_hover_with_provenance(
 
     // Cache miss — check whether the host can actually produce a
     // useful payload BEFORE spawning. If `audit_enabled` or
-    // `footprint_capture` are off, `get_component_meta_with_resolution`
-    // would run to completion but `take_record` would
-    // return None and the cache would stay empty. That means
+    // `footprint_capture` are off, the audited entry would return no
+    // captured record and the cache would stay empty. That means
     // every subsequent hover would spawn another futile task.
     // Short-circuit here so the user sees the legacy hover and
     // no blocking-pool slots are burned on a capture-disabled
@@ -83,34 +82,81 @@ pub(super) fn enrich_hover_with_provenance(
         let participation = Arc::clone(server.documents.participation());
         let admitted_fence = participation.fence();
         tokio::task::spawn_blocking(move || {
-            let Some((_analysis, resolution)) = host
-                .as_ref()
-                .get_component_meta_with_resolution(&canonical_for_task)
-            else {
+            let Some(payload) = provenance_payload(host.as_ref(), &canonical_for_task) else {
                 return;
             };
-            let Some(record) = host
-                .as_ref()
-                .host_audit_runtime()
-                .take_record(resolution.request_id)
-            else {
-                return;
-            };
-            let markdown = crate::features::hover_provenance::render_provenance_markdown(&record);
             // Work admitted under a superseded demand epoch is never warmed.
             if participation.fence() != admitted_fence {
                 return;
             }
-            cache.insert(
-                key,
-                crate::features::hover_provenance::HoverProvenancePayload { markdown },
-            );
+            cache.insert(key, payload);
         });
     }
     #[cfg(not(feature = "semantic-observe"))]
     let _ = (key, canonical_id);
 
     hover
+}
+
+#[cfg(feature = "semantic-observe")]
+fn provenance_payload(
+    host: &verter_session::VerterHost,
+    canonical: &str,
+) -> Option<crate::features::hover_provenance::HoverProvenancePayload> {
+    let (Some(_analysis), Some(record)) = host.get_component_meta_with_audit(canonical) else {
+        return None;
+    };
+    Some(crate::features::hover_provenance::HoverProvenancePayload {
+        markdown: crate::features::hover_provenance::render_provenance_markdown(&record),
+    })
+}
+
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(all(test, feature = "semantic-observe"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hover_provenance_renders_its_own_request_record() {
+        let host = verter_session::VerterHost::new_standalone(verter_session::HostConfig {
+            audit_enabled: true,
+            footprint_capture: true,
+            ..Default::default()
+        });
+        let canonical = "/workspace/Flag.vue";
+        let _ = host
+            .upsert(verter_session::UpsertRequest {
+                canonical_id: Some(canonical.into()),
+                input_id: canonical.into(),
+                source: Arc::from(
+                    "<script setup lang=\"ts\">defineProps<{ on: boolean }>()</script>",
+                ),
+                file_language: host.language_classifier().classify(canonical),
+                aliases: vec![],
+            })
+            .unwrap();
+        let (_, stale) = host.get_component_meta_with_resolution(canonical).unwrap();
+        let payload = provenance_payload(&host, canonical).expect("captured hover request");
+        let rendered_id = payload
+            .markdown
+            .split("request_id = ")
+            .nth(1)
+            .unwrap()
+            .split('`')
+            .next()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert!(rendered_id > stale.request_id);
+        assert!(!payload
+            .markdown
+            .contains(&format!("request_id = {}`", stale.request_id)));
+        assert!(host
+            .host_audit_runtime()
+            .take_record(stale.request_id)
+            .is_some());
+        assert!(host.host_audit_runtime().take_record(rendered_id).is_none());
+    }
 }
 
 /// Append a markdown suffix to a hover body. Used by the hover

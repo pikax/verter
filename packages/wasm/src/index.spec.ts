@@ -92,7 +92,7 @@ beforeEach(async () => {
 describe("@verter/wasm host wrapper", () => {
   it("decodes audit JSON text and forwards the original text to both Rust walkers", () => {
     const auditJson =
-      '{ "analysis": {}, "resolution": {}, "record": { "request_id": "9007199254740993" } }';
+      '{ "analysis": { "resolution": {} }, "record": { "request_id": "9007199254740993" } }';
     expect(decodeAuditBundle(auditJson)?.record.request_id).toBe("9007199254740993");
     expect(decodeAuditBundle(null)).toBeNull();
     expect(() => decodeAuditBundle("{")).toThrow();

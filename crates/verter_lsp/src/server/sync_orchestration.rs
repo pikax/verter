@@ -218,7 +218,10 @@ impl VerterLanguageServer {
         parent_canonical_id: &str,
         import_source: &str,
         local_binding: &str,
-    ) -> Option<verter_session::framework::ComponentContractAvailability> {
+    ) -> Option<(
+        String,
+        verter_session::framework::ComponentContractAvailability,
+    )> {
         let freshness = self.imported_child_contract_freshness_key()?;
         let key = (parent_canonical_id.to_string(), local_binding.to_string());
         let snapshot = self.barrel_component_routes.get(&key)?.clone();
@@ -256,7 +259,7 @@ impl VerterLanguageServer {
                 &snapshot.publication_witness,
             );
         }
-        current.then_some(snapshot.contract)
+        current.then_some((snapshot.terminal_canonical_id, snapshot.contract))
     }
 
     pub(super) fn publish_barrel_component_route(

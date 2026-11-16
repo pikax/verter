@@ -1,7 +1,7 @@
 # Native component facts
 
 `verter_ffi::component_meta` owns the materialized-payload byte encoder and
-the shared `AuditBundle` with its JSON byte encoder. NAPI and WASM scalar and
+the shared `AuditBundle` with its JSON byte encoder. The bundle has exactly `analysis` and `record`; resolution appears only at `analysis.resolution`. NAPI and WASM scalar and
 batch component-meta calls use the seeded session payload entries and the same
 encoder: NAPI returns Buffers, WASM returns `Uint8Array | null` slots. WASM's
 audit entry returns the shared bundle's UTF-8 JSON as text; `decodeAuditBundle`
