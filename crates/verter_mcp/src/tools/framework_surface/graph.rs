@@ -860,7 +860,7 @@ fn project_predicate_subject(v: &wire::GraphPredicateSubject, strings: &[String]
     match &v.kind {
         Some(Kind::Identifier(v)) => tagged(
             "identifier",
-            project_predicate_subject_identifier(v, strings),
+            project_predicate_subject_name(v.name_id, strings),
         ),
         Some(Kind::ThisSubject(v)) => {
             tagged("thisSubject", project_predicate_subject_this(v, strings))
@@ -869,13 +869,10 @@ fn project_predicate_subject(v: &wire::GraphPredicateSubject, strings: &[String]
     }
 }
 
-fn project_predicate_subject_identifier(
-    v: &wire::GraphPredicateSubjectIdentifier,
-    strings: &[String],
-) -> Value {
+fn project_predicate_subject_name(name_id: u32, strings: &[String]) -> Value {
     json!({
-        "nameId": v.name_id,
-        "name": resolve_string(strings, v.name_id),
+        "nameId": name_id,
+        "name": resolve_string(strings, name_id),
     })
 }
 
