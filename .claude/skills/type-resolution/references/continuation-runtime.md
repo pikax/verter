@@ -309,3 +309,42 @@ the in-place driver borrows the context on the stack without allocating a box.
 A caller retaining a suspended lowering boxes it only where its frame requires
 that storage. Both owned reads are `Send` and neither is `Clone` or `Copy`.
 
+
+## Stepping structural-fact demands
+
+`evaluate.rs` owns `StructuralFactRead`, the structural-fact normalizer's
+carrier chain and composite-arm stack between reads. `begin_structural_fact_read`
+and `resume_structural_fact_read` return `FactStep::Done`, `Composite`, or a
+query key with the owned read. The read is `Send`, never `Clone` or `Copy`.
+`begin_structural_composite_read` begins the standalone composite entry,
+preserving its optional reduction through `FactStep::Composite`.
+The existing normalization, carrier-preserving peel and composite entries drive
+the same advances in place; they retain the current frame on the stack and
+allocate parent storage only when the walk descends.
+
+The carrier loop exposes its residual `ResolveDecl` and `Instantiate` probes,
+its alias-through instantiation and the reads its held `DeferredRead` names.
+The composite finish also yields its canonical `ReduceIntersection` query;
+the returned read is consumed by `intersection_of_reduction`, after the
+completed arm walk, without repeating distribution or arm classification.
+The chain retains its visited carriers, current node, typed completeness and
+availability, alias-printing argument cursor and operation-budget epoch.
+Completed composite demands and arm positions survive delivery. A read-free
+demand adds no continuation allocation.
+
+Each stage enters the connected demand and leaves it before returning a read.
+Its holder keeps the enclosing connected demand open, as for `DeferredRead`;
+no connected guard or dispatcher borrow lives in the suspended value. A probe
+holds an `ObservedRead<()>` between advances, reopens it with
+`ObservedRead::resume` and invokes the supplied delivery inside that scope.
+An honest negative lookup discards the probe and keeps its authored carrier;
+an adopted lookup retains its ordinary facts, availability and taint.
+`reads_for_carrier` forwards only the held deferred evaluation's carrier-intent
+classification; residual probes keep their existing `execute_read` accounting.
+
+`abandon_structural_fact_read` releases held deferred recordings and composite
+normalization records from the innermost frame outward. Suspended probes have
+no installed thread or build-local observation. This helper exposes those
+specific boundaries; it does not convert the synchronous shared helpers reached
+inside argument preparation, declaration printing or final composite reduction,
+or make an arbitrary semantic root nonblocking.
