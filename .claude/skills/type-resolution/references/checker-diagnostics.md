@@ -147,7 +147,7 @@ the checker's first failure and records no diagnostic.
 - A lone non-generic signature with a DECLARED return is resolved through the executor
   (`lone_declared_signature`), so its applicability — and its diagnostic — is decided; its answer
   is the declared return either way: a refusal, or a route that cannot type the call, falls back to
-  the caller's declared read (`callee_is_lone_declared`).
+  the caller's declared read (`fold_with_lists`).
 - With explicit type arguments over overloads, the one candidate whose arity fits the call reports
   its argument's TS2345 instead of TS2769, and the call recovers with the checker's longest candidate
   (`explicit_overload_recovery`, `getLongestCandidateIndex`) — the same one, or another whose

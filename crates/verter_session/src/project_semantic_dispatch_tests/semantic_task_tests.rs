@@ -3027,7 +3027,7 @@ const CALL_VALUE_FILE: &str = "/semantic-task/call-value.ts";
 /// body calls again (`run(() => run(() => 1))`), and an overloaded callee
 /// whose route runs where it stands (`pick(1)`); and a generic call whose
 /// context-sensitive argument is a conditional of function values, which
-/// the call names for its consumer to type (`both(1, cond ? .. : ..)`).
+/// the call names for its consumer to type (`pair(1, cond ? .. : ..)`).
 const CALL_VALUE: &str = "declare function g(x: number): number;\n\
                           declare function f(x: number): string;\n\
                           declare function run<R>(cb: () => R): R;\n\
@@ -3041,11 +3041,19 @@ const CALL_VALUE: &str = "declare function g(x: number): number;\n\
                           export function overloaded() {\n\
                           return pick(1);\n\
                           }\n\
-                          declare function both<T, U>(seed: T, f: (x: T) => U): [T, U];\n\
+                          declare function pair<T, U>(seed: T, f: (x: T) => U): [T, U];\n\
                           declare const cond: boolean;\n\
                           export function untyped() {\n\
-                          return both(1, cond ? (x) => x : (x) => x);\n\
-                          }\n";
+                          return pair(1, cond ? (x) => x : (x) => x);\n\
+                          }\n\
+                          declare const u: ((x: number) => number) | ((x: number) => string);\n\
+                          declare const runner: <R>(cb: () => R) => R;\n\
+                          export function callback() { return runner(() => 1); }\n\
+                          export function guarded(value: unknown, accepts: (value: unknown, cb: () => number) => value is number) { let narrowed = accepts(value, () => 1) && value; return narrowed || 0; }\n\
+                          export function refused() { return pick(true); }\n\
+                          export function inner() { return () => pick(1); }\n\
+                          export function unionCallee() { return u(1); }\n\
+                          export function both() { const r: ReturnType<typeof g> = g(1); return pick(r); }\n";
 
 /// Each root of [`CALL_VALUE`], the calls one evaluation of its body
 /// evaluates, and the return it answers.
@@ -3145,6 +3153,237 @@ fn a_polled_call_answers_what_the_synchronous_call_answers() {
     }
 }
 
+/// A fresh call-value read with its requested-read count and the body reads it counted.
+fn call_list_read(
+    name: &str,
+    polled: bool,
+) -> (
+    usize,
+    semantic_poll_contract::JoinedEvidence,
+    Vec<(
+        verter_type_engine::project_semantic_dispatch::flow_return::body_reads::BodyReadSite,
+        u64,
+    )>,
+) {
+    use verter_type_engine::project_semantic_dispatch::flow_return::{
+        body_reads, flow_read_requests_for_tests, with_list_delivery_limit_for_tests,
+    };
+    // Far more deliveries than any root here can need: a list that asks
+    // again for a read it was answered fails at the bound, not at a deadline.
+    const LIST_DELIVERY_LIMIT: usize = 64;
+    let host = call_value_host();
+    let mut dispatch = ProjectSemanticDispatch::new(&*host);
+    let key = root_return_key(&dispatch, CALL_VALUE_FILE, name);
+    let _ = body_reads::take();
+    let requests = flow_read_requests_for_tests();
+    let read = with_list_delivery_limit_for_tests(LIST_DELIVERY_LIMIT, || {
+        if polled {
+            let mut entry = dispatch.poll_query(key);
+            let read = semantic_poll_contract::poll_until_ready(|waker| entry.poll(waker));
+            drop(entry);
+            read
+        } else {
+            dispatch.execute_via_cold_build_helper(key)
+        }
+    });
+    let requested = flow_read_requests_for_tests() - requests;
+    let rows = body_reads::take();
+    let evidence = semantic_poll_contract::joined_evidence(&dispatch, &read, |answer| {
+        display_return(&host, answer)
+    });
+    (requested, evidence, rows)
+}
+
+#[test]
+fn a_calls_signature_lists_are_read_by_request() {
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    for (name, expected) in [("overloaded", "number"), ("lowered", "string")] {
+        let (requested, evidence, rows) = call_list_read(name, false);
+        assert_eq!(evidence.0 .0, expected, "{name} answers its return");
+        assert!(requested > 0, "{name} requests its lists: {rows:?}");
+        let below: Vec<_> = rows
+            .iter()
+            .filter(|((_, site, family), _)| {
+                matches!(
+                    *site,
+                    "shared_signature_buckets"
+                        | "shared_signature_nodes"
+                        | "read_in_place"
+                        | "deliver_signature_list"
+                ) && matches!(
+                    family,
+                    SemanticQueryKeyTag::SignaturesOfType
+                        | SemanticQueryKeyTag::ReadSignatureResult
+                )
+            })
+            .collect();
+        assert!(
+            below.is_empty(),
+            "{name}'s call-value lists are answered by the root: {below:?}"
+        );
+    }
+}
+
+#[test]
+fn a_call_reads_its_callees_signature_lists_once() {
+    let (requested, _, rows) = call_list_read("refused", false);
+    assert_eq!(
+        requested, 2,
+        "the group and refusal fold share the two authored lists: {rows:?}"
+    );
+    let (requested, evidence, rows) = call_list_read("callback", false);
+    assert_eq!(evidence.0 .0, "number");
+    // The cold run requests an unsettled call list while `typeof runner`
+    // waits at the flow seam, skipping the construct list. The replay
+    // requests the callee's two settled lists and the contextual arm;
+    // parameter discovery reuses its callee's retained call list.
+    assert_eq!(
+        requested, 4,
+        "one unsettled callee list, then two settled lists and one contextual arm: {rows:?}"
+    );
+}
+
+#[test]
+fn a_call_asked_where_nothing_suspends_reads_its_lists_in_place() {
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    // A parameter's predicate requires its call signature; a closed
+    // same-file predicate would bypass the call route. Its callee type
+    // is already in the frame, so no cold `typeof` lookup adds a replay.
+    // The logical left operand also lowers as a value, retaining the
+    // callback argument for the predicate route on both logical edges.
+    let (_, evidence, rows) = call_list_read("guarded", false);
+    assert_eq!(evidence.0 .0, "number");
+    let count = |site: &str| {
+        rows.iter()
+            .filter(|((_, at, family), _)| {
+                *at == site && *family == SemanticQueryKeyTag::SignaturesOfType
+            })
+            .map(|(_, count)| *count)
+            .sum::<u64>()
+    };
+    assert!(
+        count("read_in_place") > 0,
+        "the predicate route reads its parameter list in place: {rows:?}"
+    );
+    // Guard narrowing reads its callee once for each branch edge.
+    assert_eq!(
+        count("shared_signature_nodes"),
+        2,
+        "the routes add no direct signature-node read: {rows:?}"
+    );
+}
+
+#[test]
+fn a_retyped_callback_reads_its_contextual_signature_by_request() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::{
+        body_reads, flow_read_requests_for_tests, with_body_reads_in_place_for_tests,
+    };
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    let read_callback = || {
+        let host = contextual_host();
+        let dispatch = ProjectSemanticDispatch::new(&*host);
+        let collecting = dispatch.open_request_state_for_tests().collecting_sessions;
+        let work = call_round_work(&host);
+        let requests = flow_read_requests_for_tests();
+        let _ = body_reads::take();
+        let read = dispatch.execute_via_cold_build_helper(contextual_return_key(&dispatch));
+        let requested = flow_read_requests_for_tests() - requests;
+        let rows = body_reads::take();
+        let work = call_round_work_since(call_round_work(&host), work);
+        assert_eq!(display_return(&host, read.value()), "[number, Box<3>]");
+        assert_eq!(
+            dispatch.open_request_state_for_tests().collecting_sessions,
+            collecting
+        );
+        let evidence = semantic_poll_contract::joined_evidence(&dispatch, &read, |answer| {
+            display_return(&host, answer)
+        });
+        (requested, work, evidence, rows)
+    };
+    let (requests, work, requested, rows) = read_callback();
+    let (in_place_requests, in_place_work, in_place, in_place_rows) =
+        with_body_reads_in_place_for_tests(read_callback);
+    assert!(
+        requests > 0 && in_place_requests == 0,
+        "the retyped callback requests its reads: {rows:?}"
+    );
+    assert_eq!(
+        work,
+        [2, 1, 2],
+        "the typed round begins a second walk; one candidate relates both arguments"
+    );
+    assert_eq!(
+        work, in_place_work,
+        "requesting the arm repeats no call work"
+    );
+    assert_eq!(
+        requested.0, in_place.0,
+        "requesting the arm preserves the value and receipt"
+    );
+    let arms = in_place_rows
+        .iter()
+        .filter(|((_, site, family), _)| {
+            *site == "read_in_place" && *family == SemanticQueryKeyTag::SignaturesOfType
+        })
+        .map(|(_, count)| *count)
+        .sum::<u64>();
+    assert!(
+        arms > 0 && requests as u64 >= arms,
+        "the retyping's arm reads become requests: {in_place_rows:?}"
+    );
+    assert!(
+        rows.iter().all(|((_, site, family), _)| {
+            *family != SemanticQueryKeyTag::SignaturesOfType
+                || !matches!(
+                    *site,
+                    "shared_signature_nodes" | "read_in_place" | "deliver_signature_list"
+                )
+        }),
+        "the retyping route requests each contextual arm: {rows:?}"
+    );
+}
+
+#[test]
+fn a_call_in_a_nested_function_requests_its_lists_with_its_activation_kept() {
+    let (requests, synchronous, _) = call_list_read("inner", false);
+    let (polled_requests, polled, _) = call_list_read("inner", true);
+    assert!(
+        requests > 0 && polled_requests > 0,
+        "the nested call requests its lists"
+    );
+    semantic_poll_contract::assert_joined_matches(polled, &synchronous);
+}
+
+#[test]
+fn a_union_callee_answers_through_its_list() {
+    let (requests, synchronous, rows) = call_list_read("unionCallee", false);
+    let (polled_requests, polled, _) = call_list_read("unionCallee", true);
+    assert_eq!(synchronous.0 .0, "number | string");
+    assert_eq!(
+        requests, 3,
+        "the call list, its composite result, then the construct list: {rows:?}"
+    );
+    assert_eq!(polled_requests, 3);
+    semantic_poll_contract::assert_joined_matches(polled, &synchronous);
+}
+
+#[test]
+fn a_requested_list_reads_as_the_list_read_in_place() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::with_body_reads_in_place_for_tests;
+    for name in ["both", "unionCallee"] {
+        for polled in [false, true] {
+            let (requests, requested, _) = call_list_read(name, polled);
+            let (in_place_requests, in_place, _) =
+                with_body_reads_in_place_for_tests(|| call_list_read(name, polled));
+            assert!(
+                requests > 0 && in_place_requests == 0,
+                "{name} requests reads only with requests enabled"
+            );
+            assert_eq!(requested.0, in_place.0, "{name} (polled: {polled}) preserves value, facts, diagnostics and receipt footprint");
+        }
+    }
+}
+
 /// A contextual call whose executor names a callback this evaluator does not
 /// type (a conditional of function values) settles without it, and leaves no
 /// collecting session behind: the call's held collector returns to the
@@ -3169,18 +3408,21 @@ fn a_contextual_call_whose_callback_is_not_typed_leaves_no_collecting_session() 
 }
 
 /// The reads a root flow read's own body makes at its own depth are
-/// counted, each under the site that made it: the contextual body's read
-/// of its callee's signatures (the read its frame joins another task's
-/// producer through) is counted, under a driver method.
+/// counted, each under the site that made it: a generic call's executor
+/// still reads its function argument's signature under `begin_call`.
 #[test]
 fn each_body_read_of_a_root_flow_read_is_counted_under_its_site() {
     use verter_type_engine::project_semantic_dispatch::flow_return::body_reads;
     use verter_type_engine::semantic_query::SemanticQueryKeyTag;
     const PHASES: [&str; 5] = ["prepare", "prelude", "body", "finish", "close"];
-    let host = contextual_host();
+    let host = call_value_host();
     let dispatch = ProjectSemanticDispatch::new(&*host);
     let _ = body_reads::take();
-    let _ = dispatch.execute_via_cold_build_helper(contextual_return_key(&dispatch));
+    let _ = dispatch.execute_via_cold_build_helper(root_return_key(
+        &dispatch,
+        CALL_VALUE_FILE,
+        "contextual",
+    ));
     let cold = body_reads::take();
     let signatures: Vec<_> = cold
         .iter()
@@ -3374,7 +3616,7 @@ fn a_declared_annotations_closed_signature_utility_is_counted_as_read_in_place()
 #[test]
 fn a_requested_type_leaf_read_answers_and_charges_what_the_in_place_read_does() {
     use verter_type_engine::project_semantic_dispatch::flow_return::{
-        flow_read_requests_for_tests, with_type_leaves_read_in_place_for_tests,
+        flow_read_requests_for_tests, with_body_reads_in_place_for_tests,
     };
     let summary = |name: &str, polled: bool| {
         let host = utility_host();
@@ -3398,7 +3640,7 @@ fn a_requested_type_leaf_read_answers_and_charges_what_the_in_place_read_does() 
         for polled in [false, true] {
             let (requested, by_request) = summary(name, polled);
             let (in_place_requests, in_place) =
-                with_type_leaves_read_in_place_for_tests(|| summary(name, polled));
+                with_body_reads_in_place_for_tests(|| summary(name, polled));
             assert!(
                 requested >= 1 && in_place_requests == 0,
                 "{name} (polled: {polled}) is read by request, then in place: {requested}, {in_place_requests}"

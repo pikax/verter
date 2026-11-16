@@ -213,6 +213,27 @@ impl ContextualSignature {
     }
 }
 
+/// The contextual signature's arms, and the one signature they agree on.
+pub(super) struct ContextualSignatureRead {
+    arms: Vec<SemanticNodeId>,
+    next: usize,
+    found: Option<SemanticNodeId>,
+    required: usize,
+}
+
+impl ContextualSignatureRead {
+    pub(super) fn arm(&self) -> Option<SemanticNodeId> {
+        self.arms.get(self.next).copied()
+    }
+}
+
+pub(super) enum ArmStep {
+    Next(SemanticNodeId),
+    Done(Option<SemanticNodeId>),
+}
+
+static_assertions::const_assert!(std::mem::size_of::<ArmStep>() <= 16);
+
 /// The sole callee signature's contextual inputs, prepared once for a call
 /// route. Sibling callbacks share discovery and constraint substitution.
 pub(super) struct CalleeParameters {
@@ -310,7 +331,33 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         contextual: SemanticNodeId,
         function: &SliceExpr,
     ) -> Option<ContextualSignature> {
-        let graph = self.dispatch.graph();
+        let mut read = self.begin_contextual_signature(contextual, function);
+        let mut arm = read.arm()?;
+        loop {
+            let nodes = match self
+                .dispatch
+                .shared_signature_nodes(arm, SignatureKind::Call)
+            {
+                super::super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
+                    Some(nodes)
+                }
+                super::super::signature_discovery::SharedSignatureNodes::Incomplete(_) => None,
+            };
+            match self.contextual_signature_arm(&mut read, nodes.as_deref()) {
+                ArmStep::Next(next) => arm = next,
+                ArmStep::Done(found) => {
+                    return found.and_then(|signature| self.finish_contextual_signature(signature))
+                }
+            }
+        }
+    }
+
+    /// Begin with the graph's arms only; their lists are supplied by the reader.
+    pub(super) fn begin_contextual_signature(
+        &self,
+        contextual: SemanticNodeId,
+        function: &SliceExpr,
+    ) -> Box<ContextualSignatureRead> {
         let required = match function {
             SliceExpr::NestedFunctionValue {
                 required_parameters,
@@ -318,40 +365,65 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
             } => usize::try_from(*required_parameters).unwrap_or(usize::MAX),
             _ => 0,
         };
-        let arity_smaller = |signature: SemanticNodeId| match graph.node_data(signature).as_deref()
-        {
-            Some(SemanticNodeData::Signature { params, .. }) => {
-                let (_, params) = crate::semantic_query::split_this_receiver(params);
-                !params.iter().any(|param| param.rest) && params.len() < required
-            }
-            _ => false,
-        };
-        let arms: Vec<SemanticNodeId> = match graph.node_data(contextual).as_deref() {
+        let arms = match self.dispatch.graph().node_data(contextual).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
             _ => vec![contextual],
         };
-        let mut found = None;
-        for arm in arms {
-            let mut signatures = match self
-                .dispatch
-                .shared_signature_nodes(arm, SignatureKind::Call)
-            {
-                super::super::signature_discovery::SharedSignatureNodes::Nodes(signatures) => {
-                    signatures
+        Box::new(ContextualSignatureRead {
+            arms,
+            next: 0,
+            found: None,
+            required,
+        })
+    }
+
+    /// Merge a single arm, preserving arity filtering and union agreement.
+    pub(super) fn contextual_signature_arm(
+        &self,
+        read: &mut ContextualSignatureRead,
+        nodes: Option<&[SemanticNodeId]>,
+    ) -> ArmStep {
+        let Some(nodes) = nodes else {
+            return ArmStep::Done(None);
+        };
+        let graph = self.dispatch.graph();
+        let mut arm_signature = None;
+        for signature in nodes.iter().copied() {
+            let arity_smaller = match graph.node_data(signature).as_deref() {
+                Some(SemanticNodeData::Signature { params, .. }) => {
+                    let (_, params) = crate::semantic_query::split_this_receiver(params);
+                    !params.iter().any(|param| param.rest) && params.len() < read.required
                 }
-                super::super::signature_discovery::SharedSignatureNodes::Incomplete(_) => {
-                    return None
-                }
+                _ => false,
             };
-            signatures.retain(|signature| !arity_smaller(*signature));
-            match (signatures.as_slice(), found) {
-                ([], _) => {}
-                ([signature], None) => found = Some(*signature),
-                ([signature], Some(first)) if *signature == first => {}
-                _ => return None,
+            if arity_smaller {
+                continue;
+            }
+            // Each arm contributes at most one signature, even when two
+            // candidates happen to name the same node.
+            if arm_signature.replace(signature).is_some() {
+                return ArmStep::Done(None);
             }
         }
-        let signature = found?;
+        match (arm_signature, read.found) {
+            (None, _) => {}
+            (Some(signature), None) => read.found = Some(signature),
+            (Some(signature), Some(found)) if signature == found => {}
+            _ => return ArmStep::Done(None),
+        }
+        read.next += 1;
+        match read.arm() {
+            Some(arm) => ArmStep::Next(arm),
+            None => ArmStep::Done(read.found),
+        }
+    }
+
+    /// The non-generic signature agreed on by every contributing arm.
+    pub(super) fn finish_contextual_signature(
+        &self,
+        signature: SemanticNodeId,
+    ) -> Option<ContextualSignature> {
+        let graph = self.dispatch.graph();
         let data = graph.node_data(signature)?;
         let SemanticNodeData::Signature {
             params,
@@ -413,29 +485,6 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         self.function_argument_value(request.mark, Positional::Value(node))
     }
 
-    /// The request to type a function-value argument that is not context
-    /// sensitive with the call's first pass (`checkExpressionWithContextualType`): its
-    /// parameters are its own, and its body return widens a lone fresh
-    /// literal unless the parameter's contextual return type is a literal
-    /// context for it — the type the callee's one call signature declares
-    /// at position `ordinal`, its type parameters unfixed (`run(() => 1)`
-    /// over `run<R>(cb: () => R): R` passes `() => number`, over `R extends
-    /// number` `() => 1`). A callee with several signatures gives no
-    /// contextual return, so the literal widens. `None` when the argument is
-    /// no nested function value; its evaluation is read by
-    /// [`Self::function_argument_value`].
-    pub(super) fn function_argument_request_under_parameter(
-        &mut self,
-        expr: &SliceExpr,
-        parameter: Option<SemanticNodeId>,
-    ) -> Option<FunctionArgumentRequest> {
-        if !matches!(expr, SliceExpr::NestedFunctionValue { gap: None, .. }) {
-            return None;
-        }
-        let signature = parameter.and_then(|parameter| self.contextual_signature(parameter, expr));
-        self.function_argument_request(expr, signature)
-    }
-
     /// The request to type the function-value argument `expr` (no flow
     /// gap) under `signature`: its demand, and the frame's holds and
     /// degradation before it evaluates.
@@ -489,22 +538,11 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// with each of the signature's type parameters read with its
     /// constraint, as a contextual type reads an unfixed type parameter.
     /// `None` for a callee with no call signature or several.
-    pub(super) fn callee_parameter_types(
+    pub(super) fn callee_parameters_of(
         &self,
-        callee: SemanticNodeId,
+        signatures: &[SemanticNodeId],
     ) -> Result<Option<CalleeParameters>, IncompleteReason> {
-        let signatures = match self
-            .dispatch
-            .shared_signature_nodes(callee, SignatureKind::Call)
-        {
-            super::super::signature_discovery::SharedSignatureNodes::Nodes(signatures) => {
-                signatures
-            }
-            super::super::signature_discovery::SharedSignatureNodes::Incomplete(reason) => {
-                return Err(reason)
-            }
-        };
-        let [signature] = signatures.as_slice() else {
+        let [signature] = signatures else {
             return Ok(None);
         };
         let graph = self.dispatch.graph();

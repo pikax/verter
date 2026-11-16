@@ -22,6 +22,7 @@
 
 use super::nested::{ActivationCell, ActivationOwned, DriveEnd, DriveStep, NestedActivation};
 use super::*;
+use crate::semantic_query::CacheRead;
 
 /// The outcome of a region's evaluation: its contributions, or the failure
 /// that stopped it, and whether it falls through.
@@ -41,11 +42,46 @@ pub(in crate::project_semantic_dispatch) struct ReadWait {
 pub(in crate::project_semantic_dispatch) enum ReadNesting {
     /// Read at the body's own frame, as the frame reads it itself.
     Frame,
+    /// A joined family's read, entered whole and adopted as its own cache read.
+    Entered,
 }
 
-/// The answer to a [`ReadWait`]: the type node it read, or `None` when the
-/// read answered none.
-pub(in crate::project_semantic_dispatch) struct ReadDelivery(pub(super) Option<SemanticNodeId>);
+/// The answer to a requested read.
+pub(in crate::project_semantic_dispatch) enum ReadDelivery {
+    /// A frame read that answered no node.
+    None,
+    /// A frame read's type node.
+    Node(SemanticNodeId),
+    /// An entered read, whole.
+    Value(Box<CacheRead<QueryResult<SemanticQueryValue>>>),
+}
+
+impl ReadDelivery {
+    /// A frame read's node.
+    pub(super) fn node(self) -> Option<SemanticNodeId> {
+        match self {
+            Self::None => None,
+            Self::Node(node) => Some(node),
+            Self::Value(_) => unreachable!("a frame read delivers a node"),
+        }
+    }
+
+    /// An entered read's answer.
+    pub(super) fn into_value(self) -> CacheRead<QueryResult<SemanticQueryValue>> {
+        match self {
+            Self::Value(value) => *value,
+            Self::None | Self::Node(_) => unreachable!("an entered read delivers its whole answer"),
+        }
+    }
+}
+
+static_assertions::const_assert!(std::mem::size_of::<ReadWait>() <= 16);
+static_assertions::const_assert!(std::mem::size_of::<ReadDelivery>() <= 16);
+// A site waiting on a read it requested sits on the run's stack.
+static_assertions::const_assert!(std::mem::size_of::<super::ReadSite<'static>>() <= 24);
+static_assertions::const_assert!(
+    std::mem::size_of::<ReadStep<Option<Vec<SemanticNodeId>>>>() <= 32
+);
 
 /// A reading operation's result: its value, or the read it waits on.
 #[must_use = "a read that waits is requested by its caller"]

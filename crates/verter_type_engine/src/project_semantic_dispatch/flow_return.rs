@@ -2977,8 +2977,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )))
     }
 
-    /// Read what a flow body requested (`wait`): the type node its query
-    /// answers, or `None` when it answers none. A request is read under the
+    /// Read what a flow body requested: a frame read's type node
+    /// or an entered read's whole answer. A request is read under the
     /// checking site it was made under, as the body would read it at the
     /// place it made it.
     pub(super) fn read_requested(&self, wait: ReadWait) -> ReadDelivery {
@@ -2996,16 +2996,40 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 "a body's own frame requests an instantiation or a `typeof`, not {:?}",
                 key.tag()
             ),
+            ReadNesting::Entered => verter_debug_assert!(
+                matches!(
+                    *key,
+                    SemanticQueryKey::SignaturesOfType { .. }
+                        | SemanticQueryKey::ReadSignatureResult(_)
+                ),
+                "an entered body read requests signatures or a signature result, not {:?}",
+                key.tag()
+            ),
         }
         verter_debug_assert!(
             self.checking_site.get() == checking_site,
             "a request is answered under the checking site it was made under"
         );
-        match self.execute_type_node(*key) {
-            QueryResult::Value(crate::semantic_query::SemanticQueryOutput { value, .. }) => {
-                ReadDelivery(Some(value))
+        match nesting {
+            ReadNesting::Frame => match self.execute_type_node(*key) {
+                QueryResult::Value(crate::semantic_query::SemanticQueryOutput {
+                    value, ..
+                }) => ReadDelivery::Node(value),
+                _ => ReadDelivery::None,
+            },
+            ReadNesting::Entered => {
+                ReadDelivery::Value(Box::new(self.execute_via_cold_build_helper(*key)))
             }
-            _ => ReadDelivery(None),
+        }
+    }
+
+    /// A joined family's read, requested under the current checking site.
+    #[inline(never)]
+    fn entered_read(&self, key: SemanticQueryKey) -> ReadWait {
+        ReadWait {
+            key: Box::new(key),
+            nesting: ReadNesting::Entered,
+            checking_site: self.checking_site.get(),
         }
     }
 
@@ -10888,8 +10912,9 @@ use read::{ReadDelivery, ReadNesting, ReadStep, ReadWait};
 mod operators;
 pub(super) use call_stack::HeldContextualRoute;
 use call_stack::{
-    CallArgumentWait, CallFunctionWait, CallInFlight, CallNext, CallStep, CallSuffix, DirectRail,
-    DirectReturn, OptionalChainTail,
+    AfterLists, Buckets, CallArgumentWait, CallFunctionWait, CallInFlight, CallListWait, CallNext,
+    CallStep, CallSuffix, DirectRail, DirectReturn, FoldNext, FoldTail, GroupCallee,
+    OptionalChainTail,
 };
 
 #[path = "flow_return_call_effects.rs"]
@@ -10951,6 +10976,19 @@ pub(super) trait FlowReadDriver {
         node: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> ReadStep<SemanticNodeId>;
+    /// Begin reading a signature list in declaration order, and its first read.
+    fn request_signature_list(
+        &self,
+        subject: SemanticNodeId,
+        kind: SignatureKind,
+    ) -> (super::continuation_stages::SignatureListRead, ReadWait);
+    /// Continue a list with its whole delivered read: settled nodes, no
+    /// settled list, or the read it waits on next.
+    fn deliver_signature_list(
+        &self,
+        list: &mut super::continuation_stages::SignatureListRead,
+        delivery: ReadDelivery,
+    ) -> ReadStep<Option<Vec<SemanticNodeId>>>;
     /// Answer a read the body requested and its root read answers.
     fn answer_read(&self, wait: ReadWait) -> ReadDelivery;
     /// Drive a call not yet begun to its first answer.
@@ -11563,6 +11601,34 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowReadDriver
                 nesting: ReadNesting::Frame,
                 checking_site: self.checking_site.get(),
             }),
+        }
+    }
+    fn request_signature_list(
+        &self,
+        subject: SemanticNodeId,
+        kind: SignatureKind,
+    ) -> (super::continuation_stages::SignatureListRead, ReadWait) {
+        body_read_site!("request_signature_list");
+        let (list, key) =
+            super::continuation_stages::SignatureListRead::begin(subject, kind, false);
+        (list, self.entered_read(key))
+    }
+    fn deliver_signature_list(
+        &self,
+        list: &mut super::continuation_stages::SignatureListRead,
+        delivery: ReadDelivery,
+    ) -> ReadStep<Option<Vec<SemanticNodeId>>> {
+        body_read_site!("deliver_signature_list");
+        #[cfg(any(test, feature = "test-support"))]
+        count_list_delivery();
+        use super::continuation_stages::ListProgress;
+        match self
+            .continuation_stage()
+            .advance_signature_list(list, delivery.into_value())
+        {
+            ListProgress::Read(key) => ReadStep::Wait(self.entered_read(key)),
+            ListProgress::Nodes(nodes) => ReadStep::Ready(Some(nodes)),
+            ListProgress::Unsettled => ReadStep::Ready(None),
         }
     }
     fn answer_read(&self, wait: ReadWait) -> ReadDelivery {
@@ -12713,6 +12779,20 @@ impl<D: FlowDemandDriver> FlowReadDriver for FlowCx<'_, D> {
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> ReadStep<SemanticNodeId> {
         self.driver.closed_signature_utility(node, context)
+    }
+    fn request_signature_list(
+        &self,
+        subject: SemanticNodeId,
+        kind: SignatureKind,
+    ) -> (super::continuation_stages::SignatureListRead, ReadWait) {
+        self.driver.request_signature_list(subject, kind)
+    }
+    fn deliver_signature_list(
+        &self,
+        list: &mut super::continuation_stages::SignatureListRead,
+        delivery: ReadDelivery,
+    ) -> ReadStep<Option<Vec<SemanticNodeId>>> {
+        self.driver.deliver_signature_list(list, delivery)
     }
     fn answer_read(&self, wait: ReadWait) -> ReadDelivery {
         self.driver.answer_read(wait)
@@ -14497,32 +14577,76 @@ pub fn flow_read_requests_for_tests() -> usize {
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    /// Whether flow bodies on this thread read their type leaves in place
-    /// even where their run could request them; test-only.
-    static TYPE_LEAVES_IN_PLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The most signature-list deliveries flow bodies on this thread may take
+    /// while a test bounds them, and how many they took (test-only).
+    static LIST_DELIVERY_LIMIT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static LIST_DELIVERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Run `body` with every flow body on this thread reading its type leaves
-/// in place, as a run that cannot suspend does (test-only), so a test can
-/// compare a requested read with the same read made in place.
+/// Count one signature-list delivery against the bound a test set
+/// ([`with_list_delivery_limit_for_tests`]): a list that asks again for a
+/// read it was already answered fails at once instead of reading forever.
 #[cfg(any(test, feature = "test-support"))]
-pub fn with_type_leaves_read_in_place_for_tests<R>(body: impl FnOnce() -> R) -> R {
-    struct Restore(bool);
+fn count_list_delivery() {
+    if let Some(limit) = LIST_DELIVERY_LIMIT.with(std::cell::Cell::get) {
+        let taken = LIST_DELIVERIES.with(|taken| {
+            taken.set(taken.get() + 1);
+            taken.get()
+        });
+        assert!(
+            taken <= limit,
+            "flow bodies took {taken} signature-list deliveries, more than the {limit} their lists can need"
+        );
+    }
+}
+
+/// Run `body` with the signature-list deliveries of flow bodies on this
+/// thread bounded by `limit` (test-only), so a list that never settles
+/// fails on an assertion instead of a deadline.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_list_delivery_limit_for_tests<R>(limit: usize, body: impl FnOnce() -> R) -> R {
+    struct Restore(Option<usize>, usize);
     impl Drop for Restore {
         fn drop(&mut self) {
-            TYPE_LEAVES_IN_PLACE.with(|flag| flag.set(self.0));
+            LIST_DELIVERY_LIMIT.with(|limit| limit.set(self.0));
+            LIST_DELIVERIES.with(|taken| taken.set(self.1));
         }
     }
-    let _restore = Restore(TYPE_LEAVES_IN_PLACE.with(|flag| flag.replace(true)));
+    let _restore = Restore(
+        LIST_DELIVERY_LIMIT.with(|outer| outer.replace(Some(limit))),
+        LIST_DELIVERIES.with(|taken| taken.replace(0)),
+    );
     body()
 }
 
-/// Whether a run that can suspend requests the reads its type leaves make.
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Whether flow bodies on this thread answer their reads in place
+    /// even where their run could request them; test-only.
+    static BODY_READS_IN_PLACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `body` with every flow body on this thread answering its reads
+/// in place, as a run that cannot suspend does (test-only), so a test can
+/// compare a requested read with the same read made in place.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_body_reads_in_place_for_tests<R>(body: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            BODY_READS_IN_PLACE.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(BODY_READS_IN_PLACE.with(|flag| flag.replace(true)));
+    body()
+}
+
+/// Whether a run that can suspend requests its body reads.
 #[inline]
-fn type_leaves_request_reads() -> bool {
+fn body_requests_reads() -> bool {
     #[cfg(any(test, feature = "test-support"))]
     {
-        !TYPE_LEAVES_IN_PLACE.with(std::cell::Cell::get)
+        !BODY_READS_IN_PLACE.with(std::cell::Cell::get)
     }
     #[cfg(not(any(test, feature = "test-support")))]
     {
@@ -15103,6 +15227,8 @@ enum Waiting<'e> {
 /// A site of an expression run waiting on the answer of a read it
 /// requested, with what its value is finished from.
 enum ReadSite<'e> {
+    /// A call waiting on one of its signature lists.
+    CallList(Box<CallListWait<'e>>),
     /// A type leaf whose lowered `carrier` is a closed signature utility,
     /// read as the utility's answer (the carrier kept when it answers no
     /// node).
@@ -27207,7 +27333,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let carrier = self.lower_body_type_carrier(ty);
         match self.body_type_read(carrier) {
             ReadStep::Ready(node) => node,
-            ReadStep::Wait(wait) => self.dispatch.read_in_place(wait).0.unwrap_or(carrier),
+            ReadStep::Wait(wait) => self.dispatch.read_in_place(wait).node().unwrap_or(carrier),
         }
     }
 
@@ -30144,7 +30270,15 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 // The site that requested the read resumes with its answer.
                 Some(BodyDelivery::Read(delivery)) => match run.waiting.pop() {
                     Some(Waiting::Read(ReadSite::ClosedUtility { leaf, carrier })) => {
-                        self.finish_type_leaf(leaf, delivery.0.unwrap_or(carrier))
+                        self.finish_type_leaf(leaf, delivery.node().unwrap_or(carrier))
+                    }
+                    Some(Waiting::Read(ReadSite::CallList(wait))) => {
+                        let step = self.resume_call_list(wait, delivery);
+                        match self.call_step_on_run(run, step, suspend) {
+                            ResumedCall::Value(value) => value,
+                            ResumedCall::Descend => continue,
+                            ResumedCall::Wait(wait) => return ExprProgress::Wait(wait),
+                        }
                     }
                     _ => unreachable!("a read's delivery resumes the site that requested it"),
                 },
@@ -30265,28 +30399,11 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     // stack: its callee operand and the lowered arguments its
                     // executor route types evaluate here ([`call_stack`]).
                     SliceExpr::Call(call, site, arguments) => {
-                        match self.begin_call(call, *site, arguments) {
-                            CallStep::Done(value) => value,
-                            CallStep::Operand(flight, operand) => {
-                                run.waiting.push(Waiting::CallOperand(flight));
-                                run.waiting.push(Waiting::Erase);
-                                run.current = operand;
-                                continue;
-                            }
-                            CallStep::Argument(wait) => {
-                                run.current = wait.lowered;
-                                run.waiting.push(Waiting::CallArgument(wait));
-                                run.waiting.push(Waiting::Erase);
-                                continue;
-                            }
-                            CallStep::Function(mut wait) => {
-                                let demand = wait.take_demand();
-                                run.waiting.push(Waiting::CallFunction(wait));
-                                if suspend {
-                                    return ExprProgress::Wait(BodyWait::Nested(demand));
-                                }
-                                Positional::Value(self.eval_nested_demand(demand))
-                            }
+                        let step = self.begin_call(call, *site, arguments);
+                        match self.call_step_on_run(run, step, suspend) {
+                            ResumedCall::Value(value) => value,
+                            ResumedCall::Descend => continue,
+                            ResumedCall::Wait(wait) => return ExprProgress::Wait(wait),
                         }
                     }
                     // A nested function value suspends the run when the caller
@@ -30301,7 +30418,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     }
                     // A type leaf whose answer is a read suspends the run when
                     // the caller requests reads; without, it reads in place.
-                    SliceExpr::Type(leaf) if suspend && type_leaves_request_reads() => {
+                    SliceExpr::Type(leaf) if suspend && body_requests_reads() => {
                         match self.begin_type_leaf(run, leaf) {
                             ReadStep::Ready(node) => self.finish_type_leaf(leaf, node),
                             ReadStep::Wait(wait) => {
@@ -30445,7 +30562,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     }
                     Some(Waiting::CallOperand(flight)) => {
                         let step = self.resume_call_operand(flight, value);
-                        match self.resumed_call_step(run, step, suspend) {
+                        match self.call_step_on_run(run, step, suspend) {
                             ResumedCall::Value(done) => value = done,
                             ResumedCall::Descend => break,
                             ResumedCall::Wait(wait) => return ExprProgress::Wait(wait),
@@ -30453,7 +30570,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     }
                     Some(Waiting::CallArgument(wait)) => {
                         let step = self.resume_call_argument(*wait, value);
-                        match self.resumed_call_step(run, step, suspend) {
+                        match self.call_step_on_run(run, step, suspend) {
                             ResumedCall::Value(done) => value = done,
                             ResumedCall::Descend => break,
                             ResumedCall::Wait(wait) => return ExprProgress::Wait(wait),
@@ -30469,7 +30586,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     }
                     Some(Waiting::CallFunction(wait)) => {
                         let step = self.resume_call_function(*wait, value);
-                        match self.resumed_call_step(run, step, suspend) {
+                        match self.call_step_on_run(run, step, suspend) {
                             ResumedCall::Value(done) => value = done,
                             ResumedCall::Descend => break,
                             ResumedCall::Wait(wait) => return ExprProgress::Wait(wait),
@@ -30512,32 +30629,47 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         }
     }
 
-    /// Take a resumed call's next step on `run`: its value, a child to
-    /// descend into (pushed as `run`'s current), or a function-value
-    /// argument to suspend at (evaluated in place without `suspend`).
-    fn resumed_call_step<'e>(
+    /// Take a call's next step on the expression run, retaining its
+    /// waiting state across operand, argument and signature-list reads.
+    fn call_step_on_run<'e>(
         &mut self,
         run: &mut ExprRun<'e>,
-        step: CallStep<'e>,
+        mut step: CallStep<'e>,
         suspend: bool,
     ) -> ResumedCall {
-        match step {
-            CallStep::Done(done) => ResumedCall::Value(done),
-            CallStep::Argument(wait) => {
-                run.current = wait.lowered;
-                run.waiting.push(Waiting::CallArgument(wait));
-                run.waiting.push(Waiting::Erase);
-                ResumedCall::Descend
-            }
-            CallStep::Function(mut wait) => {
-                let demand = wait.take_demand();
-                run.waiting.push(Waiting::CallFunction(wait));
-                if suspend {
-                    return ResumedCall::Wait(BodyWait::Nested(demand));
+        loop {
+            match step {
+                CallStep::Done(done) => return ResumedCall::Value(done),
+                CallStep::Operand(flight, operand) => {
+                    run.waiting.push(Waiting::CallOperand(flight));
+                    run.waiting.push(Waiting::Erase);
+                    run.current = operand;
+                    return ResumedCall::Descend;
                 }
-                ResumedCall::Value(Positional::Value(self.eval_nested_demand(demand)))
+                CallStep::Argument(wait) => {
+                    run.current = wait.lowered;
+                    run.waiting.push(Waiting::CallArgument(wait));
+                    run.waiting.push(Waiting::Erase);
+                    return ResumedCall::Descend;
+                }
+                CallStep::Function(mut wait) => {
+                    let demand = wait.take_demand();
+                    run.waiting.push(Waiting::CallFunction(wait));
+                    if suspend {
+                        return ResumedCall::Wait(BodyWait::Nested(demand));
+                    }
+                    return ResumedCall::Value(Positional::Value(self.eval_nested_demand(demand)));
+                }
+                CallStep::Read(mut wait) => {
+                    let request = wait.take_wait();
+                    if suspend && body_requests_reads() {
+                        run.waiting.push(Waiting::Read(ReadSite::CallList(wait)));
+                        return ResumedCall::Wait(BodyWait::Read(request));
+                    }
+                    let delivery = self.dispatch.read_in_place(request);
+                    step = self.resume_call_list(wait, delivery);
+                }
             }
-            CallStep::Operand(..) => unreachable!("a call evaluates its operand once"),
         }
     }
 
@@ -31469,8 +31601,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         &self,
         node: SemanticNodeId,
         site: verter_session_query::flow::slice::SliceCallSite,
+        buckets: Option<Buckets<'_>>,
     ) -> bool {
-        let Ok((call_sigs, construct_sigs)) = self.dispatch.shared_signature_buckets(node) else {
+        let Some((call_sigs, construct_sigs)) = buckets else {
             return false;
         };
         if call_sigs.len() + construct_sigs.len() > 1 {
@@ -31508,7 +31641,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         // A parameterless signature called with no arguments cannot be
         // refused, so its declared return is read as it stands.
         if self
-            .lone_declared_signature(&call_sigs, &construct_sigs)
+            .lone_declared_signature(call_sigs, construct_sigs)
             .is_some_and(|only| {
                 site.supplies_parameter_ordinal(0) || self.signature_takes_parameters(only)
             })
@@ -31531,19 +31664,6 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         ..
                     }) if !type_parameters.is_empty()
                 )
-            })
-    }
-
-    /// Whether `callee`'s one signature is a lone non-generic one with a
-    /// DECLARED return ([`Self::lone_declared_signature`]): a refusal of
-    /// its call leaves that declared return, read by the caller's own
-    /// rail, as the answer.
-    fn callee_is_lone_declared(&self, callee: SemanticNodeId) -> bool {
-        self.dispatch
-            .shared_signature_buckets(callee)
-            .is_ok_and(|(call_sigs, construct_sigs)| {
-                self.lone_declared_signature(&call_sigs, &construct_sigs)
-                    .is_some()
             })
     }
 
@@ -31584,15 +31704,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         )
     }
 
-    /// Whether a signature of `callee` reads its own type parameters in
-    /// its return: a declared return naming one, or a return the body
-    /// derives (which the lane cannot inspect before it runs, so it is
-    /// read as naming one). A callee whose signatures cannot be listed
-    /// is read as reading its clause.
-    fn undecided_call_return_reads_clause(&self, callee: SemanticNodeId) -> bool {
-        let Ok((call_sigs, construct_sigs)) = self.dispatch.shared_signature_buckets(callee) else {
-            return true;
-        };
+    /// Whether any signature's return reads its own type parameters.
+    fn signatures_read_clause(
+        &self,
+        call_sigs: &[SemanticNodeId],
+        construct_sigs: &[SemanticNodeId],
+    ) -> bool {
         let graph = self.dispatch.graph();
         call_sigs
             .iter()
@@ -31715,6 +31832,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let mut progress = self.start_resolve_call(callee, site, arguments);
         loop {
             match progress {
+                call_stack::ResolveCallProgress::List(list) => {
+                    let nodes = self.read_list_in_place(list.subject, list.kind);
+                    progress = self.deliver_route_list(list, nodes.as_deref());
+                }
                 call_stack::ResolveCallProgress::Done(step) => return step,
                 call_stack::ResolveCallProgress::Argument(route, lowered) => {
                     let value = self.eval_expr(lowered);
@@ -31744,31 +31865,22 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// back here — a completed, already-instantiated return through the
     /// callee gate's named no-transfer constructor, an SCC back-edge as a
     /// hold, a typed refusal as the `UnrepresentableCallee` degradation
-    /// this rail already defines for a callee it cannot represent. `None`
-    /// when the route decided nothing: the call's next stage reads its
-    /// callee itself.
-    fn fold_resolve_call_step(
+    /// this rail already defines for a callee it cannot represent. A fold
+    /// that depends on the callee's lists requests them before deciding; a
+    /// folded absent answer leaves the next stage to read the callee.
+    fn fold_before_lists(
         &mut self,
         step: Option<Positional<super::call_resolve::ResolveCallStep>>,
-        callee: SemanticNodeId,
         site: verter_session_query::flow::slice::SliceCallSite,
-    ) -> Option<Positional<CallValue>> {
+    ) -> FoldNext {
         let step = match step {
             Some(Positional::Value(step)) => step,
-            Some(Positional::Hold) => return Some(Positional::Hold),
+            Some(Positional::Hold) => return FoldNext::Folded(Some(Positional::Hold)),
             // A route that cannot type the call decides nothing: a lone
             // declared callee's caller still reads its declared return, but
             // its applicability went unchecked, so the result is a recorded
             // gap, never claimed complete.
-            Some(Positional::Unmodeled) | None => {
-                if self.callee_is_lone_declared(callee) {
-                    self.record_degradation(
-                        crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
-                    );
-                    return None;
-                }
-                return Some(self.degraded_unrepresentable_callee());
-            }
+            Some(Positional::Unmodeled) | None => return FoldNext::Lists(FoldTail::Untyped),
         };
         match step {
             super::call_resolve::ResolveCallStep::Complete(result) => {
@@ -31841,25 +31953,24 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         }
                     }
                 }
-                Some(Positional::Value(CallValue::of_resolved_call(
+                FoldNext::Folded(Some(Positional::Value(CallValue::of_resolved_call(
                     self.dispatch,
                     returned,
-                )))
+                ))))
             }
             // A back-edge through the executor re-enters a return in flight.
             super::call_resolve::ResolveCallStep::Hold(_) => {
                 let recovery = self.circular_return_recovery();
-                Some(Positional::Value(CallValue::of_resolved_call(
+                FoldNext::Folded(Some(Positional::Value(CallValue::of_resolved_call(
                     self.dispatch,
                     recovery,
-                )))
+                ))))
             }
             super::call_resolve::ResolveCallStep::Degraded(
                 crate::semantic_query::ResolveCallFailure::Diagnosed(recipe),
             ) => {
                 self.record_call_diagnostic(&recipe, site);
-                (!self.callee_is_lone_declared(callee))
-                    .then(|| self.degraded_unrepresentable_callee())
+                FoldNext::Lists(FoldTail::Refused)
             }
             // A PROVEN refusal — the callee is not callable, or no
             // overload accepts the authored arguments — is the typed
@@ -31869,19 +31980,14 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             super::call_resolve::ResolveCallStep::Degraded(
                 crate::semantic_query::ResolveCallFailure::NotCallable
                 | crate::semantic_query::ResolveCallFailure::NoApplicableOverload,
-            ) => (!self.callee_is_lone_declared(callee))
-                .then(|| self.degraded_unrepresentable_callee()),
+            ) => FoldNext::Lists(FoldTail::Refused),
             // So is a call whose type parameter the checker infers from a
             // context-sensitive argument's return: this rail's own read
             // would answer that parameter's fallback. The refusal keeps
             // its own typed cause.
             super::call_resolve::ResolveCallStep::Degraded(
                 crate::semantic_query::ResolveCallFailure::ContextSensitiveInference { .. },
-            ) => (!self.callee_is_lone_declared(callee)).then(|| {
-                self.degraded_call(
-                    crate::semantic_query::FlowReturnDegradation::ContextSensitiveInference,
-                )
-            }),
+            ) => FoldNext::Lists(FoldTail::ContextSensitive),
             // An UNDECIDED executor (the machinery cannot decide this
             // shape, or a budget edge) is NOT a refusal: the caller
             // falls back to this rail's own read of the same call. That
@@ -31895,9 +32001,40 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             super::call_resolve::ResolveCallStep::Degraded(
                 crate::semantic_query::ResolveCallFailure::Undecidable
                 | crate::semantic_query::ResolveCallFailure::Budget,
-            ) => ((site.supplies_parameter_ordinal(0) || site.has_explicit_type_arguments())
-                && self.undecided_call_return_reads_clause(callee))
-            .then(|| self.degraded_unrepresentable_callee()),
+            ) => {
+                if site.supplies_parameter_ordinal(0) || site.has_explicit_type_arguments() {
+                    FoldNext::Lists(FoldTail::Undecided)
+                } else {
+                    FoldNext::Folded(None)
+                }
+            }
+        }
+    }
+
+    /// Finish the route's fold with its callee's settled lists.
+    fn fold_with_lists(
+        &mut self,
+        tail: FoldTail,
+        buckets: Option<Buckets<'_>>,
+    ) -> Option<Positional<CallValue>> {
+        let lone = buckets.is_some_and(|(calls, constructs)| {
+            self.lone_declared_signature(calls, constructs).is_some()
+        });
+        match tail {
+            FoldTail::Untyped => {
+                if lone {
+                    self.record_degradation(FlowReturnDegradation::UnrepresentableCallee);
+                    None
+                } else {
+                    Some(self.degraded_unrepresentable_callee())
+                }
+            }
+            FoldTail::Refused => (!lone).then(|| self.degraded_unrepresentable_callee()),
+            FoldTail::ContextSensitive => (!lone)
+                .then(|| self.degraded_call(FlowReturnDegradation::ContextSensitiveInference)),
+            FoldTail::Undecided => buckets
+                .is_none_or(|(calls, constructs)| self.signatures_read_clause(calls, constructs))
+                .then(|| self.degraded_unrepresentable_callee()),
         }
     }
 
@@ -31962,14 +32099,14 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     ) -> CallNext<'e> {
         use verter_session_query::flow::slice::SliceCall;
         match call {
-            SliceCall::Nested(_) => self.nested_call(site, operand),
+            SliceCall::Nested(_) => self.nested_call(operand),
             SliceCall::Direct(target) => self.direct_call(target, site, arguments),
             SliceCall::OnBinding {
                 binding,
                 param,
                 captured,
                 ..
-            } => self.binding_call(binding, *param, *captured, site),
+            } => self.binding_call(binding, *param, *captured),
             SliceCall::LocalFunctionShadow => {
                 // A call to a hoisted nested function declaration: the
                 // declaration shadows every outer same-name callee; exact
@@ -31985,7 +32122,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 static_side,
                 this,
             } => self.heritage_call(heritage, member, *static_side, this, site),
-            SliceCall::Symbolic(callee) => self.symbolic_call(callee, site),
+            SliceCall::Symbolic(callee) => self.symbolic_call(callee),
             SliceCall::Member { member, .. } => self.member_call(member, site, operand),
             SliceCall::OptionalChain {
                 root,
@@ -32007,7 +32144,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             SliceCall::OnValue { member, .. } => self.value_member_call(member, site, operand),
             SliceCall::OnElement { index, .. } => self.element_call(index, site, operand),
             SliceCall::Construct(_) => self.construct_call(operand),
-            SliceCall::TaggedTemplate(_) => self.tagged_template_call(site, operand),
+            SliceCall::TaggedTemplate(_) => self.tagged_template_call(operand),
         }
     }
 
@@ -32052,10 +32189,18 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 if overloaded {
                     self.degraded_unrepresentable_callee()
                 } else {
-                    self.binding_call_value(node, site)
+                    return CallNext::Lists {
+                        subject: node,
+                        then: AfterLists::Group(GroupCallee::BindingValue),
+                    };
                 }
             }
-            CallSuffix::SymbolicGroup { callee } => return self.symbolic_group(callee, site, true),
+            CallSuffix::SymbolicGroup { callee } => {
+                return CallNext::Lists {
+                    subject: callee,
+                    then: AfterLists::Group(GroupCallee::Symbolic { asked: true }),
+                }
+            }
             CallSuffix::Group { callee, overloaded } => {
                 if overloaded {
                     self.degraded_unrepresentable_callee()
@@ -32072,11 +32217,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
 
     /// An immediately invoked function value's call.
     #[inline(never)]
-    fn nested_call<'e>(
-        &mut self,
-        site: verter_session_query::flow::slice::SliceCallSite,
-        operand: Option<Positional<SemanticNodeId>>,
-    ) -> CallNext<'e> {
+    fn nested_call<'e>(&mut self, operand: Option<Positional<SemanticNodeId>>) -> CallNext<'e> {
         let graph = self.dispatch.graph();
         // An IIFE: the call's value is the nested function's
         // evaluated return. The nested function's signature node
@@ -32100,10 +32241,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         }
         // A generic callee infers its clause from the arguments
         // through the executor, as a binding-held one does.
-        if self.call_group_needs_executor(signature, site) {
-            return CallNext::route(signature, CallSuffix::Signature { node: signature });
+        CallNext::Lists {
+            subject: signature,
+            then: AfterLists::Group(GroupCallee::Nested),
         }
-        CallNext::Value(self.signature_call_value(signature, site))
     }
 
     /// The call value of an immediately invoked function value's
@@ -32496,7 +32637,6 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         binding: &verter_session_query::flow::binding::FlowBindingRef,
         param: Option<u32>,
         captured: bool,
-        site: verter_session_query::flow::slice::SliceCallSite,
     ) -> CallNext<'e> {
         // A call on a function-typed binding: the call's value is
         // the binding's signature return. Calling an `any`-typed
@@ -32551,15 +32691,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         // signature's raw return; an undecided executor falls
         // back to the rail's own signature read (overloads keep
         // the typed degradation — the read cannot pick).
-        if self.call_group_needs_executor(node, site) {
-            let overloaded = matches!(
-                self.dispatch.shared_signature_buckets(node),
-                Ok((call_sigs, construct_sigs))
-                    if call_sigs.len() + construct_sigs.len() > 1
-            );
-            return CallNext::route(node, CallSuffix::Binding { node, overloaded });
+        CallNext::Lists {
+            subject: node,
+            then: AfterLists::Group(GroupCallee::Binding),
         }
-        CallNext::Value(self.binding_call_value(node, site))
     }
 
     /// The call value of a function-typed binding's `node`, read off its
@@ -32568,18 +32703,17 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         &mut self,
         node: SemanticNodeId,
         site: verter_session_query::flow::slice::SliceCallSite,
+        buckets: Option<Buckets<'_>>,
     ) -> Positional<CallValue> {
         let graph = self.dispatch.graph();
         // The signature read carries no receiver: a signature whose
         // value depends on one is the typed marker here.
-        if matches!(
-            self.dispatch.shared_signature_buckets(node),
-            Ok((call_sigs, construct_sigs))
-                if call_sigs
-                    .iter()
-                    .chain(construct_sigs.iter())
-                    .any(|signature| self.signature_reads_receiver(*signature))
-        ) {
+        if buckets.is_some_and(|(call_sigs, construct_sigs)| {
+            call_sigs
+                .iter()
+                .chain(construct_sigs.iter())
+                .any(|signature| self.signature_reads_receiver(*signature))
+        }) {
             return self.degraded_unrepresentable_callee();
         }
         match CallValue::of_signature_node(self.dispatch, node, site, ReturnOrigin::ClauseScoped) {
@@ -32689,7 +32823,6 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     fn symbolic_call<'e>(
         &mut self,
         callee: &verter_session_query::flow::slice::SymbolicCallee,
-        site: verter_session_query::flow::slice::SliceCallSite,
     ) -> CallNext<'e> {
         let (ty, binding, member_spans) = (callee.ty(), callee.frame_root(), callee.member_spans());
         // The symbolic `ReturnType<typeof …>` carrier: lower the
@@ -32753,36 +32886,72 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             let callee = callee_node;
             return CallNext::route(callee, CallSuffix::SymbolicGroup { callee });
         }
-        self.symbolic_group(callee_node, site, false)
+        CallNext::Lists {
+            subject: callee_node,
+            then: AfterLists::Group(GroupCallee::Symbolic { asked: false }),
+        }
     }
 
-    /// A symbolic callee's group decision: an overloaded or
-    /// inference-bearing callee's executor route, unless it was `asked`
-    /// already, else its lone signature's read.
-    fn symbolic_group<'e>(
+    /// A callee's group decision over its settled lists: an executor
+    /// route or its own signature read.
+    fn callee_group_call<'e>(
         &mut self,
-        callee: SemanticNodeId,
+        group: GroupCallee,
+        node: SemanticNodeId,
         site: verter_session_query::flow::slice::SliceCallSite,
-        asked: bool,
+        buckets: Option<Buckets<'_>>,
     ) -> CallNext<'e> {
-        // An overloaded or inference-bearing symbolic callee
-        // resolves through the executor exactly like a direct
-        // one — the lone non-generic read stays on this rail,
-        // and an undecided executor falls back to it.
-        if self.call_group_needs_executor(callee, site) {
-            let overloaded = matches!(
-                self.dispatch.shared_signature_buckets(callee),
-                Ok((call_sigs, construct_sigs))
-                    if call_sigs.len() + construct_sigs.len() > 1
-            );
-            if !asked {
-                return CallNext::route(callee, CallSuffix::Group { callee, overloaded });
+        let overloaded =
+            buckets.is_some_and(|(calls, constructs)| calls.len() + constructs.len() > 1);
+        match group {
+            GroupCallee::Nested => {
+                if self.call_group_needs_executor(node, site, buckets) {
+                    CallNext::route(node, CallSuffix::Signature { node })
+                } else {
+                    CallNext::Value(self.signature_call_value(node, site))
+                }
             }
-            if overloaded {
-                return CallNext::Value(self.degraded_unrepresentable_callee());
+            GroupCallee::Binding => {
+                if self.call_group_needs_executor(node, site, buckets) {
+                    CallNext::route(node, CallSuffix::Binding { node, overloaded })
+                } else {
+                    CallNext::Value(self.binding_call_value(node, site, buckets))
+                }
+            }
+            GroupCallee::BindingValue => {
+                CallNext::Value(self.binding_call_value(node, site, buckets))
+            }
+            GroupCallee::Symbolic { asked } => {
+                if self.call_group_needs_executor(node, site, buckets) {
+                    if !asked {
+                        return CallNext::route(
+                            node,
+                            CallSuffix::Group {
+                                callee: node,
+                                overloaded,
+                            },
+                        );
+                    }
+                    if overloaded {
+                        return CallNext::Value(self.degraded_unrepresentable_callee());
+                    }
+                }
+                CallNext::Value(self.call_return_of_callee_node(node, site))
+            }
+            GroupCallee::Tagged => {
+                if self.call_group_needs_executor(node, site, buckets) {
+                    CallNext::route(
+                        node,
+                        CallSuffix::Group {
+                            callee: node,
+                            overloaded,
+                        },
+                    )
+                } else {
+                    CallNext::Value(self.call_return_of_callee_node(node, site))
+                }
             }
         }
-        CallNext::Value(self.call_return_of_callee_node(callee, site))
     }
 
     /// A call of a member of a receiver.
@@ -33094,7 +33263,6 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     #[inline(never)]
     fn tagged_template_call<'e>(
         &mut self,
-        site: verter_session_query::flow::slice::SliceCallSite,
         operand: Option<Positional<SemanticNodeId>>,
     ) -> CallNext<'e> {
         // `` tag`a${x}b` `` — the checker's
@@ -33108,16 +33276,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             Positional::Hold => return CallNext::Value(Positional::Hold),
             Positional::Unmodeled => return CallNext::Value(Positional::Unmodeled),
         };
-        if self.call_group_needs_executor(tag, site) {
-            let overloaded = matches!(
-                self.dispatch.shared_signature_buckets(tag),
-                Ok((call_sigs, construct_sigs))
-                    if call_sigs.len() + construct_sigs.len() > 1
-            );
-            let callee = tag;
-            return CallNext::route(callee, CallSuffix::Group { callee, overloaded });
+        CallNext::Lists {
+            subject: tag,
+            then: AfterLists::Group(GroupCallee::Tagged),
         }
-        CallNext::Value(self.call_return_of_callee_node(tag, site))
     }
 }
 
