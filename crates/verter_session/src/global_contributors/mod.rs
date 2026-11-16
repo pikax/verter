@@ -17,7 +17,7 @@ use verter_session_query::inputs::contributors::{
     FileScopeContribution, SymbolContributors,
 };
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -40,6 +40,8 @@ mod ac1_tests;
 mod ac2_tests;
 #[cfg(test)]
 mod ac3_tests;
+#[cfg(test)]
+mod publication_tests;
 
 /// One per-file contribution to a resolved global / ambient symbol.
 #[derive(Debug, Clone)]
@@ -79,10 +81,10 @@ pub struct GlobalContributorPopulation {
 
 /// The lookup views materialized over one snapshot, shared by its clones.
 ///
-/// Most published snapshots are superseded before any lookup reads them
-/// (ingestion publishes once per file), so each view table is created on
-/// its first insertion rather than with the snapshot: an unread snapshot
-/// costs one small allocation instead of three sharded tables.
+/// Most published snapshots are superseded before any lookup reads them,
+/// so each view table is created on its first insertion rather than with
+/// the snapshot: an unread snapshot costs one small allocation instead of
+/// three sharded tables.
 #[derive(Debug, Default)]
 struct PopulationViews {
     symbol: LazyViewTable<ViewKey, SymbolContributors>,
@@ -737,7 +739,11 @@ pub struct GlobalContributorIndex {
     records: DashMap<RecordKey, Arc<FileContributionRecord>>,
     grouped: parking_lot::Mutex<GroupedState>,
     snapshot: parking_lot::RwLock<Arc<GlobalContributorPopulation>>,
-    publish: parking_lot::Mutex<()>,
+    /// Publication lock and number of ingestion/upsert batches still open.
+    publish: parking_lot::Mutex<usize>,
+    /// Stays set while a batch is open and until its fully-applied membership
+    /// publication succeeds, including an in-flight edit.
+    publication_pending: AtomicBool,
     /// Serializes `note_live` / `note_gone` / `clear` so a concurrent
     /// `clear` cannot drop `records` while a live note still writes
     /// `grouped`.
@@ -785,7 +791,8 @@ impl GlobalContributorIndex {
                 0,
                 Arc::new(FxHashMap::default()),
             ))),
-            publish: parking_lot::Mutex::new(()),
+            publish: parking_lot::Mutex::new(0),
+            publication_pending: AtomicBool::new(false),
             mutate: parking_lot::Mutex::new(()),
             revision: AtomicU64::new(0),
             pending_overlay_ambient: parking_lot::Mutex::new(FxHashMap::default()),
@@ -804,7 +811,43 @@ impl GlobalContributorIndex {
         Arc::clone(&self.snapshot.read())
     }
 
-    /// Entries cloned and sorted while building a published snapshot.
+    /// A published population that can vouch for this name. Unclassified
+    /// contributors may declare any name; indexed mutations affect only
+    /// their dirty symbol keys, regardless of how many batches remain open.
+    pub(crate) fn population_for_validation(
+        &self,
+        target: &AugmentationTargetKind,
+        decl_name: &str,
+    ) -> Option<Arc<GlobalContributorPopulation>> {
+        if !self.pending_overlay_ambient.lock().is_empty() {
+            return None;
+        }
+        let grouped = self.grouped.lock();
+        if !grouped.dirty.is_empty() {
+            let (target_tag, target_text) = target_parts(target);
+            let mut key = SymbolKey {
+                target_tag,
+                target_text,
+                name: Arc::from(decl_name),
+                space: SymbolSpace::Type,
+            };
+            for space in [
+                SymbolSpace::Type,
+                SymbolSpace::Value,
+                SymbolSpace::Namespace,
+            ] {
+                key.space = space;
+                if grouped.dirty.contains(&key) {
+                    return None;
+                }
+            }
+        }
+        // Publication and reset retain `grouped` through their snapshot swap.
+        // A clean dirty-set check must refer to that same published population.
+        Some(self.snapshot())
+    }
+
+    /// Entries copied while building a published snapshot.
     /// Zero on an unrelated file that contributes no global symbols.
     #[cfg(test)]
     #[must_use]
@@ -835,6 +878,30 @@ impl GlobalContributorIndex {
 
     pub(crate) fn snapshot_ingestion_cursor(&self) -> parking_lot::MutexGuard<'_, Option<u64>> {
         self.ingested_snapshot_revision.lock()
+    }
+
+    pub(crate) fn begin_publication_batch(&self) {
+        let mut batches = self.publish.lock();
+        *batches += 1;
+        self.publication_pending.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn end_publication_batch(
+        &self,
+        settled_epoch: Option<u64>,
+        live_epoch: impl Fn() -> u64,
+    ) {
+        let mut batches = self.publish.lock();
+        *batches = batches.checked_sub(1).expect("a publication batch is open");
+        // A completed pass cannot wait for another pass's guard to drop.
+        // The store holds the membership fence; in-flight mutations retain
+        // responsibility for flushing once their reservations complete.
+        if let Some(pinned) = settled_epoch {
+            if live_epoch() == pinned && self.publish_pinned(pinned, &live_epoch) {
+                self.publication_pending
+                    .store(*batches > 0, Ordering::Release);
+            }
+        }
     }
 
     pub(crate) fn retract_pending_overlay_ambient(&self, canonical: &str) {
@@ -908,9 +975,19 @@ impl GlobalContributorIndex {
     /// until the contributor is in it.
     #[must_use]
     pub fn pending_overlay_ambient(&self) -> Vec<(Arc<str>, u64)> {
+        self.pending_overlay_ambient_matching(|_| true)
+    }
+
+    /// Select under the pending-set borrow, then copy only the entries a
+    /// materialization pass needs. No pending-set guard crosses loading.
+    pub(crate) fn pending_overlay_ambient_matching(
+        &self,
+        selected: impl Fn(&str) -> bool,
+    ) -> Vec<(Arc<str>, u64)> {
         self.pending_overlay_ambient
             .lock()
             .iter()
+            .filter(|(canonical, _)| selected(canonical))
             .map(|(canonical, note)| (Arc::clone(canonical), *note))
             .collect()
     }
@@ -924,12 +1001,12 @@ impl GlobalContributorIndex {
         }
     }
 
-    /// Whether a contributor recorded at upsert still waits for
-    /// contribution collection: until it is ingested, the published
-    /// population cannot speak for any name it may declare.
+    /// Whether contribution collection or any publication batch is pending.
+    /// Per-name validation uses [`Self::population_for_validation`] instead.
     #[must_use]
     pub fn has_pending_overlay_ambient(&self) -> bool {
-        !self.pending_overlay_ambient.lock().is_empty()
+        self.publication_pending.load(Ordering::Acquire)
+            || !self.pending_overlay_ambient.lock().is_empty()
     }
 
     pub fn clear(&self) {
@@ -937,16 +1014,19 @@ impl GlobalContributorIndex {
         // Take the cursor first here too, so reset cannot invert that order.
         let mut cursor = self.snapshot_ingestion_cursor();
         let _mutate = self.mutate.lock();
-        let _guard = self.publish.lock();
+        let batches = self.publish.lock();
         self.records.clear();
         self.pending_overlay_ambient.lock().clear();
-        self.grouped.lock().clear();
+        let mut grouped = self.grouped.lock();
+        grouped.clear();
         *self.snapshot.write() = Arc::new(GlobalContributorPopulation::new(
             0,
             0,
             Arc::new(FxHashMap::default()),
         ));
         self.revision.store(0, Ordering::Release);
+        self.publication_pending
+            .store(*batches > 0, Ordering::Release);
         *cursor = None;
         #[cfg(test)]
         self.publish_sorted_entries.store(0, Ordering::Relaxed);
@@ -956,18 +1036,26 @@ impl GlobalContributorIndex {
     /// membership is still `S`. A concurrent edit that advanced the epoch
     /// abandons this attempt; that editor publishes its own snapshot.
     pub fn publish(&self, expected_epoch: u64, live_epoch: impl Fn() -> u64) {
-        let _guard = self.publish.lock();
+        let batches = self.publish.lock();
+        if *batches > 0 {
+            return;
+        }
         let pinned = live_epoch();
         if pinned != expected_epoch {
             return;
         }
-        self.publish_pinned(pinned, &live_epoch);
+        if self.publish_pinned(pinned, &live_epoch) {
+            self.publication_pending.store(false, Ordering::Release);
+        }
     }
 
     fn publish_pinned(&self, pinned: u64, live_epoch: &impl Fn() -> u64) -> bool {
+        let mut grouped = self.grouped.lock();
         let by_symbol = {
-            let mut grouped = self.grouped.lock();
             let prev = self.snapshot.read();
+            if grouped.dirty.is_empty() && prev.program_snapshot == pinned {
+                return live_epoch() == pinned;
+            }
             let next = if grouped.dirty.is_empty() {
                 Arc::clone(&prev.by_symbol)
             } else {
@@ -975,12 +1063,10 @@ impl GlobalContributorIndex {
                 for key in grouped.dirty.iter() {
                     match grouped.by_symbol.get(key) {
                         Some(entries) if !entries.is_empty() => {
-                            let mut sorted = entries.clone();
-                            sort_contributor_entries(&mut sorted);
                             #[cfg(test)]
                             self.publish_sorted_entries
-                                .fetch_add(sorted.len() as u64, Ordering::Relaxed);
-                            next.insert(key.clone(), Arc::from(sorted.into_boxed_slice()));
+                                .fetch_add(entries.len() as u64, Ordering::Relaxed);
+                            next.insert(key.clone(), Arc::from(entries.clone().into_boxed_slice()));
                         }
                         _ => {
                             next.remove(key);
@@ -993,13 +1079,13 @@ impl GlobalContributorIndex {
             if live_epoch() != pinned {
                 return false;
             }
-            grouped.dirty.clear();
             next
         };
         let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
         *self.snapshot.write() = Arc::new(GlobalContributorPopulation::new(
             pinned, revision, by_symbol,
         ));
+        grouped.dirty.clear();
         true
     }
 }
@@ -1026,22 +1112,23 @@ fn add_record_to_grouped(grouped: &mut GroupedState, record: &FileContributionRe
             continue;
         };
         grouped.dirty.insert(symbol_key.clone());
-        grouped
-            .by_symbol
-            .entry(symbol_key)
-            .or_default()
-            .push(ContributorEntry {
-                artifact_key: record.artifact_key.clone(),
-                parse_stable_hash: record.parse_stable_hash,
-                owner: fact.owner,
-                origin: fact.origin,
-                specifier: fact.specifier.clone(),
-                symbol: fact.symbol.clone(),
-                space: fact.space,
-                is_automatic_lib: record.is_automatic_lib,
-                module_kind: record.module_kind,
-                contribution_fingerprint: fact.fingerprint,
-            });
+        let entries = grouped.by_symbol.entry(symbol_key).or_default();
+        let entry = ContributorEntry {
+            artifact_key: record.artifact_key.clone(),
+            parse_stable_hash: record.parse_stable_hash,
+            owner: fact.owner,
+            origin: fact.origin,
+            specifier: fact.specifier.clone(),
+            symbol: fact.symbol.clone(),
+            space: fact.space,
+            is_automatic_lib: record.is_automatic_lib,
+            module_kind: record.module_kind,
+            contribution_fingerprint: fact.fingerprint,
+        };
+        // Stable contributor order keeps insertion order for equal keys,
+        // including base/overlay slots. Insert after those peers.
+        let position = entries.partition_point(|other| compare_contributors(other, &entry).is_le());
+        entries.insert(position, entry);
     }
 }
 

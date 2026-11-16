@@ -106,6 +106,10 @@ pub(crate) struct TestForceKnobs {
     /// cursor, whose ingestion may synchronously integrate loaded content.
     #[cfg(test)]
     pub(crate) ambient_ingestion_cursor_hook: SeamHook,
+    /// Pause configured-program ingestion after opening its contributor batch,
+    /// before taking any workspace or artifact locks.
+    #[cfg(test)]
+    pub(crate) configured_ingestion_batch_hook: SeamHook,
     /// Deterministic entry/release rendezvous for the once-per-SFC Vue macro
     /// scheduled closure. The first barrier reports that the winner entered;
     /// the second holds it while a sibling joins and the winner is cancelled.

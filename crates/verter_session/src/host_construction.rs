@@ -1360,14 +1360,15 @@ impl VerterHost {
     /// nothing and nothing re-notes an unchanged file, so its entry stays for
     /// the next lookup.
     fn materialize_pending_contributors(&self, selected: impl Fn(&str) -> bool) {
+        let _contributors = self
+            .project_type_store()
+            .indexed()
+            .batch_global_contributors();
         let index = self
             .project_type_store()
             .indexed()
             .global_contributor_index();
-        for (member, note) in index.pending_overlay_ambient() {
-            if !selected(&member) {
-                continue;
-            }
+        for (member, note) in index.pending_overlay_ambient_matching(selected) {
             let _ = self.ensure_loaded(&member);
             if self
                 .ensure_indexed_ready_serve(&member)
@@ -1394,6 +1395,10 @@ impl VerterHost {
     /// index scan, without a whole-program `read_file` on every edit and
     /// without consuming cold flights at upsert.
     pub(crate) fn ingest_program_ambient_roots(&self) {
+        let _contributors = self
+            .project_type_store()
+            .indexed()
+            .batch_global_contributors();
         self.ingest_injected_ambient_roots(None);
         self.ingest_configured_programs();
         self.materialize_pending_contributors(|_| true);
@@ -1402,6 +1407,10 @@ impl VerterHost {
     /// Classify changed injected members and make the declaration files among
     /// them IndexedReady.
     pub(crate) fn ingest_injected_ambient_roots(&self, except: Option<&str>) {
+        let _contributors = self
+            .project_type_store()
+            .indexed()
+            .batch_global_contributors();
         self.classify_injected_ambient_roots(except);
         self.materialize_pending_declarations();
     }
