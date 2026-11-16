@@ -3001,8 +3001,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     *key,
                     SemanticQueryKey::SignaturesOfType { .. }
                         | SemanticQueryKey::ReadSignatureResult(_)
+                        | SemanticQueryKey::AwaitedNormalize { .. }
                 ),
-                "an entered body read requests signatures or a signature result, not {:?}",
+                "an entered body read requests signatures, a signature result or awaited normalization, not {:?}",
                 key.tag()
             ),
         }
@@ -4503,19 +4504,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// refusal: the family answers the checker's TS1062 recovery, the error
     /// type an `await` continues with.
     fn awaited_normalize_for_flow(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        let read = self.execute_read(SemanticQueryKey::AwaitedNormalize {
+        finish_awaited_normalize_for_flow(self.execute_read(self.awaited_normalize_key(node)))
+    }
+
+    /// The shared awaited relation's key, computed without reading it.
+    fn awaited_normalize_key(&self, node: SemanticNodeId) -> SemanticQueryKey {
+        SemanticQueryKey::AwaitedNormalize {
             operand: node,
             context: self.structural_reduce_context(),
-        });
-        // A PARTIAL read (the connected demand's budget ran out part-way
-        // down a chain of thenables) is where the relation stopped, not
-        // what the operand awaits to: never an answer.
-        if read.result_is_partial() {
-            return None;
-        }
-        match read.value {
-            QueryResult::Value(reduced) => Some(reduced),
-            _ => None,
         }
     }
 
@@ -10961,11 +10957,29 @@ use rustc_hash::FxHashMap;
 use verter_session_query::type_solver::host::ResolvedRootIdentity;
 use verter_type_expr::TypeExpr;
 
+/// Finish an awaited operand from the whole read, retaining its partial status.
+fn finish_awaited_normalize_for_flow(
+    read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+) -> Option<SemanticNodeId> {
+    // A PARTIAL read (the connected demand's budget ran out part-way
+    // down a chain of thenables) is where the relation stopped, not
+    // what the operand awaits to: never an answer.
+    if read.result_is_partial() {
+        return None;
+    }
+    match read.value {
+        QueryResult::Value(reduced) => Some(reduced),
+        _ => None,
+    }
+}
+
 /// The driver's reading operations a flow body makes as requests: each
 /// answers at once ([`ReadStep::Ready`]) or names the read it waits on
 /// ([`ReadStep::Wait`]), which the body's evaluation suspends at and its
 /// root read answers ([`Self::answer_read`]).
 pub(super) trait FlowReadDriver {
+    /// Request the whole read that normalizes an awaited operand.
+    fn request_awaited_normalize(&self, node: SemanticNodeId) -> ReadWait;
     /// The value a body type's lowered carrier `node` denotes when it is a
     /// closed signature utility
     /// ([`ProjectSemanticDispatch::closed_signature_utility_read`]): the
@@ -11588,6 +11602,10 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
 impl<C: crate::resolver_core::ResolverCapabilities> FlowReadDriver
     for ProjectSemanticDispatch<'_, C>
 {
+    fn request_awaited_normalize(&self, node: SemanticNodeId) -> ReadWait {
+        body_read_site!("request_awaited_normalize");
+        self.entered_read(self.awaited_normalize_key(node))
+    }
     fn closed_signature_utility(
         &self,
         node: SemanticNodeId,
@@ -12773,6 +12791,9 @@ impl<D: FlowDemandDriver> FlowCx<'_, D> {
     }
 }
 impl<D: FlowDemandDriver> FlowReadDriver for FlowCx<'_, D> {
+    fn request_awaited_normalize(&self, node: SemanticNodeId) -> ReadWait {
+        self.driver.request_awaited_normalize(node)
+    }
     fn closed_signature_utility(
         &self,
         node: SemanticNodeId,
@@ -15227,6 +15248,8 @@ enum Waiting<'e> {
 /// A site of an expression run waiting on the answer of a read it
 /// requested, with what its value is finished from.
 enum ReadSite<'e> {
+    /// An awaited operand waiting on its normalization's whole read.
+    Awaited,
     /// A call waiting on one of its signature lists.
     CallList(Box<CallListWait<'e>>),
     /// A type leaf whose lowered `carrier` is a closed signature utility,
@@ -30269,6 +30292,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 Some(BodyDelivery::Nested(node)) => Positional::Value(node),
                 // The site that requested the read resumes with its answer.
                 Some(BodyDelivery::Read(delivery)) => match run.waiting.pop() {
+                    Some(Waiting::Read(ReadSite::Awaited)) => self.finish_awaited_read(delivery),
                     Some(Waiting::Read(ReadSite::ClosedUtility { leaf, carrier })) => {
                         self.finish_type_leaf(leaf, delivery.node().unwrap_or(carrier))
                     }
@@ -30462,15 +30486,14 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         }
                     }
                     Some(Waiting::Awaited) => {
-                        value = match value {
-                            Positional::Value(node) => {
-                                match self.dispatch.awaited_normalize_for_flow(node) {
-                                    Some(awaited) => Positional::Value(awaited),
-                                    None => Positional::Unmodeled,
-                                }
+                        if let Positional::Value(node) = value {
+                            let request = self.dispatch.request_awaited_normalize(node);
+                            if suspend && body_requests_reads() {
+                                run.waiting.push(Waiting::Read(ReadSite::Awaited));
+                                return ExprProgress::Wait(BodyWait::Read(request));
                             }
-                            other => other,
-                        };
+                            value = self.finish_awaited_read(self.dispatch.read_in_place(request));
+                        }
                     }
                     Some(Waiting::Sequence(after)) => {
                         if let Some(assertion) = after {
@@ -30626,6 +30649,16 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     step = self.class_eval_step(&mut frame, Some(Positional::Value(signature)));
                 }
             }
+        }
+    }
+
+    /// Finish an awaited operand from its requested normalization read.
+    fn finish_awaited_read(&self, delivery: ReadDelivery) -> Positional<SemanticNodeId> {
+        match finish_awaited_normalize_for_flow(super::narrow_value_cache_read(
+            delivery.into_value(),
+        )) {
+            Some(awaited) => Positional::Value(awaited),
+            None => Positional::Unmodeled,
         }
     }
 

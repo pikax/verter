@@ -43,6 +43,7 @@ pub(in crate::project_semantic_dispatch) enum ReadNesting {
     /// Read at the body's own frame, as the frame reads it itself.
     Frame,
     /// A joined family's read, entered whole and adopted as its own cache read.
+    /// Awaited normalization keeps this envelope to reject partial answers.
     Entered,
 }
 
