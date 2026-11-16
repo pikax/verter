@@ -3446,7 +3446,8 @@ const UTILITY_FILE: &str = "/semantic-task/utility.ts";
 /// signature utility types (`ReturnType<() => { v: number }>`, which the
 /// checker resolves where it is built): at the root, and in a nested
 /// function's return; and a local declared with the same utility, whose
-/// annotation is read where no statement suspends.
+/// annotation is read where no statement suspends. An awaited module-level
+/// promise exercises the expression run's normalization request.
 const UTILITY: &str = "declare const k: ReturnType<() => { v: number }>;\n\
                        export function root() {\n\
                        return k;\n\
@@ -3459,6 +3460,10 @@ const UTILITY: &str = "declare const k: ReturnType<() => { v: number }>;\n\
                        export function declared() {\n\
                        let r!: ReturnType<() => { v: number }>;\n\
                        return r;\n\
+                       }\n\
+                       declare const p: Promise<number>;\n\
+                       export async function awaited() {\n\
+                       return await p;\n\
                        }\n";
 
 fn utility_host() -> Arc<crate::VerterHost> {
@@ -3648,6 +3653,96 @@ fn a_requested_type_leaf_read_answers_and_charges_what_the_in_place_read_does() 
             assert_eq!(by_request, in_place, "{name} (polled: {polled})");
         }
     }
+}
+
+/// A module-level promise's awaited operand, read on a fresh host. The
+/// return expression keeps its `Awaited` slice form, so the expression run
+/// requests normalization after the operand's value reaches its waiting pop.
+fn awaited_operand_read(
+    polled: bool,
+) -> (
+    usize,
+    semantic_poll_contract::JoinedEvidence,
+    Vec<(
+        verter_type_engine::project_semantic_dispatch::flow_return::body_reads::BodyReadSite,
+        u64,
+    )>,
+) {
+    use verter_type_engine::project_semantic_dispatch::flow_return::{
+        body_reads, flow_read_requests_for_tests,
+    };
+    let host = utility_host();
+    let mut dispatch = ProjectSemanticDispatch::new(&*host);
+    let key = utility_return_key(&dispatch, "awaited");
+    let _ = body_reads::take();
+    let requests = flow_read_requests_for_tests();
+    let read = if polled {
+        let mut entry = dispatch.poll_query(key);
+        let read = semantic_poll_contract::poll_until_ready(|waker| entry.poll(waker));
+        drop(entry);
+        read
+    } else {
+        dispatch.execute_via_cold_build_helper(key)
+    };
+    let requested = flow_read_requests_for_tests() - requests;
+    let rows = body_reads::take();
+    let evidence = semantic_poll_contract::joined_evidence(&dispatch, &read, |answer| {
+        display_return(&host, answer)
+    });
+    (requested, evidence, rows)
+}
+
+#[test]
+fn an_awaited_operand_is_normalized_by_request() {
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    let (requested, evidence, rows) = awaited_operand_read(false);
+    assert_eq!(evidence.0 .0, "Promise<number>");
+    assert!(
+        requested > 0,
+        "the awaited operand requests its read: {rows:?}"
+    );
+    assert!(
+        rows.iter().all(|((_, site, family), _)| {
+            *family != SemanticQueryKeyTag::AwaitedNormalize
+                || !matches!(*site, "awaited_normalize_for_flow" | "read_in_place")
+        }),
+        "the root answers the awaited operand's normalization: {rows:?}"
+    );
+}
+
+#[test]
+fn a_requested_awaited_operand_reads_as_the_operand_read_in_place() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::with_body_reads_in_place_for_tests;
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    for polled in [false, true] {
+        let (requests, requested, rows) = awaited_operand_read(polled);
+        let (in_place_requests, in_place, in_place_rows) =
+            with_body_reads_in_place_for_tests(|| awaited_operand_read(polled));
+        assert!(requests > 0, "the operand requests its read: {rows:?}");
+        assert_eq!(in_place_requests, 0);
+        assert_eq!(requested.0 .0, "Promise<number>");
+        assert_eq!(
+            requested.0, in_place.0,
+            "polled: {polled} preserves value, facts, diagnostics and receipt footprint"
+        );
+        assert!(
+            in_place_rows.iter().any(|((_, site, family), count)| {
+                *site == "read_in_place"
+                    && *family == SemanticQueryKeyTag::AwaitedNormalize
+                    && *count > 0
+            }),
+            "the same normalization is answered in place: {in_place_rows:?}"
+        );
+    }
+}
+
+#[test]
+fn a_polled_awaited_operand_answers_what_the_synchronous_operand_answers() {
+    let (requests, synchronous, _) = awaited_operand_read(false);
+    let (polled_requests, polled, _) = awaited_operand_read(true);
+    assert!(requests > 0 && polled_requests > 0);
+    assert_eq!(synchronous.0 .0, "Promise<number>");
+    semantic_poll_contract::assert_joined_matches(polled, &synchronous);
 }
 
 /// A receipt's whole structure below its identity, which is an allocation

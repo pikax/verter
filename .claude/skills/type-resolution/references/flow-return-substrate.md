@@ -44,6 +44,13 @@ edit still forces a fresh inference. When a completed transaction member exists
 and the shared candidate is absent, transaction reuse precedes the dispatcher's
 own publication so its recorded reads, self-roots and refusal are replayed.
 
+An awaited operand on the expression run requests `AwaitedNormalize` when its
+position can suspend. The root answers it as an entered read and delivers the
+whole cache envelope, so the shared finish rejects partial results. Positions
+that cannot suspend answer the same request through `read_in_place`; async
+generator wrapping and operands evaluated outside that run retain their direct
+reads. Key construction and result finishing are shared by both routes.
+
 Literal switch narrowing partitions the entering parent union once in
 `flow_return_branches.rs`. When every projected discriminant and case test is
 an exact concrete unit, each clause reuses its matching parent member(s), and
