@@ -11,7 +11,7 @@
 //! request that reached the root read: a read the evaluator requests and
 //! the root read answers is not counted. A request answered below the root
 //! (by a run that cannot suspend, at once) is counted, under the site
-//! `read_in_place`.
+//! named by the requesting operation, under the stage `read_in_place`.
 //!
 //! Each counted read is attributed to the site that made it: the
 //! [`super::FlowDemandDriver`] method the evaluator called, or, outside
@@ -198,6 +198,14 @@ pub(in crate::project_semantic_dispatch) fn enter_call_stage(stage: &'static str
             current.set(outer.or(Some(stage)));
             outer
         }),
+    }
+}
+
+/// Attribute an answer below the root to its own stage, including when a
+/// call stage surrounds it. The request's origin supplies its site.
+pub(in crate::project_semantic_dispatch) fn enter_in_place() -> StageScope {
+    StageScope {
+        outer: STAGE.with(|current| current.replace(Some("read_in_place"))),
     }
 }
 

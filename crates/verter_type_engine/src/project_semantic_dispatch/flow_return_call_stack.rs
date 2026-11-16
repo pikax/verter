@@ -1890,22 +1890,6 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         Some(step)
     }
 
-    /// Read through the shared list driver where the caller cannot suspend.
-    pub(super) fn read_list_in_place(
-        &self,
-        subject: SemanticNodeId,
-        kind: SignatureKind,
-    ) -> Option<Vec<SemanticNodeId>> {
-        let (mut list, mut wait) = self.dispatch.request_signature_list(subject, kind);
-        loop {
-            let delivery = self.dispatch.read_in_place(wait);
-            match self.dispatch.deliver_signature_list(&mut list, delivery) {
-                ReadStep::Ready(nodes) => return nodes,
-                ReadStep::Wait(next) => wait = next,
-            }
-        }
-    }
-
     /// Continue the route at the list it named, with only settled nodes.
     pub(super) fn deliver_route_list<'e>(
         &mut self,
