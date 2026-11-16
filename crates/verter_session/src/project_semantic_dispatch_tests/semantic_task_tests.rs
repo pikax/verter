@@ -3165,15 +3165,49 @@ fn call_list_read(
         u64,
     )>,
 ) {
+    list_read_on_host(call_value_host(), CALL_VALUE_FILE, name, polled)
+}
+
+fn list_read_on_host(
+    host: Arc<crate::VerterHost>,
+    canonical: &str,
+    name: &str,
+    polled: bool,
+) -> (
+    usize,
+    semantic_poll_contract::JoinedEvidence,
+    Vec<(
+        verter_type_engine::project_semantic_dispatch::flow_return::body_reads::BodyReadSite,
+        u64,
+    )>,
+) {
+    list_read_key_on_host(host, polled, |dispatch| {
+        root_return_key(dispatch, canonical, name)
+    })
+}
+
+fn list_read_key_on_host(
+    host: Arc<crate::VerterHost>,
+    polled: bool,
+    make_key: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> SemanticQueryKey,
+) -> (
+    usize,
+    semantic_poll_contract::JoinedEvidence,
+    Vec<(
+        verter_type_engine::project_semantic_dispatch::flow_return::body_reads::BodyReadSite,
+        u64,
+    )>,
+) {
     use verter_type_engine::project_semantic_dispatch::flow_return::{
         body_reads, flow_read_requests_for_tests, with_list_delivery_limit_for_tests,
     };
     // Far more deliveries than any root here can need: a list that asks
     // again for a read it was answered fails at the bound, not at a deadline.
     const LIST_DELIVERY_LIMIT: usize = 64;
-    let host = call_value_host();
     let mut dispatch = ProjectSemanticDispatch::new(&*host);
-    let key = root_return_key(&dispatch, CALL_VALUE_FILE, name);
+    let key = make_key(&dispatch);
     let _ = body_reads::take();
     let requests = flow_read_requests_for_tests();
     let read = with_list_delivery_limit_for_tests(LIST_DELIVERY_LIMIT, || {
@@ -3270,11 +3304,21 @@ fn a_call_asked_where_nothing_suspends_reads_its_lists_in_place() {
         count("read_in_place") > 0,
         "the predicate route reads its parameter list in place: {rows:?}"
     );
-    // Guard narrowing reads its callee once for each branch edge.
+    // Guard narrowing requests its callee once for each branch edge, with
+    // each request answered in place at this native guard position.
     assert_eq!(
         count("shared_signature_nodes"),
-        2,
-        "the routes add no direct signature-node read: {rows:?}"
+        0,
+        "the guard uses the owned list reader: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|((stage, site, family), count)| {
+            *stage == Some("read_in_place")
+                && *site == "signature_list"
+                && *family == SemanticQueryKeyTag::SignaturesOfType
+                && *count >= 2
+        }),
+        "both guard edges attribute their list requests: {rows:?}"
     );
 }
 
@@ -3385,6 +3429,397 @@ fn a_requested_list_reads_as_the_list_read_in_place() {
             assert_eq!(requested.0, in_place.0, "{name} (polled: {polled}) preserves value, facts, diagnostics and receipt footprint");
         }
     }
+}
+
+const SIGNATURE_CONSUMERS_FILE: &str = "/ws/signature-consumers.ts";
+// Iterator keys are resolved from the project's registered global library.
+const SIGNATURE_CONSUMERS_LIB: &str = r#"
+interface SymbolConstructor { readonly iterator: unique symbol; }
+declare var Symbol: SymbolConstructor;
+"#;
+// An annotated callable variable reaches the statement's signature-list reader;
+// a same-file assertion function lowers directly to an assertion fact.
+const SIGNATURE_CONSUMERS: &str = r#"
+declare const assertNumber: (value: unknown) => asserts value is number;
+export function statement(value: unknown) { assertNumber(value); return value; }
+// A named callable type leaves its effects to signature discovery; the
+// directly written () => never annotation ends the path during lowering.
+type Stop = () => never;
+export function effect(stop: Stop) { stop(); return 1; }
+export function unionEffect(stop: (() => 1) | (() => 2)) { stop(); return 3; }
+// The base needs an object surface for inherited statics; a bare constructor
+// signature is rejected by class composition after its construct list is read.
+export function heritage(Base: { new (): { value: number } }) { return class X extends Base {}; }
+export function heritageUnion(Base: (new () => { value: number }) | (new () => { value: string })) { return class extends Base {}; }
+export function contextual(): (value: number) => number { return value => value; }
+export function methods() {
+    return {
+        method() { return this.value; }
+    } satisfies { method(this: { value: number }): number };
+}
+export function iterator(source: { [Symbol.iterator](): { next(): { done: false; value: number } } }) {
+    for (const value of source) { return value; }
+    return 0;
+}
+function identity<T>(value: T) { return value; }
+export function scheduled<T>(value: T) { return identity(value); }
+export function scheduledUse<T>(value: T) { return scheduled(value); }
+"#;
+
+fn signature_consumers_host() -> Arc<crate::VerterHost> {
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host_with_lib(
+        "/ws",
+        SIGNATURE_CONSUMERS_LIB,
+    );
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        SIGNATURE_CONSUMERS_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(SIGNATURE_CONSUMERS),
+        crate::FileLanguage::script_ts(),
+    );
+    host
+}
+
+#[test]
+fn signature_consumers_request_their_lists_at_their_retained_positions() {
+    use super::signature_epoch_tests::signature_work;
+    use verter_type_engine::project_semantic_dispatch::flow_return::with_body_reads_in_place_for_tests;
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    for name in [
+        "statement",
+        "effect",
+        "unionEffect",
+        "heritage",
+        "heritageUnion",
+        "contextual",
+        "methods",
+        "iterator",
+        "scheduledUse",
+    ] {
+        let read = |polled| {
+            let host = signature_consumers_host();
+            if name == "scheduledUse" {
+                // Warm the uninstantiated return in a separate request so
+                // this request has no logged instantiations to replay.
+                let (_, warm, _) =
+                    list_read_on_host(Arc::clone(&host), SIGNATURE_CONSUMERS_FILE, name, false);
+                assert_eq!(
+                    warm.0 .0, "T",
+                    "the generic return is available to the schedule"
+                );
+            }
+            let before = signature_work(&host);
+            let result = list_read_key_on_host(Arc::clone(&host), polled, |dispatch| {
+                let mut key = root_return_key(dispatch, SIGNATURE_CONSUMERS_FILE, name);
+                if name == "scheduledUse" {
+                    // Demand the instantiated body as the machinery root:
+                    // an ordinary call can transfer its warm return without
+                    // entering the schedule's callable-signature reader.
+                    let SemanticQueryKey::FlowReturn(flow) = &mut key else {
+                        unreachable!("a consumer is a flow-return root")
+                    };
+                    let number = dispatch
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                    flow.normalized_type_args =
+                        verter_type_expr::OwnedSlice::from(vec![number].into_boxed_slice());
+                }
+                key
+            });
+            (result, signature_work(&host).since(before))
+        };
+        let ((requests, synchronous, rows), synchronous_work) = read(false);
+        let ((polled_requests, polled, _), polled_work) = read(true);
+        assert!(
+            synchronous.1.is_some(),
+            "{name}: the synchronous read must carry a receipt: {synchronous:?}"
+        );
+        assert!(
+            polled.1.is_some(),
+            "{name}: the polled read must carry a receipt: {polled:?}"
+        );
+        semantic_poll_contract::assert_joined_matches(polled.clone(), &synchronous);
+        assert!(
+            rows.iter().all(|((_, site, family), _)| {
+                *family != SemanticQueryKeyTag::SignaturesOfType
+                    || !matches!(*site, "shared_signature_nodes" | "shared_signature_buckets")
+            }),
+            "{name} uses the owned list continuation: {rows:?}"
+        );
+        for (polled, requested, requested_work) in [
+            (false, &synchronous, synchronous_work),
+            (true, &polled, polled_work),
+        ] {
+            let ((in_place_requests, in_place, in_place_rows), in_place_work) =
+                with_body_reads_in_place_for_tests(|| read(polled));
+            assert!(
+                in_place.1.is_some(),
+                "{name} (polled: {polled}): the in-place read must carry a receipt: {in_place:?}"
+            );
+            assert_eq!(
+                in_place_requests, 0,
+                "{name}: forced in-place reads do not reach the root"
+            );
+            assert_eq!(
+                requested.0, in_place.0,
+                "{name}: values, facts, diagnostics and receipt footprint"
+            );
+            assert_eq!(
+                requested_work, in_place_work,
+                "{name}: requesting a list changes no stable-epoch signature work"
+            );
+            assert!(
+                in_place_rows.iter().any(|((stage, site, family), count)| {
+                    *stage == Some("read_in_place")
+                        && *site == "signature_list"
+                        && *family == SemanticQueryKeyTag::SignaturesOfType
+                        && *count > 0
+                }),
+                "{name} attributes its in-place list reads: {in_place_rows:?}"
+            );
+        }
+        if matches!(name, "heritage" | "heritageUnion") {
+            let expected = if name == "heritage" { 1 } else { 2 };
+            assert_eq!((requests, polled_requests), (expected, expected), "the class stack requests its construct list and each composite result once: {rows:?}");
+            assert!(
+                rows.iter().all(|((stage, site, _), _)| {
+                    !(*stage == Some("read_in_place") && *site == "signature_list")
+                }),
+                "the heritage list suspends at its retained class frame: {rows:?}"
+            );
+        }
+        if name == "unionEffect" {
+            assert_eq!(synchronous.0 .0, "number");
+            assert!(
+                rows.iter().any(|((stage, site, family), count)| {
+                    *stage == Some("read_in_place")
+                        && *site == "signature_list"
+                        && *family == SemanticQueryKeyTag::ReadSignatureResult
+                        && *count > 0
+                }),
+                "the native effects reader requests its composite result: {rows:?}"
+            );
+        }
+        if matches!(name, "statement" | "iterator" | "scheduledUse") {
+            assert_eq!(
+                synchronous.0 .0, "number",
+                "{name} preserves its return value"
+            );
+        }
+    }
+    let (_, _, rows) = call_list_read("guarded", false);
+    assert!(
+        rows.iter().all(|((_, site, _), _)| !matches!(
+            *site,
+            "shared_signature_nodes" | "shared_signature_buckets"
+        )),
+        "guard lists use the same continuation: {rows:?}"
+    );
+}
+
+#[test]
+fn an_effects_list_retries_a_result_named_in_a_retired_epoch() {
+    use super::signature_epoch_tests::signature_work;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    };
+    use verter_type_engine::signature_kernel::StoreError;
+
+    let control_host = signature_consumers_host();
+    let before = signature_work(&control_host);
+    let (_, control, _) = list_read_on_host(
+        Arc::clone(&control_host),
+        SIGNATURE_CONSUMERS_FILE,
+        "unionEffect",
+        false,
+    );
+    let control_work = signature_work(&control_host).since(before);
+
+    let host = signature_consumers_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let graph = Arc::clone(dispatch.graph_arc());
+    let weak_graph = Arc::downgrade(&graph);
+    let retired = Arc::new(AtomicBool::new(false));
+    let named = Arc::new(Mutex::new(Vec::new()));
+    let (replaced, keys) = (Arc::clone(&retired), Arc::clone(&named));
+    graph.set_produce_hook_for_tests(Some(Arc::new(move |query, _| {
+        let SemanticQueryKey::ReadSignatureResult(key) = query else {
+            return;
+        };
+        keys.lock().unwrap().push(query.clone());
+        let graph = weak_graph.upgrade().expect("the host owns the graph");
+        let store = graph.signature_store();
+        if !replaced.swap(true, Ordering::SeqCst) {
+            assert_eq!(
+                key.descriptor.epoch(),
+                store.epoch(),
+                "the result was named before retirement"
+            );
+            store.replace_epoch().expect("replace the signature epoch");
+            assert!(
+                matches!(
+                    store.bind_epoch(key.descriptor.epoch()),
+                    Err(StoreError::StaleHandle)
+                ),
+                "the pending result's producer must refuse its retired handle"
+            );
+        } else {
+            assert_eq!(
+                key.descriptor.epoch(),
+                store.epoch(),
+                "the retried result is named in the current epoch"
+            );
+        }
+    })));
+    struct ClearHook<'a>(&'a verter_type_engine::semantic_query_memo::SemanticGraphStore);
+    impl Drop for ClearHook<'_> {
+        fn drop(&mut self) {
+            self.0.set_produce_hook_for_tests(None);
+        }
+    }
+    let hook = ClearHook(&graph);
+    let before = signature_work(&host);
+    let (_, result, rows) = list_read_on_host(
+        Arc::clone(&host),
+        SIGNATURE_CONSUMERS_FILE,
+        "unionEffect",
+        false,
+    );
+    drop(hook);
+    let work = signature_work(&host).since(before);
+    let keys = named.lock().unwrap();
+    assert!(
+        retired.load(Ordering::SeqCst),
+        "the converted consumer requested a composite result"
+    );
+    assert_eq!(
+        keys.len(),
+        2,
+        "the retired result is refused, then its current-epoch replacement is read: {keys:?}"
+    );
+    assert_ne!(
+        keys[0], keys[1],
+        "the retry never reuses the retired result key"
+    );
+    let current = dispatch.execute_via_cold_build_helper(keys[1].clone());
+    assert!(
+        matches!(current.value(), QueryResult::Value(SemanticQueryValue::SignatureResult(value))
+        if value.result.epoch() == graph.signature_store().epoch()),
+        "the retried result was published in the current epoch"
+    );
+    let refused = dispatch.execute_via_cold_build_helper(keys[0].clone());
+    assert!(
+        refused.result_is_partial()
+            && matches!(
+                refused.value(),
+                QueryResult::Error(verter_type_engine::semantic_query::QueryError::Miss)
+            ),
+        "the retired result key remains a typed refusal, never a retired-epoch value"
+    );
+    assert_eq!(result.0 .0, "number");
+    assert_eq!(
+        result.0 .0, control.0 .0,
+        "only a settled current-epoch result reaches the effects answer"
+    );
+    assert_eq!(
+        (work.discovery, work.positions, work.forced),
+        (
+            control_work.discovery,
+            control_work.positions,
+            control_work.forced
+        ),
+        "retirement repeats no discovery, matching or result forcing"
+    );
+    assert_eq!(
+        (work.rebinds, work.descriptors),
+        (1, 3),
+        "one copy names the composite and its two constituents in the current epoch"
+    );
+    assert!(
+        rows.iter().any(|((stage, site, family), count)| {
+            *stage == Some("read_in_place")
+                && *site == "signature_list"
+                && *family
+                    == verter_type_engine::semantic_query::SemanticQueryKeyTag::ReadSignatureResult
+                && *count == 2
+        }),
+        "the converted consumer receives the refusal and the retried result: {rows:?}"
+    );
+}
+
+#[test]
+fn an_unsettled_call_bucket_skips_an_inhabited_construct_bucket() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::with_list_delivery_limit_for_tests;
+    use verter_type_engine::semantic_query::{QueryError, SemanticContextId, SignatureKind};
+    let host = signature_consumers_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let _scope = dispatch.enter_construction_scope();
+    let graph = dispatch.graph();
+    let result = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let construct = super::call_resolve_tests::signature(
+        &dispatch,
+        "constructor",
+        0,
+        SignatureKind::Construct,
+        vec![],
+        vec![],
+        result,
+    );
+    let unsettled = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    let subject = graph.intern_node(SemanticNodeData::Object(
+        verter_type_engine::test_surface_view! {
+            members: Arc::from([]),
+            call_signatures: Arc::from([unsettled]),
+            construct_signatures: Arc::from([construct]),
+            index_signatures: Arc::from([]),
+            keyspace: None,
+            has_index_signature: false,
+        },
+    ));
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&observed);
+    graph.set_produce_hook_for_tests(Some(Arc::new(move |key, _| {
+        if let SemanticQueryKey::SignaturesOfType {
+            subject: read_subject,
+            kind,
+            ..
+        } = key
+        {
+            if *read_subject == subject {
+                seen.lock().unwrap().push(*kind);
+            }
+        }
+    })));
+    let buckets = with_list_delivery_limit_for_tests(4, || {
+        dispatch.flow_signature_buckets_for_tests(SIGNATURE_CONSUMERS_FILE, subject)
+    });
+    graph.set_produce_hook_for_tests(None);
+    assert!(
+        buckets.is_none(),
+        "an unsettled call list is never an empty bucket"
+    );
+    assert_eq!(
+        *observed.lock().unwrap(),
+        [SignatureKind::Call],
+        "the native bucket reader stops before requesting constructors"
+    );
+    let constructs = dispatch.execute_via_cold_build_helper(SemanticQueryKey::SignaturesOfType {
+        subject,
+        kind: SignatureKind::Construct,
+        context: SemanticContextId::production(),
+    });
+    assert!(
+        matches!(
+            constructs.value(),
+            QueryResult::Value(SemanticQueryValue::SignatureSet(_))
+        ),
+        "the skipped construct bucket is readable"
+    );
+    assert!(
+        matches!(dispatch.shared_signature_nodes(subject, SignatureKind::Construct), verter_type_engine::project_semantic_dispatch::signature_discovery::SharedSignatureNodes::Nodes(nodes) if nodes == [construct]),
+        "the skipped construct list is inhabited"
+    );
 }
 
 /// A contextual call whose executor names a callback this evaluator does not

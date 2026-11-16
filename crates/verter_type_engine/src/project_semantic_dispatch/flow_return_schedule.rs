@@ -1351,7 +1351,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }),
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
         )?;
-        let (call, construct) = self.shared_signature_buckets(callee).ok()?;
+        let (call, construct) = super::signature_buckets_in_place(self, canonical, callee)?;
         let ([signature], []) = (call.as_slice(), construct.as_slice()) else {
             return None;
         };
