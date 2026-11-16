@@ -83,6 +83,37 @@ describe("native evaluator integration", () => {
     shutdownMetaRuntime();
   });
 
+  it("keeps protobuf and JSON measured completeness equal with an approximate instance", async () => {
+    const { ComponentMetaHost, captureAvailability } = await import("@verter/native");
+    const { decodeComponentMetaPayload } = await import("./type-graph.js");
+    const host = new ComponentMetaHost({ auditEnabled: true, footprintCapture: true });
+    const session = host.openSession();
+    try {
+      session.upsert(
+        "/Summary.vue",
+        '<script setup lang="ts">defineModel<number>()</script><template><div /></template>',
+      );
+      const bytes = session.getComponentMeta("/Summary.vue");
+      expect(bytes).not.toBeNull();
+      const decoded = decodeComponentMetaPayload(bytes!);
+      expect(decoded.facts!.publicInstance.kind).toBe("approximate");
+      expect(decoded.resultCompleteness).toEqual({ kind: "complete" });
+      if (captureAvailability() === "Unavailable") {
+        expect(() => session.getComponentMetaWithAudit("/Summary.vue")).toThrow(
+          /audit capture is unavailable/,
+        );
+        return;
+      }
+      const audit = session.getComponentMetaWithAudit("/Summary.vue");
+      expect(audit).not.toBeNull();
+      const json = JSON.parse(audit!.toString("utf8")).analysis;
+      expect(decoded.resultCompleteness).toEqual(json.resultCompleteness);
+    } finally {
+      session.close();
+      host.shutdown();
+    }
+  });
+
   it("evaluates simple typed props", async () => {
     const checker = await createRuntimeChecker("native-eval-basic");
 

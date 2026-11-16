@@ -1,10 +1,10 @@
 import { create, toBinary } from "@bufbuild/protobuf";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
-  LegacyComponentMetaPayloadSchema as ComponentMetaPayloadSchema,
+  ComponentMetaPayloadSchema,
   ComponentMetaPayloadSchema as FactPayloadSchema,
   createTestComponentMetaPayload as factFixture,
-  createLegacyTestComponentMetaPayload as createTestComponentMetaPayload,
+  createTestComponentMetaPayload,
   OriginGraphSchema,
   PositionEncoding,
   SurfacePartialReason,
@@ -16,10 +16,83 @@ import {
   ModelMetaSchema,
   TypeRegistryEntrySchema,
 } from "../../proto/src/gen/verter/v1/component_meta_pb.js";
-import { GRAPH_FORMAT_VERSION } from "./type-graph-core.js";
+import { DecodedTypeGraph, GRAPH_FORMAT_VERSION } from "./type-graph-core.js";
 import { decodeTypedComponentMetaPayload } from "./type-graph-proto-decode.js";
 
 describe("decodeTypedComponentMetaPayload", () => {
+  it("reads the measured wire summary independently of approximate domains", () => {
+    const fixture = factFixture();
+    fixture.body!.facts!.props!.guarantee = { kind: 2, causes: [103] };
+    const decoded = decodeTypedComponentMetaPayload(
+      toBinary(FactPayloadSchema, create(FactPayloadSchema, fixture)),
+    );
+    expect(decoded.resultCompleteness).toEqual({ kind: "complete" });
+    expect(decoded.facts!.props.kind).toBe("approximate");
+  });
+
+  it("reads root info from the wire even when reachability disagrees", () => {
+    const fixture = factFixture();
+    fixture.body!.rootInfo = { kind: 4, reason: 2, targets: [] };
+    const decoded = decodeTypedComponentMetaPayload(
+      toBinary(FactPayloadSchema, create(FactPayloadSchema, fixture)),
+    );
+    expect(decoded.rootInfo).toEqual({ kind: "multiple", reason: "multiRoot", targets: [] });
+  });
+
+  it("projects accepted completeness from the shared accepted-props guarantee", () => {
+    const fixture = factFixture();
+    fixture.body!.facts!.acceptedEvents = { guarantee: { kind: 3, causes: [9001] } };
+    const decoded = decodeTypedComponentMetaPayload(
+      toBinary(FactPayloadSchema, create(FactPayloadSchema, fixture)),
+    );
+    expect(decoded.acceptedSurfaceCompleteness).toBe("exact");
+    expect(Object.hasOwn(decoded, "acceptedEvents")).toBe(false);
+    fixture.body!.facts!.acceptedProps!.value!.open = true;
+    const open = decodeTypedComponentMetaPayload(
+      toBinary(FactPayloadSchema, create(FactPayloadSchema, fixture)),
+    );
+    expect(open.acceptedSurfaceCompleteness).toBe("lowerBound");
+  });
+
+  it("leaves unavailable semantic lanes absent", () => {
+    const fixture = factFixture();
+    fixture.body!.facts!.props = { guarantee: { kind: 3, causes: [9001] } };
+    fixture.body!.facts!.componentPublicContract = { guarantee: { kind: 3, causes: [106] } };
+    const decoded = decodeTypedComponentMetaPayload(
+      toBinary(FactPayloadSchema, create(FactPayloadSchema, fixture)),
+    );
+    expect(Object.hasOwn(decoded, "props")).toBe(false);
+    expect(Object.hasOwn(decoded, "componentPublicContract")).toBe(false);
+    expect(decoded.facts!.props).toEqual({ kind: "unavailable", causes: [9001] });
+    expect(decoded.facts!.componentPublicContract).toEqual({ kind: "unavailable", causes: [106] });
+  });
+
+  it("propagates a TypeError from a fact decode callback", () => {
+    const fixture = factFixture();
+    const bytes = toBinary(FactPayloadSchema, create(FactPayloadSchema, fixture));
+    const bug = new TypeError("decode callback bug");
+    const spy = vi
+      .spyOn(DecodedTypeGraph.prototype, "getStringMaybe")
+      .mockImplementationOnce(() => {
+        throw bug;
+      });
+    try {
+      expect(() => decodeTypedComponentMetaPayload(bytes)).toThrow(bug);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("refuses schema 12", () => {
+    const fixture = factFixture();
+    fixture.schemaVersion = 12;
+    expect(() =>
+      decodeTypedComponentMetaPayload(
+        toBinary(FactPayloadSchema, create(FactPayloadSchema, fixture)),
+      ),
+    ).toThrow(/expected 15, found 12/);
+  });
+
   it("publishes independent semantic facts", () => {
     const fixture = factFixture();
     const result = decodeTypedComponentMetaPayload(
@@ -29,27 +102,9 @@ describe("decodeTypedComponentMetaPayload", () => {
       facts: { props: { kind: "complete" }, events: { kind: "complete" } },
     });
   });
-  it.each([1, 2])("does not infer domain closure from legacy summary %d", (kind) => {
-    const current = createTestComponentMetaPayload();
-    const payload = create(ComponentMetaPayloadSchema, {
-      ...current,
-      body: {
-        ...current.body!,
-        props: [],
-        resultCompleteness: { kind, partialReasons: kind === 2 ? [14] : [] },
-      },
-    });
-    const result = decodeTypedComponentMetaPayload(toBinary(ComponentMetaPayloadSchema, payload));
-    expect(result.facts!.props).toMatchObject({
-      kind: kind === 1 ? "complete" : "approximate",
-      open: true,
-      value: [],
-    });
-    expect(result.facts!.events).toMatchObject({ open: true });
-  });
   it("accepts the current schema version and rejects an older response", () => {
     const current = createTestComponentMetaPayload();
-    expect(current.schemaVersion).toBe(12);
+    expect(current.schemaVersion).toBe(15);
     expect(() =>
       decodeTypedComponentMetaPayload(
         toBinary(
@@ -86,53 +141,6 @@ describe("decodeTypedComponentMetaPayload", () => {
     expect(result.componentPublicContract.contract.props[0]?.name).toBe("root");
     expect(result.componentPublicContract.contract.props[0]?.type.type).toBeDefined();
   });
-
-  it.each([
-    [1, "unrepresentableRequiredMemberValue"],
-    [2, "unrepresentableRequiredPayload"],
-  ] as const)(
-    "decodes required-source output failure with publication subreason %s",
-    (publicationFailure, expected) => {
-      const base = createTestComponentMetaPayload();
-      const current = base.body!.componentPublicContract!.availability;
-      if (current.case !== "supported") throw new Error("fixture contract must be supported");
-      const payload = create(ComponentMetaPayloadSchema, {
-        ...base,
-        body: {
-          ...base.body!,
-          componentPublicContract: {
-            availability: {
-              case: "unsupported",
-              value: {
-                adapterId: current.value.adapterId,
-                reason: 3,
-                outputLane: 13,
-                index: 2,
-                outputFailure: 2,
-                publicationFailure,
-                diagnostics: [],
-              },
-            },
-          },
-        },
-      });
-
-      const result = decodeTypedComponentMetaPayload(toBinary(ComponentMetaPayloadSchema, payload));
-
-      expect(result.componentPublicContract).toMatchObject({
-        kind: "unsupported",
-        reason: {
-          kind: "outputMaterializationFailed",
-          lane: "eventReturn",
-          index: 2,
-          failure: {
-            kind: "requiredSourceUnavailable",
-            publicationFailure: expected,
-          },
-        },
-      });
-    },
-  );
 
   it("decodes origin graph from protobuf binary", () => {
     const base = createTestComponentMetaPayload();
@@ -206,14 +214,14 @@ describe("decodeTypedComponentMetaPayload", () => {
         absence: "unannotated",
         provenance: "semanticEvaluator",
       },
-      typeNodeId: 1,
+      typeNodeId: 0,
       displayId: 2,
       expectedDisplay: { text: "TreeNode" },
-      hasType: true,
+      hasType: false,
     },
     {
       label: "Failed",
-      publication: { kind: 1, failure: 1, provenance: 1 },
+      publication: { kind: 1, failure: 1, provenance: 1, factCauses: [102] },
       expected: {
         kind: "failed",
         failure: "unrepresentableRequiredMemberValue",
@@ -232,17 +240,25 @@ describe("decodeTypedComponentMetaPayload", () => {
         ...base,
         body: {
           ...base.body!,
-          props: [
-            {
-              nameId: 3,
-              typeNodeId,
-              publication,
-              terminalDisplay: { textId: displayId },
-              required: true,
-              hasDefault: false,
-              tags: [],
+          facts: {
+            ...base.body!.facts!,
+            props: {
+              guarantee: { kind: 1, causes: [] },
+              value: {
+                entries: [
+                  {
+                    nameId: 3,
+                    typeNodeId,
+                    publication,
+                    terminalDisplay: { textId: displayId },
+                    requiredFact: { guarantee: { kind: 1, causes: [] }, value: true },
+                    hasDefaultFact: { guarantee: { kind: 1, causes: [] }, value: false },
+                    tags: [],
+                  },
+                ],
+              },
             },
-          ],
+          },
         },
       });
 
@@ -252,73 +268,6 @@ describe("decodeTypedComponentMetaPayload", () => {
       expect(result.props[0]?.terminalDisplay).toEqual(expectedDisplay);
     },
   );
-
-  it("rejects Failed rows carrying a type or terminal display", () => {
-    const base = createTestComponentMetaPayload();
-    const payload = create(ComponentMetaPayloadSchema, {
-      ...base,
-      body: {
-        ...base.body!,
-        props: [
-          {
-            nameId: 3,
-            typeNodeId: 1,
-            publication: { kind: 1, failure: 1, provenance: 1 },
-            terminalDisplay: { textId: 2 },
-            required: true,
-            hasDefault: false,
-            tags: [],
-          },
-        ],
-      },
-    });
-
-    expect(() =>
-      decodeTypedComponentMetaPayload(toBinary(ComponentMetaPayloadSchema, payload)),
-    ).toThrow(/carries success output/i);
-  });
-
-  it("rejects dropped publication and Published rows without a type", () => {
-    const base = createTestComponentMetaPayload();
-    const encodeWithProp = (prop: Record<string, unknown>) =>
-      toBinary(
-        ComponentMetaPayloadSchema,
-        create(ComponentMetaPayloadSchema, {
-          ...base,
-          body: { ...base.body!, props: [prop] },
-        }),
-      );
-
-    expect(() =>
-      decodeTypedComponentMetaPayload(
-        encodeWithProp({
-          nameId: 3,
-          typeNodeId: 1,
-          terminalDisplay: { textId: 2 },
-          required: true,
-          tags: [],
-        }),
-      ),
-    ).toThrow(/publication/i);
-    expect(() =>
-      decodeTypedComponentMetaPayload(
-        encodeWithProp({
-          nameId: 3,
-          typeNodeId: 0,
-          publication: {
-            kind: 3,
-            provenance: 1,
-            semanticAuthority: 1,
-            exactness: 1,
-            reason: 1,
-          },
-          terminalDisplay: { textId: 2 },
-          required: true,
-          tags: [],
-        }),
-      ),
-    ).toThrow(/missing its type/i);
-  });
 
   it("decodes the binding return-wrapper role and its typed reason, keeping absence absent", () => {
     const base = createTestComponentMetaPayload();
@@ -552,7 +501,7 @@ describe("typed property keys", () => {
 
   function payloadWithMembers(members: unknown[]) {
     return {
-      schemaVersion: 12,
+      schemaVersion: 15,
       typeGraph: {
         strings: ["/x.ts", "alpha", "tag", "Obj"],
         nodes: [
@@ -567,28 +516,11 @@ describe("typed property keys", () => {
           },
         ],
       },
-      typeRegistry: [{ nameId: 4, typeNodeId: 4, rawTypeId: 4 }],
       body: {
         filePathId: 1,
         optionsApi: false,
-        props: [],
-        events: [],
-        slots: [],
-        acceptedProps: [],
-        acceptedEvents: [],
-        acceptedSurfaceCompleteness: 1,
         resultCompleteness: { kind: 1, partialReasons: [] },
-        rootReachability: { kind: 1, reason: 5, branches: [] },
-        fallthroughSurface: { kind: 1, reason: 5, branches: [] },
         orderedSfcStructure: { schemaVersion: 1, artifactToken: "", blocks: [], markupNodes: [] },
-        componentPublicContract: {
-          availability: {
-            case: "unsupported",
-            value: { adapterId: 1, reason: 1, diagnostics: [] },
-          },
-        },
-        models: [],
-        exposed: [],
         components: [],
         templateRefs: [],
         imports: [],
@@ -596,6 +528,29 @@ describe("typed property keys", () => {
         vueApiCalls: [],
         styles: [],
         flags: {},
+        facts: {
+          ...factFixture().body!.facts!,
+          typeRegistry: {
+            guarantee: { kind: 1, causes: [] },
+            value: { entries: [{ nameId: 4, typeNodeId: 4, rawTypeId: 4 }] },
+          },
+          props: { guarantee: { kind: 1, causes: [] }, value: { entries: [] } },
+          events: { guarantee: { kind: 1, causes: [] }, value: { entries: [] } },
+          slots: { guarantee: { kind: 1, causes: [] }, value: { entries: [] } },
+          models: { guarantee: { kind: 1, causes: [] }, value: { entries: [] } },
+          exposed: { guarantee: { kind: 1, causes: [] }, value: { entries: [] } },
+          acceptedProps: { guarantee: { kind: 1, causes: [] }, value: { entries: [] } },
+          acceptedEvents: { guarantee: { kind: 1, causes: [] }, value: { entries: [] } },
+          rootReachability: {
+            guarantee: { kind: 1, causes: [] },
+            value: { kind: 1, reason: 5, branches: [] },
+          },
+          fallthroughSurface: {
+            guarantee: { kind: 1, causes: [] },
+            value: { kind: 1, reason: 5, branches: [] },
+          },
+          componentPublicContract: { guarantee: { kind: 3, causes: [106] } },
+        },
       },
     };
   }
@@ -618,8 +573,7 @@ describe("typed property keys", () => {
 
   it("decodes every property-key kind", async () => {
     const { create, toBinary } = await import("@bufbuild/protobuf");
-    const { LegacyComponentMetaPayloadSchema: ComponentMetaPayloadSchema } =
-      await import("@verter/proto");
+    const { ComponentMetaPayloadSchema } = await import("@verter/proto");
     const payload = create(
       ComponentMetaPayloadSchema,
       payloadWithMembers([
@@ -662,8 +616,7 @@ describe("typed property keys", () => {
 
   it("resolves display names for string, number, and symbol keys through the bridge", async () => {
     const { create, toBinary } = await import("@bufbuild/protobuf");
-    const { LegacyComponentMetaPayloadSchema: ComponentMetaPayloadSchema } =
-      await import("@verter/proto");
+    const { ComponentMetaPayloadSchema } = await import("@verter/proto");
     const { nativeTypeRegistryToMap } = await import("./native-component-meta.js");
     const { decodeComponentMetaPayload } = await import("./type-graph.js");
     const payload = create(
@@ -693,8 +646,7 @@ describe("typed property keys", () => {
 
   it("rejects a schema-4 payload with the typed version error", async () => {
     const { create, toBinary } = await import("@bufbuild/protobuf");
-    const { LegacyComponentMetaPayloadSchema: ComponentMetaPayloadSchema } =
-      await import("@verter/proto");
+    const { ComponentMetaPayloadSchema } = await import("@verter/proto");
     const payload = create(ComponentMetaPayloadSchema, {
       ...payloadWithMembers([]),
       schemaVersion: 4,
@@ -794,6 +746,11 @@ describe("surface partial reason taxonomy parity", () => {
 
     const messageAt = (schemaVersion: number, cause: number) => {
       const payload = create(FactPayloadSchema, { ...factFixture(), schemaVersion });
+      payload.body!.resultCompleteness = {
+        $typeName: "verter.v1.ResultCompleteness",
+        kind: 2,
+        partialReasons: [cause],
+      };
       payload.body!.facts!.delivery = {
         $typeName: "verter.v1.FactGuarantee",
         kind: 3,
@@ -887,56 +844,6 @@ describe("result completeness fail-closed branches", () => {
   it("still accepts the well-formed complete surface", () => {
     expect(decodeCompletenessOf({ kind: 1, partialReasons: [] })).toEqual({ kind: "complete" });
   });
-
-  it("stamps a schema-12 failed publication without dropping the healthy sibling", async () => {
-    const base = createTestComponentMetaPayload();
-    const healthy = base.body!.props![0]!;
-    base.body!.props!.push({
-      ...healthy,
-      nameId: 6,
-      typeNodeId: 0,
-      publication: {
-        ...healthy.publication!,
-        kind: 1,
-        failure: 1,
-        provenance: 1,
-      },
-      terminalDisplay: { textId: 0 },
-    });
-    const result = decodeTypedComponentMetaPayload(
-      toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, base)),
-    );
-    expect(result.facts!.props.kind).not.toBe("unavailable");
-    expect(result.props.map((prop) => prop.name)).toEqual(["root", "label"]);
-    expect(result.props[1]?.typeFact).toEqual({ kind: "unavailable", causes: [102] });
-    expect(result.props[0]?.typeFact?.kind).toBe("complete");
-    const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
-    const projected = nativeComponentMetaToComponentMeta(result);
-    expect(projected.props.map((prop) => prop.name)).toEqual(["root"]);
-  });
-
-  it("localizes a schema-12 invalid node without turning bool fields into facts", async () => {
-    const base = createTestComponentMetaPayload();
-    base.typeGraph!.nodes[0].kind = {
-      case: "array",
-      value: { $typeName: "verter.v1.ArrayNode", elementNodeId: 999, readonly: false },
-    };
-    const first = base.body!.props![0]!;
-    first.typeNodeId = 1;
-    base.body!.props!.push({ ...first, nameId: 6, typeNodeId: 2 });
-    const result = decodeTypedComponentMetaPayload(
-      toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, base)),
-    );
-    expect(result.props.map((prop) => prop.name)).toEqual(["root", "label"]);
-    expect(result.props[0]?.typeFact).toEqual({ kind: "unavailable", causes: [102] });
-    expect(result.props[0]?.required).toBe(true);
-    expect(result.props[0]?.requiredFact).toBeUndefined();
-    expect(result.props[1]?.typeFact?.kind).toBe("complete");
-    expect(result.props[1]?.type).toBeDefined();
-    const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
-    const projected = nativeComponentMetaToComponentMeta(result);
-    expect(projected.props.map((prop) => prop.name)).toEqual(["label"]);
-  });
 });
 
 describe("independent component facts", () => {
@@ -955,8 +862,8 @@ describe("independent component facts", () => {
     expect(result.facts!.events).toEqual({ kind: "unavailable", causes: [9001] });
     expect(result.facts!.props.kind).toBe("complete");
     expect(result.props[0]?.typeFact?.kind).toBe("complete");
-    expect(result.resultCompleteness).toEqual({ kind: "partial", reasons: ["propagated"] });
-    expect(result.events).toEqual([]);
+    expect(result.resultCompleteness).toEqual({ kind: "complete" });
+    expect(Object.hasOwn(result, "events")).toBe(false);
   });
 
   it("preserves false, proven absence, and a complete open membership domain", () => {
@@ -972,14 +879,25 @@ describe("independent component facts", () => {
     expect(result.facts!.publicInstance).toEqual({ kind: "complete", value: undefined });
   });
 
+  it("retains wire causes when a malformed fact is localized", () => {
+    const payload = fixture();
+    payload.body!.facts!.props!.guarantee = {
+      $typeName: "verter.v1.FactGuarantee",
+      kind: 3,
+      causes: [9001],
+    };
+    const result = decode(payload);
+    expect(result.facts!.props).toEqual({ kind: "unavailable", causes: [9001] });
+    expect(Object.hasOwn(result, "props")).toBe(false);
+    expect(result.facts!.events.kind).toBe("complete");
+  });
+
   it.each(["approximateWithoutCauses", "unavailableWithValue"] as const)(
     "refuses a contradictory %s without poisoning siblings",
     (mode) => {
       const payload = fixture();
       payload.body!.facts!.props!.guarantee!.kind = mode === "approximateWithoutCauses" ? 2 : 3;
-      const result = decode(payload);
-      expect(result.facts!.props).toEqual({ kind: "unavailable", causes: [100] });
-      expect(result.facts!.events.kind).toBe("complete");
+      expect(() => decode(payload)).toThrow(/causes/);
     },
   );
 
@@ -993,15 +911,17 @@ describe("independent component facts", () => {
     payload.body!.facts!.props!.value!.entries.push({ ...first, nameId: 6, typeNodeId: 2 });
     const result = decode(payload);
     expect(result.facts!.props.kind).toBe("complete");
-    expect(result.props[0]?.typeFact).toEqual({ kind: "unavailable", causes: [100] });
+    expect(result.props[0]?.typeFact).toEqual({ kind: "unavailable", causes: [102] });
     expect(result.props[0]?.type).toBeUndefined();
     expect(result.props[1]?.typeFact?.kind).toBe("complete");
     expect(result.slots[0]?.bindings[0]?.typeFact?.kind).toBe("unavailable");
     expect(result.facts!.events.kind).toBe("complete");
     const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
     const projected = nativeComponentMetaToComponentMeta(result);
-    expect(projected.props.map((prop) => prop.name)).toEqual([result.props[1].name]);
-    expect(projected.slots[0].bindings).toEqual([]);
+    expect(projected.props!.map((prop) => prop.name)).toEqual(
+      result.props!.map((prop) => prop.name),
+    );
+    expect(projected.slots![0].bindings[0].typeFact.kind).toBe("unavailable");
     expect(projected.facts!.props.kind).toBe("complete");
   });
 
@@ -1042,12 +962,15 @@ describe("independent component facts", () => {
     expect(result.publicInstance?.members.map((member) => member.name)).toEqual(["label", "next"]);
     expect(result.publicInstance?.members[0]?.typeFact).toEqual({
       kind: "unavailable",
-      causes: [100],
+      causes: [11],
     });
     expect(result.publicInstance?.members[1]?.type).toBeDefined();
     const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
     const projected = nativeComponentMetaToComponentMeta(result);
-    expect(projected.publicInstance?.members.map((member) => member.name)).toEqual(["next"]);
+    expect(projected.publicInstance?.members.map((member) => member.name)).toEqual([
+      "label",
+      "next",
+    ]);
   });
 
   it("localizes a string literal whose string id is zero", async () => {
@@ -1060,11 +983,11 @@ describe("independent component facts", () => {
     props[0].typeNodeId = 1;
     props.push({ ...props[0], nameId: 6, typeNodeId: 2 });
     const result = decode(payload);
-    expect(result.props[0]?.typeFact).toEqual({ kind: "unavailable", causes: [100] });
+    expect(result.props[0]?.typeFact).toEqual({ kind: "unavailable", causes: [102] });
     expect(result.props[1]?.typeFact?.kind).toBe("complete");
     const { nativeComponentMetaToComponentMeta } = await import("./native-component-meta.js");
     const projected = nativeComponentMetaToComponentMeta(result);
-    expect(projected.props.map((prop) => prop.name)).toEqual(["label"]);
+    expect(projected.props!.map((prop) => prop.name)).toEqual(["root", "label"]);
   });
 
   it("keeps constrained binders distinct and renders their constraints", async () => {
@@ -1134,7 +1057,7 @@ describe("independent component facts", () => {
     const result = decode(payload);
     expect(result.facts!.models.kind).toBe("complete");
     expect(result.models.map((model) => model.name)).toEqual(["label", "next"]);
-    expect(result.models[0]?.typeFact).toEqual({ kind: "unavailable", causes: [100] });
+    expect(result.models[0]?.typeFact).toEqual({ kind: "unavailable", causes: [11] });
     expect(result.models[1]?.typeFact?.kind).toBe("complete");
     expect(result.models[1]?.type).toBeDefined();
     expect(result.facts!.exposed.kind).toBe("complete");
@@ -1149,8 +1072,8 @@ describe("independent component facts", () => {
     const { nativeComponentMetaToComponentMeta, nativeTypeRegistryToMap } =
       await import("./native-component-meta.js");
     const projected = nativeComponentMetaToComponentMeta(result);
-    expect(projected.models.map((model) => model.name)).toEqual(["next"]);
-    expect(projected.exposed.map((entry) => entry.name)).toEqual(["next"]);
+    expect(projected.models!.map((model) => model.name)).toEqual(["label", "next"]);
+    expect(projected.exposed!.map((entry) => entry.name)).toEqual(["label", "next"]);
     expect([...(nativeTypeRegistryToMap(result)?.keys() ?? [])]).toEqual(["next"]);
   });
 
@@ -1207,18 +1130,17 @@ describe("independent component facts", () => {
       failure: "unrepresentableRequiredMemberValue" as const,
       provenance: "semanticEvaluator" as const,
     };
-    const jsonMember = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
     result.acceptedProps = [
-      jsonMember({
+      {
         name: "bad",
-        type: null,
+        typeFact: { kind: "unavailable", causes: [102] },
         publication: failedPublication,
         terminalDisplay: {},
         required: true,
         provenance: { kind: "declared" },
         availability: { kind: "always" },
         kind: "declaredProp",
-      }),
+      },
       {
         name: "ok",
         type,
@@ -1232,13 +1154,13 @@ describe("independent component facts", () => {
       },
     ];
     result.acceptedEvents = [
-      jsonMember({
+      {
         name: "bad",
-        payload: null,
+        typeFact: { kind: "unavailable", causes: [11] },
         provenance: { kind: "declared" },
         availability: { kind: "always" },
         kind: "listener",
-      }),
+      },
       {
         name: "ok",
         payload: type,
@@ -1254,13 +1176,13 @@ describe("independent component facts", () => {
         {
           branchKey: "root",
           props: [
-            jsonMember({
+            {
               name: "bad",
-              type: null,
+              typeFact: { kind: "unavailable", causes: [102] },
               publication: failedPublication,
               terminalDisplay: {},
               sources: [],
-            }),
+            },
             {
               name: "ok",
               type,
@@ -1271,7 +1193,7 @@ describe("independent component facts", () => {
             },
           ],
           events: [
-            jsonMember({ name: "bad", payload: null, sources: [] }),
+            { name: "bad", typeFact: { kind: "unavailable", causes: [11] }, sources: [] },
             {
               name: "ok",
               payload: type,
@@ -1288,24 +1210,28 @@ describe("independent component facts", () => {
     const projected = nativeComponentMetaToComponentMeta(result);
     expect(result.acceptedProps.map((prop) => prop.name)).toEqual(["bad", "ok"]);
     expect(projected.facts).toBe(result.facts);
-    expect(projected.acceptedProps.map((prop) => prop.name)).toEqual(["ok"]);
-    expect(projected.acceptedEvents.map((event) => event.name)).toEqual(["ok"]);
+    expect(projected.acceptedProps.map((prop) => prop.name)).toEqual(["bad", "ok"]);
+    expect(projected.acceptedEvents.map((event) => event.name)).toEqual(["bad", "ok"]);
     if (projected.fallthroughSurface.kind !== "branches") {
       throw new Error("expected fallthrough branches");
     }
-    expect(projected.fallthroughSurface.branches[0].props.map((prop) => prop.name)).toEqual(["ok"]);
+    expect(projected.fallthroughSurface.branches[0].props.map((prop) => prop.name)).toEqual([
+      "bad",
+      "ok",
+    ]);
     expect(projected.fallthroughSurface.branches[0].events.map((event) => event.name)).toEqual([
+      "bad",
       "ok",
     ]);
   });
 
-  it("ignores a conflicting legacy summary and preserves the delivery refusal", () => {
+  it("keeps the wire summary independent from a delivery refusal", () => {
     const payload = fixture();
     payload.body!.facts!.delivery!.kind = 3;
     payload.body!.facts!.delivery!.causes = [20];
     const result = decode(payload);
     expect(result.facts!.delivery).toEqual({ kind: "unavailable", causes: [20] });
-    expect(result.resultCompleteness).toEqual({ kind: "partial", reasons: ["operationBudget"] });
+    expect(result.resultCompleteness).toEqual({ kind: "complete" });
     expect(result.facts!.props.kind).toBe("complete");
   });
 
@@ -1317,10 +1243,8 @@ describe("independent component facts", () => {
       absent: false,
     };
     const result = decode(payload);
-    expect(result.componentPublicContract).toMatchObject({
-      kind: "unsupported",
-      reason: { kind: "adapterUnavailable" },
-    });
+    expect(Object.hasOwn(result, "componentPublicContract")).toBe(false);
+    expect(result.facts!.componentPublicContract).toEqual({ kind: "unavailable", causes: [106] });
     expect(result.facts!.props.kind).toBe("complete");
   });
 });

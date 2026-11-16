@@ -860,8 +860,6 @@ describe("mapEventMeta", () => {
     const event: EventMeta = {
       name: "click",
       payload: unknown("unknown"),
-      hasValidator: false,
-      isDeclared: true,
       description: "Fired on click",
       tags: [{ name: "deprecated" }],
     };
@@ -883,8 +881,6 @@ describe("mapEventMeta", () => {
         elements: [ref("Item"), primitive("boolean")],
         modifiers: [{ label: "item" }, { label: "exact" }],
       },
-      hasValidator: false,
-      isDeclared: true,
       rawSignature: "DECOY_SIGNATURE",
     };
     const typeRegistry = new Map<string, any>([
@@ -932,8 +928,6 @@ describe("mapEventMeta", () => {
         ],
         modifiers: [{ label: "transform" }, { label: "exact" }],
       },
-      hasValidator: false,
-      isDeclared: true,
       rawSignature: "DECOY_SIGNATURE",
     };
 
@@ -946,8 +940,6 @@ describe("mapEventMeta", () => {
     const event: EventMeta = {
       name: "update:open",
       payload: primitive("boolean"),
-      hasValidator: false,
-      isDeclared: true,
       rawSignature: "[value: boolean]",
     };
 

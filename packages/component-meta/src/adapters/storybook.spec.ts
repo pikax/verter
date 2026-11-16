@@ -135,14 +135,10 @@ describe("toArgTypes", () => {
         {
           name: "click",
           payload: { kind: "unknown", rawType: "" },
-          hasValidator: false,
-          isDeclared: true,
         },
         {
           name: "update",
           payload: { kind: "unknown", rawType: "" },
-          hasValidator: false,
-          isDeclared: true,
         },
       ],
     });

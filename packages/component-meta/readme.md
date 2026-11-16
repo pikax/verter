@@ -226,3 +226,24 @@ These legacy public APIs are not supported:
 ## License
 
 MIT
+
+### Native fact availability
+
+The decoder accepts exactly schema 15. It copies the producer measured
+`resultCompleteness` and `rootInfo` from the wire. A summary does not determine
+an independent lane guarantee. `acceptedSurfaceCompleteness` projects only
+the shared accepted-props resolver claim.
+
+Semantic lanes such as `props`, `events`, `slots`, `acceptedProps`,
+`rootReachability` and `componentPublicContract` are absent when unavailable.
+Read their guarantees and causes through `facts`. Known member rows remain
+present when their value is unavailable; every row carries `typeFact`, while
+`type` or `payload` is optional. Complete optional absence is a complete fact
+with an undefined value. Event metadata has no `hasValidator` or `isDeclared`.
+
+Both `@verter/component-meta` and `@verter/component-meta/browser` re-export
+all of `@verter/type-ir`. The browser entry exports the decoder and
+`nativeComponentMetaToComponentMeta`. Conversion takes the decoded native
+shape, including each member `typeFact`; it accepts no JSON publication
+adaptation. Its component name is a display name derived from the file name.
+`vModelEntries` transcribes the wire `vModels` name list.

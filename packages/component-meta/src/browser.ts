@@ -26,47 +26,7 @@ export type {
   ComponentFlags,
 } from "./types.js";
 
-// Type IR — re-exported from @verter/type-ir for public-API stability.
-export type {
-  TypeDescriptor,
-  PrimitiveName,
-  PrimitiveType,
-  LiteralType,
-  UnionType,
-  IntersectionType,
-  ArrayType,
-  TupleType,
-  ObjectType,
-  ObjectProperty,
-  ObjectIndexSignature,
-  FunctionType,
-  FunctionParameter,
-  TypeParameterType,
-  EnumType,
-  EnumMember,
-  RefType,
-  IntrinsicApplicationType,
-  RecursiveRefType,
-  RecursiveRefConditionalFrame,
-  UnknownType,
-} from "@verter/type-ir";
-
-export {
-  primitive,
-  literal,
-  union,
-  intersection,
-  array,
-  tuple,
-  object,
-  func,
-  typeParameter,
-  ref,
-  intrinsicApplication,
-  intrinsicDisplayName,
-  recursiveRef,
-  unknown,
-} from "@verter/type-ir";
+export * from "@verter/type-ir";
 
 // Native type evaluation bridge
 export { typeExprToDescriptor, buildEvaluatedTypeMap } from "./type-expr-bridge.js";
@@ -79,3 +39,5 @@ export type {
 export { decodeComponentMetaPayload } from "./type-graph-decode.js";
 export type { FactResult, FactCause, FactCauses } from "./facts.js";
 export type { NativeComponentMetaResult, NativeComponentFacts } from "./native-component-meta.js";
+
+export { nativeComponentMetaToComponentMeta } from "./native-component-meta.js";

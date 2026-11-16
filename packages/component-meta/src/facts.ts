@@ -11,3 +11,10 @@ export type FactResult<T> =
       readonly open?: boolean;
     }
   | { readonly kind: "unavailable"; readonly causes: FactCauses };
+
+/** Accepted props, events and fallthrough share the producer resolver claim. */
+export function projectAcceptedSurfaceCompleteness(
+  fact: FactResult<unknown>,
+): "exact" | "lowerBound" {
+  return fact.kind === "complete" && !fact.open ? "exact" : "lowerBound";
+}

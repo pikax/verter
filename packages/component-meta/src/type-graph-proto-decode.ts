@@ -1,8 +1,7 @@
-import type { FactResult, FactCauses } from "./facts.js";
+import { projectAcceptedSurfaceCompleteness, type FactResult, type FactCauses } from "./facts.js";
 import { fromBinary } from "@bufbuild/protobuf";
 import {
   ComponentMetaPayloadSchema,
-  LegacyComponentMetaPayloadSchema,
   PositionEncoding,
   SurfacePartialReason,
   type ComponentMetaPayload,
@@ -13,8 +12,6 @@ import {
 import type { NativeComponentMetaResult } from "./native-component-meta.js";
 import type {
   NativeConsumedRootBindings,
-  NativeComponentContractAvailability,
-  NativeComponentMetaOutputFailure,
   NativeComponentPublicContract,
   NativeContractDegradation,
   NativeContractSurface,
@@ -28,13 +25,13 @@ import type {
   NativeSurfacePartialReason,
   NativeTerminalTypeDisplay,
   NativeTypePublication,
-  NativeTypePublicationFailure,
   NativeUnresolvedRootTargetReason,
 } from "./native-component-meta.js";
 import {
   BRANCH_STATUS_PARTIALLY_UNRESOLVED,
   BRANCH_STATUS_RESOLVED,
   BRANCH_STATUS_UNRESOLVED,
+  ComponentMetaGraphError,
   createGraphTypeExprRef,
   DecodedTypeGraph,
   FALLTHROUGH_BRANCHES,
@@ -187,9 +184,6 @@ const EXPANSION_REASON_PROJECTION_WORK_LIMIT = 13;
 const EXPANSION_REASON_CONNECTED_QUERY_DEPTH_LIMIT = 14;
 const EXPANSION_REASON_CONNECTED_MEMORY_LIMIT = 15;
 
-const ACCEPTED_SURFACE_COMPLETENESS_EXACT = 1;
-const ACCEPTED_SURFACE_COMPLETENESS_LOWER_BOUND = 2;
-
 const RESULT_COMPLETENESS_COMPLETE = 1;
 const RESULT_COMPLETENESS_PARTIAL = 2;
 /**
@@ -268,39 +262,7 @@ export function decodeTypedComponentMetaPayload(
   payload: ArrayBuffer | ArrayBufferView,
 ): NativeComponentMetaResult {
   const message = fromBinary(ComponentMetaPayloadSchema, toBytes(payload));
-  if (message.schemaVersion === 12) {
-    const legacy = fromBinary(LegacyComponentMetaPayloadSchema, toBytes(payload));
-    return decodeLegacyPayload(legacy as unknown as ComponentMetaPayload);
-  }
   return decodeTypedPayload(message);
-}
-
-function decodeLegacyPayload(message: ComponentMetaPayload): NativeComponentMetaResult {
-  if (message.schemaVersion !== 12) {
-    throw graphError(
-      `component-meta protobuf payload version mismatch: expected ${GRAPH_FORMAT_VERSION}, found ${message.schemaVersion}`,
-    );
-  }
-  if (!message.typeGraph || !message.body) {
-    throw graphError("component-meta protobuf payload is missing a required section");
-  }
-
-  // Localize invalid nodes without turning schema-12 bool fields into fact records.
-  const graph = decodeTypeGraph(message.typeGraph, true);
-  graph.factMode = false;
-  const typeRegistry = ((message as ProtoRecord).typeRegistry as ProtoRecord[]).map((entry) =>
-    decodeTypeRegistryEntry(entry, graph),
-  );
-  const body = decodeComponentMetaBody(message.body, graph);
-  const origin = decodeOptionalOriginGraph(message);
-  const result = {
-    ...body,
-    typeRegistry,
-    ...(origin !== undefined ? { origin } : {}),
-  } as unknown as NativeComponentMetaResult;
-  stampLegacyMemberFacts(result);
-  result.facts = adaptLegacyFacts(result);
-  return result;
 }
 
 function decodeTypedPayload(message: ComponentMetaPayload): NativeComponentMetaResult {
@@ -390,58 +352,48 @@ function decodeTypedPayload(message: ComponentMetaPayload): NativeComponentMetaR
       true,
     ),
   };
-  const value = (fact: FactResult<unknown>, fallback: unknown) =>
-    fact.kind === "unavailable" ? fallback : fact.value;
   // Only authored/scalar positions reach this shared decoder. Semantic lanes
   // are decoded independently above and compatibility arrays derive from them.
   const authored = decodeAuthoredBody(body as ProtoRecord, graph);
   const result = {
     ...authored,
     facts,
-    props: value(facts.props, []),
-    events: value(facts.events, []),
-    slots: value(facts.slots, []),
-    models: value(facts.models, []),
-    exposed: value(facts.exposed, []),
-    acceptedProps: value(facts.acceptedProps, []),
-    acceptedEvents: value(facts.acceptedEvents, []),
-    rootReachability: value(facts.rootReachability, {
-      kind: "noFallthrough",
-      reason: "noTemplate",
-    }),
-    fallthroughSurface: value(facts.fallthroughSurface, { kind: "none", reason: "noTemplate" }),
-    publicInstance: value(facts.publicInstance, undefined),
-    componentPublicContract:
-      facts.componentPublicContract.kind === "unavailable"
-        ? {
-            kind: "unsupported",
-            adapterId: "",
-            reason: {
-              kind: facts.componentPublicContract.causes.includes(106)
-                ? "adapterUnavailable"
-                : "componentMetaUnavailable",
-            },
-            diagnostics: [],
-          }
-        : { kind: "supported", contract: facts.componentPublicContract.value },
-    typeRegistry: value(facts.typeRegistry, []),
-    acceptedSurfaceCompleteness:
-      facts.acceptedProps.kind === "complete" &&
-      !facts.acceptedProps.open &&
-      facts.acceptedEvents.kind === "complete" &&
-      !facts.acceptedEvents.open
-        ? "exact"
-        : "lowerBound",
-    resultCompleteness: summarizeFacts(facts),
-    ...maybe(
-      "rootInfo",
-      facts.rootReachability.kind === "unavailable"
-        ? undefined
-        : deriveRootInfo(facts.rootReachability.value),
+    ...Object.fromEntries(
+      Object.entries(facts)
+        .filter(
+          ([key, fact]) =>
+            key !== "delivery" &&
+            key !== "componentPublicContract" &&
+            fact.kind !== "unavailable" &&
+            fact.value !== undefined,
+        )
+        .map(([key, fact]) => [key, fact.kind === "unavailable" ? undefined : fact.value]),
     ),
+    ...(facts.componentPublicContract.kind === "unavailable"
+      ? {}
+      : {
+          componentPublicContract: {
+            kind: "supported",
+            contract: facts.componentPublicContract.value,
+          },
+        }),
+    acceptedSurfaceCompleteness: projectAcceptedSurfaceCompleteness(facts.acceptedProps),
+    resultCompleteness: decodeResultCompleteness(
+      requireProtoMessage(
+        body.resultCompleteness as ProtoRecord | undefined,
+        "result completeness",
+      ),
+    ),
+    ...maybe("rootInfo", decodeOptionalRootInfo(body.rootInfo as ProtoRecord | undefined, graph)),
     ...maybe("origin", decodeOptionalOriginGraph(message)),
   } as unknown as NativeComponentMetaResult;
   return result;
+}
+
+function requireFactCauses(value: unknown, label: string): FactCauses {
+  const causes = numberList(value);
+  if (causes.length === 0) throw graphError("component-meta " + label + " lacks causes");
+  return causes as unknown as FactCauses;
 }
 
 function decodeFact<T>(
@@ -468,113 +420,12 @@ function decodeFact<T>(
     return kind === 1
       ? { kind: "complete", value, ...open }
       : { kind: "approximate", value, causes: causes as unknown as FactCauses, ...open };
-  } catch {
-    return { kind: "unavailable", causes: [100] };
+  } catch (error) {
+    if (!(error instanceof ComponentMetaGraphError)) throw error;
+    const causes = numberList(raw?.guarantee?.causes);
+    if (causes.length === 0) throw error;
+    return { kind: "unavailable", causes: causes as unknown as FactCauses };
   }
-}
-
-function summarizeFacts(facts: Record<string, FactResult<unknown>>): NativeResultCompleteness {
-  const causes = new Set<number>();
-  function visit(value: unknown): void {
-    if (!value || typeof value !== "object") return;
-    if (
-      "kind" in value &&
-      (value.kind === "unavailable" || value.kind === "approximate") &&
-      "causes" in value
-    ) {
-      for (const cause of value.causes as number[]) causes.add(cause);
-    }
-    // Graph references own a shared graph; traversal stops at the typed handle.
-    if ("graph" in value && "nodeId" in value) return;
-    for (const item of Object.values(value)) visit(item);
-  }
-  visit(facts);
-  const reasons = [...causes].map(
-    (cause) => SURFACE_PARTIAL_REASON_BY_WIRE[cause as SurfacePartialReason] ?? "propagated",
-  );
-  return reasons.length === 0
-    ? { kind: "complete" }
-    : { kind: "partial", reasons: [...new Set(reasons)] };
-}
-
-function legacyPublicationFact(
-  publication: { kind: string; exactness?: string },
-  type: unknown,
-): FactResult<unknown> {
-  if (publication.kind === "failed" || (type === undefined && publication.kind !== "absent")) {
-    return { kind: "unavailable", causes: [102] };
-  }
-  if (publication.kind === "absent") return { kind: "complete", value: undefined };
-  if (publication.kind === "published" && publication.exactness === "incomplete") {
-    return { kind: "approximate", value: type, causes: [101] };
-  }
-  return { kind: "complete", value: type };
-}
-
-function stampLegacyMemberFacts(result: NativeComponentMetaResult): void {
-  for (const prop of result.props) {
-    prop.typeFact ??= legacyPublicationFact(prop.publication, prop.type) as NonNullable<
-      typeof prop.typeFact
-    >;
-  }
-  for (const event of result.events) {
-    event.typeFact ??= legacyPublicationFact(event.publication, event.payload) as NonNullable<
-      typeof event.typeFact
-    >;
-  }
-  for (const slot of result.slots) {
-    for (const binding of slot.bindings) {
-      binding.typeFact ??= legacyPublicationFact(binding.publication, binding.type) as NonNullable<
-        typeof binding.typeFact
-      >;
-    }
-  }
-  for (const prop of result.acceptedProps) {
-    prop.typeFact ??= legacyPublicationFact(prop.publication, prop.type) as NonNullable<
-      typeof prop.typeFact
-    >;
-  }
-  if (result.fallthroughSurface.kind === "branches") {
-    for (const branch of result.fallthroughSurface.branches) {
-      for (const prop of branch.props) {
-        prop.typeFact ??= legacyPublicationFact(prop.publication, prop.type) as NonNullable<
-          typeof prop.typeFact
-        >;
-      }
-    }
-  }
-}
-
-function adaptLegacyFacts(result: NativeComponentMetaResult): NativeComponentMetaResult["facts"] {
-  const summary = result.resultCompleteness;
-  const causes: FactCauses = [101];
-  const fact = <T>(value: T): FactResult<T> =>
-    summary.kind === "complete"
-      ? { kind: "complete", value, ...(Array.isArray(value) ? { open: true } : {}) }
-      : value === undefined
-        ? { kind: "unavailable", causes }
-        : { kind: "approximate", value, causes, open: Array.isArray(value) };
-  return {
-    delivery:
-      summary.kind === "complete"
-        ? { kind: "complete", value: undefined }
-        : { kind: "unavailable", causes },
-    props: fact(result.props),
-    events: fact(result.events),
-    slots: fact(result.slots),
-    models: fact(result.models),
-    exposed: fact(result.exposed),
-    acceptedProps: fact(result.acceptedProps),
-    acceptedEvents: fact(result.acceptedEvents),
-    rootReachability: fact(result.rootReachability),
-    fallthroughSurface: fact(result.fallthroughSurface),
-    publicInstance: fact(result.publicInstance),
-    componentPublicContract:
-      result.componentPublicContract.kind === "supported"
-        ? fact(result.componentPublicContract.contract)
-        : { kind: "unavailable", causes: [101] },
-    typeRegistry: fact(result.typeRegistry),
-  };
 }
 
 function decodeTypeGraph(typeGraph: ProtoRecord, localFailures = false): DecodedTypeGraph {
@@ -583,13 +434,11 @@ function decodeTypeGraph(typeGraph: ProtoRecord, localFailures = false): Decoded
     try {
       return decodeTypeNode(node);
     } catch (error) {
-      if (!localFailures) throw error;
+      if (!localFailures || !(error instanceof ComponentMetaGraphError)) throw error;
       return { kind: NODE_UNKNOWN, rawId: 0 } as GraphNodeRecord;
     }
   });
   const graph = new DecodedTypeGraph(strings, nodes);
-  graph.factMode = localFailures;
-  graph.localizeFailures = localFailures;
   validateNodeTable(graph, localFailures);
   return graph;
 }
@@ -953,7 +802,7 @@ function validateNodeTable(graph: DecodedTypeGraph, localFailures = false): void
           break;
       }
     } catch (error) {
-      if (!localFailures) throw error;
+      if (!localFailures || !(error instanceof ComponentMetaGraphError)) throw error;
       invalid.add(index + 1);
     }
   }
@@ -1045,177 +894,6 @@ function decodeAuthoredBody(body: ProtoRecord, graph: DecodedTypeGraph): Record<
     ),
     ...decodeMacroExpansionDiagnostics(body, graph),
   };
-}
-
-function decodeComponentMetaBody(
-  body: ProtoRecord,
-  graph: DecodedTypeGraph,
-): Omit<NativeComponentMetaResult, "typeRegistry"> {
-  const resolution = decodeOptionalResolution(body.resolution as ProtoRecord | undefined, graph);
-  const rootReachability: NativeRootReachability = decodeRootReachability(
-    requireProtoMessage(body.rootReachability as ProtoRecord | undefined, "root reachability"),
-    graph,
-  );
-  const rootInfo =
-    decodeOptionalRootInfo(body.rootInfo as ProtoRecord | undefined, graph) ??
-    deriveRootInfo(rootReachability);
-  return {
-    filePath: graph.getString(readRequiredId(body.filePathId, "file path")),
-    componentPublicContract: decodeComponentContractAvailability(
-      requireProtoMessage(
-        body.componentPublicContract as ProtoRecord | undefined,
-        "component public contract",
-      ),
-      graph,
-    ),
-    componentName: "",
-    optionsApi: Boolean(body.optionsApi),
-    props: ((body.props as ProtoRecord[] | undefined) ?? []).map((prop) => decodeProp(prop, graph)),
-    events: ((body.events as ProtoRecord[] | undefined) ?? []).map((event) =>
-      decodeEvent(event, graph),
-    ),
-    slots: ((body.slots as ProtoRecord[] | undefined) ?? []).map((slot) => decodeSlot(slot, graph)),
-    models: ((body.models as ProtoRecord[] | undefined) ?? []).map((model) =>
-      decodeModel(model, graph),
-    ),
-    exposed: ((body.exposed as ProtoRecord[] | undefined) ?? []).map((exposed) =>
-      decodeExposed(exposed, graph),
-    ),
-    ...maybe(
-      "publicInstance",
-      decodeOptionalPublicInstance(body.publicInstance as ProtoRecord | undefined, graph),
-    ),
-    orderedSfcStructure: decodeOrderedStructure(
-      requireProtoMessage(
-        body.orderedSfcStructure as ProtoRecord | undefined,
-        "ordered SFC structure",
-      ),
-    ),
-    components: ((body.components as ProtoRecord[] | undefined) ?? []).map((component) =>
-      decodeComponentUsage(component, graph),
-    ),
-    templateRefs: ((body.templateRefs as ProtoRecord[] | undefined) ?? []).map((templateRef) =>
-      decodeTemplateRef(templateRef, graph),
-    ),
-    imports: ((body.imports as ProtoRecord[] | undefined) ?? []).map((entry) =>
-      decodeImport(entry, graph),
-    ),
-    bindings: ((body.bindings as ProtoRecord[] | undefined) ?? []).map((binding) =>
-      decodeBinding(binding, graph),
-    ),
-    vueApiCalls: ((body.vueApiCalls as ProtoRecord[] | undefined) ?? []).map((call) =>
-      decodeVueApiCall(call, graph),
-    ),
-    styles: ((body.styles as ProtoRecord[] | undefined) ?? []).map((style) =>
-      decodeStyle(style, graph),
-    ),
-    flags: decodeComponentFlags(body.flags as ProtoRecord | undefined),
-    acceptedProps: ((body.acceptedProps as ProtoRecord[] | undefined) ?? []).map((prop) =>
-      decodeAcceptedProp(prop, graph),
-    ),
-    acceptedEvents: ((body.acceptedEvents as ProtoRecord[] | undefined) ?? []).map((event) =>
-      decodeAcceptedEvent(event, graph),
-    ),
-    acceptedSurfaceCompleteness: decodeAcceptedSurfaceCompleteness(
-      Number(body.acceptedSurfaceCompleteness ?? 0),
-    ),
-    resultCompleteness: decodeResultCompleteness(
-      requireProtoMessage(
-        body.resultCompleteness as ProtoRecord | undefined,
-        "result completeness",
-      ),
-    ),
-    ...maybe("rootInfo", rootInfo),
-    rootReachability,
-    fallthroughSurface: decodeFallthroughSurface(
-      requireProtoMessage(
-        body.fallthroughSurface as ProtoRecord | undefined,
-        "fallthrough surface",
-      ),
-      graph,
-    ),
-    ...maybe("resolution", resolution),
-    ...decodeMacroExpansionDiagnostics(body, graph),
-  } as unknown as Omit<NativeComponentMetaResult, "typeRegistry">;
-}
-
-function decodeComponentContractAvailability(
-  message: ProtoRecord,
-  graph: DecodedTypeGraph,
-): NativeComponentContractAvailability {
-  const availability = message.availability as
-    | { case: "supported" | "unsupported" | undefined; value?: ProtoRecord }
-    | undefined;
-  if (!availability?.case || !availability.value) {
-    throw graphError("component-meta component public contract has no availability");
-  }
-  if (availability.case === "supported") {
-    return {
-      kind: "supported",
-      contract: decodeSupportedComponentContract(availability.value, graph),
-    };
-  }
-  const unsupported = availability.value;
-  const adapterId = graph.getString(readRequiredId(unsupported.adapterId, "contract adapter"));
-  const diagnostics = decodeResolutionDiagnostics(
-    (unsupported.diagnostics as ProtoRecord[] | undefined) ?? [],
-    graph,
-  );
-  const reason = Number(unsupported.reason ?? 0);
-  switch (reason) {
-    case 1:
-      return {
-        kind: "unsupported",
-        adapterId,
-        reason: { kind: "adapterUnavailable" },
-        diagnostics,
-      };
-    case 2:
-      return {
-        kind: "unsupported",
-        adapterId,
-        reason: { kind: "componentMetaUnavailable" },
-        diagnostics,
-      };
-    case 3:
-      return {
-        kind: "unsupported",
-        adapterId,
-        reason: {
-          kind: "outputMaterializationFailed",
-          lane: decodeOutputLane(Number(unsupported.outputLane ?? 0)),
-          index: Number(unsupported.index ?? 0),
-          ...(Boolean(unsupported.hasInnerIndex)
-            ? { innerIndex: Number(unsupported.innerIndex ?? 0) }
-            : {}),
-          failure: decodeOutputFailure(
-            Number(unsupported.outputFailure ?? 0),
-            Number(unsupported.publicationFailure ?? 0),
-          ),
-        },
-        diagnostics,
-      };
-    case 4:
-      return {
-        kind: "unsupported",
-        adapterId,
-        reason: {
-          kind: "publicationFailed",
-          surface: decodeContractSurface(
-            requireProtoMessage(
-              unsupported.publicationSurface as ProtoRecord | undefined,
-              "publication-failed contract surface",
-            ),
-            graph,
-          ),
-          failure: decodePublicationFailure(Number(unsupported.publicationFailure ?? 0)),
-          provenance: decodeResolutionProvenance(Number(unsupported.publicationProvenance ?? 0)),
-        },
-        diagnostics,
-      };
-    default:
-      throw graphError(`component-meta contract has unknown unsupported reason ${reason}`);
-  }
 }
 
 function decodeSupportedComponentContract(
@@ -1463,56 +1141,6 @@ function requireContractProvenance(value: unknown): void {
   }
 }
 
-function decodePublicationFailure(value: number): NativeTypePublicationFailure {
-  if (value === 1) return "unrepresentableRequiredMemberValue";
-  if (value === 2) return "unrepresentableRequiredPayload";
-  throw graphError(`component-meta contract has unknown publication failure ${value}`);
-}
-
-function decodeOutputLane(value: number): string {
-  const lanes = [
-    "prop",
-    "eventPayload",
-    "slotBinding",
-    "slotReturn",
-    "model",
-    "exposed",
-    "publicInstanceMember",
-    "typeRegistryEntry",
-    "acceptedProp",
-    "acceptedEventPayload",
-    "fallthroughProp",
-    "fallthroughEventPayload",
-    "eventReturn",
-  ];
-  const lane = lanes[value - 1];
-  if (!lane) throw graphError(`component-meta contract has unknown output lane ${value}`);
-  return lane;
-}
-
-function decodeOutputFailure(
-  value: number,
-  publicationFailure: number,
-): NativeComponentMetaOutputFailure {
-  switch (value) {
-    case 1:
-      return { kind: "unraisableSource" };
-    case 2:
-      return {
-        kind: "requiredSourceUnavailable",
-        publicationFailure: decodePublicationFailure(publicationFailure),
-      };
-    case 3:
-      return { kind: "interiorSourceMiss" };
-    case 4:
-      return { kind: "shellMaterializationMiss" };
-    case 5:
-      return { kind: "unknownMaterializingSourceInterior" };
-    default:
-      throw graphError(`component-meta contract has unknown output failure ${value}`);
-  }
-}
-
 function decodeOptionalPublicInstance(
   publicInstance: ProtoRecord | undefined,
   graph: DecodedTypeGraph,
@@ -1596,29 +1224,6 @@ function decodeOptionalRootInfo(
     targets: ((info.targets as ProtoRecord[] | undefined) ?? []).map((target) =>
       decodeRootTargetRef(target, graph),
     ),
-  };
-}
-
-function deriveRootInfo(
-  reachability: NativeComponentMetaResult["rootReachability"],
-): Record<string, unknown> {
-  if (reachability.kind === "branches") {
-    return {
-      kind: reachability.branches.length <= 1 ? "single" : "conditional",
-      targets: reachability.branches.map((branch) => ({ ...branch.target })),
-    };
-  }
-
-  const kind =
-    reachability.reason === "multiRoot" || reachability.reason === "rootVFor"
-      ? "multiple"
-      : reachability.reason === "branchNotSingleRoot"
-        ? "conditional"
-        : "none";
-  return {
-    kind,
-    ...(reachability.reason !== undefined ? { reason: reachability.reason } : {}),
-    targets: [],
   };
 }
 
@@ -1797,16 +1402,10 @@ function decodePublishedTypeFields(
       return {
         publication,
         terminalDisplay,
-        ...(graph.factMode
-          ? {
-              typeFact: {
-                kind: "unavailable",
-                causes: numberList(row.publication?.factCauses).length
-                  ? numberList(row.publication?.factCauses)
-                  : [102],
-              },
-            }
-          : {}),
+        typeFact: {
+          kind: "unavailable",
+          causes: requireFactCauses(row.publication?.factCauses, "failed publication"),
+        },
       };
     }
     if (publication.kind === "published" && typeNodeId === 0) {
@@ -1815,7 +1414,6 @@ function decodePublishedTypeFields(
     const type = typeNodeId !== 0 ? createGraphTypeExprRef(graph, typeNodeId) : undefined;
     const causes = numberList(row.publication?.factCauses);
     if (
-      graph.factMode &&
       publication.kind === "published" &&
       (publication.exactness === "incomplete" ? causes.length === 0 : causes.length !== 0)
     )
@@ -1827,17 +1425,17 @@ function decodePublishedTypeFields(
           ? {
               kind: "approximate",
               value: type,
-              causes: (causes.length ? causes : [103]) as unknown as FactCauses,
+              causes: causes as unknown as FactCauses,
             }
           : { kind: "complete", value: type };
     return {
       ...maybe("type", type),
       publication,
       terminalDisplay,
-      ...(graph.factMode ? { typeFact } : {}),
+      typeFact,
     };
   } catch (error) {
-    if (!graph.factMode && !(graph.localizeFailures && isLocalizedGraphFailure(error))) {
+    if (!(error instanceof ComponentMetaGraphError)) {
       throw error;
     }
     return {
@@ -1847,19 +1445,19 @@ function decodePublishedTypeFields(
         provenance: "schema",
       },
       terminalDisplay: {},
-      ...(graph.factMode ? { typeFact: { kind: "unavailable", causes: [100] } } : {}),
+      typeFact: {
+        kind: "unavailable",
+        causes: numberList(row.publication?.factCauses).length
+          ? numberList(row.publication?.factCauses)
+          : [102],
+      },
     };
   }
 }
 
-function isLocalizedGraphFailure(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /graph node \d+ is invalid/.test(message) || message.includes("missing node id");
-}
-
 function decodeProp(prop: ProtoRecord, graph: DecodedTypeGraph): Record<string, unknown> {
-  const requiredFact = graph.factMode ? decodeBooleanFact(prop.requiredFact) : undefined;
-  const hasDefaultFact = graph.factMode ? decodeBooleanFact(prop.hasDefaultFact) : undefined;
+  const requiredFact = decodeBooleanFact(prop.requiredFact);
+  const hasDefaultFact = decodeBooleanFact(prop.hasDefaultFact);
   return {
     name: graph.getString(readRequiredId(prop.nameId, "prop name")),
     ...decodePublishedTypeFields(prop, graph, "prop"),
@@ -1867,29 +1465,14 @@ function decodeProp(prop: ProtoRecord, graph: DecodedTypeGraph): Record<string, 
       "typeExpansion",
       decodeOptionalExpansionMetadata(prop.typeExpansion as ProtoRecord | undefined, graph),
     ),
-    required: requiredFact
-      ? requiredFact.kind === "unavailable"
-        ? undefined
-        : requiredFact.value
-      : Boolean(prop.required),
-    hasDefault: hasDefaultFact
-      ? hasDefaultFact.kind === "unavailable"
-        ? undefined
-        : hasDefaultFact.value
-      : Boolean(prop.hasDefault),
-    ...(graph.factMode ? { requiredFact, hasDefaultFact } : {}),
+    required: requiredFact.kind === "unavailable" ? undefined : requiredFact.value,
+    hasDefault: hasDefaultFact.kind === "unavailable" ? undefined : hasDefaultFact.value,
+    requiredFact,
+    hasDefaultFact,
     ...maybe("defaultValue", graph.getStringMaybe(Number(prop.defaultValueId ?? 0))),
     ...maybe("description", graph.getStringMaybe(Number(prop.descriptionId ?? 0))),
     ...maybeArray("tags", decodeJsdocTags((prop.tags as ProtoRecord[] | undefined) ?? [], graph)),
-    // proto3 wire-level: booleans default to `false` when the field
-    // is absent. Field 10 (`declared_in_macro_type_arg`) on
-    // `verter.v1.PropMeta` is always populated by current Rust
-    // producers, but older native binaries compiled against a proto
-    // definition without field 10 emit messages that lack it —
-    // `Boolean(undefined)` is correctly `false`, matching the "drop
-    // unless explicitly declared" semantics the Refined policy
-    // enforces. This is legitimate forward-compat.
-    declaredInMacroTypeArg: Boolean(prop.declaredInMacroTypeArg),
+    declaredInMacroTypeArg: prop.declaredInMacroTypeArg,
   };
 }
 
@@ -1905,10 +1488,10 @@ function decodeEvent(event: ProtoRecord, graph: DecodedTypeGraph): Record<string
   );
   return {
     name: graph.getString(readRequiredId(event.nameId, "event name")),
-    payload: published.type,
+    ...maybe("payload", published.type),
     publication: published.publication,
     terminalDisplay: published.terminalDisplay,
-    ...maybe("typeFact", published.typeFact),
+    typeFact: published.typeFact,
     ...maybe(
       "payloadExpansion",
       decodeOptionalExpansionMetadata(event.payloadExpansion as ProtoRecord | undefined, graph),
@@ -1947,7 +1530,7 @@ function decodeSlot(slot: ProtoRecord, graph: DecodedTypeGraph): Record<string, 
     isRequired: Boolean(slot.isRequired),
     // Field 8 (`declared_in_macro_type_arg`) — proto3 bool defaults make
     // the coercion read `false` when the field is absent.
-    declaredInMacroTypeArg: Boolean(slot.declaredInMacroTypeArg),
+    declaredInMacroTypeArg: slot.declaredInMacroTypeArg,
     ...maybe("returnType", graph.getStringMaybe(Number(slot.returnTypeId ?? 0))),
     ...(typedReturn.type !== undefined ? { returnValue: typedReturn.type } : {}),
     ...(typedReturn.publication !== undefined
@@ -2822,19 +2405,6 @@ function decodeResultCompleteness(message: ProtoRecord): NativeResultCompletenes
   return { kind: "partial", reasons };
 }
 
-function decodeAcceptedSurfaceCompleteness(value: number): "exact" | "lowerBound" {
-  switch (value) {
-    case ACCEPTED_SURFACE_COMPLETENESS_EXACT:
-      return "exact";
-    case ACCEPTED_SURFACE_COMPLETENESS_LOWER_BOUND:
-      return "lowerBound";
-    default:
-      throw graphError(
-        `component-meta graph payload has unknown accepted surface completeness ${value}`,
-      );
-  }
-}
-
 function decodeAcceptedPropKind(value: number): "declaredProp" | "attr" {
   switch (value) {
     case ACCEPTED_PROP_KIND_DECLARED_PROP:
@@ -2922,19 +2492,16 @@ function decodeTypedRef(
   label: string,
   key = "type",
 ): Record<string, unknown> {
-  if (!graph.factMode && !graph.localizeFailures) {
-    return { [key]: createGraphTypeExprRef(graph, readRequiredId(nodeId, label)) };
-  }
   try {
     const type = createGraphTypeExprRef(graph, readRequiredId(nodeId, label));
-    return graph.factMode
-      ? { [key]: type, typeFact: { kind: "complete", value: type } }
-      : { [key]: type };
+    return { [key]: type, typeFact: { kind: "complete", value: type } };
   } catch (error) {
-    if (!graph.factMode && !(graph.localizeFailures && isLocalizedGraphFailure(error))) {
+    if (!(error instanceof ComponentMetaGraphError)) {
       throw error;
     }
-    return graph.factMode ? { typeFact: { kind: "unavailable", causes: [100] } } : {};
+    return {
+      typeFact: { kind: "unavailable", causes: [SurfacePartialReason.MISSING_SEMANTIC_NODE_DATA] },
+    };
   }
 }
 
@@ -3022,7 +2589,7 @@ function toBytes(payload: ArrayBuffer | ArrayBufferView): Uint8Array {
 }
 
 function graphError(message: string): Error {
-  return new Error(message);
+  return new ComponentMetaGraphError(message);
 }
 
 function decodeBooleanFact(raw: ProtoRecord | undefined): FactResult<boolean> {

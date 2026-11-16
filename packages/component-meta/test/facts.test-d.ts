@@ -22,3 +22,19 @@ declare const healthyEvent: NativeEventMeta & { payload: NativeTypeExprLike };
 const presentPayload: NativeTypeExprLike = healthyEvent.payload;
 void missingPayload;
 void presentPayload;
+
+import type { PropMeta, EventMeta } from "../src/types.js";
+import type { TypeDescriptor } from "@verter/type-ir";
+declare const prop: PropMeta;
+const optionalType: TypeDescriptor | undefined = prop.type;
+const typeFact: SourceFact<TypeDescriptor | undefined> = prop.typeFact;
+declare const event: EventMeta;
+// @ts-expect-error events have no producer-owned validator flag
+event.hasValidator;
+// @ts-expect-error events have no separate declared flag
+event.isDeclared;
+void optionalType;
+void typeFact;
+
+const typeCanBeAbsent: undefined extends PropMeta["type"] ? true : false = true;
+void typeCanBeAbsent;

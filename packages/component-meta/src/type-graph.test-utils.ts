@@ -1,8 +1,5 @@
 import { create, toBinary } from "@bufbuild/protobuf";
-import {
-  LegacyComponentMetaPayloadSchema as ComponentMetaPayloadSchema,
-  type LegacyComponentMetaPayloadInit as ComponentMetaPayloadInit,
-} from "@verter/proto";
+import { ComponentMetaPayloadSchema, type ComponentMetaPayloadInit } from "@verter/proto";
 
 type TestPrimitiveName =
   | "string"
@@ -113,7 +110,7 @@ export interface TestComponentMetaPayload {
   typeRegistry?: TestTypeRegistryEntry[];
 }
 
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 15;
 
 const NODE_PRIMITIVE = 1;
 const NODE_UNION = 3;
@@ -329,8 +326,8 @@ export function buildTestComponentMetaProtoPayload(
       typeNodeId: builder.nodeId(prop.type),
       publication: publishedResolvedConcrete(),
       terminalDisplay: { textId: builder.stringId(prop.terminalDisplay) },
-      required: Boolean(prop.required),
-      hasDefault: Boolean(prop.hasDefault),
+      requiredFact: { guarantee: { kind: 1, causes: [] }, value: Boolean(prop.required) },
+      hasDefaultFact: { guarantee: { kind: 1, causes: [] }, value: Boolean(prop.hasDefault) },
       typeExpansion: expansionMeta(prop.typeExpansion, builder),
       tags: [],
     })),
@@ -400,14 +397,45 @@ export function buildTestComponentMetaProtoPayload(
     },
   };
 
+  const {
+    props: propEntries,
+    events,
+    slots: slotEntries,
+    models,
+    exposed,
+    acceptedProps,
+    acceptedEvents,
+    acceptedSurfaceCompleteness,
+    rootReachability,
+    fallthroughSurface,
+    componentPublicContract,
+    ...authored
+  } = body;
+  const fact = <T>(value: T) => ({ guarantee: { kind: 1, causes: [] }, value });
   return {
     schemaVersion: SCHEMA_VERSION,
     typeGraph: {
       strings: builder.protoStringTable(),
       nodes: builder.protoNodeTable(),
     },
-    typeRegistry: typeRegistryEntries,
-    body,
+    body: {
+      ...authored,
+      facts: {
+        delivery: { kind: 1, causes: [] },
+        props: fact({ entries: propEntries }),
+        events: fact({ entries: events }),
+        slots: fact({ entries: slotEntries }),
+        models: fact({ entries: models }),
+        exposed: fact({ entries: exposed }),
+        acceptedProps: fact({ entries: acceptedProps }),
+        acceptedEvents: fact({ entries: acceptedEvents }),
+        rootReachability: fact(rootReachability),
+        fallthroughSurface: fact(fallthroughSurface),
+        publicInstance: { guarantee: { kind: 1, causes: [] }, absent: true },
+        componentPublicContract: { guarantee: { kind: 3, causes: [106] } },
+        typeRegistry: fact({ entries: typeRegistryEntries }),
+      },
+    },
   };
 }
 

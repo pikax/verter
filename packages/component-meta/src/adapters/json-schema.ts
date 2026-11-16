@@ -145,7 +145,8 @@ export function propsToJsonSchema(meta: ComponentMeta): JSONSchema {
   const properties: Record<string, JSONSchema> = {};
   const required: string[] = [];
 
-  for (const prop of meta.props) {
+  for (const prop of meta.props ?? []) {
+    if (prop.type === undefined) continue;
     // Keep the known type when `required` is unavailable. Only an exact
     // true enters `required`; absence does not assert requiredness.
     properties[prop.name] = typeToJsonSchema(prop.type);

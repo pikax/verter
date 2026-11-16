@@ -221,10 +221,14 @@ async function readFileSafe(absPath: string, ws: CheckerWorkspace): Promise<stri
 }
 
 /** Volar's `required` flag is a boolean and cannot carry an unavailable fact. */
-type KnownRequiredProp = PropMeta & { required: boolean };
+function hasType<T extends { type?: TypeDescriptor }>(row: T): row is T & { type: TypeDescriptor } {
+  return row.type !== undefined;
+}
+
+type KnownRequiredProp = PropMeta & { required: boolean; type: TypeDescriptor };
 
 function hasRequiredFact(prop: PropMeta): prop is KnownRequiredProp {
-  return typeof prop.required === "boolean";
+  return typeof prop.required === "boolean" && prop.type !== undefined;
 }
 
 /**
@@ -238,7 +242,9 @@ export function mapPropMeta(
   typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMeta {
   if (!hasRequiredFact(prop)) {
-    throw new Error(`component-meta compat cannot project ${prop.name} without a required fact`);
+    throw new Error(
+      `component-meta compat cannot project ${prop.name} without a required fact or type`,
+    );
   }
   const classification = classifyCompatPropDescriptor(prop, typeRegistry);
   switch (classification.kind) {
@@ -1583,12 +1589,16 @@ function buildSlotBindingsType(slot: SlotMeta, typeRegistry?: Map<string, TypeDe
   }
 
   return `{ ${slot.bindings
-    .map((binding) => `${binding.name}: ${compatSlotBindingTypeText(binding, typeRegistry)}`)
+    .filter(hasType)
+    .map(
+      (binding) =>
+        `${binding.name}: ${compatSlotBindingTypeText({ ...binding, type: binding.type }, typeRegistry)}`,
+    )
     .join("; ")}; }`;
 }
 
 function compatSlotBindingTypeText(
-  binding: SlotMeta["bindings"][number],
+  binding: SlotMeta["bindings"][number] & { type: TypeDescriptor },
   typeRegistry?: Map<string, TypeDescriptor>,
 ): string {
   const compatUiBinding = buildCompatUiBindingType(binding);
@@ -1604,7 +1614,7 @@ function compatSlotBindingTypeText(
 }
 
 function buildCompatUiBindingType(binding: SlotMeta["bindings"][number]): string | undefined {
-  if (!descriptorCarriesUiHelperMarker(binding.type)) {
+  if (binding.type === undefined || !descriptorCarriesUiHelperMarker(binding.type)) {
     return undefined;
   }
 
@@ -1665,7 +1675,7 @@ function unwrapComponentUiDescriptor(
 function buildSlotBindingsDescriptor(slot: SlotMeta): TypeDescriptor {
   return {
     kind: "object",
-    properties: slot.bindings.map((binding) => ({
+    properties: slot.bindings.filter(hasType).map((binding) => ({
       name: binding.name,
       type: binding.type,
       optional: false,
@@ -1730,7 +1740,7 @@ function buildEventPayloadSchema(
 }
 
 function buildEventPayloadType(
-  event: EventMeta,
+  event: EventMeta & { payload: TypeDescriptor },
   typeRegistry?: Map<string, TypeDescriptor>,
 ): string {
   const classification = classifyCompatEventPayload(event.payload);
@@ -1784,10 +1794,12 @@ export function mapEventMeta(
   options?: MetaCheckerOptions,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMeta {
+  if (event.payload === undefined)
+    throw new Error(`component-meta compat cannot project ${event.name} without a payload`);
   return {
     name: event.name,
     description: event.description ?? "",
-    type: buildEventPayloadType(event, typeRegistry),
+    type: buildEventPayloadType({ ...event, payload: event.payload }, typeRegistry),
     required: false,
     global: false,
     tags: (event.tags ?? []).map((t) => ({
@@ -1834,6 +1846,7 @@ function buildCompatSlotBindingsSchema(
   let usedCompatUiBinding = false;
 
   for (const binding of slot.bindings) {
+    if (binding.type === undefined) continue;
     const compatUiBinding = buildCompatUiBindingType(binding);
     if (compatUiBinding) {
       usedCompatUiBinding = true;
@@ -1855,7 +1868,7 @@ function buildCompatSlotBindingsSchema(
       description: "",
       tags: [],
       required: true,
-      type: compatSlotBindingTypeText(binding, typeRegistry),
+      type: compatSlotBindingTypeText({ ...binding, type: binding.type }, typeRegistry),
       schema: typeDescriptorToSchema(binding.type, options, typeRegistry),
     } as unknown as PropertyMetaSchema;
   }
@@ -1879,6 +1892,8 @@ export function mapExposedMeta(
   options?: MetaCheckerOptions,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMeta {
+  if (exposed.type === undefined)
+    throw new Error(`component-meta compat cannot project ${exposed.name} without a type`);
   return {
     name: exposed.name,
     description: exposed.description ?? "",
@@ -1900,12 +1915,18 @@ export function mapComponentMeta(
 ): VolarComponentMeta {
   return {
     type: 0,
-    props: meta.props.filter(hasRequiredFact).map((p) => mapPropMeta(p, options, typeRegistry)),
-    events: meta.events.map((e) => mapEventMeta(e, options, typeRegistry)),
-    slots: meta.slots
+    props: (meta.props ?? [])
+      .filter(hasRequiredFact)
+      .map((p) => mapPropMeta(p, options, typeRegistry)),
+    events: (meta.events ?? [])
+      .filter((event) => event.payload !== undefined)
+      .map((e) => mapEventMeta(e, options, typeRegistry)),
+    slots: (meta.slots ?? [])
       .filter((s) => isCompatVisibleSlot(s))
       .map((s) => mapSlotMeta(s, options, typeRegistry)),
-    exposed: meta.exposed.map((e) => mapExposedMeta(e, options, typeRegistry)),
+    exposed: (meta.exposed ?? [])
+      .filter((member) => member.type !== undefined)
+      .map((e) => mapExposedMeta(e, options, typeRegistry)),
     _verter: meta,
   };
 }
