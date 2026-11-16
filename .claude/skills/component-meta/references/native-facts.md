@@ -88,6 +88,14 @@ an independently decoded sibling or the known member domain.
 
 Constrained `infer` nodes retain both name and constraint through graph
 interning, persisted graph validation, protobuf and TypeScript rendering.
+Tuple descriptors retain the wire's readonly flag and aligned per-element
+labels, optional flags and rest flags. `@verter/type-ir` represents these as
+`readonly?: true` and `modifiers?: { label?: string; optional?: true; rest?: true }[]`
+beside `elements`; absent modifiers mean every element is plain. A rest
+element retains its complete type, such as `boolean[]`. The `tuple` builder
+accepts elements, optional modifiers and a readonly boolean. Native JSON and
+both graph decoders preserve these facts, and descriptor-to-native conversion
+round-trips them. Descriptor consumers use `modifiers`, replacing `labels`.
 Optional capture still contributes no origin graph by default. No new counters,
 histories, timers or optional observation stores are introduced.
 

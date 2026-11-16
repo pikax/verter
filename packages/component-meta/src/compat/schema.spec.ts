@@ -49,6 +49,29 @@ describe("typeDescriptorToString", () => {
     );
   });
 
+  it("prints readonly tuples with optional and rest elements", () => {
+    const descriptor = tuple(
+      [primitive("number"), primitive("string"), array(primitive("boolean"))],
+      [{ label: "id" }, { label: "name", optional: true }, { label: "rest", rest: true }],
+      true,
+    );
+    const text = "readonly [id: number, name?: string, ...rest: boolean[]]";
+    expect(typeDescriptorToString(descriptor)).toBe(text);
+    expect(typeDescriptorToSchema(descriptor)).toEqual({
+      kind: "array",
+      type: text,
+      schema: ["number", "string", { kind: "array", type: "boolean[]", schema: ["boolean"] }],
+    });
+    expect(
+      typeDescriptorToString(
+        tuple(
+          [union([primitive("number"), primitive("string")]), array(primitive("boolean"))],
+          [{ optional: true }, { rest: true }],
+        ),
+      ),
+    ).toBe("[(number | string)?, ...boolean[]]");
+  });
+
   it("converts objects to 'object'", () => {
     expect(
       typeDescriptorToString(object([{ name: "x", type: primitive("string"), optional: false }])),

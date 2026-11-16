@@ -44,7 +44,7 @@ describe("required emit payload honesty (native)", () => {
     expect(save!.payload).toEqual({
       kind: "tuple",
       elements: [{ kind: "primitive", name: "number" }],
-      labels: ["id"],
+      modifiers: [{ label: "id" }],
     });
   });
 
@@ -60,7 +60,7 @@ describe("required emit payload honesty (native)", () => {
     expect(save!.payload).toEqual({
       kind: "tuple",
       elements: [{ kind: "ref", name: "Row" }],
-      labels: ["value"],
+      modifiers: [{ label: "value" }],
     });
     expect(JSON.stringify(save!.payload)).not.toContain("unknown");
     expect(JSON.stringify(save!.payload)).not.toContain("semanticMiss");

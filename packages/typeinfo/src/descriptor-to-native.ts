@@ -65,12 +65,13 @@ export function descriptorToNative(d: TypeDescriptor): NativeTypeExpr {
     case "tuple":
       return {
         kind: "tuple",
-        elements: d.elements.map<NativeTupleElement>((el: TypeDescriptor) => ({
+        elements: d.elements.map<NativeTupleElement>((el: TypeDescriptor, i) => ({
           ty: descriptorToNative(el),
-          optional: false,
-          rest: false,
+          ...(d.modifiers?.[i]?.label !== undefined ? { label: d.modifiers[i].label } : {}),
+          optional: d.modifiers?.[i]?.optional === true,
+          rest: d.modifiers?.[i]?.rest === true,
         })),
-        readonly: false,
+        readonly: d.readonly === true,
       };
     case "object":
       return { kind: "object", properties: lowerObjectMembers(d) };

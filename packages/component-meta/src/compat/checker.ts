@@ -20,6 +20,7 @@ import { projectDeclaredOnlyNativeResult } from "./native-projection.js";
 import { compatSlotSurvives } from "../published-surface.js";
 import type { TypeDescriptor } from "@verter/type-ir";
 import { intrinsicDisplayName } from "@verter/type-ir";
+import { tupleDescriptorToString } from "../type-expr-bridge.js";
 import type { VerterHostAdapter } from "../host-adapter.js";
 import type {
   ComponentMeta,
@@ -585,7 +586,12 @@ function descriptorsStructurallyEquivalent(left: TypeDescriptor, right: TypeDesc
       return (
         right.kind === "tuple" &&
         descriptorListsStructurallyEquivalent(left.elements, right.elements) &&
-        JSON.stringify(left.labels ?? []) === JSON.stringify(right.labels ?? [])
+        left.readonly === right.readonly &&
+        left.elements.every((_, index) => {
+          const a = left.modifiers?.[index];
+          const b = right.modifiers?.[index];
+          return a?.label === b?.label && a?.optional === b?.optional && a?.rest === b?.rest;
+        })
       );
     case "object":
       return (
@@ -1314,30 +1320,13 @@ function typeDescriptorToCompatDisplay(
         registryResolutionDepth,
       )}[]`;
     case "tuple": {
-      // Preserve per-element labels. The Rust producer surface emits
-      // `TupleElement.label: Option<String>`; the TS bridge surfaces them
-      // as `descriptor.labels: (string | null)[]` aligned with `elements`.
-      // Renderers walk labels to produce `[label: type]` output rather
-      // than the lossy `[type]` form (drops the label entirely) or the
-      // pre-fix bug `[{ label: type }]` (leaked the typed schema into
-      // user-visible display text after registry-resolving the ref).
-      //
-      // When a label is present, render the element with the
-      // non-resolving `typeDescriptorToString` form so refs preserve
-      // their names (`[item: Item]`) instead of being expanded through
-      // the registry (`[item: { label: string; }]`). The labelled syntax
-      // already identifies the element symbolically; expanding the ref
-      // obscures the structural reading. When the element is anonymous,
-      // the existing registry-resolving display path is used (matches
-      // the legacy behaviour for unlabelled tuples).
-      const rendered = descriptor.elements.map((type, i) => {
-        const label = descriptor.labels?.[i] ?? null;
-        if (label) {
-          return `${label}: ${typeDescriptorToString(type)}`;
-        }
-        return typeDescriptorToCompatDisplay(type, typeRegistry, visited, registryResolutionDepth);
-      });
-      return `[${rendered.join(", ")}]`;
+      // Labelled elements keep references symbolic; anonymous elements retain
+      // the bounded registry display used by the surrounding compat renderer.
+      return tupleDescriptorToString(descriptor, (type, index) =>
+        descriptor.modifiers?.[index]?.label
+          ? typeDescriptorToString(type)
+          : typeDescriptorToCompatDisplay(type, typeRegistry, visited, registryResolutionDepth),
+      );
     }
     case "function":
       return compatFunctionTypeToString(descriptor, typeRegistry, visited, registryResolutionDepth);

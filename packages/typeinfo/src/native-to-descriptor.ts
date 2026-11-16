@@ -106,7 +106,15 @@ export function nativeToDescriptor(expr: NativeTypeExpr): TypeDescriptor {
     case "array":
       return array(nativeToDescriptor(expr.element));
     case "tuple":
-      return tuple(expr.elements.map((e) => nativeToDescriptor(e.ty)));
+      return tuple(
+        expr.elements.map((e) => nativeToDescriptor(e.ty)),
+        expr.elements.map((e) => ({
+          ...(e.label != null ? { label: e.label } : {}),
+          ...(e.optional ? { optional: true } : {}),
+          ...(e.rest ? { rest: true } : {}),
+        })),
+        expr.readonly,
+      );
     case "object":
       return lowerObject(expr.properties);
     // `function` and `constructorType` share the identical native payload
