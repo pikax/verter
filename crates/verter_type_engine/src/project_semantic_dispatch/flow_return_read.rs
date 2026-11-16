@@ -35,10 +35,18 @@ pub(super) type RegionOutcome = (Result<Vec<FlowContribution>, FlowReturnFailure
 pub(in crate::project_semantic_dispatch) struct ReadWait {
     pub(super) key: Box<crate::semantic_query::SemanticQueryKey>,
     pub(super) nesting: ReadNesting,
+    pub(super) shape: ReadShape,
     pub(super) checking_site: crate::semantic_query::checker_policy::TupleSplicePosition,
+    /// Read under the lexical demand of the body's own file.
+    pub(super) lexical: bool,
+    /// The reading operation that requested it, named in the body-read
+    /// attribution of test builds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) origin: ReadOrigin,
 }
 
 /// How a requested read's answer is adopted by the body that requested it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::project_semantic_dispatch) enum ReadNesting {
     /// Read at the body's own frame, as the frame reads it itself.
     Frame,
@@ -47,31 +55,70 @@ pub(in crate::project_semantic_dispatch) enum ReadNesting {
     Entered,
 }
 
+impl ReadNesting {
+    pub(super) fn of(key: &SemanticQueryKey) -> Self {
+        match key {
+            SemanticQueryKey::Instantiate(_) | SemanticQueryKey::TypeOf { .. } => Self::Frame,
+            _ => Self::Entered,
+        }
+    }
+}
+
+/// What a requested read hands back, independently of how it is adopted.
+#[derive(Clone, Copy)]
+pub(in crate::project_semantic_dispatch) enum ReadShape {
+    Node,
+    Whole,
+}
+
+/// The reading operation that requested an answer.
+#[derive(Clone, Copy)]
+pub(in crate::project_semantic_dispatch) enum ReadOrigin {
+    ClosedUtility,
+    SignatureList,
+    Awaited,
+    MemberPath,
+}
+
+impl ReadOrigin {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::ClosedUtility => "closed_signature_utility",
+            Self::SignatureList => "signature_list",
+            Self::Awaited => "awaited_normalize",
+            Self::MemberPath => "member_path",
+        }
+    }
+}
+
 /// The answer to a requested read.
 pub(in crate::project_semantic_dispatch) enum ReadDelivery {
-    /// A frame read that answered no node.
+    /// A node read that answered no node.
     None,
-    /// A frame read's type node.
+    /// A node read's type node.
     Node(SemanticNodeId),
-    /// An entered read, whole.
+    /// A whole cache read, with either nesting.
     Value(Box<CacheRead<QueryResult<SemanticQueryValue>>>),
 }
 
 impl ReadDelivery {
-    /// A frame read's node.
+    /// A node read's answer, with either nesting.
     pub(super) fn node(self) -> Option<SemanticNodeId> {
         match self {
             Self::None => None,
             Self::Node(node) => Some(node),
-            Self::Value(_) => unreachable!("a frame read delivers a node"),
+            Self::Value(_) => unreachable!("a node read delivers a node"),
         }
     }
 
-    /// An entered read's answer.
+    /// A whole read's answer, with either nesting.
     pub(super) fn into_value(self) -> CacheRead<QueryResult<SemanticQueryValue>> {
         match self {
             Self::Value(value) => *value,
-            Self::None | Self::Node(_) => unreachable!("an entered read delivers its whole answer"),
+            Self::None | Self::Node(_) => {
+                unreachable!("a whole read delivers its whole answer")
+            }
         }
     }
 }
@@ -200,7 +247,8 @@ impl FlowRead {
                 FlowStep::Request(wait) => {
                     #[cfg(any(test, feature = "test-support"))]
                     super::FLOW_READ_REQUESTS.with(|requests| requests.set(requests.get() + 1));
-                    delivery = Some(dispatch.answer_read(wait));
+                    delivery =
+                        Some(dispatch.answer_read(wait, &self.root.borrow_owner().canonical));
                 }
             }
         };
