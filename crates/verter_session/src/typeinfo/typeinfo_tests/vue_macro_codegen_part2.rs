@@ -21,9 +21,7 @@ import type { Flag } from './flags'
 defineProps<{ on: Flag; absent: Missing; unknownValue: unknown }>()
 </script>"#,
     );
-    let facts = host
-        .vue_prop_runtime_constructors("/src/Facts.vue")
-        .unwrap();
+    let facts = host.prop_runtime_constructors("/src/Facts.vue").unwrap();
     let props = &facts.constructors;
     assert_eq!(props["on"].as_slice(), [RuntimeConstructor::Boolean]);
     assert!(!props.contains_key("absent"));
@@ -34,7 +32,7 @@ defineProps<{ on: Flag; absent: Missing; unknownValue: unknown }>()
         .any(|fact| fact.canonical_id() == Some("/src/flags.ts")));
     upsert_ts(&host, "/src/ordinary.ts", "export type Flag = boolean;");
     assert!(host
-        .vue_prop_runtime_constructors("/src/ordinary.ts")
+        .prop_runtime_constructors("/src/ordinary.ts")
         .unwrap()
         .constructors
         .is_empty());
@@ -52,9 +50,7 @@ fn prop_runtime_read_model_rows_override_declared_props_in_both_macro_orders() {
             "/src/Model.vue",
             &format!("<script setup lang=\"ts\">type Flag = boolean; {body}</script>"),
         );
-        let facts = host
-            .vue_prop_runtime_constructors("/src/Model.vue")
-            .unwrap();
+        let facts = host.prop_runtime_constructors("/src/Model.vue").unwrap();
         let props = &facts.constructors;
         assert_eq!(
             props["on"].as_slice(),
@@ -84,7 +80,7 @@ fn wide_props_runtime_read_demands_one_classifier_per_member() {
     assert_eq!(before.counters.runtime_classifier_calls, 0);
     assert_eq!(after.counters.runtime_classifier_calls, 64);
     assert_eq!(after.counters.tsc_materializations, 0);
-    let facts = host.vue_prop_runtime_constructors("/src/Wide.vue").unwrap();
+    let facts = host.prop_runtime_constructors("/src/Wide.vue").unwrap();
     let props = &facts.constructors;
     assert_eq!(props.len(), 64);
     assert!(props

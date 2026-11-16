@@ -13,6 +13,12 @@ gate. Binding error mapping preserves native argument/serialization statuses
 and WASM string errors. Response-byte attribution fires once in the shared
 encoder; its observation gate is owned by `verter_audit`.
 
+JavaScript consumers decode scalar WASM metadata bytes and each non-null batch
+slot with `decodeComponentMetaPayload` from `@verter/component-meta/browser`.
+The same decoder and its `NativeComponentMetaResult` return type are also
+exported by `@verter/component-meta`. The browser entry re-exports the shared
+decoder directly; its native-result imports are type-only.
+
 `component_meta.proto` defines one schema, versioned by the single
 `COMPONENT_META_SCHEMA_VERSION` constant (currently 15). Protobuf and the JSON
 rendering both state that version (`schemaVersion` in JSON). JSON has no
@@ -40,6 +46,22 @@ The session preserves the membership guarantee before member normalization.
 The macro producer returns its typed surface claim through DTO construction,
 including complete no-surface and unavailable answers. A completeness summary
 never reconstructs this guarantee, and a second surface probe is unnecessary.
+Vue props, events, slots, models and exposed domains read that claim from the
+framework-surface bundle, never from expanded `define_*` shape rows. Runtime
+props, emits and expose bundles use the analyzer's enumeration certificate:
+complete/closed when fully enumerated, otherwise approximate/open with cause
+103. Runtime emits arrays and objects publish their captured event names through
+the shared runtime-object surface synthesis used by props and expose. A literal
+`defineEmits(['saved'])` therefore reports Supported with the `saved` member;
+an identifier argument or spread reports Partial and retains only captured
+literal members. A runtime `defineSlots()` without a type argument certifies
+nothing: its bundle states approximate/open with cause 103 and its empty
+framework surface reports Partial. Component meta reads these same bundle
+claims. A runtime macro without a bundle claim uses the analyzer certificate
+under the same rule. The framework-surface operation preserves a bundle's
+approximate membership as a partial surface status.
+`ExpandedObjectShape.domain_guarantee` remains an output-only mirror for the
+public `evaluateTypes` JSON response; it does not authorize component facts.
 Output-only numeric mirrors travel with shallow metadata and never drive
 semantic evaluation. Missing evidence refuses a guarantee. Materialization
 failure of a published member produces a failed publication with no type value;
@@ -66,6 +88,14 @@ an independently decoded sibling or the known member domain.
 
 Constrained `infer` nodes retain both name and constraint through graph
 interning, persisted graph validation, protobuf and TypeScript rendering.
+Tuple descriptors retain the wire's readonly flag and aligned per-element
+labels, optional flags and rest flags. `@verter/type-ir` represents these as
+`readonly?: true` and `modifiers?: { label?: string; optional?: true; rest?: true }[]`
+beside `elements`; absent modifiers mean every element is plain. A rest
+element retains its complete type, such as `boolean[]`. The `tuple` builder
+accepts elements, optional modifiers and a readonly boolean. Native JSON and
+both graph decoders preserve these facts, and descriptor-to-native conversion
+round-trips them. Descriptor consumers use `modifiers`, replacing `labels`.
 Optional capture still contributes no origin graph by default. No new counters,
 histories, timers or optional observation stores are introduced.
 
@@ -116,6 +146,8 @@ certifies absent domains; runtime props, emits and expose extractors record
 `AnalyzedMacro::runtime_members_fully_enumerated` during their existing
 member traversal. Literal objects with static names and literal name arrays
 can certify enumeration; an omitted member or non-literal input cannot.
+Calls to `defineProps()`, `defineEmits()` and `defineExpose()` with neither a
+runtime argument nor a type argument certify empty, closed domains.
 Type-based domains use their existing complete, closed producer claims.
 Type-based expose retains the resolved surface producer's authority.
 The model producer withholds its certificate because the sidecar lists model
@@ -126,9 +158,14 @@ report: a dynamic-name outlet withholds slot enumeration, including when no
 
 The sidecar builder records only registered script-setup geometry and the
 positive `options_member_free` geometry report. The existing macro-flags fold
-certifies that report only without an export-default options object and when
-every `defineOptions` call reports member-free arguments. The options extractor
-uses its existing property traversal and the fixed key set `name`, `inheritAttrs`;
+certifies that report only without an Options API default export and when
+every `defineOptions` call reports member-free arguments. Default-export
+identifiers follow the root binding index to their local initializer; Vue's
+`defineComponent` is recognized by its imported API identity, including aliases.
+An unresolved default export in a plain script withholds the member-free report
+and reports `OptionsApiMembers`; it never certifies an empty instance.
+The `defineOptions` extractor uses its existing property traversal and the fixed
+key set `name`, `inheritAttrs`;
 every argument must be an object literal containing only non-computed keys
 from that set. A spread, any other key or a non-literal argument withholds the
 report. The terminal sink alone reads all five
@@ -138,13 +175,19 @@ closed domain claim becomes Exact. Otherwise the instance stays Partial with
 approximation cause 103, or the failed domain producer's more specific causes;
 measured partiality is merged into the same lane. Plain literal runtime
 `defineProps({ label: String, size: Number })` is eligible. The props-domain
-runtime claim remains independent of the enumeration certificate.
+runtime claim uses the analyzer's enumeration evidence; published member
+value types remain independent.
 The cached sidecar stays Partial; finalization operates on the delivery clone.
 The fixed Vue built-ins excluded from this claim are enumerated beside the
 sidecar builder; a test renders the real IDE public-constructor projection and
 checks its omitted and retained built-in keys against that list and the
-sidecar's own members, then checks every exclusion is a real Vue built-in
+sidecar's own members, then checks every fixed-key exclusion is a real Vue built-in
 omitted or retained by the constructor. `$slots` is excluded only when the
 sidecar has no slots; otherwise it is listed as a sidecar member. The constant
 and its re-export are test-only; production inserts `$slots` directly when
 slots exist.
+
+The closed public-instance claim also excludes global members contributed by
+`ComponentCustomProperties`. Like the fixed built-ins, that augmentation class
+is outside the claim's domain. Its members are not modeled, and this exclusion
+adds no augmentation read or dependency.

@@ -3658,58 +3658,76 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             expr: &verter_type_expr::TypeExpr,
             context: crate::semantic_query::ProjectionReductionContext,
         ) -> Option<SemanticNodeId> {
-            // A scope whose file is not (yet) materialised still lowers: the
-            // lowering is a pure typed-IR → carrier-graph mapping, and every
-            // reference that cannot resolve NOW stays a scoped `BareRef`
-            // carrier the demand points retry against the live view. Bailing
-            // here would destroy the authored head (name / args / scope) at
-            // raise time — `None` from this entry means "no lowering exists",
-            // never "the scope file is not loaded yet". The unknown file
-            // contributes a default content hash to the scope (the honest
-            // value for a file with no content generation); the carriers
-            // resolve by canonical id at demand, so nothing stale is baked in.
-            let whole_hash = self
-                .ctx
-                .shallow_file_state(scope_canonical_id)
-                .map(|shallow| shallow.whole_hash)
-                .unwrap_or_default();
-            let scope = NodeScopeId::File {
-                canonical_id: verter_type_expr::OwnedStr::from(scope_canonical_id),
-                owner,
-                whole_hash,
-                local_scope: None,
-            };
-            let env = rustc_hash::FxHashMap::default();
-            let name_resolution = rustc_hash::FxHashMap::default();
-            let scope_payload = self
-                .ctx
-                .prepared_decl_bundle(scope_canonical_id)
-                .map(|bundle| {
-                    crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                        &bundle, owner,
-                    )
-                });
-            // R15/F11 — construct the resolver-context
-            // `ScopeShadowing` once at the dispatch entry point. The
-            // shadow set is derived from the same `scope_payload` the
-            // foundation (`524f469d`) consumed inline; any future
-            // shadow-source addition lands in `ScopeShadowing::from_*`
-            // rather than at every call site.
-            let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
-                scope_payload.as_ref(),
+            let mut lowering = self.begin_type_lowering_in_owner_scope_with_context(
+                scope_canonical_id, owner, expr, context,
             );
-            let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-            let id = self.shallow_lower_type_expr_with_context(
-                expr,
-                &env,
-                &scope,
-                &name_resolution,
-                scope_payload.as_ref(),
-                &shadowing,
-                &mut substitutions,
-                context,
-            );
-            Some(id)
+            Some(self.drive_type_lowering(&lowering.context.as_lowering(), &mut lowering.read))
+        }
+    }
+
+    /// Build the owner-exact context beside an owned, stepping lowering.
+    fn begin_type_lowering_in_owner_scope_with_context<'e>(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expr: &'e verter_type_expr::TypeExpr,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> lower::OwnerTypeLowerRead<'e> {
+        let context_data = self.owner_type_lowering_context(scope_canonical_id, owner);
+        let read = self.begin_type_lowering(expr, &context_data.scope, context);
+        lower::OwnerTypeLowerRead {
+            context: context_data,
+            read,
+        }
+    }
+
+    /// Construct the scope data shared by stepping and in-place lowering.
+    fn owner_type_lowering_context(
+        &self,
+        scope_canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+    ) -> lower::OwnedTypeLoweringContext {
+        // A scope whose file is not (yet) materialised still lowers: the
+        // lowering is a pure typed-IR → carrier-graph mapping, and every
+        // reference that cannot resolve NOW stays a scoped `BareRef`
+        // carrier the demand points retry against the live view. Bailing
+        // here would destroy the authored head (name / args / scope) at
+        // raise time — `None` from this entry means "no lowering exists",
+        // never "the scope file is not loaded yet". The unknown file
+        // contributes a default content hash to the scope (the honest
+        // value for a file with no content generation); the carriers
+        // resolve by canonical id at demand, so nothing stale is baked in.
+        let whole_hash = self
+            .ctx
+            .shallow_file_state(scope_canonical_id)
+            .map(|shallow| shallow.whole_hash)
+            .unwrap_or_default();
+        let scope = NodeScopeId::File {
+            canonical_id: verter_type_expr::OwnedStr::from(scope_canonical_id),
+            owner,
+            whole_hash,
+            local_scope: None,
+        };
+        let env = rustc_hash::FxHashMap::default();
+        let name_resolution = rustc_hash::FxHashMap::default();
+        let scope_payload = self
+            .ctx
+            .prepared_decl_bundle(scope_canonical_id)
+            .map(|bundle| {
+                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                    &bundle, owner,
+                )
+            });
+        // Compute builtin shadowing from the same owned scope payload.
+        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
+            scope_payload.as_ref(),
+        );
+        lower::OwnedTypeLoweringContext {
+            scope,
+            env,
+            name_resolution,
+            scope_payload,
+            shadowing,
         }
     }
 

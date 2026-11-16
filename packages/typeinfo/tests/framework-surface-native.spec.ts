@@ -29,12 +29,44 @@ import { VerterHost, captureAvailability } from "@verter/native";
 import { describe, expect, it } from "vitest";
 
 import type { FunctionType, TypeDescriptor } from "@verter/type-ir";
+import { descriptorToNative } from "../src/descriptor-to-native.js";
+import { nativeToDescriptor } from "../src/native-to-descriptor.js";
+import type { NativeTypeExpr } from "../src/native-type-expr.js";
 
 import {
   decodeFrameworkSurfaceResponse,
   type FrameworkSurface,
   type FrameworkSurfaceError,
 } from "../src/framework-surface.js";
+
+it("round-trips readonly tuples with optional and rest elements", () => {
+  const native: NativeTypeExpr = {
+    kind: "tuple",
+    readonly: true,
+    elements: [
+      { label: "id", ty: { kind: "primitive", name: "number" }, optional: false, rest: false },
+      { label: "name", ty: { kind: "primitive", name: "string" }, optional: true, rest: false },
+      {
+        label: "rest",
+        ty: { kind: "array", element: { kind: "primitive", name: "boolean" }, readonly: false },
+        optional: false,
+        rest: true,
+      },
+    ],
+  };
+  const descriptor = nativeToDescriptor(native);
+  expect(descriptor).toEqual({
+    kind: "tuple",
+    elements: [
+      { kind: "primitive", name: "number" },
+      { kind: "primitive", name: "string" },
+      { kind: "array", element: { kind: "primitive", name: "boolean" } },
+    ],
+    modifiers: [{ label: "id" }, { label: "name", optional: true }, { label: "rest", rest: true }],
+    readonly: true,
+  });
+  expect(descriptorToNative(descriptor)).toEqual(native);
+});
 
 function expectFunction(type: TypeDescriptor | undefined): FunctionType {
   expect(type?.kind).toBe("function");

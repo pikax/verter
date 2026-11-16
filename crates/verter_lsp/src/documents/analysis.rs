@@ -72,7 +72,7 @@ fn enrich_prop_definitions<E: std::fmt::Debug>(
         }
     };
     let runtime = host
-        .vue_prop_runtime_constructors(canonical)
+        .prop_runtime_constructors(canonical)
         .unwrap_or_default();
     let (component_meta, _resolution, types) = output.into_parts();
     let semantic = component_meta

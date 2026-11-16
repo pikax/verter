@@ -1128,8 +1128,8 @@ describe("component-meta native aliases", () => {
   it.runIf(captured)("napi_get_component_meta_with_audit_returns_populated_footprint", () => {
     // With audit_enabled +
     // footprint_capture on, the binding returns a Buffer containing
-    // `{ analysis, resolution, record }` JSON — and the record's
-    // `footprint` field MUST be populated (non-null, with at least
+    // `{ analysis, record }` JSON with resolution at `analysis.resolution`.
+    // The record's `footprint` field MUST be populated (non-null, with at least
     // the structural record-vectors present). A regression that
     // accidentally drops the footprint attach (e.g. miner call gets
     // gated behind a flag that defaults off) surfaces here.
@@ -1151,7 +1151,8 @@ describe("component-meta native aliases", () => {
     expect(buffer).toBeTruthy();
     const bundle = JSON.parse((buffer as Buffer).toString("utf-8"));
     expect(bundle).toHaveProperty("analysis");
-    expect(bundle).toHaveProperty("resolution");
+    expect(bundle).not.toHaveProperty("resolution");
+    expect(bundle.analysis).toHaveProperty("resolution");
     expect(bundle).toHaveProperty("record");
     expect(bundle.record).toHaveProperty("request_id");
     // u64 fields must be decimal strings.
@@ -1367,7 +1368,6 @@ describe("VerterHost type declarations in sync with native binary", () => {
       "compileWithAudit",
       "configureProjects",
       "ensureIdeCompiled",
-      "evaluateTypes",
       "getAnalysis",
       "getAuditRecords",
       "getBundlerBatchSummary",

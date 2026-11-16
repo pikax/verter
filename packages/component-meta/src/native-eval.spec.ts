@@ -368,7 +368,7 @@ defineEmits<ImportedEmits>()
     expect(save!.payload).toEqual({
       kind: "tuple",
       elements: [{ kind: "primitive", name: "number" }],
-      labels: ["id"],
+      modifiers: [{ label: "id" }],
     });
 
     // Imported == local: the same payload authored inline publishes the
@@ -411,7 +411,7 @@ defineEmits<Events>()
     expect(save!.payload).toEqual({
       kind: "tuple",
       elements: [{ kind: "ref", name: "Row" }],
-      labels: ["value"],
+      modifiers: [{ label: "value" }],
     });
     expect(JSON.stringify(save!.payload)).not.toContain("unknown");
     expect(JSON.stringify(save!.payload)).not.toContain("semanticMiss");

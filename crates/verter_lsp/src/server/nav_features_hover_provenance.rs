@@ -131,7 +131,7 @@ mod tests {
                 source: Arc::from(
                     "<script setup lang=\"ts\">defineProps<{ on: boolean }>()</script>",
                 ),
-                file_language: verter_session::FileLanguage::vue(),
+                file_language: host.language_classifier().classify(canonical),
                 aliases: vec![],
             })
             .unwrap();

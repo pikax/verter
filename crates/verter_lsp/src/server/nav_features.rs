@@ -966,7 +966,7 @@ async fn handle_completion_attempt(
                     let runtime = server
                         .documents
                         .host()
-                        .vue_prop_runtime_constructors(&resolved)
+                        .prop_runtime_constructors(&resolved)
                         .unwrap_or_default();
                     crate::documents::ForegroundRequest::bracket_native_facts(
                         &runtime.fact_versions,
@@ -1008,7 +1008,7 @@ async fn handle_completion_attempt(
                         let runtime = server
                             .documents
                             .host()
-                            .vue_prop_runtime_constructors(&resolved)
+                            .prop_runtime_constructors(&resolved)
                             .unwrap_or_default();
                         crate::documents::ForegroundRequest::bracket_native_facts(
                             &runtime.fact_versions,

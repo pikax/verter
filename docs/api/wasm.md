@@ -306,6 +306,26 @@ encoder as NAPI, producing identical bytes for identical host state. Batches
 run inline and preserve input order. `null` means a missing component; genuine
 request failures throw. Encoded payloads participate in the shared payload cache.
 
+Decode the bytes returned by `getComponentMeta()` and each non-null
+`getComponentMetaBatch()` slot with `decodeComponentMetaPayload` from
+`@verter/component-meta/browser`. It returns `NativeComponentMetaResult`.
+
+```ts
+import {
+  decodeComponentMetaPayload,
+  type NativeComponentMetaResult,
+} from "@verter/component-meta/browser";
+
+const bytes = session.getComponentMeta("/src/App.vue");
+const meta: NativeComponentMetaResult | null =
+  bytes === null ? null : decodeComponentMetaPayload(bytes);
+
+const batch = session.getComponentMetaBatch(["/src/App.vue", "/src/Button.vue"]);
+const components = batch.map((bytes) =>
+  bytes === null ? null : decodeComponentMetaPayload(bytes),
+);
+```
+
 The audit method returns the same JSON text NAPI encodes as UTF-8 bytes.
 `decodeAuditBundle(text)` parses it; `whyLoaded(session, text, canonicalId)` and
 `whyInstantiated(session, text, declCanonicalId, declSymbolName, argsFingerprintHex)`

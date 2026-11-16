@@ -108,6 +108,7 @@ export type {
 } from "./type-expr-bridge.js";
 
 // Native component-meta payload + projection helpers
+export { decodeComponentMetaPayload } from "./type-graph-decode.js";
 export {
   nativeComponentMetaToComponentMeta,
   nativeTypeRegistryToMap,

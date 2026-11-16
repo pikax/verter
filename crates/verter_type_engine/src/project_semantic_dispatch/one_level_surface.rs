@@ -987,10 +987,10 @@ pub fn project_macro_argument_surface_claim<C: crate::resolver_core::ResolverCap
         return SurfaceResolution::no_surface();
     };
     if !mac.is_type_based {
-        // A runtime-object `defineExpose({...})` / `defineProps({...})`
+        // A runtime `defineExpose({...})` / `defineProps({...})` / `defineEmits(...)`
         // has no type argument to lower, but the analyzer already
         // captured its member names (`mac.expose_fields` /
-        // `mac.prop_fields` are populated for BOTH type-based and
+        // `mac.prop_fields` / `mac.emit_fields` are populated for BOTH type-based and
         // runtime macro forms). Synthesize a one-level surface directly
         // from those already-typed facts instead of reporting an empty
         // surface for every runtime-declared macro. See
@@ -1159,61 +1159,52 @@ fn runtime_object_macro_surface<C: crate::resolver_core::ResolverCapabilities>(
 
     let declaration_origin = Some(verter_type_expr::OwnedStr::from(owner_canonical));
     let mut entries: Vec<SurfaceEntry> = Vec::new();
+    let mut push_member = |name: &str, span, optional| {
+        entries.push(SurfaceEntry::Member(SurfaceMember {
+            key: AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from(name)),
+            // Runtime member values are not re-derived here. Membership is
+            // independent of this honest unknown value.
+            value: unknown_member_value_node(dispatch),
+            optional,
+            readonly: false,
+            method_kind: None,
+            has_implementation_body: false,
+            visibility: verter_type_expr::MemberVisibility::Public,
+            spans: verter_type_expr::MemberSpans::name_only(span),
+            declaration_origin: declaration_origin.clone(),
+            declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+            merge_role: MergeRoleStamp::NEUTRAL,
+            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+        }));
+    };
     match macro_kind {
         AnalyzedMacroKind::DefineExpose => {
             for field in &mac.expose_fields {
-                entries.push(SurfaceEntry::Member(SurfaceMember {
-                    key: AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from(
-                        field.name.as_str(),
-                    )),
-                    // The exposed value's real type is not re-derived
-                    // here (see the doc comment above) — `unknown` is
-                    // the honest placeholder, never a fabricated shape.
-                    value: unknown_member_value_node(dispatch),
-                    optional: false,
-                    readonly: false,
-                    method_kind: None,
-                    has_implementation_body: false,
-                    visibility: verter_type_expr::MemberVisibility::Public,
-                    spans: verter_type_expr::MemberSpans::name_only(
-                        field.span.unwrap_or(verter_span::Span::new(0, 0)),
-                    ),
-                    declaration_origin: declaration_origin.clone(),
-                    declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: MergeRoleStamp::NEUTRAL,
-                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                }));
+                push_member(
+                    &field.name,
+                    field.span.unwrap_or(verter_span::Span::new(0, 0)),
+                    false,
+                );
             }
         }
         AnalyzedMacroKind::DefineProps => {
             for field in &mac.prop_fields {
-                entries.push(SurfaceEntry::Member(SurfaceMember {
-                    key: AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from(
-                        field.name.as_str(),
-                    )),
-                    value: unknown_member_value_node(dispatch),
-                    optional: field.is_optional,
-                    readonly: false,
-                    method_kind: None,
-                    has_implementation_body: false,
-                    visibility: verter_type_expr::MemberVisibility::Public,
-                    spans: verter_type_expr::MemberSpans::name_only(field.span),
-                    declaration_origin: declaration_origin.clone(),
-                    declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
-                    merge_role: MergeRoleStamp::NEUTRAL,
-                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-                }));
+                push_member(&field.name, field.span, field.is_optional);
+            }
+        }
+        AnalyzedMacroKind::DefineEmits => {
+            for field in &mac.emit_fields {
+                push_member(&field.name, field.span, false);
             }
         }
         // Every other non-type-based macro kind has no synthesized
-        // surface here (`DefineEmits`/`DefineSlots` runtime-object forms
+        // surface here (`DefineSlots` without a type argument
         // and the `WithDefaults` outer macro).
         _ => return None,
     }
     if entries.is_empty() {
-        // A bare `defineExpose()` / an object-less `defineProps()` call
-        // has genuinely nothing to surface — `None` stays correct there,
-        // distinct from the "has members but they were dropped" defect.
+        // No captured members to surface. The bundle's analyzer enumeration
+        // certificate distinguishes an empty domain from incomplete input.
         return None;
     }
 

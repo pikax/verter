@@ -1285,17 +1285,45 @@ fn define_expose_extracts_fields() {
         ("defineExpose(api)", true, vec![]),
         ("defineExpose<{ ready: boolean }>(api)", true, vec![]),
         ("defineExpose()", false, vec![]),
+        ("defineProps()", false, vec![]),
+        ("defineEmits()", false, vec![]),
+        ("defineEmits(['saved'])", false, vec!["saved"]),
+        ("defineEmits(events)", true, vec![]),
+        ("defineProps({ a: String })", false, vec!["a"]),
+        ("defineProps({ ...shared, a: String })", true, vec!["a"]),
+        ("defineProps({ [key]: Number, a: String })", true, vec!["a"]),
+        ("defineProps(shared)", true, vec![]),
     ] {
         let macros = parse_macros(code);
         let de = macros
             .iter()
-            .find(|m| m.kind == AnalyzedMacroKind::DefineExpose)
+            .find(|m| {
+                matches!(
+                    m.kind,
+                    AnalyzedMacroKind::DefineExpose
+                        | AnalyzedMacroKind::DefineProps
+                        | AnalyzedMacroKind::DefineEmits
+                )
+            })
             .unwrap();
         assert_eq!(
-            de.expose_fields
-                .iter()
-                .map(|field| field.name.as_str())
-                .collect::<Vec<_>>(),
+            match de.kind {
+                AnalyzedMacroKind::DefineProps => de
+                    .prop_fields
+                    .iter()
+                    .map(|field| field.name.as_str())
+                    .collect::<Vec<_>>(),
+                AnalyzedMacroKind::DefineEmits => de
+                    .emit_fields
+                    .iter()
+                    .map(|field| field.name.as_str())
+                    .collect::<Vec<_>>(),
+                _ => de
+                    .expose_fields
+                    .iter()
+                    .map(|field| field.name.as_str())
+                    .collect::<Vec<_>>(),
+            },
             names,
             "{code}"
         );

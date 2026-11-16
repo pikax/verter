@@ -22,6 +22,7 @@ import {
   FrameworkSurfaceOriginHopKind,
   FrameworkTag,
   GraphPrimitiveKind,
+  SemanticTypeGraphSchema,
   TypeInfoGraphResponseSchema,
 } from "@verter/proto";
 import { describe, expect, it } from "vitest";
@@ -31,6 +32,7 @@ import {
   type FrameworkSurface,
   type FrameworkSurfaceError,
 } from "../src/framework-surface.js";
+import { graphNodeToDescriptor } from "../src/graph.js";
 
 /**
  * Build the encoded `TypeInfoGraphResponse` bytes for a
@@ -335,6 +337,69 @@ describe("decodeFrameworkSurfaceResponse", () => {
       ],
       returnType: { kind: "primitive", name: "void" },
     });
+  });
+
+  it("keeps readonly tuple labels, optional elements and rest elements", () => {
+    const graph = create(SemanticTypeGraphSchema, {
+      strings: { entries: ["", "value", "id", "name", "rest"] },
+      nodes: [
+        {},
+        { kind: { case: "primitive", value: { kind: GraphPrimitiveKind.NUMBER } } },
+        { kind: { case: "primitive", value: { kind: GraphPrimitiveKind.STRING } } },
+        { kind: { case: "primitive", value: { kind: GraphPrimitiveKind.BOOLEAN } } },
+        { kind: { case: "array", value: { elementNodeId: 3 } } },
+        {
+          kind: {
+            case: "tuple",
+            value: {
+              readonly: true,
+              elements: [
+                { labelNameId: 2, valueNodeId: 1 },
+                { labelNameId: 3, valueNodeId: 2, optional: true },
+                { labelNameId: 4, valueNodeId: 4, rest: true },
+              ],
+            },
+          },
+        },
+      ],
+    });
+    const response = create(TypeInfoGraphResponseSchema, {
+      kind: {
+        case: "frameworkSurface",
+        value: {
+          schemaVersion: 3,
+          framework: FrameworkTag.VUE,
+          graph,
+          surfaces: [
+            {
+              kind: FrameworkSurfaceKind.PROPS,
+              members: [{ nameId: 1, typeNodeId: 5, required: true }],
+              status: { support: FrameworkSurfaceKindSupport.SUPPORTED },
+            },
+          ],
+        },
+      },
+    });
+    const surface = decodeFrameworkSurfaceResponse(
+      toBinary(TypeInfoGraphResponseSchema, response),
+    ) as FrameworkSurface;
+    const expected = {
+      kind: "tuple",
+      elements: [
+        { kind: "primitive", name: "number" },
+        { kind: "primitive", name: "string" },
+        { kind: "array", element: { kind: "primitive", name: "boolean" } },
+      ],
+      modifiers: [{ label: "id" }, { label: "name", optional: true }, { label: "rest", rest: true }],
+      readonly: true,
+    };
+    expect(surface.kinds.get(FrameworkSurfaceKind.PROPS)!.members[0]!.type).toEqual(expected);
+    expect(
+      graphNodeToDescriptor(
+        { ...graph, strings: graph.strings!.entries, factIdentity: graph.factIdentity },
+        5,
+      ),
+    ).toEqual(expected);
   });
 
   it("keeps SUPPORTED-empty distinct from UNSUPPORTED", () => {

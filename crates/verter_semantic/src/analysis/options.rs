@@ -1,18 +1,20 @@
 //! Options API extraction for `verter_semantic::analysis`.
 //!
-//! Extracts structured information from `export default { ... }` and
-//! `export default defineComponent({ ... })` for cross-component type resolution.
+//! Extracts structured information from default-exported options objects,
+//! including local bindings and Vue's imported `defineComponent` factory.
 
 use oxc_ast::ast::*;
 use oxc_ast::Comment;
 use oxc_span::GetSpan;
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_span::Span;
+use verter_type_expr::DeclBindingKey;
 
 use crate::analysis::macros::{
     default_value_source_text, extract_jsdoc_for, resolve_runtime_constructor_array,
     resolve_runtime_constructor_identifier,
 };
-use crate::analysis::root_binding_index::RootBindingIndex;
+use crate::analysis::root_binding_index::{BindingResolution, RootBindingIndex, StartScope};
 use verter_session_query::analysis::types::{
     AnalyzedEmitField, AnalyzedOptionsApi, AnalyzedOptionsComponent, AnalyzedOptionsField,
     AnalyzedOptionsProp,
@@ -26,55 +28,61 @@ mod options_tests;
 ///
 /// Handles:
 /// - `export default { ... }` (bare object)
-/// - `export default defineComponent({ ... })` (wrapped)
+/// - `export default defineComponent({ ... })` (including import aliases)
+/// - `export default opts` (a local initializer, including alias chains)
 ///
 /// `import_sources` maps local binding names to their import source strings.
 ///
 /// Returns `None` if the expression is not an options object.
-pub(crate) fn try_extract_options_from_expression(
-    expr: &Expression<'_>,
+pub(crate) fn try_extract_options_from_expression<'a>(
+    expr: &Expression<'a>,
     source: &str,
     import_sources: &rustc_hash::FxHashMap<String, String>,
     comments: &[Comment],
     binding_index: &RootBindingIndex,
+    initializers: &FxHashMap<DeclBindingKey, &Expression<'a>>,
+    is_define_component_import: impl Fn(&IdentifierReference<'_>) -> bool,
 ) -> Option<AnalyzedOptionsApi> {
-    match expr {
-        Expression::ObjectExpression(obj) => Some(extract_options_api(
-            obj,
-            source,
-            false,
-            import_sources,
-            comments,
-            binding_index,
-        )),
-        Expression::CallExpression(call) => {
-            let is_define_component = match &call.callee {
-                Expression::Identifier(id) => is_define_component_name(&id.name),
-                _ => false,
-            };
-            if !is_define_component {
-                return None;
-            }
-            let first_arg = call.arguments.first()?.as_expression()?;
-            if let Expression::ObjectExpression(obj) = first_arg {
-                Some(extract_options_api(
+    let mut expr = expr;
+    let mut is_define_component = false;
+    let mut visited = FxHashSet::default();
+    loop {
+        match expr.get_inner_expression() {
+            Expression::ObjectExpression(obj) => {
+                return Some(extract_options_api(
                     obj,
                     source,
-                    true,
+                    is_define_component,
                     import_sources,
                     comments,
                     binding_index,
-                ))
-            } else {
-                None
+                ));
             }
+            Expression::Identifier(id) => {
+                let BindingResolution::Local(key) = binding_index.resolve_value_identifier(
+                    Span::new(id.span.start, id.span.end),
+                    StartScope::ProgramRoot,
+                ) else {
+                    return None;
+                };
+                if !visited.insert(key.clone()) {
+                    return None;
+                }
+                expr = initializers.get(&key)?;
+            }
+            Expression::CallExpression(call) if !call.optional => {
+                let Expression::Identifier(id) = call.callee.get_inner_expression() else {
+                    return None;
+                };
+                if !is_define_component_import(id) {
+                    return None;
+                }
+                is_define_component = true;
+                expr = call.arguments.first()?.as_expression()?;
+            }
+            _ => return None,
         }
-        _ => None,
     }
-}
-
-fn is_define_component_name(name: &str) -> bool {
-    name == "defineComponent"
 }
 
 /// Extract full Options API analysis from an object expression.

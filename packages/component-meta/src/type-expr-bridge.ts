@@ -5,7 +5,7 @@
  * evaluator into the public TypeDescriptor format used by adapters and consumers.
  */
 
-import type { TypeDescriptor } from "@verter/type-ir";
+import type { TupleType, TypeDescriptor } from "@verter/type-ir";
 import {
   primitive,
   literal,
@@ -429,19 +429,15 @@ export function typeExprToDescriptor(
       const elements = expr.elements.map((e) =>
         typeExprToDescriptor(e.ty, nativeRegistry, visiting, graphVisiting),
       );
-      // Preserve per-element labels. Producers emit `label: string | null`
-      // (Rust `TupleElement.label: Option<String>`); we mirror that across the
-      // bridge so renderers can produce `[label: type]` output instead of the
-      // pre-fix `[{ label: type }]` shape (which leaked the typed schema into
-      // user-visible display text).
-      const labels = expr.elements.map((e) => e.label ?? null);
-      const t = tuple(elements);
-      // Attach `labels` only when at least one position has a label — the
-      // schema rule is "absent labels === all anonymous".
-      if (labels.some((l) => l !== null)) {
-        return { ...t, labels };
-      }
-      return t;
+      return tuple(
+        elements,
+        expr.elements.map((e) => ({
+          ...(e.label != null ? { label: e.label } : {}),
+          ...(e.optional ? { optional: true } : {}),
+          ...(e.rest ? { rest: true } : {}),
+        })),
+        expr.readonly,
+      );
     }
 
     case "object": {
@@ -1061,14 +1057,11 @@ function substituteDescriptorTypeParameters(
         ),
       );
     case "tuple": {
-      const t = tuple(
+      return tuple(
         descriptor.elements.map((element) => substituteDescriptorTypeParameters(element, bindings)),
+        descriptor.modifiers,
+        descriptor.readonly,
       );
-      // Preserve labels through type-parameter substitution.
-      if (descriptor.labels) {
-        return { ...t, labels: descriptor.labels };
-      }
-      return t;
     }
     case "object":
       return object(
@@ -2424,14 +2417,15 @@ function graphNodeToDescriptor(
           graphVisiting,
         ),
       );
-      const labels = node.elements.map((element) =>
-        element.labelId ? expr.graph.getString(element.labelId) : null,
+      return tuple(
+        els,
+        node.elements.map((element) => ({
+          ...(element.labelId ? { label: expr.graph.getString(element.labelId) } : {}),
+          ...(element.optional ? { optional: true } : {}),
+          ...(element.rest ? { rest: true } : {}),
+        })),
+        node.readonly,
       );
-      const t = tuple(els);
-      if (labels.some((l) => l !== null)) {
-        return { ...t, labels };
-      }
-      return t;
     }
     case NODE_OBJECT: {
       const props = node.members
@@ -2849,6 +2843,31 @@ function tupleForm(elements: PrintedTupleElement[], readonly: boolean): Printed 
   });
   const text = `[${items.join(", ")}]`;
   return readonly ? printed(`readonly ${text}`, PREC_PREFIX) : printed(text, PREC_PRIMARY);
+}
+
+/** Print descriptor tuple syntax using the same modifier rules as the wire printer. */
+export function tupleDescriptorToString(
+  descriptor: TupleType,
+  render: (element: TypeDescriptor, index: number) => string,
+): string {
+  return tupleForm(
+    descriptor.elements.map((element, index) => ({
+      label: descriptor.modifiers?.[index]?.label,
+      optional: descriptor.modifiers?.[index]?.optional === true,
+      rest: descriptor.modifiers?.[index]?.rest === true,
+      type: printed(
+        render(element, index),
+        element.kind === "union"
+          ? PREC_UNION
+          : element.kind === "intersection"
+            ? PREC_INTERSECTION
+            : element.kind === "function"
+              ? PREC_LOWEST
+              : PREC_PRIMARY,
+      ),
+    })),
+    descriptor.readonly === true,
+  ).text;
 }
 
 function objectForm(members: string[]): Printed {

@@ -414,3 +414,7 @@ fn an_overloaded_argument_infers_from_its_last_overload() {
     let failures = named_mismatches(&named);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+#[test]
+fn concrete_no_infer_members_preserve_candidate_only_trials() {
+    super::call_resolve_tests::concrete_no_infer_members_use_pure_verdicts_cold_and_warm_but_preserve_candidate_only_trials();
+}

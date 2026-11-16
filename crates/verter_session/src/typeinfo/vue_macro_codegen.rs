@@ -66,9 +66,9 @@ use tsc_projection::*;
 const VUE_MACRO_CODEGEN_CACHE_ID: SchedulerCacheId = SchedulerCacheId(0x5655_454D_4143_5231);
 const VUE_MACRO_CODEGEN_KEY_DOMAIN: &[u8] = b"verter:typeinfo:vue-macro-codegen:v1\0";
 
-/// Available Vue runtime prop constructors and the producer facts they read.
+/// Available runtime prop constructors and the producer facts they read.
 #[derive(Debug, Default)]
-pub struct VuePropRuntimeFacts {
+pub struct PropRuntimeFacts {
     /// Available constructor facts by effective runtime prop name.
     pub constructors: BTreeMap<String, OrderedRuntimeConstructors>,
     /// Producer observations to validate through the caller's settlement.
@@ -931,15 +931,15 @@ fn terminal_partial_vue_macro_codegen_output<M: verter_audit::observe::ObserveEx
 }
 
 impl VerterHost {
-    /// Read available per-prop Vue runtime constructors from the macro producer.
+    /// Read available per-prop runtime constructors from the shared macro producer.
     ///
     /// This explicitly demands runtime classification without compiling. Missing,
     /// degraded, and non-Vue rows make no claim and are absent from the map.
     /// Other consumers keep their existing, narrower macro demands.
-    pub fn vue_prop_runtime_constructors(
+    pub fn prop_runtime_constructors(
         &self,
         canonical_id: &str,
-    ) -> Result<VuePropRuntimeFacts, ExecutionAbort> {
+    ) -> Result<PropRuntimeFacts, ExecutionAbort> {
         let canonical = self.resolve_alias_or_canonical(canonical_id);
         let is_vue = self
             .scheduler
@@ -950,7 +950,7 @@ impl VerterHost {
                     .is_some_and(|data| data.file_language.is_vue())
             });
         if !is_vue {
-            return Ok(VuePropRuntimeFacts::default());
+            return Ok(PropRuntimeFacts::default());
         }
         let output =
             self.produce_vue_macro_codegen(canonical_id, VueMacroCodegenDemand::Runtime)?;
@@ -983,7 +983,7 @@ impl VerterHost {
                 }
             }
         }
-        Ok(VuePropRuntimeFacts {
+        Ok(PropRuntimeFacts {
             constructors,
             fact_versions,
         })

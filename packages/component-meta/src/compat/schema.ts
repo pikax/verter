@@ -7,6 +7,7 @@
 import type { TypeDescriptor } from "@verter/type-ir";
 import { intrinsicDisplayName } from "@verter/type-ir";
 import type { PropertyMetaSchema, MetaCheckerOptions } from "./types.js";
+import { tupleDescriptorToString } from "../type-expr-bridge.js";
 
 const MAX_SCHEMA_REGISTRY_RESOLUTION_DEPTH = 1;
 
@@ -111,18 +112,9 @@ function convertType(
     }
 
     case "tuple": {
-      // Preserve labelled-tuple syntax in display text.
-      const rendered = td.elements.map((entry, i) => {
-        const text = schemaDescriptorToString(
-          entry,
-          typeRegistry,
-          visited,
-          registryResolutionDepth,
-        );
-        const label = td.labels?.[i] ?? null;
-        return label ? `${label}: ${text}` : text;
-      });
-      const type = `[${rendered.join(", ")}]`;
+      const type = tupleDescriptorToString(td, (entry) =>
+        schemaDescriptorToString(entry, typeRegistry, visited, registryResolutionDepth),
+      );
       if (ignore?.(type)) return type;
       return {
         kind: "array",
@@ -363,17 +355,9 @@ function schemaDescriptorToString(
         registryResolutionDepth,
       )}[]`;
     case "tuple": {
-      const rendered = td.elements.map((entry, i) => {
-        const text = schemaDescriptorToString(
-          entry,
-          typeRegistry,
-          visited,
-          registryResolutionDepth,
-        );
-        const label = td.labels?.[i] ?? null;
-        return label ? `${label}: ${text}` : text;
-      });
-      return `[${rendered.join(", ")}]`;
+      return tupleDescriptorToString(td, (entry) =>
+        schemaDescriptorToString(entry, typeRegistry, visited, registryResolutionDepth),
+      );
     }
     case "object":
       if (
@@ -481,12 +465,7 @@ export function typeDescriptorToString(td: TypeDescriptor): string {
     case "array":
       return `${typeDescriptorToString(td.element)}[]`;
     case "tuple": {
-      const rendered = td.elements.map((entry, i) => {
-        const text = typeDescriptorToString(entry);
-        const label = td.labels?.[i] ?? null;
-        return label ? `${label}: ${text}` : text;
-      });
-      return `[${rendered.join(", ")}]`;
+      return tupleDescriptorToString(td, typeDescriptorToString);
     }
     case "object":
       if (

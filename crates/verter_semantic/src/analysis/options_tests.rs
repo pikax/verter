@@ -251,6 +251,56 @@ export default defineComponent({
     assert_eq!(opts.methods[0].name, "inc");
 }
 
+#[test]
+fn default_identifier_resolves_options_initializer() {
+    for source in [
+        "const opts = { props: ['msg'], methods: { inc() {} } }; export default opts;",
+        "export default opts; const opts = { props: ['msg'], methods: { inc() {} } };",
+        "export const opts = { props: ['msg'], methods: { inc() {} } }; export default opts;",
+        "const opts = { props: ['msg'], methods: { inc() {} } }; const alias = opts; export default alias;",
+        "const opts = ({ props: ['msg'], methods: { inc() {} } } as const); export default (opts);",
+    ] {
+        let snap = analyze(source);
+        let opts = snap.options_api.expect(source);
+        assert!(!opts.is_define_component, "{source}");
+        assert_eq!(opts.props[0].name, "msg", "{source}");
+        assert_eq!(opts.methods[0].name, "inc", "{source}");
+    }
+}
+
+#[test]
+fn define_component_import_alias_resolves_options() {
+    for source in [
+        "import { defineComponent as dc } from 'vue'; export default dc({ props: ['msg'] });",
+        "import { defineComponent as dc } from 'vue'; const opts = dc({ props: ['msg'] }); export default opts;",
+        "import { defineComponent as dc } from 'vue'; const opts = { props: ['msg'] }; export default dc(opts);",
+        "export default dc({ props: ['msg'] }); import { defineComponent as dc } from 'vue';",
+    ] {
+        let opts = analyze(source).options_api.expect(source);
+        assert!(opts.is_define_component, "{source}");
+        assert_eq!(opts.props[0].name, "msg", "{source}");
+    }
+}
+
+#[test]
+fn unresolved_default_exports_withhold_member_free_claim() {
+    for source in [
+        "export default missing;",
+        "const opts = other; const other = opts; export default opts;",
+        "export default makeOptions();",
+        "export default function Component() {}",
+        "import { other as defineComponent } from 'vue'; export default defineComponent({ props: ['wrong'] });",
+        "import { defineComponent as dc } from './other'; export default dc({ props: ['wrong'] });",
+        "import type { defineComponent as dc } from 'vue'; export default dc({ props: ['wrong'] });",
+        "import { type defineComponent as dc } from 'vue'; export default dc({ props: ['wrong'] });",
+        "const defineComponent = (value) => value; export default defineComponent({ props: ['wrong'] });",
+    ] {
+        let snap = analyze(source);
+        assert!(snap.flags.contains(AnalysisFlags::HAS_OPTIONS_API), "{source}");
+        assert!(snap.options_api.is_none(), "{source}");
+    }
+}
+
 // ── Negative: script setup should NOT produce options_api ──
 
 #[test]
@@ -461,7 +511,8 @@ fn emits_object_multi_param_validator() {
 #[test]
 fn jsdoc_on_options_api_props() {
     let snap = analyze(
-        r#"export default defineComponent({
+        r#"import { defineComponent } from 'vue';
+        export default defineComponent({
             props: {
                 /** The display label */
                 label: String,
