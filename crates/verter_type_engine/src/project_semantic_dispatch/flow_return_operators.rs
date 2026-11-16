@@ -1617,7 +1617,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// expression's bare-literal operands (nested logicals included)
     /// contribute to its result. Empty for every other position.
     pub(super) fn operator_fresh_values(
-        &self,
+        &mut self,
         expr: &SliceExpr,
         node: SemanticNodeId,
     ) -> Vec<SemanticNodeId> {
@@ -1644,7 +1644,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
             .collect()
     }
 
-    fn collect_operator_fresh_literals(&self, expr: &SliceExpr, out: &mut Vec<SemanticNodeId>) {
+    fn collect_operator_fresh_literals(&mut self, expr: &SliceExpr, out: &mut Vec<SemanticNodeId>) {
         match expr {
             // A value-position `=` is its right-hand side's type, fresh
             // literals included.
@@ -1713,7 +1713,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// fresh literal leaf, each fresh arm of a conditional, and the fresh
     /// literals of a nested value-position write or logical operator.
     fn collect_fresh_leaves(
-        &self,
+        &mut self,
         expr: &SliceExpr,
         freshness: &verter_session_query::flow::slice::SliceFreshness,
         out: &mut Vec<SemanticNodeId>,
