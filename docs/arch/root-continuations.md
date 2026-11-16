@@ -2510,6 +2510,43 @@ call's executor route (`CallStage`, `CallSuffix`), and the stage after
 the route takes its answer instead of the computation running again from
 its beginning.
 
+Within a flow read, a call's value computation requests its callee's
+signature lists through the shared signature-list continuation, in declaration
+order: the call list, then the construct list. The root read answers the
+entered query with its whole cache read, including a composite candidate's
+signature-result read. A run that cannot suspend answers the same requests
+in place. The call keeps settled lists only, rebasing them when its callee
+changes; group decisions and the route's fold reuse them. An unsettled list
+is asked again by its next reader, and an unsettled call list skips the
+construct list. The retained state is the boxed call flight's
+`CallStage::Lists` and `CalleeLists`, plus a boxed `CallListWait` in
+`ReadSite::CallList` while a list waits. The executor route names its own
+parameter, contextual-signature and settlement lists in `RouteList`; the
+same driver requests them and returns their settled nodes. A route's read
+of its call's callee uses `CalleeLists` when that list is already settled.
+Receiver binding names a different callee and therefore reads its own lists.
+Guards and statement effects drive the same requests through
+`read_list_in_place`, without retaining callee lists between route reads.
+
+`ArgumentPending` retains a missing-parameter answer for the current
+argument, or an object's completed typing and widening classification
+while its first-pass parameters are read. An unsettled parameter list can
+be asked again by the next argument. `ContextualSignatureRead` holds the
+arms and their agreed signature, shared by first-pass callback typing,
+callback retyping and the in-place contextual-signature reader. A finishing
+route retains this reader in `FinishRoute.retyping`; its `CallRead` keeps
+the candidate collector across the arm reads and the callback suspension.
+The contextual window opens only once the callback request is built.
+
+Settlement releases the call, then adopts argument observations, then
+requests any lists needed to decide whether the executor's observations
+belong to the declared read. `SettlingRoute` retains the indexed serve,
+step, observations, relation count and declared proof across those reads;
+it has no `CallRead` and cannot hold a call across a settlement list request.
+Within the call category, direct reads remain in object-literal
+construction, in-place contextual arguments and guard/effect classification;
+the executor's own lists remain under `begin_call` and `resume_call`.
+
 An ignored acceptance test in the session's `semantic_poll_contract` group
 states the polled entry's contract for the flow gap and fails today:
 `a_flow_suspended_at_a_held_read_evaluates_its_body_once` (after the held

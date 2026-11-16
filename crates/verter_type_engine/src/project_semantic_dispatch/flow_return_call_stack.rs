@@ -12,7 +12,11 @@
 //! the route's answer ([`CallSuffix`]). The route ([`ResolveCallFrame`])
 //! types the arguments one at a time and suspends for each lowered one;
 //! its answer is folded once and the computation continues
-//! ([`FlowEvaluator::continue_call_value`]) where it stopped. Nothing the
+//! ([`FlowEvaluator::continue_call_value`]) where it stopped. Its callee's
+//! signature lists are requested through the root read and retained once
+//! settled, shared by its group decision, route and fold. The route names
+//! its parameter, contextual-arm and settlement lists for the same driver
+//! to request; a caller that cannot suspend answers them in place. Nothing the
 //! first stage did runs again: a call's value is computed once.
 //!
 //! A function-value argument the route types under its parameter's
@@ -36,7 +40,11 @@ use std::sync::Arc;
 use verter_session_query::source::demand::ExpressionSourceDemand as _;
 
 use super::super::call_resolve::ResolveCallStep;
-use super::contextual::{CalleeParameters, FunctionArgumentMark, FunctionArgumentRequest};
+use super::super::continuation_stages::SignatureListRead;
+use super::contextual::{
+    ArmStep, CalleeParameters, ContextualSignatureRead, FunctionArgumentMark,
+    FunctionArgumentRequest,
+};
 use super::FlowDemandDriver;
 use super::*;
 use verter_session_query::flow::slice::{
@@ -61,6 +69,113 @@ pub(super) struct CallInFlight<'e> {
     operand: Option<Positional<SemanticNodeId>>,
     /// Where the value computation stands.
     stage: CallStage<'e>,
+    lists: CalleeLists,
+}
+
+/// The settled signature lists of a call's callee. An unsettled list is
+/// asked for again by its next reader.
+#[derive(Default)]
+struct CalleeLists {
+    subject: Option<SemanticNodeId>,
+    call: Option<Vec<SemanticNodeId>>,
+    construct: Option<Vec<SemanticNodeId>>,
+}
+
+/// Both buckets, call then construct.
+pub(super) type Buckets<'a> = (&'a [SemanticNodeId], &'a [SemanticNodeId]);
+
+impl CalleeLists {
+    /// Retain lists only for this subject.
+    fn rebase(&mut self, subject: SemanticNodeId) {
+        if self.subject != Some(subject) {
+            *self = Self {
+                subject: Some(subject),
+                ..Self::default()
+            };
+        }
+    }
+
+    fn settled(&self, subject: SemanticNodeId, kind: SignatureKind) -> Option<&[SemanticNodeId]> {
+        if self.subject != Some(subject) {
+            return None;
+        }
+        match kind {
+            SignatureKind::Call => self.call.as_deref(),
+            SignatureKind::Construct => self.construct.as_deref(),
+        }
+    }
+
+    /// Keep the callee's list, handing back any other subject's nodes.
+    fn keep(
+        &mut self,
+        subject: SemanticNodeId,
+        kind: SignatureKind,
+        nodes: Vec<SemanticNodeId>,
+    ) -> Option<Vec<SemanticNodeId>> {
+        if self.subject != Some(subject) {
+            return Some(nodes);
+        }
+        match kind {
+            SignatureKind::Call => self.call = Some(nodes),
+            SignatureKind::Construct => self.construct = Some(nodes),
+        }
+        None
+    }
+
+    fn buckets(&self) -> Option<Buckets<'_>> {
+        Some((self.call.as_deref()?, self.construct.as_deref()?))
+    }
+}
+
+/// A call waiting on a read one of its signature lists made.
+pub(super) struct CallListWait<'e> {
+    flight: Box<CallInFlight<'e>>,
+    list: SignatureListRead,
+    subject: SemanticNodeId,
+    kind: SignatureKind,
+    route: Option<Box<RouteList<'e>>>,
+    wait: Option<ReadWait>,
+}
+
+impl CallListWait<'_> {
+    pub(super) fn take_wait(&mut self) -> ReadWait {
+        self.wait
+            .take()
+            .expect("a list requests its waiting read once")
+    }
+}
+
+/// What a call's value computation does with its callee's lists.
+pub(super) enum AfterLists<'e> {
+    Group(GroupCallee),
+    Fold(Box<FoldRest<'e>>),
+}
+
+pub(super) struct FoldRest<'e> {
+    tail: FoldTail,
+    then: CallSuffix<'e>,
+}
+
+/// The callee whose group decision needs the lists.
+pub(super) enum GroupCallee {
+    Nested,
+    Binding,
+    BindingValue,
+    Symbolic { asked: bool },
+    Tagged,
+}
+
+/// The rest of a route's fold once its callee's lists are known.
+pub(super) enum FoldTail {
+    Untyped,
+    Refused,
+    ContextSensitive,
+    Undecided,
+}
+
+pub(super) enum FoldNext {
+    Folded(Option<Positional<CallValue>>),
+    Lists(FoldTail),
 }
 
 /// Where a call's value computation stands between its stages.
@@ -72,12 +187,23 @@ enum CallStage<'e> {
         callee: SemanticNodeId,
         then: CallSuffix<'e>,
     },
+    /// The callee's lists, call then construct, stopping if either does not settle.
+    Lists {
+        subject: SemanticNodeId,
+        then: AfterLists<'e>,
+        unsettled: bool,
+    },
     /// Taken by the stage that runs now.
     Taken,
 }
 
 /// What one stage of a call's value computation concluded.
 pub(super) enum CallNext<'e> {
+    /// The callee's lists, which the following stage takes.
+    Lists {
+        subject: SemanticNodeId,
+        then: AfterLists<'e>,
+    },
     /// The call's value.
     Value(Positional<CallValue>),
     /// The executor route for `callee`, whose answer `then` takes.
@@ -199,6 +325,8 @@ pub(super) enum CallStep<'e> {
     Argument(Box<CallArgumentWait<'e>>),
     /// A function-value argument's signature, for its executor route.
     Function(Box<CallFunctionWait<'e>>),
+    /// A read made by a signature list.
+    Read(Box<CallListWait<'e>>),
     /// Nothing: the call's value.
     Done(Positional<SemanticNodeId>),
 }
@@ -208,6 +336,7 @@ pub(super) enum CallStep<'e> {
 static_assertions::const_assert!(std::mem::size_of::<CallStep<'static>>() <= 24);
 static_assertions::const_assert!(std::mem::size_of::<CallNext<'static>>() <= 48);
 static_assertions::const_assert!(std::mem::size_of::<CallSuffix<'static>>() <= 24);
+static_assertions::const_assert!(std::mem::size_of::<AfterLists<'static>>() <= 16);
 
 /// A call's executor route ([`FlowEvaluator::resolve_call_step`]) between
 /// its arguments: the arguments typed so far.
@@ -229,6 +358,17 @@ pub(super) struct ResolveCallFrame<'e> {
     /// The typed function value of the argument being typed, once its
     /// signature is evaluated.
     delivered_function: Option<Option<SemanticNodeId>>,
+    pending: Option<Box<ArgumentPending>>,
+}
+
+/// Work already done for the argument stopped at a signature list.
+enum ArgumentPending {
+    NoParameters,
+    Arms(Box<ContextualSignatureRead>),
+    FirstPass {
+        typed: TypedArgument,
+        reads_widening_local: bool,
+    },
 }
 
 /// A call's executor route once every argument is typed: the executor
@@ -253,7 +393,51 @@ pub(super) struct FinishRoute {
     retyped: bool,
     /// The argument being retyped.
     position: usize,
+    retyping: Option<Box<ContextualSignatureRead>>,
 }
+
+/// A route whose call is released and whose argument observations are adopted.
+struct SettlingRoute {
+    _serve: verter_session_query::inputs::indexed::IndexedInputServe,
+    key: crate::semantic_query::ResolveCallKey,
+    step: Positional<ResolveCallStep>,
+    retyped: bool,
+    step_observations: super::super::flow_return_fact::ObservedRead<()>,
+    undecided_relations: u64,
+    declared_result: Option<super::super::call_resolve::DeclaredCallResult>,
+    calls: Option<Vec<SemanticNodeId>>,
+}
+
+/// A route names the signature list its driver must read before it continues.
+pub(super) struct RouteList<'e> {
+    at: RouteListAt<'e>,
+    pub(super) subject: SemanticNodeId,
+    pub(super) kind: SignatureKind,
+}
+
+enum RouteListAt<'e> {
+    Settling(Box<SettlingRoute>),
+    Parameters(Box<ResolveCallFrame<'e>>),
+    FirstPassParameters(Box<ResolveCallFrame<'e>>),
+    TypingArm(Box<ResolveCallFrame<'e>>),
+    RetypingArm(Box<FinishRoute>),
+    Taken,
+}
+
+/// The next context-sensitive argument: a literal, or a function's arm reader.
+enum Retyped {
+    InPlace(usize),
+    Function(usize, Box<ContextualSignatureRead>),
+}
+
+static_assertions::const_assert!(std::mem::size_of::<Retyped>() <= 24);
+static_assertions::const_assert!(std::mem::size_of::<RouteList<'static>>() <= 32);
+static_assertions::const_assert!(
+    std::mem::size_of::<Option<Box<ArgumentPending>>>() <= std::mem::size_of::<usize>()
+);
+static_assertions::const_assert!(
+    std::mem::size_of::<Option<Box<ContextualSignatureRead>>>() <= std::mem::size_of::<usize>()
+);
 
 /// A call's executor route held across its flow frame's suspension: the
 /// route as it stood before the round whose callback stopped the run, its
@@ -328,6 +512,8 @@ pub(super) enum ResolveCallProgress<'e> {
     Argument(ResolveCallFrame<'e>, &'e SliceExpr),
     /// The signature of a function-value argument.
     Function(Box<RouteFunction<'e>>),
+    /// A signature list read by the route's driver.
+    List(Box<RouteList<'e>>),
     /// Nothing: the route's step.
     Done(Option<Positional<ResolveCallStep>>),
 }
@@ -380,6 +566,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             evidence: self.call_evidence_mark(),
             operand: None,
             stage: CallStage::Begin,
+            lists: CalleeLists::default(),
         });
         match call_operand(call) {
             Some(operand) => CallStep::Operand(flight, operand),
@@ -510,7 +697,24 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     return self.finish_call(site, evidence, value);
                 }
                 CallNext::Route { callee, then } => (callee, then),
+                CallNext::Lists { subject, then } => {
+                    flight.lists.rebase(subject);
+                    flight.stage = CallStage::Lists {
+                        subject,
+                        then,
+                        unsettled: false,
+                    };
+                    match self.read_call_lists(flight) {
+                        Ok(step) => return step,
+                        Err((back, following)) => {
+                            flight = back;
+                            next = following;
+                            continue;
+                        }
+                    }
+                }
             };
+            flight.lists.rebase(callee);
             flight.stage = CallStage::Route { callee, then };
             let progress = self.start_resolve_call(callee, flight.site, flight.arguments);
             match self.call_route_progress(flight, progress) {
@@ -519,6 +723,130 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     flight = back;
                     next = following;
                 }
+            }
+        }
+    }
+
+    /// Read the missing callee lists, call then construct, or take their
+    /// following stage. An unsettled call list skips the construct list.
+    fn read_call_lists<'e>(
+        &mut self,
+        mut flight: Box<CallInFlight<'e>>,
+    ) -> Result<CallStep<'e>, (Box<CallInFlight<'e>>, CallNext<'e>)> {
+        let CallStage::Lists {
+            subject, unsettled, ..
+        } = &flight.stage
+        else {
+            unreachable!("a call reads lists only in its list stage");
+        };
+        let (subject, unsettled) = (*subject, *unsettled);
+        let missing = if unsettled {
+            None
+        } else if flight.lists.settled(subject, SignatureKind::Call).is_none() {
+            Some(SignatureKind::Call)
+        } else if flight
+            .lists
+            .settled(subject, SignatureKind::Construct)
+            .is_none()
+        {
+            Some(SignatureKind::Construct)
+        } else {
+            None
+        };
+        if let Some(kind) = missing {
+            let (list, wait) = self.dispatch.request_signature_list(subject, kind);
+            return Ok(CallStep::Read(Box::new(CallListWait {
+                flight,
+                list,
+                subject,
+                kind,
+                route: None,
+                wait: Some(wait),
+            })));
+        }
+        let CallStage::Lists { subject, then, .. } =
+            std::mem::replace(&mut flight.stage, CallStage::Taken)
+        else {
+            unreachable!("the lists resume their following stage");
+        };
+        let next = self.after_call_lists(&flight, subject, then);
+        Err((flight, next))
+    }
+
+    /// Resume the same list, or the call's next stage once it settles.
+    pub(super) fn resume_call_list<'e>(
+        &mut self,
+        mut wait: Box<CallListWait<'e>>,
+        delivery: ReadDelivery,
+    ) -> CallStep<'e> {
+        match self
+            .dispatch
+            .deliver_signature_list(&mut wait.list, delivery)
+        {
+            ReadStep::Wait(next) => {
+                wait.wait = Some(next);
+                CallStep::Read(wait)
+            }
+            ReadStep::Ready(nodes) => {
+                let CallListWait {
+                    mut flight,
+                    subject,
+                    kind,
+                    route,
+                    ..
+                } = *wait;
+                if let Some(route) = route {
+                    let returned = nodes.and_then(|nodes| flight.lists.keep(subject, kind, nodes));
+                    let nodes = returned
+                        .as_deref()
+                        .or_else(|| flight.lists.settled(subject, kind));
+                    let progress = self.deliver_route_list(route, nodes);
+                    return self.continue_call_route(flight, progress);
+                }
+                match nodes {
+                    Some(nodes) => {
+                        let _ = flight.lists.keep(subject, kind, nodes);
+                    }
+                    None => {
+                        let CallStage::Lists { unsettled, .. } = &mut flight.stage else {
+                            unreachable!("a list answers the stage that requested it");
+                        };
+                        *unsettled = true;
+                    }
+                }
+                match self.read_call_lists(flight) {
+                    Ok(step) => step,
+                    Err((flight, next)) => self.advance_call(flight, next),
+                }
+            }
+        }
+    }
+
+    /// Take the group decision or fold with the call's retained lists.
+    fn after_call_lists<'e>(
+        &mut self,
+        flight: &CallInFlight<'e>,
+        subject: SemanticNodeId,
+        then: AfterLists<'e>,
+    ) -> CallNext<'e> {
+        let buckets = flight.lists.buckets();
+        let site = flight.site;
+        let driver = self.dispatch;
+        match then {
+            AfterLists::Group(group) => {
+                let read =
+                    driver.observe_read(|| self.callee_group_call(group, subject, site, buckets));
+                driver
+                    .adopt_read(read)
+                    .unwrap_or(CallNext::Value(Positional::Unmodeled))
+            }
+            AfterLists::Fold(rest) => {
+                let FoldRest { tail, then } = *rest;
+                let answer = self.fold_with_lists(tail, buckets);
+                let read = driver.observe_read(|| self.continue_call_value(site, then, answer));
+                driver
+                    .adopt_read(read)
+                    .unwrap_or(CallNext::Value(Positional::Unmodeled))
             }
         }
     }
@@ -541,44 +869,74 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     fn call_route_progress<'e>(
         &mut self,
         mut flight: Box<CallInFlight<'e>>,
-        progress: ResolveCallProgress<'e>,
+        mut progress: ResolveCallProgress<'e>,
     ) -> Result<CallStep<'e>, (Box<CallInFlight<'e>>, CallNext<'e>)> {
-        match progress {
-            ResolveCallProgress::Argument(route, lowered) => {
-                Ok(CallStep::Argument(Box::new(CallArgumentWait {
-                    flight,
-                    route,
-                    lowered,
-                })))
-            }
-            ResolveCallProgress::Function(function) => {
-                let RouteFunction { at, request } = *function;
-                let window = self.open_function_argument_window(&at);
-                Ok(CallStep::Function(Box::new(CallFunctionWait {
-                    flight,
-                    route: at,
-                    mark: request.mark,
-                    demand: Some(request.demand),
-                    window,
-                })))
-            }
-            ResolveCallProgress::Done(step) => {
-                let CallStage::Route { callee, then } =
-                    std::mem::replace(&mut flight.stage, CallStage::Taken)
-                else {
-                    unreachable!("a route answers the call that started it");
-                };
-                let site = flight.site;
-                let answer = self.fold_resolve_call_step(step, callee, site);
-                // The next stage runs under its own observation even when
-                // it only hands the answer back: an abort the route observed
-                // leaves the call unmodelled.
-                let driver = self.dispatch;
-                let read = driver.observe_read(|| self.continue_call_value(site, then, answer));
-                let next = driver
-                    .adopt_read(read)
-                    .unwrap_or(CallNext::Value(Positional::Unmodeled));
-                Err((flight, next))
+        loop {
+            match progress {
+                ResolveCallProgress::List(route) => {
+                    if let Some(nodes) = flight.lists.settled(route.subject, route.kind) {
+                        progress = self.deliver_route_list(route, Some(nodes));
+                        continue;
+                    }
+                    let subject = route.subject;
+                    let kind = route.kind;
+                    let (list, wait) = self.dispatch.request_signature_list(subject, kind);
+                    return Ok(CallStep::Read(Box::new(CallListWait {
+                        flight,
+                        list,
+                        subject,
+                        kind,
+                        route: Some(route),
+                        wait: Some(wait),
+                    })));
+                }
+                ResolveCallProgress::Argument(route, lowered) => {
+                    return Ok(CallStep::Argument(Box::new(CallArgumentWait {
+                        flight,
+                        route,
+                        lowered,
+                    })));
+                }
+                ResolveCallProgress::Function(function) => {
+                    let RouteFunction { at, request } = *function;
+                    let window = self.open_function_argument_window(&at);
+                    return Ok(CallStep::Function(Box::new(CallFunctionWait {
+                        flight,
+                        route: at,
+                        mark: request.mark,
+                        demand: Some(request.demand),
+                        window,
+                    })));
+                }
+                ResolveCallProgress::Done(step) => {
+                    let CallStage::Route { callee, then } =
+                        std::mem::replace(&mut flight.stage, CallStage::Taken)
+                    else {
+                        unreachable!("a route answers the call that started it");
+                    };
+                    let site = flight.site;
+                    let answer = match self.fold_before_lists(step, site) {
+                        FoldNext::Folded(answer) => answer,
+                        FoldNext::Lists(tail) => {
+                            return Err((
+                                flight,
+                                CallNext::Lists {
+                                    subject: callee,
+                                    then: AfterLists::Fold(Box::new(FoldRest { tail, then })),
+                                },
+                            ))
+                        }
+                    };
+                    // The next stage runs under its own observation even when
+                    // it only hands the answer back: an abort the route observed
+                    // leaves the call unmodelled.
+                    let driver = self.dispatch;
+                    let read = driver.observe_read(|| self.continue_call_value(site, then, answer));
+                    let next = driver
+                        .adopt_read(read)
+                        .unwrap_or(CallNext::Value(Positional::Unmodeled));
+                    return Err((flight, next));
+                }
             }
         }
     }
@@ -694,6 +1052,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             argument_observations: (0..count).map(|_| None).collect(),
             awaiting: None,
             delivered_function: None,
+            pending: None,
         };
         self.advance_resolve_call(route, None)
     }
@@ -752,19 +1111,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         self.adopt_argument_observations(&mut route.argument_observations);
                         return ResolveCallProgress::Done(None);
                     };
-                    let binding = self.indexed_argument_binding(*root);
                     let frame_arguments = route.frame_arguments.clone();
-                    // An argument that is itself a call, or a member read,
-                    // evaluates through this frame's carriers, against the
-                    // frame's bindings: a hold on its callee holds this call
-                    // too. Any other argument that is no bare binding read
-                    // is a value THIS frame computes (`c ? a : b`,
-                    // `twin(c)`, `[twin(c)]`): its frame lowering reads the
-                    // frame's own bindings, which the indexed program
-                    // resolves in owner scope and cannot.
-                    // A literal argument this frame computes is also
-                    // evaluated in its const context: the value a `const`
-                    // type parameter it is passed to infers from.
                     if route.function_arguments.len() == ordinal {
                         route.function_arguments.push(
                             arguments
@@ -786,6 +1133,34 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                 .cloned(),
                         );
                     }
+                    let asks_parameters = route.delivered_function.is_none()
+                        && route.pending.is_none()
+                        && route.contextual_parameters.is_none()
+                        && !argument.context_sensitive
+                        && matches!(
+                            route.function_arguments.last(),
+                            Some(Some(SliceExpr::NestedFunctionValue { gap: None, .. }))
+                        );
+                    if asks_parameters {
+                        let subject = route.callee;
+                        return ResolveCallProgress::List(Box::new(RouteList {
+                            at: RouteListAt::Parameters(Box::new(route)),
+                            subject,
+                            kind: SignatureKind::Call,
+                        }));
+                    }
+                    let binding = self.indexed_argument_binding(*root);
+                    // An argument that is itself a call, or a member read,
+                    // evaluates through this frame's carriers, against the
+                    // frame's bindings: a hold on its callee holds this call
+                    // too. Any other argument that is no bare binding read
+                    // is a value THIS frame computes (`c ? a : b`,
+                    // `twin(c)`, `[twin(c)]`): its frame lowering reads the
+                    // frame's own bindings, which the indexed program
+                    // resolves in owner scope and cannot.
+                    // A literal argument this frame computes is also
+                    // evaluated in its const context: the value a `const`
+                    // type parameter it is passed to infers from.
                     let mut const_view = None;
                     // Whether the argument is a call whose result is wholly
                     // the fresh literal its inference kept: a fresh literal
@@ -804,9 +1179,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                     Some(
                                         expr @ SliceExpr::NestedFunctionValue { gap: None, .. },
                                     ) if !argument.context_sensitive => {
-                                        if route.contextual_parameters.is_none() {
-                                            route.contextual_parameters =
-                                                self.callee_parameter_types(route.callee).ok();
+                                        if let Some(pending) = route.pending.take() {
+                                            let ArgumentPending::NoParameters = *pending else {
+                                                unreachable!(
+                                                    "parameter delivery resumes before typing"
+                                                );
+                                            };
                                         }
                                         let parameter = route
                                             .contextual_parameters
@@ -815,9 +1193,22 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                             .and_then(|parameters| {
                                                 parameters.at(self.dispatch, ordinal)
                                             });
-                                        self.function_argument_request_under_parameter(
-                                            expr, parameter,
-                                        )
+                                        if let Some(parameter) = parameter {
+                                            let read =
+                                                self.begin_contextual_signature(parameter, expr);
+                                            if let Some(subject) = read.arm() {
+                                                route.pending =
+                                                    Some(Box::new(ArgumentPending::Arms(read)));
+                                                return ResolveCallProgress::List(Box::new(
+                                                    RouteList {
+                                                        at: RouteListAt::TypingArm(Box::new(route)),
+                                                        subject,
+                                                        kind: SignatureKind::Call,
+                                                    },
+                                                ));
+                                            }
+                                        }
+                                        self.function_argument_request(expr, None)
                                     }
                                     _ => None,
                                 };
@@ -972,45 +1363,74 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 },
                 _ => false,
             };
-            // A context-sensitive object literal also rides as the first
-            // inference pass reads it: its context-sensitive members as the
-            // non-inferring `any`.
-            let first_pass = match route
-                .function_arguments
-                .get(ordinal)
-                .and_then(Option::as_ref)
-            {
-                Some(SliceExpr::Object { entries, offset }) if argument.context_sensitive => {
+            let first_pass = match route.function_arguments.get(ordinal).cloned().flatten() {
+                Some(SliceExpr::Object {
+                    ref entries,
+                    offset,
+                }) if argument.context_sensitive => {
                     if route.contextual_parameters.is_none() {
-                        route.contextual_parameters =
-                            self.callee_parameter_types(route.callee).ok();
+                        route.pending = Some(Box::new(ArgumentPending::FirstPass {
+                            typed,
+                            reads_widening_local,
+                        }));
+                        let subject = route.callee;
+                        return ResolveCallProgress::List(Box::new(RouteList {
+                            at: RouteListAt::FirstPassParameters(Box::new(route)),
+                            subject,
+                            kind: SignatureKind::Call,
+                        }));
                     }
-                    let contextual = route
-                        .contextual_parameters
-                        .as_mut()
-                        .and_then(Option::as_mut)
-                        .and_then(|parameters| parameters.at(self.dispatch, ordinal));
-                    match self.eval_object_literal_first_pass(entries, *offset, contextual) {
-                        Positional::Value(node) => Some(node),
-                        Positional::Hold | Positional::Unmodeled => None,
-                    }
+                    self.first_pass_read(&mut route, ordinal, entries, offset)
                 }
                 _ => None,
             };
-            route.args.push(crate::semantic_query::CallArgKey::Eager {
-                ty,
-                spread: argument.spread,
-                context_sensitive: argument.context_sensitive,
-                const_view: typed.const_view,
-                first_pass,
-                literal_mode: indexed_argument_literal_mode(
-                    argument.literal_mode,
-                    reads_widening_local || typed.fresh_call,
-                ),
-                literal_provenance: typed.literal_provenance,
-            });
+            self.finish_argument(&mut route, ordinal, typed, reads_widening_local, first_pass);
         }
         self.finish_resolve_call(route)
+    }
+
+    /// The context-sensitive object's non-inferring first pass, after its own typing.
+    fn first_pass_read(
+        &mut self,
+        route: &mut ResolveCallFrame<'_>,
+        ordinal: usize,
+        entries: &[verter_session_query::flow::slice::SliceObjectEntry],
+        offset: u32,
+    ) -> Option<SemanticNodeId> {
+        let contextual = route
+            .contextual_parameters
+            .as_mut()
+            .and_then(Option::as_mut)
+            .and_then(|parameters| parameters.at(self.dispatch, ordinal));
+        match self.eval_object_literal_first_pass(entries, offset, contextual) {
+            Positional::Value(node) => Some(node),
+            Positional::Hold | Positional::Unmodeled => None,
+        }
+    }
+
+    /// Record the typed argument once all of its reads have finished.
+    fn finish_argument(
+        &mut self,
+        route: &mut ResolveCallFrame<'_>,
+        ordinal: usize,
+        typed: TypedArgument,
+        reads_widening_local: bool,
+        first_pass: Option<SemanticNodeId>,
+    ) {
+        let argument = &route.indexed.call.args[ordinal];
+        let ty = typed.node.expect("only a typed argument finishes");
+        route.args.push(crate::semantic_query::CallArgKey::Eager {
+            ty,
+            spread: argument.spread,
+            context_sensitive: argument.context_sensitive,
+            const_view: typed.const_view,
+            first_pass,
+            literal_mode: indexed_argument_literal_mode(
+                argument.literal_mode,
+                reads_widening_local || typed.fresh_call,
+            ),
+            literal_provenance: typed.literal_provenance,
+        });
     }
 
     /// Ask the executor for a call whose arguments are typed: its explicit
@@ -1142,6 +1562,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             call,
             retyped: false,
             position: 0,
+            retyping: None,
         }))
     }
 
@@ -1239,9 +1660,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 _ => None,
             });
             let Some((ty, spread)) = retyped else {
-                return RetypeRound::Progress(Box::new(ResolveCallProgress::Done(
-                    self.settle_retyped_call(*finish),
-                )));
+                return RetypeRound::Progress(Box::new(self.settle_route(finish)));
             };
             finish.retyped = true;
             finish.args[position] = crate::semantic_query::CallArgKey::Eager {
@@ -1274,9 +1693,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 .saturating_sub(relations_before);
             let complete = read.observations_are_complete();
             let Ok(((step, proof), observations)) = read.split() else {
-                return RetypeRound::Progress(Box::new(ResolveCallProgress::Done(
-                    self.settle_retyped_call(*finish),
-                )));
+                return RetypeRound::Progress(Box::new(self.settle_route(finish)));
             };
             let old = std::mem::replace(&mut finish.step_observations, observations);
             let _ = old.discard();
@@ -1284,51 +1701,49 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             finish.declared_result = proof.filter(|_| complete);
         }
         match self.next_retyped_argument(&finish) {
-            Some((position, Some(request))) => {
+            Some(Retyped::Function(position, read)) => {
                 finish.position = position;
-                RetypeRound::Progress(Box::new(ResolveCallProgress::Function(Box::new(
-                    RouteFunction {
-                        at: RouteAt::Finishing(finish),
-                        request,
-                    },
-                ))))
+                let Some(subject) = read.arm() else {
+                    return RetypeRound::Progress(Box::new(self.settle_route(finish)));
+                };
+                finish.retyping = Some(read);
+                RetypeRound::Progress(Box::new(ResolveCallProgress::List(Box::new(RouteList {
+                    at: RouteListAt::RetypingArm(finish),
+                    subject,
+                    kind: SignatureKind::Call,
+                }))))
             }
-            Some((position, None)) => {
+            Some(Retyped::InPlace(position)) => {
                 finish.position = position;
                 RetypeRound::InPlace(finish)
             }
-            None => RetypeRound::Progress(Box::new(ResolveCallProgress::Done(
-                self.settle_retyped_call(*finish),
-            ))),
+            None => RetypeRound::Progress(Box::new(self.settle_route(finish))),
         }
     }
 
     /// The context-sensitive argument the executor's last step names for
-    /// retyping, while a round is left: its position, and the request to
-    /// type it under the contextual type the step hands back — `None` for
-    /// an object or array literal, which is typed in place.
-    fn next_retyped_argument(
-        &mut self,
-        finish: &FinishRoute,
-    ) -> Option<(usize, Option<FunctionArgumentRequest>)> {
+    /// retyping: its position, and a function value's contextual arm reader.
+    /// Object and array literals are typed in place.
+    fn next_retyped_argument(&self, finish: &FinishRoute) -> Option<Retyped> {
         let (position, contextual) = Self::contextual_argument_request(&finish.step)?;
         let expr = finish.function_arguments.get(position).cloned().flatten()?;
         if matches!(expr, SliceExpr::Object { .. } | SliceExpr::Array { .. }) {
-            return Some((position, None));
+            return Some(Retyped::InPlace(position));
         }
         if !matches!(expr, SliceExpr::NestedFunctionValue { gap: None, .. }) {
             return None;
         }
-        let signature = self.contextual_signature(contextual, &expr)?;
-        let request = self.function_argument_request(&expr, Some(signature))?;
-        Some((position, Some(request)))
+        Some(Retyped::Function(
+            position,
+            self.begin_contextual_signature(contextual, &expr),
+        ))
     }
 
-    /// The executor's step for a call once no argument is retyped again. The
-    /// call is released first: an answered call holds nothing, and one whose
-    /// callback goes untyped returns its collector abandoned.
-    fn settle_retyped_call(&mut self, finish: FinishRoute) -> Option<Positional<ResolveCallStep>> {
+    /// Release the call and adopt argument observations before reading any
+    /// lists needed to settle the executor's step.
+    fn settle_route<'e>(&mut self, finish: Box<FinishRoute>) -> ResolveCallProgress<'e> {
         let FinishRoute {
+            _serve,
             step,
             retyped,
             mut argument_observations,
@@ -1338,21 +1753,54 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             key,
             call,
             ..
-        } = finish;
+        } = *finish;
         self.dispatch.release_call(call);
         self.adopt_argument_observations(&mut argument_observations);
-        // A declined executor does not own the fixed declared result read by
-        // the direct-call route. Its failed applicability probes are not that
-        // route's evidence; authored argument observations remain adopted.
-        let declined = !retyped
+        let settling = Box::new(SettlingRoute {
+            _serve,
+            key,
+            step,
+            retyped,
+            step_observations,
+            undecided_relations,
+            declared_result,
+            calls: None,
+        });
+        let undecided = !retyped
             && matches!(
-                step,
+                settling.step,
                 Positional::Value(ResolveCallStep::Degraded(
                     crate::semantic_query::ResolveCallFailure::Undecidable
                         | crate::semantic_query::ResolveCallFailure::Budget
                 ))
-            )
-            && !self.undecided_call_return_reads_clause(key.callee);
+            );
+        if undecided {
+            let subject = settling.key.callee;
+            return ResolveCallProgress::List(Box::new(RouteList {
+                at: RouteListAt::Settling(settling),
+                subject,
+                kind: SignatureKind::Call,
+            }));
+        }
+        ResolveCallProgress::Done(self.finish_settle(*settling, false))
+    }
+
+    /// A declined executor's probes are not the declared result's evidence.
+    fn finish_settle(
+        &mut self,
+        settling: SettlingRoute,
+        declined: bool,
+    ) -> Option<Positional<ResolveCallStep>> {
+        let SettlingRoute {
+            _serve,
+            key,
+            step,
+            retyped,
+            step_observations,
+            undecided_relations,
+            declared_result,
+            ..
+        } = settling;
         let validity = if declined {
             self.dispatch
                 .discard_call_relation_observations(undecided_relations);
@@ -1440,6 +1888,155 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             ));
         }
         Some(step)
+    }
+
+    /// Read through the shared list driver where the caller cannot suspend.
+    pub(super) fn read_list_in_place(
+        &self,
+        subject: SemanticNodeId,
+        kind: SignatureKind,
+    ) -> Option<Vec<SemanticNodeId>> {
+        let (mut list, mut wait) = self.dispatch.request_signature_list(subject, kind);
+        loop {
+            let delivery = self.dispatch.read_in_place(wait);
+            match self.dispatch.deliver_signature_list(&mut list, delivery) {
+                ReadStep::Ready(nodes) => return nodes,
+                ReadStep::Wait(next) => wait = next,
+            }
+        }
+    }
+
+    /// Continue the route at the list it named, with only settled nodes.
+    pub(super) fn deliver_route_list<'e>(
+        &mut self,
+        mut list: Box<RouteList<'e>>,
+        nodes: Option<&[SemanticNodeId]>,
+    ) -> ResolveCallProgress<'e> {
+        let at = std::mem::replace(&mut list.at, RouteListAt::Taken);
+        match at {
+            RouteListAt::Settling(mut settling) => match list.kind {
+                SignatureKind::Call => {
+                    if let Some(calls) = nodes {
+                        settling.calls = Some(calls.to_vec());
+                        list.at = RouteListAt::Settling(settling);
+                        list.kind = SignatureKind::Construct;
+                        return ResolveCallProgress::List(list);
+                    }
+                    ResolveCallProgress::Done(self.finish_settle(*settling, false))
+                }
+                SignatureKind::Construct => {
+                    let declined = nodes.is_some_and(|constructs| {
+                        let calls = settling
+                            .calls
+                            .as_deref()
+                            .expect("the call list precedes the construct list");
+                        !self.signatures_read_clause(calls, constructs)
+                    });
+                    ResolveCallProgress::Done(self.finish_settle(*settling, declined))
+                }
+            },
+            RouteListAt::Parameters(mut route) => {
+                route.contextual_parameters =
+                    nodes.and_then(|nodes| self.callee_parameters_of(nodes).ok());
+                if route.contextual_parameters.is_none() {
+                    route.pending = Some(Box::new(ArgumentPending::NoParameters));
+                }
+                self.advance_resolve_call(*route, None)
+            }
+            RouteListAt::FirstPassParameters(mut route) => {
+                route.contextual_parameters =
+                    nodes.and_then(|nodes| self.callee_parameters_of(nodes).ok());
+                let pending = route
+                    .pending
+                    .take()
+                    .expect("the typed object waits on parameters");
+                let ArgumentPending::FirstPass {
+                    typed,
+                    reads_widening_local,
+                } = *pending
+                else {
+                    unreachable!("the first pass retains its typed argument");
+                };
+                let ordinal = route.args.len();
+                let argument = route.function_arguments.get(ordinal).cloned().flatten();
+                let Some(SliceExpr::Object {
+                    ref entries,
+                    offset,
+                }) = argument
+                else {
+                    unreachable!("only a context-sensitive object asks for first-pass parameters");
+                };
+                let first_pass = self.first_pass_read(&mut route, ordinal, entries, offset);
+                self.finish_argument(&mut route, ordinal, typed, reads_widening_local, first_pass);
+                self.advance_resolve_call(*route, None)
+            }
+            RouteListAt::TypingArm(mut route) => {
+                let pending = route
+                    .pending
+                    .take()
+                    .expect("typing retained its contextual arms");
+                let ArgumentPending::Arms(mut read) = *pending else {
+                    unreachable!("a typing arm resumes its signature reader");
+                };
+                let found = match self.contextual_signature_arm(&mut read, nodes) {
+                    ArmStep::Next(subject) => {
+                        route.pending = Some(Box::new(ArgumentPending::Arms(read)));
+                        list.at = RouteListAt::TypingArm(route);
+                        list.subject = subject;
+                        return ResolveCallProgress::List(list);
+                    }
+                    ArmStep::Done(found) => found,
+                };
+                let signature =
+                    found.and_then(|signature| self.finish_contextual_signature(signature));
+                let expr = route
+                    .function_arguments
+                    .last()
+                    .and_then(Option::as_ref)
+                    .expect("the function value waits on its contextual arms");
+                if let Some(request) = self.function_argument_request(expr, signature) {
+                    ResolveCallProgress::Function(Box::new(RouteFunction {
+                        at: RouteAt::Typing(route),
+                        request,
+                    }))
+                } else {
+                    route.delivered_function = Some(None);
+                    self.advance_resolve_call(*route, None)
+                }
+            }
+            RouteListAt::RetypingArm(mut finish) => {
+                let mut read = finish
+                    .retyping
+                    .take()
+                    .expect("retyping retained its contextual arms");
+                let found = match self.contextual_signature_arm(&mut read, nodes) {
+                    ArmStep::Next(subject) => {
+                        finish.retyping = Some(read);
+                        list.at = RouteListAt::RetypingArm(finish);
+                        list.subject = subject;
+                        return ResolveCallProgress::List(list);
+                    }
+                    ArmStep::Done(found) => found,
+                };
+                let request = found
+                    .and_then(|signature| self.finish_contextual_signature(signature))
+                    .and_then(|signature| {
+                        let expr = finish
+                            .function_arguments
+                            .get(finish.position)
+                            .and_then(Option::as_ref)?;
+                        self.function_argument_request(expr, Some(signature))
+                    });
+                match request {
+                    Some(request) => ResolveCallProgress::Function(Box::new(RouteFunction {
+                        at: RouteAt::Finishing(finish),
+                        request,
+                    })),
+                    None => self.settle_route(finish),
+                }
+            }
+            RouteListAt::Taken => unreachable!("a route list is delivered once per requested list"),
+        }
     }
 
     fn adopt_argument_observations(
