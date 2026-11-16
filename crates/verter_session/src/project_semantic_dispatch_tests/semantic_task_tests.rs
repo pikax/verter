@@ -1857,7 +1857,12 @@ const CALLBACK_ROUNDS: &str = "type Box<T> = { v: T };\n\
      declare function echo<T>(seed: T, f: (x: T) => T): T;\n\
      declare function typedEcho(x: number): number;\n\
      declare function each<T>(seed: T, fs: ((x: T) => string)[]): T;\n\
-     declare const typedFs: ((x: number) => string)[];\n";
+     declare const typedFs: ((x: number) => string)[];\n\
+     interface TypedCallback { (x: number): Box<3> }\n\
+     declare const viaInterface: TypedCallback;\n\
+     interface TypedSecond { (y: Box<3>): string }\n\
+     declare const viaSecond: TypedSecond;\n\
+     declare function one<T, U>(seed: T, f: (x: T) => U): [T, U];\n";
 
 fn callback_rounds_host() -> Arc<crate::VerterHost> {
     callback_rounds_host_of(CALLBACK_ROUNDS)
@@ -1892,7 +1897,10 @@ fn round_call_host(case: RoundCall) -> Arc<crate::VerterHost> {
         RoundCall::CallbackArray => {
             callback_rounds_host_of(&format!("{CALLBACK_ROUNDS}{ARRAY_GLOBAL}"))
         }
-        RoundCall::TwoCallbacks | RoundCall::CallbackBesideSpread => callback_rounds_host(),
+        RoundCall::TwoCallbacks
+        | RoundCall::CallbackBesideSpread
+        | RoundCall::TypedByDeclaration
+        | RoundCall::SecondTypedByDeclaration => callback_rounds_host(),
     }
 }
 
@@ -1920,6 +1928,10 @@ fn callback_round_value(
 /// Which call a consumer types the callbacks of.
 #[derive(Clone, Copy)]
 enum RoundCall {
+    /// The first typed callback is a declaration carrier.
+    TypedByDeclaration,
+    /// The second typed callback is a declaration carrier.
+    SecondTypedByDeclaration,
     /// `both(number, f, g)`, `f` typed by `typedF` and `g` by `typedG`: the
     /// candidate's collector holds `T` and `U` when `g`'s parameter type
     /// is mapped.
@@ -1950,6 +1962,31 @@ fn round_call(
     use verter_type_engine::semantic_query::{
         ArgumentLiteralMode, CallArgKey, CallKind, PayloadArray, SemanticNodeId, TupleElement,
     };
+    if matches!(
+        case,
+        RoundCall::TypedByDeclaration | RoundCall::SecondTypedByDeclaration
+    ) {
+        use verter_type_expr::locators::{
+            AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodySlot,
+        };
+        // Populate authored body lowering independently of the semantic
+        // instantiations the member relation must still demand itself.
+        for name in ["TypedCallback", "TypedSecond", "Box"] {
+            let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
+                anchor: AuthoredAnchor {
+                    canonical_id: CALLBACK_ROUNDS_FILE.into(),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    symbol: name.into(),
+                    space: LocatorSymbolSpace::Type,
+                },
+                path: Default::default(),
+            });
+            assert!(matches!(
+                dispatch.lower_locator(locator),
+                QueryResult::Value(_)
+            ));
+        }
+    }
     let argument = |ty: SemanticNodeId, spread: bool, context_sensitive: bool| CallArgKey::Eager {
         first_pass: None,
         ty,
@@ -1963,9 +2000,23 @@ fn round_call(
         .graph_arc()
         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let (callee, args, typed) = match case {
-        RoundCall::TwoCallbacks => {
+        RoundCall::TypedByDeclaration => {
+            let f = callback_round_value(dispatch, "viaInterface");
+            (
+                callback_round_value(dispatch, "one"),
+                vec![eager(number), argument(f, false, true)],
+                vec![eager(number), eager(f)],
+            )
+        }
+        RoundCall::TwoCallbacks | RoundCall::SecondTypedByDeclaration => {
             let f = callback_round_value(dispatch, "typedF");
-            let g = callback_round_value(dispatch, "typedG");
+            let g = callback_round_value(
+                dispatch,
+                match case {
+                    RoundCall::SecondTypedByDeclaration => "viaSecond",
+                    _ => "typedG",
+                },
+            );
             (
                 callback_round_value(dispatch, "both"),
                 vec![
@@ -2147,6 +2198,96 @@ fn instantiations_held_and_noted(key: &SemanticQueryKey) -> bool {
 /// thread since the last call, which forgets them.
 fn take_held_instantiations() -> Vec<SemanticQueryKey> {
     HELD_INSTANTIATIONS.with(|held| std::mem::take(&mut *held.borrow_mut()))
+}
+
+fn typed_declaration_after_callback(key: &SemanticQueryKey, name: &str, round: usize) -> bool {
+    let selected = matches!(key, SemanticQueryKey::Instantiate(key)
+        if key.base().merged_symbol_name.as_ref() == name)
+        && verter_type_engine::project_semantic_dispatch::call_callbacks_typed_here_for_tests()
+            >= round;
+    if selected {
+        HELD_INSTANTIATIONS.with(|held| {
+            let mut held = held.borrow_mut();
+            if !held.contains(key) {
+                held.push(key.clone());
+            }
+        });
+    }
+    selected
+}
+
+fn typed_callback_instantiation(key: &SemanticQueryKey) -> bool {
+    typed_declaration_after_callback(key, "TypedCallback", 1)
+}
+
+fn typed_second_instantiation(key: &SemanticQueryKey) -> bool {
+    typed_declaration_after_callback(key, "TypedSecond", 2)
+}
+
+fn assert_typed_callback_wait(
+    case: RoundCall,
+    filter: fn(&SemanticQueryKey) -> bool,
+    round: usize,
+    name: &str,
+) {
+    let (synchronous, synchronous_work) = synchronous_round_call(case);
+    assert_eq!(synchronous_work[0], 2);
+    assert_eq!(synchronous_work[1], 1);
+    if round == 1 {
+        assert_eq!(synchronous_work, [2, 1, 2]);
+    }
+    let _ = take_held_instantiations();
+    let run = poll_round_call(case, Some(filter));
+    let held = take_held_instantiations();
+    assert!(
+        run.yielded,
+        "the call yields at the typed callback's operand instantiation"
+    );
+    assert_eq!(
+        held.len(),
+        1,
+        "premise: the typed callback instantiation is still cold at its member relation"
+    );
+    let last = run
+        .suspensions
+        .last()
+        .expect("the collector is held at the operand read");
+    assert_eq!(last.needs, held);
+    assert!(
+        matches!(last.needs.as_slice(), [SemanticQueryKey::Instantiate(key)]
+        if key.base().merged_symbol_name.as_ref() == name)
+    );
+    assert_eq!(last.collected_candidates, round);
+    assert_eq!(run.typed_at_hold, round);
+    assert_eq!(run.at_hold, [1, 0, 0]);
+    assert!(run.repolled_pending);
+    assert_eq!(run.pending_elsewhere, Some(true));
+    assert_eq!(run.repoll_work, [0; 3]);
+    assert_eq!(run.held, 1);
+    assert!(run.woken);
+    assert_eq!(run.work, [1, synchronous_work[1], synchronous_work[2]]);
+    assert_eq!(run.answer, synchronous);
+}
+
+#[test]
+fn a_contextual_call_waiting_on_its_typed_callbacks_operand_keeps_its_collector_and_does_not_walk_again(
+) {
+    assert_typed_callback_wait(
+        RoundCall::TypedByDeclaration,
+        typed_callback_instantiation,
+        1,
+        "TypedCallback",
+    );
+}
+
+#[test]
+fn a_later_callback_round_waits_on_its_typed_operand_with_the_earlier_rounds_inference_kept() {
+    assert_typed_callback_wait(
+        RoundCall::SecondTypedByDeclaration,
+        typed_second_instantiation,
+        2,
+        "TypedSecond",
+    );
 }
 
 /// Whether every noted instantiation is one of the `Array` interface: the
@@ -2489,26 +2630,57 @@ fn a_contextual_call_on_a_frame_walks_once_across_its_callback_rounds_to_the_syn
 /// then resolves in place to the synchronous answer.
 #[test]
 fn a_contextual_call_released_while_its_resumed_candidate_waits_leaves_nothing_open() {
+    assert_released_callback_wait(
+        RoundCall::TwoCallbacks,
+        signature_lists_after_a_typed_callback,
+        2,
+        false,
+    );
+}
+
+#[test]
+fn a_contextual_call_released_while_its_typed_callbacks_operand_waits_leaves_nothing_open() {
+    assert_typed_callback_wait(
+        RoundCall::TypedByDeclaration,
+        typed_callback_instantiation,
+        1,
+        "TypedCallback",
+    );
+    assert_released_callback_wait(
+        RoundCall::TypedByDeclaration,
+        typed_callback_instantiation,
+        1,
+        true,
+    );
+}
+
+fn assert_released_callback_wait(
+    case: RoundCall,
+    filter: fn(&SemanticQueryKey) -> bool,
+    collected: usize,
+    typed_operand: bool,
+) {
     use verter_type_engine::project_semantic_dispatch::{
         call_callbacks_typed_here_for_tests, drive_contextual_call_here_for_tests,
         hold_call_needs_here_for_tests, take_call_suspensions_for_tests, ContextualCallProbe,
     };
-    let (synchronous, _) = synchronous_round_call(RoundCall::TwoCallbacks);
+    let (synchronous, _) = synchronous_round_call(case);
     for dropped_elsewhere in [false, true] {
-        let host = callback_rounds_host();
+        let host = round_call_host(case);
         let _request =
             verter_type_engine::request_context::install_test_request_for(CALLBACK_ROUNDS_FILE);
         let dispatch = ProjectSemanticDispatch::new(&*host);
         let _scope = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
-        let (frame, call, typed) = round_call(&dispatch, RoundCall::TwoCallbacks);
+        let (frame, call, typed) = round_call(&dispatch, case);
         let waker = Waker::from(Arc::new(CountingWaker::default()));
         let _ = take_call_suspensions_for_tests();
         drive_contextual_call_here_for_tests(Some(ContextualCallProbe {
             call: call.clone(),
             typed: typed.clone(),
         }));
-        hold_call_needs_here_for_tests(Some(signature_lists_after_a_typed_callback));
+        hold_call_needs_here_for_tests(Some(filter));
+        let before = call_round_work(&host);
         dispatch
             .with_semantic_task_for_tests(
                 SemanticQueryKey::ResolveCall(Box::new(frame.clone())),
@@ -2519,20 +2691,45 @@ fn a_contextual_call_released_while_its_resumed_candidate_waits_leaves_nothing_o
                         task.poll_for_tests(&waker).is_pending()
                     };
                     hold_call_needs_here_for_tests(None);
-                    assert!(pending, "the call yields at the signature list");
+                    assert!(pending, "the call yields at its held read");
                     assert_eq!(call_callbacks_typed_here_for_tests(), 1);
                     let suspensions = take_call_suspensions_for_tests();
                     let last = suspensions
                         .last()
                         .unwrap_or_else(|| panic!("the call suspends with its collector held"));
-                    assert!(
-                        matches!(
+                    if typed_operand {
+                        assert!(
+                            matches!(last.needs.as_slice(), [SemanticQueryKey::Instantiate(key)]
+                            if key.base().merged_symbol_name.as_ref() == "TypedCallback")
+                        );
+                    } else {
+                        assert!(matches!(
                             last.needs.as_slice(),
                             [SemanticQueryKey::SignaturesOfType { .. }]
-                        ),
-                        "it waits on a signature list `g`'s mapping reads: {last:?}"
+                        ));
+                    }
+                    assert_eq!(last.collected_candidates, collected);
+                    assert_eq!(
+                        call_round_work_since(call_round_work(&host), before),
+                        [1, 0, 0]
                     );
-                    assert_eq!(last.collected_candidates, 2);
+                    {
+                        let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                        assert!(task.poll_for_tests(&waker).is_pending());
+                    }
+                    std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| {
+                                let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                                assert!(task.poll_for_tests(&waker).is_pending());
+                            })
+                            .join()
+                            .expect("the call remains pending on another thread");
+                    });
+                    assert_eq!(
+                        call_round_work_since(call_round_work(&host), before),
+                        [1, 0, 0]
+                    );
                     if dropped_elsewhere {
                         let task = slot.take().expect("the task is lent");
                         std::thread::scope(|scope| {

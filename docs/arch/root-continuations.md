@@ -1993,7 +1993,16 @@ computed across the request (`CandidateMapping`: fixation, widening and the
 two mappers run once; the resumable contextual type walk keeps a callable
 leaf's substituted targets), and the walk records the waiting candidate
 (`CandidateWalk::preparing`) and re-enters its preparation with the
-delivery. Released while it waits, the call pops its executor frame
+delivery. Once a callback is typed, the preparation also demands its
+relation's first operand instantiations through `OperandDemand`, held in
+the finished mapping while a read is requested. This demand belongs to the
+call preparation: the binding member relation itself computes in place
+over the delivered answers, independently of the machinery-root relation
+driver. On delivery the finished mapping is reused without reading its
+signature lists again, with the candidate's collector and cursor retained.
+A frame callback round without a kept walk asserts in checked builds and
+returns an undecidable refusal; it never resumes through the synchronous
+driver. Released while it waits, the call pops its executor frame
 undecided and abandons the held collector. Driven in place, as the flow
 evaluator drives the `CallRead` its route holds, a callback round still
 resumes through `resume_contextual_call` and executes the call again,
@@ -2375,11 +2384,12 @@ signature-list roots over such subjects still enter the synchronous cold
 admission, since those families do not build as continuations yet.
 
 A helper computation ([Helper continuations](#helper-continuations))
-suspends only at a relation's operand demands, the operand demands of a
-sub-relation its worklist or an object comparison's property pair reaches,
+suspends only at a machinery-root relation's operand demands, the operand
+demands of a sub-relation its worklist or an object comparison's property pair reaches,
 a call walk's candidate lists and argument operand demands, a contextual
-candidate preparation's signature lists, and a contextual call's callback
-exchange. Below those points it runs in place,
+candidate preparation's signature lists and typed callback operand demands,
+and a contextual call's callback exchange. Below those points it runs in
+place,
 inventoried for conversion by its owner:
 
 - the relation reduction's prefix (but for the object comparison its
@@ -2391,9 +2401,12 @@ inventoried for conversion by its owner:
   re-discharge at a frame's close;
 - the call executor below its walk's seams: argument acquisition (an
   argument's program expression evaluates in place), contextual candidate
-  preparation below its signature lists (substitution, including its
+  preparation below its signature lists and typed callback operand demands
+  (substitution, including its
   intersection and template-literal reductions, fixation, and the lists a
-  composite candidate's signature results read), the
+  composite candidate's signature results read), its first round's eager
+  pass, receiver and generic-rest relations, fixation relations and
+  `generic_function_against`'s signature list, the
   relations both applicability passes make (inside each
   relation), fixation, the post-fixation checks, the selected candidate's
   return (its declared recipe or its body's flow return), diagnostics,

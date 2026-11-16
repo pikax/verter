@@ -267,7 +267,8 @@ pub(super) struct CallPlan {
 /// On a frame of the continuation runtime ([`HelperDrive::Frame`]) the
 /// walk reads its candidate list, each argument relation's operand
 /// instantiations and the signature lists a contextual candidate's
-/// preparation maps as requests; a delivery enters the walk where it stood.
+/// preparation maps, and its typed callback relation's operand instantiations,
+/// as requests; a delivery enters the walk where it stood.
 /// Driven in place, it makes every read where it stands and never stops.
 ///
 /// A walk whose candidate names a callback ends its round between
