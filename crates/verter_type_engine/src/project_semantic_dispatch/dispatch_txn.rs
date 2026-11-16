@@ -298,9 +298,9 @@ impl ObligationIdentity {
 /// The relation-domain payload of one in-flight frame.
 #[derive(Debug)]
 pub struct RelationFrameState {
-    /// This frame deposited inference candidates into the active session
-    /// (a session-local delta — admission row 7: ReturnOnly, never
-    /// published).
+    /// This frame wrote candidates into an outer session or ran pure-key
+    /// assignability with that collector visible. Such a session-local result
+    /// is ReturnOnly, never settled or published as the pure relation.
     pub(crate) session_delta: bool,
     /// The session this frame OPENED (it is the binding root), if any.
     pub(crate) opened_session: Option<SessionId>,
@@ -2429,7 +2429,7 @@ impl RelationDomainRuntime {
 
     /// The stack positions of the visible collecting sessions, innermost
     /// first.
-    fn visible_collecting_positions(&self) -> impl Iterator<Item = usize> + '_ {
+    pub(super) fn visible_collecting_positions(&self) -> impl Iterator<Item = usize> + '_ {
         let floor = self.visible_floor();
         self.collecting_ids
             .iter()

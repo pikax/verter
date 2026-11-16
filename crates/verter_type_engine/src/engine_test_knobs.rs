@@ -21,6 +21,10 @@
 /// Per-host engine test forcing knobs. See the module docs.
 #[derive(Debug, Default)]
 pub struct TestKnobs {
+    /// Relation obligation frames opened by this host, across worker threads.
+    pub relation_frames: std::sync::atomic::AtomicU64,
+    /// Shadow session-independent pairs against the collecting relation.
+    pub relation_independence_shadow: parking_lot::Mutex<Option<std::sync::Arc<RelationShadowLog>>>,
     /// One-shot rendezvous inside the next semantic cold build. Operand
     /// concurrency tests use it to hold the winning build while an identical
     /// caller joins the graph's existing in-flight entry.
@@ -117,6 +121,62 @@ pub struct TestKnobs {
     /// demands of ONE macro collapse onto ONE cold build; a test asserts this
     /// counter is `1` after a barrier-synchronised concurrent demand burst.
     pub macro_hot_cold_builds: std::sync::atomic::AtomicUsize,
+}
+
+/// Observations shared by the hosts of one shadow fixture run.
+#[derive(Debug, Default)]
+pub struct RelationShadowLog {
+    pub checks: std::sync::atomic::AtomicUsize,
+    pub differences: parking_lot::Mutex<Vec<&'static str>>,
+}
+
+thread_local! {
+    static REQUESTED_RELATION_SHADOW: std::cell::RefCell<Option<std::sync::Arc<RelationShadowLog>>> = const { std::cell::RefCell::new(None) };
+    static RUNNING_RELATION_SHADOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static COLLECTING_RELATION_SHADOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Carry shadow forcing from a fixture into every host it constructs.
+pub fn requested_relation_shadow() -> Option<std::sync::Arc<RelationShadowLog>> {
+    REQUESTED_RELATION_SHADOW.with(|slot| slot.borrow().clone())
+}
+
+/// Run fixtures with isolated, shared shadow observations.
+pub fn with_relation_shadow<R>(
+    body: impl FnOnce() -> R,
+    log: std::sync::Arc<RelationShadowLog>,
+) -> R {
+    struct Reset(Option<std::sync::Arc<RelationShadowLog>>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            REQUESTED_RELATION_SHADOW.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let _reset = Reset(REQUESTED_RELATION_SHADOW.with(|slot| slot.replace(Some(log))));
+    body()
+}
+
+pub(crate) fn relation_shadow_running() -> bool {
+    RUNNING_RELATION_SHADOW.with(|slot| slot.get())
+}
+
+pub(crate) fn relation_shadow_collecting() -> bool {
+    COLLECTING_RELATION_SHADOW.with(|slot| slot.get())
+}
+
+pub(crate) fn in_relation_shadow<R>(collecting: bool, body: impl FnOnce() -> R) -> R {
+    struct Reset(bool, bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            RUNNING_RELATION_SHADOW.with(|slot| slot.set(self.0));
+            COLLECTING_RELATION_SHADOW.with(|slot| slot.set(self.1));
+        }
+    }
+    let _reset = Reset(
+        RUNNING_RELATION_SHADOW.with(|slot| slot.replace(true)),
+        COLLECTING_RELATION_SHADOW.with(|slot| slot.replace(collecting)),
+    );
+    body()
 }
 
 impl TestKnobs {

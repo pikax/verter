@@ -823,14 +823,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             RelationEntry::Member {
                 mut key,
                 occurrence,
-            } => match self.relation_answer_before_compute(&mut key, occurrence) {
-                Some(step) => EntryStage::Answered(RelationOutput::Step(step)),
-                None => EntryStage::Compute(Prepared::Relation {
-                    key,
-                    occurrence,
-                    barrier: false,
-                }),
-            },
+            } => {
+                let barrier = self.relation_pair_is_session_independent(&key);
+                #[cfg(any(test, feature = "test-support"))]
+                if barrier {
+                    self.check_independent_relation_for_tests(&key, occurrence);
+                }
+                let answer = if barrier {
+                    self.with_binding_disabled(|| {
+                        self.relation_answer_before_compute(&mut key, occurrence)
+                    })
+                } else {
+                    self.relation_answer_before_compute(&mut key, occurrence)
+                };
+                match answer {
+                    Some(step) => EntryStage::Answered(RelationOutput::Step(step)),
+                    None => EntryStage::Compute(Prepared::Relation {
+                        key,
+                        occurrence,
+                        barrier,
+                    }),
+                }
+            }
             RelationEntry::Root(key) => match self.begin_relate_build(&key) {
                 Ok(root) => EntryStage::Compute(Prepared::Root(Box::new(root))),
                 Err(refusal) => EntryStage::Answered(RelationOutput::Root(refusal)),

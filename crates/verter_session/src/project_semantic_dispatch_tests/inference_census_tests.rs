@@ -54,7 +54,7 @@ struct Row {
 }
 
 /// The class of one setting's verdict against tsc's diagnostics.
-fn class_of(verdict: &Verdict, tsc_diagnostics: &[u32]) -> Class {
+fn class_of(probe: &str, verdict: &Verdict, tsc_diagnostics: &[u32]) -> Class {
     if verdict.matched {
         let mut lane = verdict.diagnostics.clone();
         lane.sort_unstable();
@@ -69,7 +69,7 @@ fn class_of(verdict: &Verdict, tsc_diagnostics: &[u32]) -> Class {
     match verdict.class {
         "WRONG-CLEAN" => Class::WrongClean,
         "GAP" => Class::Gap,
-        other => panic!("a census row may not {other}: {}", verdict.lane),
+        other => panic!("census row `{probe}` may not {other}: {}", verdict.lane),
     }
 }
 
@@ -94,7 +94,7 @@ fn census(name: &str, matrix: Matrix<'_>, rows: &[Row]) -> Vec<String> {
         };
         let mut classes = Vec::new();
         for (setting, verdict) in verdicts.iter().enumerate() {
-            let class = class_of(verdict, row.diagnostics[setting]);
+            let class = class_of(probe, verdict, row.diagnostics[setting]);
             classes.push(format!("{class:?}"));
             let expected = row.baseline[setting];
             if class != expected {
@@ -129,6 +129,7 @@ declare function pw<T extends string>(a: { v: T }): T;
 declare function pu<T>(a: { v: T }): T;
 declare function pa<T extends string>(a: T[]): T;
 declare function co<T>(f: (x: T) => void, g: (x: T) => void): T;
+declare function coBox<T>(f: (x: { v: T }) => void, g: (x: { v: T }) => void): T;
 declare function mix<T>(x: T, f: (x: T) => void): T;
 declare function mix2<T>(f: (x: T) => void, x: T): T;
 declare function ret<T>(f: () => T, x: T): T;
@@ -156,6 +157,7 @@ export function r13() { return arr([1], ["a"]); }
 export function r14() { return box({ a: 1, b: "x" }); }
 export function r15() { return fnr((x) => x > 0); }
 export function r16() { return both(1, (x) => x + 1); }
+export function structuredCallbackParameters() { return coBox((x: { v: string }) => {}, (x: { v: "a" }) => {}); }
 "##;
 
 /// The census over [`CALL_INFERENCE`].
@@ -287,6 +289,12 @@ fn call_inference() {
             tsc: [r#"number"#, r#"number"#, r#"number"#, r#"number"#],
             diagnostics: [&[], &[], &[], &[]],
             baseline: [Class::Exact, Class::Exact, Class::Exact, Class::Exact],
+        },
+        Row {
+            read: Read::Return("structuredCallbackParameters"),
+            tsc: [r#""a""#; 4],
+            diagnostics: [&[]; 4],
+            baseline: [Class::Exact; 4],
         },
     ];
     let failures = census("call_inference", Matrix::new(CALL_INFERENCE), &rows);

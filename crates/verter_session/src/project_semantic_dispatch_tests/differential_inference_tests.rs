@@ -18,6 +18,123 @@
 use super::differential_global_library_tests::GLOBALS_LIB;
 use super::differential_harness_tests::{Matrix, Read};
 
+/// Concrete siblings use the ordinary relation while another argument
+/// collects; reverse mappings still collect their variables. The value-carrier
+/// call and direct recursive-body read retain their measured limitations.
+#[test]
+fn concrete_argument_siblings_preserve_checker_inference_and_diagnostics() {
+    let source = r#"
+declare function g<T>(a: T, b: number): T;
+declare function g<T>(a: T, b: unknown): { fallback: T };
+export function matching() { return g("a" as const, 1); }
+export function mismatching() { return g("a" as const, "bad"); }
+export function h<T>(x: T, y: typeof x): T { return x; }
+export function carrier() { return h("a" as const, "b" as const); }
+export function r<T>(x: T): T { return r(x); }
+export function recursive() { return r(1 as const); }
+export function rigid<T extends { value: number }>(x: T["value"]) { return g("a" as const, x); }
+declare function n<T>(a: T, b: NoInfer<number>): T;
+declare function n<T>(a: T, b: unknown): { fallback: T };
+export function noInferMatching() { return n("a" as const, 1); }
+export function noInferMismatching() { return n("a" as const, "bad"); }
+export function nullable() { return g("a" as const, null); }
+declare const maybe: number | null;
+export function nullableUnion() { return g("a" as const, maybe); }
+type Select<X> = X extends [infer U, number] ? U : "miss";
+declare function reverse<T>(x: { [K in keyof T]: { value: T[K] } }): T;
+export function recovered() { return reverse({ a: { value: 1 }, b: { value: "b" } }); }
+declare function reverseFixed<T>(x: { [K in keyof T]: { value: T[K]; fixed: number } }): T;
+export function recoveredFixed() { return reverseFixed({ a: { value: 1, fixed: 1 }, b: { value: "b", fixed: 2 } }); }
+"#;
+    let reads = [
+        (Read::Return("matching"), "\"a\""),
+        (Read::Return("mismatching"), "{ fallback: \"a\"; }"),
+        (Read::Return("carrier"), "\"a\" | \"b\""),
+        (Read::Return("recursive"), "1"),
+        (Read::Return("r"), "T"),
+        (Read::Return("rigid"), "\"a\""),
+        (Read::Return("noInferMatching"), "\"a\""),
+        (Read::Return("noInferMismatching"), "{ fallback: \"a\"; }"),
+        (Read::Return("nullable"), "\"a\""),
+        (Read::Return("nullableUnion"), "\"a\""),
+        (Read::Type("Select<[\"a\", 1]>"), "\"a\""),
+        (Read::Type("Select<[\"a\", \"bad\"]>"), "\"miss\""),
+        (Read::Return("recovered"), "{ a: number; b: string; }"),
+        (Read::Return("recoveredFixed"), "{ a: number; b: string; }"),
+    ];
+    let rows: Vec<_> = reads
+        .iter()
+        .map(|(read, answer)| {
+            (
+                *read,
+                if matches!(read.text(), "nullable" | "nullableUnion") {
+                    vec![
+                        "{ fallback: \"a\"; }",
+                        *answer,
+                        "{ fallback: \"a\"; }",
+                        *answer,
+                    ]
+                } else {
+                    vec![*answer; 4]
+                },
+            )
+        })
+        .collect();
+    let shadow =
+        std::sync::Arc::new(verter_type_engine::engine_test_knobs::RelationShadowLog::default());
+    let verdicts = verter_type_engine::engine_test_knobs::with_relation_shadow(
+        || Matrix::new(source).verdicts(&rows),
+        std::sync::Arc::clone(&shadow),
+    );
+    let mut failures = Vec::new();
+    for ((read, _), settings) in reads.iter().zip(verdicts) {
+        for (setting, verdict) in settings.iter().enumerate() {
+            // These public-boundary limitations also occur with the original
+            // session-visible reducer. Keep the checker answers above so an
+            // improvement requires an explicit update rather than disappearing.
+            let expected = match read.text() {
+                "carrier" => !verdict.matched
+                    && verdict.class == "GAP"
+                    && verdict.lane == "the lane measured `<opaque UnmodeledPosition>` degraded by UnrepresentableCallee",
+                "r" => !verdict.matched
+                    && verdict.class == "WRONG-CLEAN"
+                    && verdict.lane == "the lane measured `never`",
+                _ => verdict.matched,
+            };
+            if !expected || !verdict.diagnostics.is_empty() {
+                failures.push(format!(
+                    "{} setting {setting}: {} {}; diagnostics {:?}",
+                    read.text(),
+                    verdict.class,
+                    verdict.lane,
+                    verdict.diagnostics
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(
+        shadow.checks.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the fixtures must exercise independent pairs"
+    );
+    for difference in shadow.differences.lock().iter() {
+        assert!(
+            [
+                "NoInfer target",
+                "rigid indexed-access constraint",
+                "non-strict-null union erasure"
+            ]
+            .contains(difference),
+            "{difference}"
+        );
+    }
+    eprintln!(
+        "independent relation shadow: {} checks; allowed differences {:?}",
+        shadow.checks.load(std::sync::atomic::Ordering::Relaxed),
+        shadow.differences.lock()
+    );
+}
+
 #[test]
 fn contextual_invariant_reference_inference_uses_forward_candidates() {
     let matrix = Matrix::new("interface Inv<in out T> { value: T; input: (x: T) => void }");
