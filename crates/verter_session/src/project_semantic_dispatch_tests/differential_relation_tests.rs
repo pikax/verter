@@ -428,6 +428,19 @@ fn intersection_types_relate_as_the_checker_relates_them() {
         ("[string] extends [Brand] ? 1 : 2", "2"),
         ("[string & number] extends [never] ? 1 : 2", "1"),
         ("[never] extends [string & number] ? 1 : 2", "1"),
+        // TypeScript 7.0.2: `tsc --noEmit --strict` accepts IsNever = true
+        // and IsAny = false for both forms; assigning 1 gives TS2322
+        // (`Type '1' is not assignable to type 'never'`).
+        // checker.ts getIntersectionType checks DisjointDomains before Any:
+        // https://github.com/microsoft/TypeScript/blob/v5.9.3/src/compiler/checker.ts#L18597-L18617
+        (
+            "(((string[] & readonly string[]) & string) & number) & any",
+            "never",
+        ),
+        (
+            "string[] & readonly string[] & string & number & any",
+            "never",
+        ),
         ("[\"a\" & string] extends [\"a\"] ? 1 : 2", "1"),
         ("[A & { a: \"x\" }] extends [{ a: \"x\" }] ? 1 : 2", "1"),
         (
@@ -442,6 +455,92 @@ fn intersection_types_relate_as_the_checker_relates_them() {
             "[((a: string) => 1) & ((a: number) => 2)] extends [(a: number) => 2] ? 1 : 2",
             "1",
         ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// TypeScript 7.0.2, `tsc --noEmit --strict`, with each combination of
+/// `--strictNullChecks true|false --noImplicitAny true|false`: both the
+/// Never test and `0 extends (1 & R)` distinguish Never from Any.
+/// `getIntersectionType` checks nullable/object, its listed domain pairs,
+/// and template/string conflicts before Any; Boolean is a union, not a
+/// BooleanLiteral domain flag.
+/// https://github.com/microsoft/TypeScript/blob/v5.9.3/src/compiler/checker.ts#L18597-L18617
+/// https://github.com/microsoft/TypeScript/blob/v7.0.2/src/compiler/checker.ts#L18673-L18693
+/// `addTypeToIntersection` compares type identities before counting units,
+/// and retains erased nullable flags for later additions to the type set.
+/// https://github.com/microsoft/TypeScript/blob/v7.0.2/src/compiler/checker.ts#L18470-L18505
+#[test]
+fn intersection_contradictions_before_any_match_the_checker() {
+    let matrix = Matrix::new(
+        "interface I { readonly k: unique symbol }\n\
+         declare const a: I, b: I;\n\
+         declare const x: unique symbol, y: unique symbol;",
+    );
+    let mut failures = matrix.types(&[
+        ("boolean & null & any", "any"),
+        ("boolean & undefined & any", "never"),
+        ("string & null & any", "never"),
+        ("object & null & any", "never"),
+        ("true & false & any", "never"),
+        ("1 & 2 & any", "never"),
+        ("string & number & any", "never"),
+        ("`a${string}` & \"b\" & any", "never"),
+        ("typeof a.k & typeof b.k & any", "any"),
+        ("null & true & any", "never"),
+        ("undefined & 1 & any", "never"),
+        ("null & undefined & any", "never"),
+        ("typeof x & typeof y & any", "never"),
+        ("[typeof a.k & typeof b.k] extends [never] ? 1 : 2", "2"),
+        (
+            "[typeof a.k & typeof b.k] extends [typeof a.k] ? 1 : 2",
+            "1",
+        ),
+        (
+            "[typeof a.k & typeof b.k & any] extends [never] ? 1 : 2",
+            "2",
+        ),
+        ("[null & true & any] extends [never] ? 1 : 2", "1"),
+        ("[undefined & 1 & any] extends [never] ? 1 : 2", "1"),
+        ("[null & undefined & any] extends [never] ? 1 : 2", "1"),
+        ("[typeof x & typeof y & any] extends [never] ? 1 : 2", "1"),
+        ("[boolean & null & any] extends [never] ? 1 : 2", "2"),
+        ("[boolean & undefined & any] extends [never] ? 1 : 2", "1"),
+        ("[string & null & any] extends [never] ? 1 : 2", "1"),
+        ("[object & null & any] extends [never] ? 1 : 2", "1"),
+        ("[true & false & any] extends [never] ? 1 : 2", "1"),
+        ("[1 & 2 & any] extends [never] ? 1 : 2", "1"),
+        ("[string & number & any] extends [never] ? 1 : 2", "1"),
+        ("[`a${string}` & \"b\" & any] extends [never] ? 1 : 2", "1"),
+    ]);
+    // An erased nullable retains flags, but cannot itself add NonPrimitive.
+    failures.extend(matrix.nullness(&[(Read::Type("true & null & any"), "never", "any")]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// TypeScript 7.0.2, `tsc --noEmit --strict`, all four combinations of
+/// strictNullChecks/noImplicitAny: equal-valued members of one enum are
+/// one unit; another enum or a plain literal supplies a distinct unit.
+/// `getEnumLiteralType` interns by enum identity, value kind and value.
+/// https://github.com/microsoft/TypeScript/blob/v7.0.2/src/compiler/checker.ts#L20324-L20330
+#[test]
+fn intersection_enum_units_match_the_checker() {
+    let matrix = Matrix::new(
+        "enum E { A = 1, B = 1, C = 2 }\n\
+         enum F { A = 1, B = 2 }\n\
+         enum S { A = \"x\", B = \"x\", C = \"y\" }",
+    );
+    let failures = matrix.types(&[
+        ("E.A & E.B & any", "any"),
+        ("E.A & E.C & any", "never"),
+        ("E.A & F.A & any", "never"),
+        ("E.A & 1 & any", "never"),
+        ("S.A & S.B & any", "any"),
+        ("[E.A & E.B & any] extends [never] ? 1 : 2", "2"),
+        ("[E.A & E.C & any] extends [never] ? 1 : 2", "1"),
+        ("[E.A & F.A & any] extends [never] ? 1 : 2", "1"),
+        ("[E.A & 1 & any] extends [never] ? 1 : 2", "1"),
+        ("[S.A & S.B & any] extends [never] ? 1 : 2", "2"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
