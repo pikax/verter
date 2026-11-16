@@ -714,7 +714,10 @@ fn extract_consumed_root_bindings(
 /// Does NOT access host/VFS/workspace — all resolved data is pre-supplied.
 /// Source order of props/events/slots/exposed is preserved.
 pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAnalysis {
-    let options_api = input.options_api.is_some();
+    let options_api = input.options_api.is_some()
+        || input
+            .analysis_flags
+            .contains(AnalysisFlags::HAS_OPTIONS_API);
     let (flags, options_member_free) = extract_flags(&input);
     let evaluated_types = input.evaluated_types;
     let slot_binding_index = SlotBindingIndex::new(evaluated_types);
@@ -2962,7 +2965,13 @@ fn extract_styles(
 
 fn extract_flags(input: &ComponentMetaInput<'_>) -> (ComponentMetaFlags, bool) {
     let (has_inherit_attrs_false, options_member_free) = input.macros.iter().fold(
-        (false, input.options_api.is_none()),
+        (
+            false,
+            input.options_api.is_none()
+                && !input
+                    .analysis_flags
+                    .contains(AnalysisFlags::HAS_OPTIONS_API),
+        ),
         |(inherit, member_free), m| {
             if m.kind == AnalyzedMacroKind::DefineOptions {
                 (

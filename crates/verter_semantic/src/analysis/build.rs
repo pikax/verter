@@ -211,8 +211,23 @@ impl ImportBindingMap {
         name: &str,
         api: VueApiClassification,
     ) -> bool {
-        let Some((idx, binding_api)) = self.unambiguous_by_name.get(name).and_then(Option::as_ref)
-        else {
+        let Some((idx, _)) = self.unambiguous_by_name.get(name).and_then(Option::as_ref) else {
+            return false;
+        };
+        self.is_runtime_vue_api_binding(
+            imports,
+            &DeclBindingKey::new(imports[*idx].owner, name),
+            api,
+        )
+    }
+
+    fn is_runtime_vue_api_binding(
+        &self,
+        imports: &[AnalyzedImport],
+        key: &DeclBindingKey,
+        api: VueApiClassification,
+    ) -> bool {
+        let Some((idx, binding_api)) = self.map.get(key) else {
             return false;
         };
         if *binding_api != Some(api) {
@@ -226,7 +241,7 @@ impl ImportBindingMap {
         !import
             .bindings
             .iter()
-            .find(|b| b.name == name)
+            .find(|b| b.name.as_str() == key.name.as_ref())
             .map(|b| b.is_type_only)
             .unwrap_or(false)
     }
@@ -433,7 +448,10 @@ fn build_script_analysis_inner(
     let mut store_usages: Vec<StoreUsage> = Vec::new();
     let mut store_definitions: Vec<StoreDefinition> = Vec::new();
     let mut first_await_offset: Option<u32> = None;
-    let mut options_api: Option<AnalyzedOptionsApi> = None;
+    let mut default_export = None;
+    // Borrowed only during this shallow pass. Binding identity comes from
+    // RootBindingIndex; these references never enter a cached snapshot.
+    let mut options_initializers = FxHashMap::default();
     let mut const_string_values: FxHashMap<String, Vec<String>> = FxHashMap::default();
 
     for (statement_index, stmt) in program.body.iter().enumerate() {
@@ -472,7 +490,11 @@ fn build_script_analysis_inner(
                     for vd in &var_decl.declarations {
                         if let Some(ref init) = vd.init {
                             let binding_name = match &vd.id {
-                                BindingPattern::BindingIdentifier(id) => Some(id.name.as_str()),
+                                BindingPattern::BindingIdentifier(id) => {
+                                    options_initializers
+                                        .insert(DeclBindingKey::new(owner, id.name.as_str()), init);
+                                    Some(id.name.as_str())
+                                }
                                 _ => None,
                             };
                             try_extract_store_call(
@@ -554,6 +576,12 @@ fn build_script_analysis_inner(
                 };
 
                 for decl in &var_decl.declarations {
+                    if let (BindingPattern::BindingIdentifier(id), Some(init)) =
+                        (&decl.id, &decl.init)
+                    {
+                        options_initializers
+                            .insert(DeclBindingKey::new(owner, id.name.as_str()), init);
+                    }
                     try_extract_macro_from_var_decl(
                         decl,
                         &mut macros,
@@ -704,28 +732,49 @@ fn build_script_analysis_inner(
             }
 
             Statement::ExportDefaultDeclaration(export) => {
-                if let Some(expr) = export.declaration.as_expression() {
-                    let source_map: FxHashMap<String, String> = import_map
-                        .iter()
-                        .filter_map(|(name, (idx, _))| {
-                            imports
-                                .get(*idx)
-                                .map(|imp| (name.clone(), imp.source.clone()))
-                        })
-                        .collect();
-                    options_api = crate::analysis::options::try_extract_options_from_expression(
-                        expr,
-                        content,
-                        &source_map,
-                        &program.comments,
-                        &binding_index,
-                    );
-                }
+                default_export = Some(export);
             }
 
             _ => {}
         }
     }
+
+    // Extraction waits for the complete root inventory, including declarations
+    // and imports authored after the export.
+    let options_api: Option<AnalyzedOptionsApi> = default_export.and_then(|export| {
+        let expr = export.declaration.as_expression()?;
+        let source_map: FxHashMap<String, String> = import_map
+            .iter()
+            .filter_map(|(name, (idx, _))| {
+                imports
+                    .get(*idx)
+                    .map(|imp| (name.clone(), imp.source.clone()))
+            })
+            .collect();
+        crate::analysis::options::try_extract_options_from_expression(
+            expr,
+            content,
+            &source_map,
+            &program.comments,
+            &binding_index,
+            &options_initializers,
+            |id| {
+                let crate::analysis::root_binding_index::BindingResolution::Local(key) =
+                    binding_index.resolve_value_identifier(
+                        Span::new(id.span.start, id.span.end),
+                        crate::analysis::root_binding_index::StartScope::ProgramRoot,
+                    )
+                else {
+                    return false;
+                };
+                import_map.is_runtime_vue_api_binding(
+                    &imports,
+                    &key,
+                    VueApiClassification::DefineComponent,
+                )
+            },
+        )
+    });
 
     resolve_macro_type_references_with_owners(program, &mut macros, content, owners);
 
@@ -749,7 +798,8 @@ fn build_script_analysis_inner(
     if first_await_offset.is_some() {
         flags |= AnalysisFlags::ASYNC_SETUP;
     }
-    if options_api.is_some() {
+    // Unresolved default exports cannot prove the absence of instance members.
+    if default_export.is_some() {
         flags |= AnalysisFlags::HAS_OPTIONS_API;
     }
     if !store_usages.is_empty() {
