@@ -76,5 +76,6 @@ export type {
   NativeTypeExpr,
 } from "./type-expr-bridge.js";
 
+export { decodeComponentMetaPayload } from "./type-graph-decode.js";
 export type { FactResult, FactCause, FactCauses } from "./facts.js";
-export type { NativeComponentFacts } from "./native-component-meta.js";
+export type { NativeComponentMetaResult, NativeComponentFacts } from "./native-component-meta.js";
