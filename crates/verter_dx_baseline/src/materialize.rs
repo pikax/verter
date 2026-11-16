@@ -919,23 +919,27 @@ pub fn materialize(req: &MaterializeRequest) -> Result<MaterializeReport, Materi
     let profile = ide_profile();
     let profile_desc = profile_descriptor(&profile);
 
+    let mut inputs = Vec::with_capacity(vue_files.len());
     for vue in &vue_files {
         let content = fs::read_to_string(vue).map_err(|e| io_err(vue, e))?;
         let canonical = canonicalize_path(&vue.to_string_lossy());
+        inputs.push(UpsertRequest {
+            canonical_id: Some(canonical.clone()),
+            input_id: canonical.clone(),
+            source: Arc::from(content.as_str()),
+            file_language: FileLanguage::vue(),
+            aliases: vec![],
+        });
+    }
+    for outcome in host.upsert_many_for_compile(inputs, verter_session::Priority::Background) {
+        outcome.result.map_err(|error| MaterializeError::Upsert {
+            canonical: outcome.canonical_id,
+            message: format!("{error:?}"),
+        })?;
+    }
 
-        let _ = host
-            .upsert(UpsertRequest {
-                canonical_id: Some(canonical.clone()),
-                input_id: canonical.clone(),
-                source: Arc::from(content.as_str()),
-                file_language: FileLanguage::vue(),
-                aliases: vec![],
-            })
-            .map_err(|e| MaterializeError::Upsert {
-                canonical: canonical.clone(),
-                message: format!("{e:?}"),
-            })?;
-
+    for vue in &vue_files {
+        let canonical = canonicalize_path(&vue.to_string_lossy());
         host.ensure_loaded(&canonical);
 
         // This pass consumes exactly two products: the IDE artifact below and

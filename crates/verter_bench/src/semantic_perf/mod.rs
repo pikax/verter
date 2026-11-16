@@ -111,6 +111,7 @@ pub struct Job {
 pub const JOB_SCHEMA: u32 = 1;
 /// The result schema this runner writes.
 pub const RESULT_SCHEMA: u32 = 2;
+const SETUP_INGESTION: &str = "atomic-batch";
 
 /// The canonical root the scenario project lives at inside the host.
 const PROJECT_ROOT: &str = "/bench";
@@ -226,6 +227,8 @@ pub struct JobResult {
     /// This process: every statistics reading must be of it.
     pub pid: u32,
     pub phases: PhaseTimes,
+    /// Project setup registers sources together through the shared host batch.
+    pub setup_ingestion: &'static str,
     pub init: RequestRecord,
     pub probes: Vec<ProbeRecord>,
     /// OS statistics after the requests, with the host alive and nothing
@@ -371,7 +374,7 @@ fn configure_project(
     lib_mode: LibMode,
     workspace: &MemoryWorkspace,
     host: &VerterHost,
-) -> Result<(), JobError> {
+) -> Result<Option<UpsertRequest>, JobError> {
     let tsconfig = read(dir, tsconfig)?;
     let lib_text = read(dir, lib)?;
     let tsconfig_path = format!("{PROJECT_ROOT}/tsconfig.json");
@@ -385,24 +388,32 @@ fn configure_project(
         &tsconfig_path,
     );
     host.configure_projects(vec![project]);
-    match lib_mode {
-        LibMode::Ambient => workspace
-            .register_ambient_lib(AmbientLibSpec {
-                project_id: None,
-                canonical_id: Arc::from(lib),
-                source: Arc::from(lib_text.as_str()),
-            })
-            .map_err(|err| JobError(format!("register the library: {err}")))?,
+    let registration = match lib_mode {
+        LibMode::Ambient => {
+            workspace
+                .register_ambient_lib(AmbientLibSpec {
+                    project_id: None,
+                    canonical_id: Arc::from(lib),
+                    source: Arc::from(lib_text.as_str()),
+                })
+                .map_err(|err| JobError(format!("register the library: {err}")))?;
+            None
+        }
         LibMode::RootFile => {
             let lib_id = format!("{PROJECT_ROOT}/{lib}");
             let language = verter_session::LanguageRegistry::global()
                 .classify_static(&lib_id)
                 .static_resolution();
-            upsert(host, lib_id, &lib_text, language)
-                .map_err(|err| JobError(format!("upsert the library: {err}")))?;
+            Some(UpsertRequest {
+                canonical_id: Some(lib_id.clone()),
+                input_id: lib_id,
+                source: Arc::from(lib_text),
+                file_language: language,
+                aliases: Vec::new(),
+            })
         }
-    }
-    Ok(())
+    };
+    Ok(registration)
 }
 
 /// Upsert one file's text into the host.
@@ -430,7 +441,7 @@ fn open_project(
     workspace: &MemoryWorkspace,
     host: &VerterHost,
 ) -> Result<String, JobError> {
-    configure_project(
+    let library = configure_project(
         &job.dir,
         &job.tsconfig,
         &job.lib,
@@ -438,26 +449,53 @@ fn open_project(
         workspace,
         host,
     )?;
+    let mut inputs = Vec::with_capacity(job.files.len() + 2);
+    inputs.extend(library);
     for file in &job.files {
         let source = read(&job.dir, file)?;
-        upsert(
-            host,
-            format!("{PROJECT_ROOT}/{file}"),
-            &source,
-            FileLanguage::script_ts(),
-        )
-        .map_err(|err| JobError(format!("upsert supporting module {file}: {err}")))?;
+        let canonical = format!("{PROJECT_ROOT}/{file}");
+        inputs.push(UpsertRequest {
+            canonical_id: Some(canonical.clone()),
+            input_id: canonical,
+            source: Arc::from(source),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        });
     }
     let scenario = read(&job.dir, &job.scenario)?;
     let scenario_id = format!("{PROJECT_ROOT}/{}", job.scenario);
-    upsert(
-        host,
-        scenario_id.clone(),
-        &scenario,
-        FileLanguage::script_ts(),
-    )
-    .map_err(|err| JobError(format!("upsert the scenario: {err}")))?;
+    inputs.push(UpsertRequest {
+        canonical_id: Some(scenario_id.clone()),
+        input_id: scenario_id.clone(),
+        source: Arc::from(scenario),
+        file_language: FileLanguage::script_ts(),
+        aliases: Vec::new(),
+    });
+    ingest(host, inputs)?;
     Ok(scenario_id)
+}
+
+fn ingest(host: &VerterHost, mut inputs: Vec<UpsertRequest>) -> Result<(), JobError> {
+    // A repeated canonical keeps the final source and language in input order.
+    let mut keep: Vec<_> = {
+        let mut seen = std::collections::HashSet::with_capacity(inputs.len());
+        inputs
+            .iter()
+            .rev()
+            .map(|input| {
+                seen.insert(verter_session::canonicalize_id(
+                    input.canonical_id.as_deref().unwrap_or(&input.input_id),
+                ))
+            })
+            .collect()
+    };
+    inputs.retain(|_| keep.pop().expect("one canonical selection per input"));
+    for outcome in host.upsert_many_for_compile(inputs, verter_session::Priority::Interactive) {
+        outcome
+            .result
+            .map_err(|error| JobError(format!("upsert {}: {error}", outcome.canonical_id)))?;
+    }
+    Ok(())
 }
 
 fn request(
@@ -760,6 +798,7 @@ pub fn run_job(
             init: init.micros,
             teardown: None,
         },
+        setup_ingestion: SETUP_INGESTION,
         init,
         probes,
         after_requests,

@@ -288,9 +288,24 @@ pub fn profile_component_meta() -> Result<LaneProfile, JobError> {
             PROJECT_ROOT.to_string(),
             None,
         )]);
-        for (name, source) in SFC_FIXTURES {
-            let canonical = id(name);
-            upsert(&host, &canonical, source, language_of(&canonical));
+        let inputs = SFC_FIXTURES
+            .iter()
+            .map(|(name, source)| {
+                let canonical = id(name);
+                let file_language = language_of(&canonical);
+                UpsertRequest {
+                    canonical_id: Some(canonical.clone()),
+                    input_id: canonical,
+                    source: Arc::from(*source),
+                    file_language,
+                    aliases: Vec::new(),
+                }
+            })
+            .collect();
+        for outcome in host.upsert_many_for_compile(inputs, verter_session::Priority::Interactive) {
+            outcome
+                .result
+                .unwrap_or_else(|err| panic!("upsert {}: {err:?}", outcome.canonical_id));
         }
     });
     phases.push(p);

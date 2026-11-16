@@ -1,6 +1,6 @@
 //! `impl VerterHost` — source upsert methods.
 //!
-//! Contains [`VerterHost::upsert`] and internal compile-input projection,
+//! Contains [`VerterHost::upsert`] and status-only bulk registration,
 //! which handle file ingestion, change detection, and cache invalidation.
 
 use std::collections::BTreeSet;
@@ -25,25 +25,31 @@ thread_local! {
 }
 
 /// One per-request outcome from the shared upsert engine
-/// [`VerterHost::upsert_many_with_priority`]. `result` is the same
-/// `Result<HostUpdateResult, HostError>` the single-file
-/// [`VerterHost::upsert`] returns. Compile-only admission requests a
+/// [`VerterHost::upsert_many_with_priority`]. `result` carries the full
+/// update projection or the same error the single-file
+/// [`VerterHost::upsert`] returns. Bulk source admission requests a
 /// status-only payload, represented by `Ok(None)`, because that caller never
 /// exposes the public update projection.
 ///
 /// `canonical_id` is the request's resolved canonical on every arm —
 /// including the failure arms, whose `result` `HostError` carries no
 /// canonical of its own — so callers can fold a failure into a
-/// per-canonical error map without re-deriving it. Its only consumer is
-/// `compile_many`'s Stage B error-folding, which lives in `host_compile`
-/// (the whole module is `not(target_arch = "wasm32")`). The field tracks
-/// that same target gate: on wasm there is no compile-batch path to read
-/// it, so carrying it would be dead storage.
+/// per-canonical error map without re-deriving it. Bulk callers consume the
+/// same identity through [`UpsertStatus`].
 pub(crate) struct UpsertBatchOutcome {
-    #[cfg(not(target_arch = "wasm32"))]
     pub canonical_id: String,
     pub result: Result<Option<HostUpdateResult>, HostError>,
     post_commit: UpsertPostCommit,
+}
+
+/// Status of one source registered by [`VerterHost::upsert_many_for_compile`].
+/// Entries follow input order, including failed registrations.
+#[derive(Debug)]
+pub struct UpsertStatus {
+    /// Resolved canonical identity of this input, on success or failure.
+    pub canonical_id: String,
+    /// Registration status without the detailed single-file changeset.
+    pub result: Result<(), HostError>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,12 +166,7 @@ impl UpsertBatchTxn {
             .into_iter()
             .zip(states)
             .map(|(prepared, state)| {
-                // Capture the canonical BEFORE the `Ready` arm moves
-                // `prepared` into `finish_upsert_post_commit`. Only
-                // `compile_many`'s Stage B (native-only) reads it back, so
-                // it is bound — like the field it feeds — under the same
-                // target gate as its sole consumer.
-                #[cfg(not(target_arch = "wasm32"))]
+                // Capture identity before the Ready arm consumes preparation.
                 let canonical_id = prepared.canonical_id.clone();
                 let (result, post_commit) = match state {
                     CompletionState::Ready(ready) => match verter_audit::specialise!(
@@ -193,7 +194,6 @@ impl UpsertBatchTxn {
                     }
                 };
                 UpsertBatchOutcome {
-                    #[cfg(not(target_arch = "wasm32"))]
                     canonical_id,
                     result,
                     post_commit,
@@ -382,21 +382,30 @@ impl VerterHost {
         self.upsert_many_with_priority_and_demand(requests, priority, UpsertResultDemand::Full)
     }
 
-    /// Compile-only source admission. Runs the identical scheduler, host-state,
-    /// and workspace commit path as [`Self::upsert_many_with_priority`] while
+    /// Bulk source admission for callers that do not consume a changeset.
+    /// Runs the identical scheduler, host-state,
+    /// and workspace commit path as [`Self::upsert`] while
     /// omitting the public [`HostUpdateResult`] projection that `compile_many`
-    /// never reads.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    pub(crate) fn upsert_many_for_compile(
+    /// never reads. Canonical identities must be unique within the batch
+    /// after normalization by [`crate::canonicalize_id`];
+    /// duplicates panic before any source is registered. A failed input does
+    /// not prevent the remaining inputs from completing.
+    pub fn upsert_many_for_compile(
         &self,
         requests: Vec<UpsertRequest>,
         priority: Priority,
-    ) -> Vec<UpsertBatchOutcome> {
+    ) -> Vec<UpsertStatus> {
         self.upsert_many_with_priority_and_demand(
             requests,
             priority,
             UpsertResultDemand::StatusOnly,
         )
+        .into_iter()
+        .map(|outcome| UpsertStatus {
+            canonical_id: outcome.canonical_id,
+            result: outcome.result.map(|_| ()),
+        })
+        .collect()
     }
 
     fn upsert_many_with_priority_and_demand(
@@ -430,11 +439,13 @@ impl VerterHost {
         // Derived work can join an index producer whose source integration
         // needs the admission fence. Source and workspace publication above
         // are complete before any such dependency is awaited.
-        self.materialize_pending_declarations();
-        self.materialize_upsert_carrier_routes(&mut outcomes);
         if !changed.is_empty() {
             self.ingest_changed_program_files(changed);
         }
+        // Discover the source roots before the declaration pass flushes its
+        // contributors, so a bulk open publishes one complete population.
+        self.materialize_pending_declarations();
+        self.materialize_upsert_carrier_routes(&mut outcomes);
         #[cfg(test)]
         if let Some(hook) = UPSERT_BATCH_POST_COMMIT_HOOK.with(|slot| slot.borrow_mut().take()) {
             hook();

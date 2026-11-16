@@ -29,6 +29,15 @@ playground E2E tests
 
 ## TypeScript Project Opening Samples
 
+The semantic benchmark's ordinary and session setup phases collect their root
+library and source inputs before one `upsert_many_for_compile` call. Result
+records identify this with `setupIngestion: "atomic-batch"`. This models bulk
+project opening; session edits still use scalar `upsert`. Keep a scalar setup
+control beside bulk setup comparisons so the per-file admission cost remains
+visible. Setup deduplicates host canonical IDs before admission, retaining the
+final source and language for repeated inputs. Compare setup separately from
+init and semantic demands.
+
 `cargo run --release -p verter_session --example project_open_profile` emits
 three JSON timing samples for configuration plus interleaved injection/upsert
 of 8,441 generated TypeScript files across 104 directories (about 3.3 MB),

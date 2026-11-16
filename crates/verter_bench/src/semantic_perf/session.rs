@@ -35,9 +35,9 @@ use serde::{Deserialize, Serialize};
 use verter_session::VerterHost;
 
 use super::{
-    configure_project, micros, observe, process_stats, read, request, retention, start_engine,
-    upsert, wire_bytes, JobError, LibMode, Observation, RequestOutcome, RetentionCounts, Sink,
-    PROJECT_ROOT,
+    configure_project, ingest, micros, observe, process_stats, read, request, retention,
+    start_engine, upsert, wire_bytes, JobError, LibMode, Observation, RequestOutcome,
+    RetentionCounts, Sink, PROJECT_ROOT,
 };
 
 /// The session job schema this runner reads.
@@ -175,6 +175,8 @@ pub struct SessionResult {
     pub stage: &'static str,
     pub pid: u32,
     pub phases: SessionPhases,
+    /// Sources are admitted together before the session's first demand.
+    pub setup_ingestion: &'static str,
     pub init_outcome: RequestOutcome,
     pub steps: Vec<StepRecord>,
     /// OS statistics after the last step (observation-inclusive).
@@ -352,7 +354,7 @@ pub fn run_session(job: &SessionJob, sink: &Sink<'_>) -> Result<SessionResult, J
 
     sink.phase("setup")?;
     let start = Instant::now();
-    configure_project(
+    let library = configure_project(
         &job.dir,
         &job.tsconfig,
         &job.lib,
@@ -360,13 +362,20 @@ pub fn run_session(job: &SessionJob, sink: &Sink<'_>) -> Result<SessionResult, J
         &workspace,
         &host,
     )?;
+    let mut inputs = Vec::with_capacity(job.files.len() + 1);
+    inputs.extend(library);
     for file in &job.files {
         let text = read(&job.dir, file)?;
         let id = canonical(file);
-        workspace.inject_file(id.clone(), Arc::from(text.as_str()));
-        upsert(&host, id.clone(), &text, language_of(&id))
-            .map_err(|err| JobError(format!("upsert {file}: {err}")))?;
+        inputs.push(verter_session::UpsertRequest {
+            canonical_id: Some(id.clone()),
+            input_id: id.clone(),
+            source: Arc::from(text),
+            file_language: language_of(&id),
+            aliases: Vec::new(),
+        });
     }
+    ingest(&host, inputs)?;
     let setup = micros(start);
 
     sink.phase("init")?;
@@ -378,6 +387,7 @@ pub fn run_session(job: &SessionJob, sink: &Sink<'_>) -> Result<SessionResult, J
         "schema": SESSION_RESULT_SCHEMA, "tool": "verter", "kind": "session",
         "stage": "partial", "observability": job.observability,
         "captureAvailable": capture_available(), "pid": std::process::id(),
+        "setupIngestion": super::SETUP_INGESTION,
         "phases": { "engineStart": engine_start, "setup": setup, "init": init.micros },
         "initOutcome": init.outcome, "initRetention": init_retention,
     });
@@ -437,6 +447,7 @@ pub fn run_session(job: &SessionJob, sink: &Sink<'_>) -> Result<SessionResult, J
             setup,
             init: init.micros,
         },
+        setup_ingestion: super::SETUP_INGESTION,
         init_outcome: init.outcome,
         steps,
         after_steps,

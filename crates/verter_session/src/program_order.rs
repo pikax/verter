@@ -42,6 +42,16 @@ use verter_workspace::{
     AmbientLibsByProject, CanonicalPath, ProjectPayload, WorkspaceAccess, WorkspaceSnapshot,
 };
 
+#[cfg(test)]
+thread_local! {
+    static LIBRARY_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn library_builds_for_tests() -> u64 {
+    LIBRARY_BUILDS.with(std::cell::Cell::get)
+}
+
 /// A file a program walk is reading on this thread: the host, the program
 /// reading it, and the file.
 struct WalkRead {
@@ -568,6 +578,8 @@ impl ProjectLibraries {
         project: ProjectId,
         options: &SemanticCompilerOptions,
     ) -> Option<Self> {
+        #[cfg(test)]
+        LIBRARY_BUILDS.with(|count| count.set(count.get() + 1));
         let key = workspace.project_stable_key(project)?;
         let mut available: FxHashSet<Arc<str>> = FxHashSet::default();
         if let Some(registered) = registry.by_project.get(&key) {
@@ -713,8 +725,19 @@ impl crate::VerterHost {
         let Some(root) = workspace.published_root() else {
             return;
         };
+        if !root
+            .snapshot
+            .projects
+            .iter()
+            .any(|project| matches!(&project.payload, ProjectPayload::Configured { .. }))
+        {
+            return;
+        }
         let index = self.project_type_store().indexed().program_order_index();
-        let files: Vec<_> = files.into_iter().collect();
+        let files: Vec<_> = files
+            .into_iter()
+            .map(|file| CanonicalPath::new(&file))
+            .collect();
         for project in &root.snapshot.projects {
             let ProjectPayload::Configured {
                 tsconfig_path,
@@ -725,27 +748,52 @@ impl crate::VerterHost {
             else {
                 continue;
             };
+            let registry = workspace.ambient_libs_view();
+            let program: Arc<str> = Arc::from(tsconfig_path.as_str());
+            let mut needs_libraries = files.iter().any(|file| file == tsconfig_path);
+            let mut pending = Vec::new();
+            {
+                let discovered = index.discovered.read();
+                for file in &files {
+                    let known = discovered.get(&(Arc::clone(&program), Arc::from(file.as_str())));
+                    if !membership.contains(file) && known.is_none() {
+                        continue;
+                    }
+                    needs_libraries |= known.is_none_or(|entry| {
+                        entry.files.is_none()
+                            || entry.published.authority() != root.authority()
+                            || entry.published.snapshot.generation != root.snapshot.generation
+                            || !Arc::ptr_eq(&entry.registry, &registry)
+                    });
+                    if known.is_none_or(|entry| !entry.current(workspace.as_ref(), file.as_str())) {
+                        pending.push(file.as_str().to_owned());
+                    }
+                }
+            }
+            if pending.is_empty() && !needs_libraries {
+                continue;
+            }
             let owner = verter_session_query::resolution::ProjectOwnership {
                 project_root: project.root.as_str().to_owned(),
                 tsconfig_path: Some(tsconfig_path.as_str().to_owned()),
             };
-            let registry = workspace.ambient_libs_view();
-            let options = workspace
-                .semantic_compiler_options_for_project(project.id)
-                .unwrap_or_else(|| compiler_options.semantic.clone());
-            let libraries =
-                ProjectLibraries::of(workspace.as_ref(), &registry, project.id, &options);
-            let mut pending: Vec<String> = files
-                .iter()
-                .filter(|file| {
-                    membership.contains(&CanonicalPath::new(file))
-                        || index.discovered.read().contains_key(&(
-                            Arc::from(tsconfig_path.as_str()),
-                            Arc::from(file.as_str()),
-                        ))
-                })
-                .cloned()
-                .collect();
+            let libraries = std::cell::OnceCell::new();
+            let libraries = || {
+                libraries
+                    .get_or_init(|| {
+                        let options = workspace
+                            .semantic_compiler_options_for_project(project.id)
+                            .unwrap_or_else(|| compiler_options.semantic.clone());
+                        ProjectLibraries::of(workspace.as_ref(), &registry, project.id, &options)
+                    })
+                    .as_ref()
+            };
+            // New members and configuration/library changes keep eager discovery.
+            // An existing member still refreshes its own inclusion edges below;
+            // only its parsed library references can demand the library inventory.
+            if needs_libraries {
+                let _ = libraries();
+            }
             let mut visited = FxHashSet::default();
             while let Some(file) = pending.pop() {
                 if !visited.insert(file.clone()) {
@@ -756,7 +804,7 @@ impl crate::VerterHost {
                 let (children, fresh) = self.discovered_files(
                     workspace.as_ref(),
                     &root.snapshot,
-                    libraries.as_ref(),
+                    &libraries,
                     &owner,
                     compiler_options.js_is_member(),
                     &file,
@@ -1172,7 +1220,7 @@ impl crate::VerterHost {
                         let (files, _) = self.discovered_files(
                             workspace.as_ref(),
                             snapshot,
-                            libraries.as_ref(),
+                            &|| libraries.as_ref(),
                             &owner,
                             javascript,
                             file,
@@ -1242,11 +1290,11 @@ impl crate::VerterHost {
     /// names' files. A library pulls in only the libraries it references.
     /// `None` when the program cannot load `file`.
     #[allow(clippy::too_many_arguments)]
-    fn discovered_files(
+    fn discovered_files<'libs>(
         &self,
         workspace: &dyn WorkspaceAccess,
         snapshot: &WorkspaceSnapshot,
-        libraries: Option<&ProjectLibraries>,
+        libraries: &dyn Fn() -> Option<&'libs ProjectLibraries>,
         owner: &verter_session_query::resolution::ProjectOwnership,
         javascript: bool,
         file: &str,
@@ -1280,10 +1328,6 @@ impl crate::VerterHost {
             return (None, true);
         };
         let registry = workspace.ambient_libs_view();
-        if libraries.is_some_and(|libraries| !Arc::ptr_eq(&libraries.registry, &registry)) {
-            *provisional = true;
-            return (None, true);
-        }
         let transition = workspace.last_content_transition_generation(file);
         let mut local_probes = Vec::new();
         let mut local_provisional = false;
@@ -1328,10 +1372,10 @@ impl crate::VerterHost {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn read_pulled_files(
+    fn read_pulled_files<'libs>(
         &self,
         workspace: &dyn WorkspaceAccess,
-        libraries: Option<&ProjectLibraries>,
+        libraries: &dyn Fn() -> Option<&'libs ProjectLibraries>,
         owner: &verter_session_query::resolution::ProjectOwnership,
         javascript: bool,
         file: &str,
@@ -1370,6 +1414,17 @@ impl crate::VerterHost {
         };
         *provisional |= !serve.store_published;
         let references = &serve.indexed.route_inventory.program_references;
+        let libraries = if references.libs.is_empty() {
+            None
+        } else {
+            libraries()
+        };
+        if libraries.is_some_and(|libraries| {
+            !Arc::ptr_eq(&libraries.registry, &workspace.ambient_libs_view())
+        }) {
+            *provisional = true;
+            return None;
+        }
         *reference_free = references.paths.is_empty()
             && references.types.is_empty()
             && references.libs.is_empty()

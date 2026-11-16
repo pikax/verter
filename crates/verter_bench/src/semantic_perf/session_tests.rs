@@ -116,6 +116,54 @@ fn complete_session_journal_contains_each_real_answer_in_order() {
 }
 
 #[test]
+fn project_setup_accepts_repeated_canonical_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = job(dir.path());
+    std::fs::write(
+        dir.path().join("input.ts._VERTER_.bundle.ts"),
+        "export type Init = 0; export type Answer = 43;",
+    )
+    .unwrap();
+    session.files = vec![
+        "lib.d.ts".into(),
+        "input.ts".into(),
+        "input.ts._VERTER_.bundle.ts".into(),
+    ];
+    let out = dir.path().join("session.json");
+    let result = run_session(&session, &Sink::new(&out)).unwrap();
+    let record = serde_json::to_value(result).unwrap();
+    for (index, step) in record["steps"].as_array().unwrap().iter().enumerate() {
+        assert_eq!(
+            step["requests"][0]["observation"]["text"],
+            if index == 0 { "0" } else { "43" }
+        );
+        assert_eq!(step["requests"][0]["outcome"]["kind"], "value");
+    }
+
+    let row = super::Job {
+        schema: super::JOB_SCHEMA,
+        dir: dir.path().into(),
+        tsconfig: session.tsconfig,
+        lib: session.lib,
+        lib_mode: session.lib_mode,
+        scenario: "input.ts".into(),
+        files: session.files,
+        init_alias: session.init_alias,
+        probes: vec!["Answer".into()],
+        warm_repeats: 1,
+        observability: false,
+    };
+    let result = super::run_job(&row, None, &Sink::new(&dir.path().join("row.json"))).unwrap();
+    let probe = &result.probes[0];
+    assert_eq!(probe.cold.outcome, super::RequestOutcome::Value);
+    assert_eq!(
+        probe.observation.as_ref().unwrap().text.as_deref(),
+        Some("42")
+    );
+    assert_eq!(probe.warm[0].same_answer_as_cold, Some(true));
+}
+
+#[test]
 fn scenario_probe_loads_supporting_modules_before_the_return_demand() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("tsconfig.json"), r#"{"compilerOptions":{"strict":true,"noLib":true},"files":["lib.d.ts","base.ts","scenario.ts"]}"#).unwrap();
