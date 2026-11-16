@@ -935,6 +935,7 @@ mod unused_declaration_population {
             slot_fields: vec![],
             default_keys: vec![],
             default_values: vec![],
+            runtime_members_fully_enumerated: false,
             expose_fields: vec![],
             resolved_local_types: vec![],
             parsed_type_argument: None,

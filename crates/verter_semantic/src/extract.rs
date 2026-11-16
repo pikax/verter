@@ -509,6 +509,7 @@ mod tests {
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
@@ -684,6 +685,7 @@ mod tests {
         let mac = AnalyzedMacro {
             edit_anchors: Default::default(),
             kind: AnalyzedMacroKind::DefineExpose,
+            runtime_members_fully_enumerated: false,
             expose_fields: vec![
                 AnalyzedExposeField {
                     name: "open".to_string(),
@@ -768,6 +770,7 @@ mod tests {
                 value: "'blue'".into(),
                 span: Span::new(40, 46),
             }],
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,

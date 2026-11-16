@@ -107,6 +107,8 @@ impl Default for MetadataFactGuarantee {
 /// Independent membership guarantees of the declared semantic lanes.
 #[derive(Debug, Clone, Default)]
 pub struct ComponentDomainGuarantees {
+    /// Positive reports for the domains represented by the instance sidecar.
+    pub enumeration: PublicInstanceEnumeration,
     pub props: MetadataFactGuarantee,
     pub events: MetadataFactGuarantee,
     pub slots: MetadataFactGuarantee,
@@ -115,6 +117,19 @@ pub struct ComponentDomainGuarantees {
     pub accepted: MetadataFactGuarantee,
     pub public_instance: MetadataFactGuarantee,
     pub type_registry: MetadataFactGuarantee,
+}
+
+/// Producer-owned certificates for public-instance input membership.
+/// Default means no producer has certified enumeration.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PublicInstanceEnumeration {
+    /// Positive geometry report: options cannot add unlisted instance members.
+    pub options_member_free: bool,
+    pub props: bool,
+    pub emits: bool,
+    pub slots: bool,
+    pub exposed: bool,
+    pub models: bool,
 }
 
 /// The single component-fact cause vocabulary. Both directions are generated
@@ -312,7 +327,18 @@ pub struct ExposedAnalysis {
 #[derive(Debug, Clone)]
 pub struct PublicInstanceAnalysis {
     pub members: Vec<PublicInstanceMemberAnalysis>,
+    /// Component geometry prerequisite, independent of domain enumeration and
+    /// delivery completeness. The terminal sink checks all three inputs.
+    pub structural_failure: Option<PublicInstanceStructuralFailure>,
     pub completeness: PublicInstanceCompleteness,
+}
+
+/// A producer prerequisite the public-instance enumeration could not prove.
+/// Its cause is carried by `ComponentDomainGuarantees::public_instance`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicInstanceStructuralFailure {
+    NotScriptSetup,
+    OptionsApiMembers,
 }
 
 /// A single runtime-observable public-instance member.

@@ -3744,6 +3744,7 @@ fn make_synth_macro(
         slot_fields: slots,
         default_keys: Vec::new(),
         default_values: Vec::new(),
+        runtime_members_fully_enumerated: false,
         expose_fields: Vec::new(),
         resolved_local_types: Vec::new(),
         parsed_type_argument: None,

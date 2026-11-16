@@ -128,6 +128,7 @@ mod tests {
             emit_fields,
             slot_fields: vec![],
             default_keys: vec![],
+            runtime_members_fully_enumerated: false,
             expose_fields: vec![],
             default_values: vec![],
             resolved_local_types: vec![],

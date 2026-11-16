@@ -94,6 +94,7 @@ fn analyzed_macro(kind: AnalyzedMacroKind, at: u32, end: u32) -> AnalyzedMacro {
         slot_fields: Vec::new(),
         default_keys: Vec::new(),
         default_values: Vec::new(),
+        runtime_members_fully_enumerated: false,
         expose_fields: Vec::new(),
         resolved_local_types: Vec::new(),
         parsed_type_argument: None,

@@ -3192,20 +3192,25 @@ fn try_extract_macro(
                 None
             };
 
-            // Detect defineOptions({ inheritAttrs: false })
-            let has_inherit_attrs_false =
-                kind == AnalyzedMacroKind::DefineOptions && has_inherit_attrs_false_in_args(call);
+            let (has_inherit_attrs_false, options_member_free) =
+                if kind == AnalyzedMacroKind::DefineOptions {
+                    extract_define_options(call)
+                } else {
+                    (false, false)
+                };
 
             let prop_extraction = if kind == AnalyzedMacroKind::DefineProps {
                 extract_prop_fields(call, source, comments, binding_index)
             } else if kind == AnalyzedMacroKind::DefineModel {
                 PropFieldExtraction {
+                    fully_enumerated: false,
                     fields: extract_define_model_type(call, source, &model_name),
                     default_keys: Vec::new(),
                     default_values: Vec::new(),
                 }
             } else {
                 PropFieldExtraction {
+                    fully_enumerated: false,
                     fields: Vec::new(),
                     default_keys: Vec::new(),
                     default_values: Vec::new(),
@@ -3213,10 +3218,10 @@ fn try_extract_macro(
             };
             let prop_fields = prop_extraction.fields;
 
-            let emit_fields = if kind == AnalyzedMacroKind::DefineEmits {
+            let (emit_fields, emits_fully_enumerated) = if kind == AnalyzedMacroKind::DefineEmits {
                 extract_emit_fields(call, comments, source)
             } else {
-                Vec::new()
+                (Vec::new(), false)
             };
 
             let slot_fields = if kind == AnalyzedMacroKind::DefineSlots {
@@ -3244,11 +3249,12 @@ fn try_extract_macro(
                 Vec::new()
             };
 
-            let expose_fields = if kind == AnalyzedMacroKind::DefineExpose {
-                extract_expose_fields(call, comments, source, binding_index)
-            } else {
-                Vec::new()
-            };
+            let (expose_fields, runtime_members_fully_enumerated) =
+                if kind == AnalyzedMacroKind::DefineExpose {
+                    extract_expose_fields(call, comments, source, binding_index)
+                } else {
+                    (Vec::new(), false)
+                };
 
             // Edit anchors: one shared derivation for every macro kind, minted
             // in place from the OXC nodes already in scope here. A pure `match`
@@ -3271,6 +3277,13 @@ fn try_extract_macro(
                 slot_fields,
                 default_keys,
                 expose_fields,
+                runtime_members_fully_enumerated: match kind {
+                    AnalyzedMacroKind::DefineProps => prop_extraction.fully_enumerated,
+                    AnalyzedMacroKind::DefineEmits => emits_fully_enumerated,
+                    AnalyzedMacroKind::DefineExpose => runtime_members_fully_enumerated,
+                    AnalyzedMacroKind::DefineOptions => options_member_free,
+                    _ => false,
+                },
                 default_values,
                 resolved_local_types: Vec::new(),
                 parsed_type_argument,
@@ -3447,6 +3460,7 @@ fn define_model_is_required(call: &CallExpression<'_>) -> bool {
 
 /// Result of extracting prop fields from a `defineProps` call.
 struct PropFieldExtraction {
+    fully_enumerated: bool,
     fields: Vec<AnalyzedPropField>,
     default_keys: Vec<String>,
     default_values: Vec<AnalyzedDefaultValue>,
@@ -3468,6 +3482,7 @@ fn extract_prop_fields(
     if let Some(ref type_args) = call.type_arguments {
         if let Some(first) = type_args.params.first() {
             return PropFieldExtraction {
+                fully_enumerated: false,
                 fields: extract_prop_fields_from_type(first, source, comments),
                 default_keys: Vec::new(),
                 default_values: Vec::new(),
@@ -3480,6 +3495,7 @@ fn extract_prop_fields(
         if let Some(expr) = first_arg.as_expression() {
             let rt = extract_prop_fields_from_runtime(expr, source, comments, binding_index);
             return PropFieldExtraction {
+                fully_enumerated: rt.fully_enumerated,
                 fields: rt.fields,
                 default_keys: rt.default_keys,
                 default_values: rt.default_values,
@@ -3488,6 +3504,7 @@ fn extract_prop_fields(
     }
 
     PropFieldExtraction {
+        fully_enumerated: false,
         fields: Vec::new(),
         default_keys: Vec::new(),
         default_values: Vec::new(),
@@ -3530,6 +3547,7 @@ fn extract_prop_fields_from_type(
 
 /// Result of extracting prop fields from a runtime defineProps argument.
 struct RuntimePropExtraction {
+    fully_enumerated: bool,
     fields: Vec<AnalyzedPropField>,
     default_keys: Vec<String>,
     default_values: Vec<AnalyzedDefaultValue>,
@@ -3639,18 +3657,27 @@ fn extract_prop_fields_from_runtime(
 ) -> RuntimePropExtraction {
     match expr {
         Expression::ObjectExpression(obj) => {
+            let mut fully_enumerated = true;
             let mut fields = Vec::new();
             let mut default_keys = Vec::new();
             let mut default_values = Vec::new();
 
             for prop in &obj.properties {
                 let ObjectPropertyKind::ObjectProperty(p) = prop else {
+                    fully_enumerated = false;
                     continue;
                 };
+                if p.computed {
+                    fully_enumerated = false;
+                    continue;
+                }
                 let key_name = match &p.key {
                     PropertyKey::StaticIdentifier(id) => id.name.to_string(),
                     PropertyKey::StringLiteral(lit) => lit.value.to_string(),
-                    _ => continue,
+                    _ => {
+                        fully_enumerated = false;
+                        continue;
+                    }
                 };
 
                 let mut type_annotation: Option<String> = None;
@@ -3785,13 +3812,15 @@ fn extract_prop_fields_from_runtime(
             }
 
             RuntimePropExtraction {
+                fully_enumerated,
                 fields,
                 default_keys,
                 default_values,
             }
         }
-        Expression::ArrayExpression(arr) => RuntimePropExtraction {
-            fields: arr
+        Expression::ArrayExpression(arr) => {
+            let mut fully_enumerated = true;
+            let fields = arr
                 .elements
                 .iter()
                 .filter_map(|elem| {
@@ -3816,14 +3845,20 @@ fn extract_prop_fields_from_runtime(
                             constructor_bindings: Vec::new(),
                         })
                     } else {
+                        fully_enumerated = false;
                         None
                     }
                 })
-                .collect(),
-            default_keys: Vec::new(),
-            default_values: Vec::new(),
-        },
+                .collect();
+            RuntimePropExtraction {
+                fully_enumerated,
+                fields,
+                default_keys: Vec::new(),
+                default_values: Vec::new(),
+            }
+        }
         _ => RuntimePropExtraction {
+            fully_enumerated: false,
             fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
@@ -3842,11 +3877,14 @@ fn extract_emit_fields(
     call: &CallExpression<'_>,
     comments: &[Comment],
     source: &str,
-) -> Vec<AnalyzedEmitField> {
+) -> (Vec<AnalyzedEmitField>, bool) {
     // Type-based: extract from type parameters
     if let Some(ref type_args) = call.type_arguments {
         if let Some(first) = type_args.params.first() {
-            return extract_emit_fields_from_type(first, comments, source);
+            return (
+                extract_emit_fields_from_type(first, comments, source),
+                false,
+            );
         }
     }
 
@@ -3857,7 +3895,7 @@ fn extract_emit_fields(
         }
     }
 
-    Vec::new()
+    (Vec::new(), false)
 }
 
 /// Extract emit fields from a TypeScript type parameter.
@@ -3994,17 +4032,25 @@ fn extract_emit_fields_from_members_at(
 }
 
 /// Extract emit fields from a runtime argument (object keys or array string elements).
-fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitField> {
-    match expr {
+fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> (Vec<AnalyzedEmitField>, bool) {
+    let mut fully_enumerated = true;
+    let fields = match expr {
         Expression::ObjectExpression(obj) => obj
             .properties
             .iter()
             .filter_map(|prop| {
                 if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                    if p.computed {
+                        fully_enumerated = false;
+                        return None;
+                    }
                     let key_name = match &p.key {
                         PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
                         PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
-                        _ => None,
+                        _ => {
+                            fully_enumerated = false;
+                            None
+                        }
                     };
                     key_name.map(|name| AnalyzedEmitField {
                         name,
@@ -4017,6 +4063,7 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                         payload_expr_scope: None,
                     })
                 } else {
+                    fully_enumerated = false;
                     None
                 }
             })
@@ -4037,12 +4084,17 @@ fn extract_emit_fields_from_runtime(expr: &Expression<'_>) -> Vec<AnalyzedEmitFi
                         payload_expr_scope: None,
                     })
                 } else {
+                    fully_enumerated = false;
                     None
                 }
             })
             .collect(),
-        _ => Vec::new(),
-    }
+        _ => {
+            fully_enumerated = false;
+            Vec::new()
+        }
+    };
+    (fields, fully_enumerated)
 }
 
 /// Extract object property key names from the second argument of `withDefaults()`.
@@ -4122,7 +4174,8 @@ pub(crate) fn default_value_source_text(expr: &Expression<'_>, source: &str) -> 
 /// `defineExpose({ foo, bar })`.
 ///
 /// Only parses object literal arguments. Identifier args (e.g., `defineExpose(myObj)`)
-/// return empty since we can't resolve the value statically. Each field's
+/// return empty without an enumeration certificate. An absent argument is
+/// positively empty. Each field's
 /// leading `/** ... */` block is captured at the field key span, exactly like
 /// runtime prop fields.
 fn extract_expose_fields(
@@ -4130,21 +4183,30 @@ fn extract_expose_fields(
     comments: &[Comment],
     source: &str,
     binding_index: Option<&crate::analysis::root_binding_index::RootBindingIndex>,
-) -> Vec<AnalyzedExposeField> {
+) -> (Vec<AnalyzedExposeField>, bool) {
     let Some(first_arg) = call.arguments.first() else {
-        return Vec::new();
+        return (Vec::new(), true);
     };
     let Some(Expression::ObjectExpression(obj)) = first_arg.as_expression() else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
-    obj.properties
+    let mut fully_enumerated = true;
+    let fields = obj
+        .properties
         .iter()
         .filter_map(|prop| {
             if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                if p.computed {
+                    fully_enumerated = false;
+                    return None;
+                }
                 let key_name = match &p.key {
                     PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
                     PropertyKey::StringLiteral(lit) => Some(lit.value.to_string()),
-                    _ => None,
+                    _ => {
+                        fully_enumerated = false;
+                        None
+                    }
                 };
                 let (description, tags) = extract_jsdoc_for(comments, p.key.span().start, source);
                 // Structural: read the OXC value node directly, never slice
@@ -4190,10 +4252,12 @@ fn extract_expose_fields(
                     tags,
                 })
             } else {
+                fully_enumerated = false;
                 None
             }
         })
-        .collect()
+        .collect();
+    (fields, fully_enumerated)
 }
 
 /// Extract individual slot field names, required status, bindings, and spans from a `defineSlots` call.
@@ -4672,29 +4736,38 @@ fn extract_slot_bindings_from_pick_ast(
     bindings
 }
 
-/// Check if a `defineOptions()` call has `inheritAttrs: false` in its first object argument.
-fn has_inherit_attrs_false_in_args(call: &CallExpression<'_>) -> bool {
-    let Some(first_arg) = call.arguments.first() else {
-        return false;
-    };
-    let Some(Expression::ObjectExpression(obj)) = first_arg.as_expression() else {
-        return false;
-    };
-    for prop in &obj.properties {
-        if let ObjectPropertyKind::ObjectProperty(p) = prop {
-            let is_inherit_attrs = match &p.key {
-                PropertyKey::StaticIdentifier(id) => id.name == "inheritAttrs",
-                PropertyKey::StringLiteral(lit) => lit.value == "inheritAttrs",
-                _ => false,
+/// Options that add no props, emits, exposed members or slots.
+const MEMBER_FREE_DEFINE_OPTIONS_KEYS: &[&str] = &["name", "inheritAttrs"];
+
+/// Extract inheritance flags and certify member-free options in one traversal.
+fn extract_define_options(call: &CallExpression<'_>) -> (bool, bool) {
+    let mut has_inherit_attrs_false = None;
+    let mut member_free = true;
+    for (index, arg) in call.arguments.iter().enumerate() {
+        let Some(Expression::ObjectExpression(obj)) = arg.as_expression() else {
+            member_free = false;
+            continue;
+        };
+        for prop in &obj.properties {
+            let ObjectPropertyKind::ObjectProperty(p) = prop else {
+                member_free = false;
+                continue;
             };
-            if is_inherit_attrs {
+            let key = match &p.key {
+                PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
+                PropertyKey::StringLiteral(lit) => Some(lit.value.as_str()),
+                _ => None,
+            };
+            member_free &= !p.computed
+                && key.is_some_and(|key| MEMBER_FREE_DEFINE_OPTIONS_KEYS.contains(&key));
+            if index == 0 && key == Some("inheritAttrs") && has_inherit_attrs_false.is_none() {
                 if let Expression::BooleanLiteral(b) = &p.value {
-                    return !b.value; // inheritAttrs: false
+                    has_inherit_attrs_false = Some(!b.value);
                 }
             }
         }
     }
-    false
+    (has_inherit_attrs_false.unwrap_or(false), member_free)
 }
 
 // ── JSDoc extraction helpers ─────────────────────────────────────────

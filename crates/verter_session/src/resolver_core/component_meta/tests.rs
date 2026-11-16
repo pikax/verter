@@ -371,6 +371,7 @@ fn resolve_component_meta_parts_prefers_combined_imported_macro_surface() {
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
@@ -476,6 +477,7 @@ fn resolve_component_meta_parts_fallthrough_reuses_combined_imported_macro_surfa
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
@@ -608,6 +610,7 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
@@ -699,6 +702,7 @@ defineEmits<Emits>()
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
                 owner: TopLevelOwnerId::instance(0),
@@ -773,6 +777,7 @@ fn local_resolved_macro_types_push_authoritative_owner_local_entry() {
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
                 owner: TopLevelOwnerId::instance(0),
@@ -840,6 +845,7 @@ fn projectable_local_emit_roots_fill_resolved_macros_without_resolved_local_type
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
@@ -909,6 +915,7 @@ defineSlots<CalendarSlots>()
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
                 owner: TopLevelOwnerId::instance(0),
@@ -978,6 +985,7 @@ type LocalItem = {
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
                 owner: TopLevelOwnerId::instance(0),
@@ -1103,6 +1111,7 @@ type Props = Pick<ImportedBase, 'href'>
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
                 owner: TopLevelOwnerId::instance(0),
@@ -1209,6 +1218,7 @@ type Props = Pick<ImportedBase, 'href'>
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
                 owner: TopLevelOwnerId::instance(0),
@@ -1290,6 +1300,7 @@ type Props = {
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
                 owner: TopLevelOwnerId::instance(0),
@@ -1375,6 +1386,7 @@ type Props = {
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
                 owner: TopLevelOwnerId::instance(0),
@@ -1455,6 +1467,7 @@ type Props = Omit<ImportedBase, 'hidden'>
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
                 owner: TopLevelOwnerId::instance(0),
@@ -1536,6 +1549,7 @@ type Props = Omit<ImportedBase, 'hidden'>
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: vec![ResolvedLocalType {
                 owner: TopLevelOwnerId::instance(0),
@@ -1605,6 +1619,7 @@ fn resolve_component_meta_parts_keeps_direct_imported_macro_root_seeded() {
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
@@ -1690,6 +1705,7 @@ fn resolve_component_meta_parts_seeds_imported_macro_root_when_graph_metadata_un
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,
@@ -1763,6 +1779,7 @@ interface Helper {
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: vec![
                 ResolvedLocalType {
@@ -1987,6 +2004,7 @@ fn define_slots_of_imported_slot(import_source: &str) -> TestSnapshot {
             slot_fields: Vec::new(),
             default_keys: Vec::new(),
             default_values: Vec::new(),
+            runtime_members_fully_enumerated: false,
             expose_fields: Vec::new(),
             resolved_local_types: Vec::new(),
             parsed_type_argument: None,

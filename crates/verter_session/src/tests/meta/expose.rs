@@ -729,6 +729,7 @@ fn component_meta_output_exposed_unraisable_source_degrades_per_member() {
         tags: Vec::new(),
     });
     analysis.public_instance = Some(cm::PublicInstanceAnalysis {
+        structural_failure: None,
         members: vec![
             cm::PublicInstanceMemberAnalysis {
                 name: "bad".to_string(),

@@ -2890,6 +2890,7 @@ fn build_test_meta() -> FfiComponentMeta {
     FfiComponentMeta {
         domain_guarantees:
             verter_session_query::analysis::component_meta::ComponentDomainGuarantees {
+                enumeration: Default::default(),
                 props:
                     verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(
                         false,
@@ -3214,6 +3215,20 @@ mod tests {
         let exact = meta.facts().public_instance;
         assert_eq!(exact.kind(), 1);
         assert!(!exact.open());
+        let exact_proto = super::component_meta_payload(&meta)
+            .body
+            .unwrap()
+            .facts
+            .unwrap()
+            .public_instance
+            .unwrap();
+        let guarantee = exact_proto.guarantee.unwrap();
+        assert_eq!(guarantee.kind, 1);
+        assert!(guarantee.causes.is_empty());
+        assert_eq!(
+            exact_proto.value.unwrap().completeness,
+            proto::PublicInstanceCompleteness::Exact as i32
+        );
         meta.public_instance = None;
         let absent = meta.facts().public_instance;
         assert_eq!(absent.kind(), 1);

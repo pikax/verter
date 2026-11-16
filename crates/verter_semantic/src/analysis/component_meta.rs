@@ -715,7 +715,7 @@ fn extract_consumed_root_bindings(
 /// Source order of props/events/slots/exposed is preserved.
 pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAnalysis {
     let options_api = input.options_api.is_some();
-    let flags = extract_flags(&input);
+    let (flags, options_member_free) = extract_flags(&input);
     let evaluated_types = input.evaluated_types;
     let slot_binding_index = SlotBindingIndex::new(evaluated_types);
 
@@ -922,6 +922,8 @@ pub fn extract_component_meta(input: ComponentMetaInput<'_>) -> ComponentMetaAna
             evaluated_types,
             input.macros,
             input.resolved_macros,
+            input.template,
+            options_member_free,
         ),
         props,
         events,
@@ -2958,32 +2960,44 @@ fn extract_styles(
         .collect()
 }
 
-fn extract_flags(input: &ComponentMetaInput<'_>) -> ComponentMetaFlags {
-    let has_inherit_attrs_false = input
-        .macros
-        .iter()
-        .any(|m| m.kind == AnalyzedMacroKind::DefineOptions && m.has_inherit_attrs_false);
+fn extract_flags(input: &ComponentMetaInput<'_>) -> (ComponentMetaFlags, bool) {
+    let (has_inherit_attrs_false, options_member_free) = input.macros.iter().fold(
+        (false, input.options_api.is_none()),
+        |(inherit, member_free), m| {
+            if m.kind == AnalyzedMacroKind::DefineOptions {
+                (
+                    inherit || m.has_inherit_attrs_false,
+                    member_free && m.runtime_members_fully_enumerated,
+                )
+            } else {
+                (inherit, member_free)
+            }
+        },
+    );
 
     let flags = input.analysis_flags;
 
-    ComponentMetaFlags {
-        async_setup: flags.contains(AnalysisFlags::ASYNC_SETUP),
-        has_reactive_state: flags.contains(AnalysisFlags::HAS_REACTIVE_STATE),
-        has_computed: flags.contains(AnalysisFlags::HAS_COMPUTED),
-        has_watchers: flags.contains(AnalysisFlags::HAS_WATCHERS),
-        has_lifecycle_hooks: flags.contains(AnalysisFlags::HAS_LIFECYCLE_HOOKS),
-        has_provide: flags.contains(AnalysisFlags::HAS_PROVIDE),
-        has_inject: flags.contains(AnalysisFlags::HAS_INJECT),
-        has_inherit_attrs_false: flags.contains(AnalysisFlags::HAS_INHERIT_ATTRS_FALSE)
-            || has_inherit_attrs_false,
-        has_store_usage: !input.store_usages.is_empty(),
-        // D123 — analysis itself has no view of lowering failures, so
-        // the field is emitted `false` here. No downstream production
-        // path flips it today; macro-impacting lowering failures are
-        // surfaced through the structured `macro_expansion_diagnostics`
-        // entries rather than this flag.
-        has_macro_failure: false,
-    }
+    (
+        ComponentMetaFlags {
+            async_setup: flags.contains(AnalysisFlags::ASYNC_SETUP),
+            has_reactive_state: flags.contains(AnalysisFlags::HAS_REACTIVE_STATE),
+            has_computed: flags.contains(AnalysisFlags::HAS_COMPUTED),
+            has_watchers: flags.contains(AnalysisFlags::HAS_WATCHERS),
+            has_lifecycle_hooks: flags.contains(AnalysisFlags::HAS_LIFECYCLE_HOOKS),
+            has_provide: flags.contains(AnalysisFlags::HAS_PROVIDE),
+            has_inject: flags.contains(AnalysisFlags::HAS_INJECT),
+            has_inherit_attrs_false: flags.contains(AnalysisFlags::HAS_INHERIT_ATTRS_FALSE)
+                || has_inherit_attrs_false,
+            has_store_usage: !input.store_usages.is_empty(),
+            // D123 — analysis itself has no view of lowering failures, so
+            // the field is emitted `false` here. No downstream production
+            // path flips it today; macro-impacting lowering failures are
+            // surfaced through the structured `macro_expansion_diagnostics`
+            // entries rather than this flag.
+            has_macro_failure: false,
+        },
+        options_member_free,
+    )
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2998,22 +3012,31 @@ fn component_domain_guarantees(
     evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     macros: &[AnalyzedMacro],
     resolved_macros: &[ResolvedMacroInput],
+    template: Option<&verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
+    options_member_free: bool,
 ) -> verter_session_query::analysis::component_meta::ComponentDomainGuarantees {
     use verter_session_query::analysis::component_meta::{
-        ComponentDomainGuarantees, MetadataFactGuarantee,
+        ComponentDomainGuarantees, MetadataFactGuarantee, PublicInstanceEnumeration,
     };
     fn lane(
+        fully_enumerated: &mut bool,
+        input_enumerated: bool,
         macros: &[AnalyzedMacro],
         kind: AnalyzedMacroKind,
         rows: Option<&[verter_session_query::analysis::type_expand::ExpandedMacroObjectShape]>,
         props: Option<&[verter_session_query::analysis::type_expand::ExpandedMacroProps]>,
     ) -> MetadataFactGuarantee {
+        *fully_enumerated = input_enumerated;
         let mut result = MetadataFactGuarantee::complete(false);
         for (index, item) in macros
             .iter()
             .enumerate()
-            .filter(|(_, item)| item.kind == kind && item.is_type_based)
+            .filter(|(_, item)| item.kind == kind)
         {
+            if !item.is_type_based {
+                *fully_enumerated &= item.runtime_members_fully_enumerated;
+                continue;
+            }
             let next = rows
                 .and_then(|rows| {
                     rows.iter()
@@ -3029,7 +3052,7 @@ fn component_domain_guarantees(
                 })
                 .cloned()
                 .unwrap_or_default();
-            let _ = item;
+            *fully_enumerated &= next.kind == 1 && !next.open;
             result.kind = result.kind.max(next.kind);
             result.open |= next.open;
             for cause in next.causes {
@@ -3041,23 +3064,34 @@ fn component_domain_guarantees(
         result
     }
     fn producer_lane(
+        fully_enumerated: &mut bool,
         macros: &[AnalyzedMacro],
         resolved: &[ResolvedMacroInput],
         kind: AnalyzedMacroKind,
         claim: impl Fn(&ResolvedMacroInput) -> Option<&MetadataFactGuarantee>,
     ) -> MetadataFactGuarantee {
+        *fully_enumerated = true;
         let mut result = MetadataFactGuarantee::complete(false);
         for (index, mac) in macros
             .iter()
             .enumerate()
             .filter(|(_, mac)| mac.kind == kind)
         {
-            // Object-literal expose names are authoritative analyzer facts.
-            if kind == AnalyzedMacroKind::DefineExpose
-                && !mac.is_type_based
-                && !mac.expose_fields.is_empty()
-            {
-                result.absorb(&MetadataFactGuarantee::complete(false));
+            // Model value names are known, but modifiers props are not listed.
+            if kind == AnalyzedMacroKind::DefineModel {
+                *fully_enumerated = false;
+            }
+            if kind == AnalyzedMacroKind::DefineExpose && !mac.is_type_based {
+                *fully_enumerated &= mac.runtime_members_fully_enumerated;
+                result.absorb(&if mac.runtime_members_fully_enumerated {
+                    MetadataFactGuarantee::complete(false)
+                } else {
+                    MetadataFactGuarantee {
+                        kind: 2,
+                        causes: vec![103],
+                        open: true,
+                    }
+                });
                 continue;
             }
             let mut joined = None;
@@ -3065,41 +3099,55 @@ fn component_domain_guarantees(
                 MetadataFactGuarantee::absorb_option(&mut joined, claim(row).cloned());
             }
             let next = joined.unwrap_or_default();
+            *fully_enumerated &= next.kind == 1 && !next.open;
             result.absorb(&next);
         }
         result
     }
+    let mut enumeration = PublicInstanceEnumeration {
+        options_member_free,
+        ..Default::default()
+    };
     let mut guarantees = ComponentDomainGuarantees {
         props: lane(
+            &mut enumeration.props,
+            true,
             macros,
             AnalyzedMacroKind::DefineProps,
             None,
             evaluated.map(|value| value.define_props.as_slice()),
         ),
         events: lane(
+            &mut enumeration.emits,
+            true,
             macros,
             AnalyzedMacroKind::DefineEmits,
             evaluated.map(|value| value.define_emits.as_slice()),
             None,
         ),
         slots: lane(
+            &mut enumeration.slots,
+            template.is_none_or(|template| !template.has_dynamic_slot_outlet),
             macros,
             AnalyzedMacroKind::DefineSlots,
             evaluated.map(|value| value.define_slots.as_slice()),
             None,
         ),
         models: producer_lane(
+            &mut enumeration.models,
             macros,
             resolved_macros,
             AnalyzedMacroKind::DefineModel,
             |row| row.models_guarantee.as_ref(),
         ),
         exposed: producer_lane(
+            &mut enumeration.exposed,
             macros,
             resolved_macros,
             AnalyzedMacroKind::DefineExpose,
             |row| row.exposed_guarantee.as_ref(),
         ),
+        enumeration,
         accepted: AcceptedSurfaceCompleteness::Exact.guarantee(),
         public_instance:
             verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Exact
@@ -3108,12 +3156,15 @@ fn component_domain_guarantees(
     };
     for resolved in resolved_macros {
         if let Some(next) = &resolved.props_guarantee {
+            guarantees.enumeration.props &= next.kind == 1 && !next.open;
             guarantees.props.absorb(next);
         }
         if let Some(next) = &resolved.events_guarantee {
+            guarantees.enumeration.emits &= next.kind == 1 && !next.open;
             guarantees.events.absorb(next);
         }
         if let Some(next) = &resolved.slots_guarantee {
+            guarantees.enumeration.slots &= next.kind == 1 && !next.open;
             guarantees.slots.absorb(next);
         }
     }

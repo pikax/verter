@@ -199,8 +199,8 @@ fn extract_component_meta_from_inputs<M: verter_audit::observe::ObserveExec>(
         ));
     }
 
-    populate_public_instance_sidecar(&mut meta);
     meta.ordered_sfc_structure = ctx.ordered_sfc_structure(&canonical);
+    populate_public_instance_sidecar(&mut meta);
     meta
 }
 
@@ -385,9 +385,69 @@ fn build_public_instance_slots_member(
     }
 }
 
+/// Fixed `ComponentPublicInstance` built-ins excluded from the sidecar's
+/// completeness claim. `$slots` is excluded exactly when the sidecar has no
+/// slots; when slots exist the sidecar lists it instead.
+/// These are the Vue built-ins, not user-defined or Options API members.
+#[cfg(test)]
+pub(crate) const PUBLIC_INSTANCE_OMITTED_BUILTINS: &[&str] = &[
+    "$",
+    "$data",
+    "$props",
+    "$slots",
+    "$attrs",
+    "$refs",
+    "$root",
+    "$parent",
+    "$host",
+    "$emit",
+    "$el",
+    "$options",
+    "$forceUpdate",
+    "$nextTick",
+    "$watch",
+];
+
 pub(crate) fn populate_public_instance_sidecar(
     meta: &mut verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) {
+    use verter_language::parse_artifact::carrier_inventory::{
+        CarrierBlock, ScriptRole, SectionRole,
+    };
+    use verter_session_query::analysis::component_meta::{
+        MetadataFactGuarantee, PublicInstanceCompleteness, PublicInstanceStructuralFailure,
+    };
+
+    let structural_failure = if !meta.domain_guarantees.enumeration.options_member_free {
+        Some(PublicInstanceStructuralFailure::OptionsApiMembers)
+    } else if !meta
+        .ordered_sfc_structure
+        .as_ref()
+        .is_some_and(|structure| {
+            structure.inventory.blocks().iter().any(|block| {
+                matches!(
+                    block,
+                    CarrierBlock::Section {
+                        role: SectionRole::Script {
+                            role: ScriptRole::Setup,
+                            ..
+                        },
+                        ..
+                    }
+                )
+            })
+        })
+    {
+        Some(PublicInstanceStructuralFailure::NotScriptSetup)
+    } else {
+        None
+    };
+    // Unsupported component geometry uses the shared approximation cause.
+    let structural_claim = if structural_failure.is_none() {
+        MetadataFactGuarantee::complete(false)
+    } else {
+        PublicInstanceCompleteness::Partial.guarantee()
+    };
     let mut members = Vec::new();
 
     if !meta.slots.is_empty() {
@@ -432,19 +492,20 @@ pub(crate) fn populate_public_instance_sidecar(
         Some(
             verter_session_query::analysis::component_meta::PublicInstanceAnalysis {
                 members,
+                structural_failure,
                 completeness:
                     verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Partial,
             },
         )
     };
-    meta.domain_guarantees.public_instance = meta
-        .public_instance
-        .as_ref()
-        .map_or(
-            verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Exact,
-            |instance| instance.completeness,
-        )
-        .guarantee();
+    // A nonempty cached sidecar never claims Exact. The terminal sink owns
+    // that decision after merging its measured materialization completeness.
+    meta.domain_guarantees.public_instance =
+        if meta.public_instance.is_some() && structural_failure.is_none() {
+            PublicInstanceCompleteness::Partial.guarantee()
+        } else {
+            structural_claim
+        };
 }
 
 /// Internal carrier for one component-meta extraction. Bundles the projected

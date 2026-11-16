@@ -824,6 +824,60 @@ pub(crate) fn build_component_meta_output<M: verter_audit::observe::ObserveExec>
     )?;
     let completeness = completeness
         .merge(verter_type_engine::request_context::current_cold_compute_completeness());
+    // Structural eligibility is producer-owned. Final exactness is delivery-local:
+    // materialization can fail even when the cached enumeration was eligible.
+    let guarantees = &analysis.domain_guarantees;
+    let enumeration = &guarantees.enumeration;
+    let failed_domain = [
+        (enumeration.props, &guarantees.props),
+        (enumeration.emits, &guarantees.events),
+        (enumeration.slots, &guarantees.slots),
+        (enumeration.exposed, &guarantees.exposed),
+        (enumeration.models, &guarantees.models),
+    ]
+    .into_iter()
+    .find(|(enumerated, claim)| !enumerated || claim.kind != 1 || claim.open)
+    .map(|(_, claim)| claim.clone());
+    if let Some(claim) = failed_domain.as_ref() {
+        let mut failure =
+            verter_session_query::analysis::component_meta::PublicInstanceCompleteness::Partial
+                .guarantee();
+        if !claim.causes.is_empty() {
+            failure.causes.clone_from(&claim.causes);
+        }
+        analysis.domain_guarantees.public_instance = failure;
+    }
+    let structurally_complete = failed_domain.is_none()
+        && analysis.public_instance.as_ref().map_or(
+            analysis.domain_guarantees.public_instance.kind == 1,
+            |instance| instance.structural_failure.is_none(),
+        );
+    let exact = structurally_complete && !completeness.is_partial();
+    use verter_session_query::analysis::component_meta::PublicInstanceCompleteness;
+    if structurally_complete {
+        analysis.domain_guarantees.public_instance = if exact {
+            PublicInstanceCompleteness::Exact.guarantee()
+        } else {
+            crate::typeinfo::surface_resolution::metadata_guarantee(
+                verter_type_engine::semantic_query::FactStatus::approximate(completeness.reasons()),
+                true,
+            )
+        };
+    } else if completeness.is_partial() {
+        analysis.domain_guarantees.public_instance.absorb(
+            &crate::typeinfo::surface_resolution::metadata_guarantee(
+                verter_type_engine::semantic_query::FactStatus::approximate(completeness.reasons()),
+                true,
+            ),
+        );
+    }
+    if let Some(instance) = &mut analysis.public_instance {
+        instance.completeness = if exact {
+            PublicInstanceCompleteness::Exact
+        } else {
+            PublicInstanceCompleteness::Partial
+        };
+    }
     let adapter_id = ctx
         .ensure_indexed_ready_serve(scope_canonical_id)
         .and_then(|serve| {
