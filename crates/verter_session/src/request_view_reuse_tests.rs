@@ -682,11 +682,12 @@ fn completion_writers_publish_presence_under_the_map_lock_before_insertion() {
 #[test]
 fn repeated_completion_of_one_content_version_promotes_once() {
     let (host, canonical) = small_host_with_one_script();
+    // Capture before lazy publication so these facts need request completion.
+    let view = host.resolver_store_view_read().into_owned_view();
     assert!(
         host.ensure_indexed_ready_serve(&canonical).is_some(),
         "the script must index"
     );
-    let view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
     let ctx = HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
         &host,

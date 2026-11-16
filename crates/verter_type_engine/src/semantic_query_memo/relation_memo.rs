@@ -143,7 +143,7 @@ impl SemanticGraphStore {
             self_root_canonicals: Arc::clone(&entry.self_root_canonicals),
             validated_at_generation: entry.validated_at_generation,
             admission_seq: entry.admission_seq,
-            cost_receipt: Arc::clone(&entry.cost_receipt),
+            cost_receipt: Arc::clone(&entry.evidence.cost_receipt),
         })
     }
 

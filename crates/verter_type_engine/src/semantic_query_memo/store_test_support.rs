@@ -285,6 +285,9 @@ impl SemanticGraphStore {
             return 0;
         };
         let mut entry = MemoEntry {
+            evidence: super::family::MemoEvidence::new(super::scc_publish::fixture_receipt(
+                &family,
+            )),
             lease,
             result,
             read_set_signature: read_set_signature.clone(),
@@ -295,7 +298,6 @@ impl SemanticGraphStore {
             retention: None,
             validated_at_generation,
             admission_seq,
-            cost_receipt: super::scc_publish::fixture_receipt(&family),
         };
         // A seed is charged like every published candidate; one the account
         // refuses is not seeded.
@@ -423,7 +425,7 @@ impl SemanticGraphStore {
             self_root_canonicals: Arc::clone(&entry.self_root_canonicals),
             validated_at_generation: entry.validated_at_generation,
             admission_seq: entry.admission_seq,
-            cost_receipt: Arc::clone(&entry.cost_receipt),
+            cost_receipt: Arc::clone(&entry.evidence.cost_receipt),
         })
     }
 

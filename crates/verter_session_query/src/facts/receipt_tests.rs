@@ -83,6 +83,7 @@ fn a_digest_collision_never_makes_two_evidences_equal() {
     let a = ResultReceipt::new(vec![whole("/a.ts", 1)]);
     let forged = ResultReceipt(Arc::new(ResultEvidence {
         facts: Arc::from(vec![whole("/z.ts", 9)]),
+        validation_stamp: Default::default(),
         digest: a.digest(),
         canonicals: ResultReceipt::new(vec![whole("/z.ts", 9)])
             .canonicals()
@@ -165,6 +166,7 @@ fn equal_chains_assembled_apart_compare_without_native_recursion() {
                         None => built,
                         Some(digests) => ResultReceipt(Arc::new(ResultEvidence {
                             facts: Arc::clone(&built.0.facts),
+                            validation_stamp: Default::default(),
                             digest: digests[level as usize],
                             canonicals: built.0.canonicals.clone(),
                             aggregated: Arc::clone(&built.0.aggregated),

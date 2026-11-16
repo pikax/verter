@@ -624,6 +624,7 @@ const flag = defineModel('flag', { default: false })
     // default value the same way as the typed form.
     const flagProp = meta.props.find((p) => p.name === "flag");
     expect(flagProp).toBeDefined();
+    expect(flagProp!.type).toBe("any");
     expect(flagProp!.required).toBe(false);
     expect(flagProp!.default).toBe("false");
 
@@ -632,6 +633,7 @@ const flag = defineModel('flag', { default: false })
     expect(meta.events.find((e) => e.name === "update:required")).toBeDefined();
     expect(meta.events.find((e) => e.name === "update:defaulted")).toBeDefined();
     expect(meta.events.find((e) => e.name === "update:flag")).toBeDefined();
+    expect(meta.events.find((e) => e.name === "update:flag")!.type).toBe("[any]");
 
     // ── Native structured surface (`_verter.props`): the descriptors stay
     //    BARE `T` (never a synthesized `T | undefined` union) plus the typed
@@ -663,9 +665,16 @@ const flag = defineModel('flag', { default: false })
 
     const nativeFlag = nativeProps.find((p) => p.name === "flag");
     expect(nativeFlag).toBeDefined();
+    expect(nativeFlag!.typeFact).toEqual({ kind: "complete", value: undefined });
+    expect(nativeFlag).not.toHaveProperty("type");
     expect(nativeFlag!.required).toBe(false);
     expect(nativeFlag!.hasDefault).toBe(true);
     expect(nativeFlag!.default).toBe("false");
+
+    const nativeFlagUpdate = meta._verter!.events.find((event) => event.name === "update:flag");
+    expect(nativeFlagUpdate).toBeDefined();
+    expect(nativeFlagUpdate!.typeFact).toEqual({ kind: "complete", value: undefined });
+    expect(nativeFlagUpdate).not.toHaveProperty("payload");
 
     // Negative: no native descriptor carries a decorated undefined arm.
     for (const prop of [nativeModel!, nativeRequired!, nativeDefaulted!]) {

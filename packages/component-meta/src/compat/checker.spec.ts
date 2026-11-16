@@ -32,7 +32,9 @@ import {
   unknown,
 } from "@verter/type-ir";
 import { typeExprToDescriptor } from "../type-expr-bridge.js";
-import type { PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
+import type { ComponentMeta, PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
+import type { FactResult } from "../facts.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 
 let nextProjectRootId = 1;
 
@@ -1252,6 +1254,61 @@ describe("mapExposedMeta", () => {
 });
 
 describe("mapComponentMeta", () => {
+  it("omits unavailable types but keeps unannotated members as any", () => {
+    const members: Array<{ name: string; typeFact: FactResult<TypeDescriptor | undefined> }> = [
+      { name: "unavailable", typeFact: { kind: "unavailable", causes: [102] } },
+      { name: "flag", typeFact: { kind: "complete", value: undefined } },
+    ];
+    const meta: ComponentMeta = {
+      ...nativeMetaPayload("Input.vue"),
+      componentName: "Input",
+      resultCompleteness: { kind: "complete" },
+      acceptedSurfaceCompleteness: "exact",
+      orderedSfcStructure: {
+        ...nativeMetaPayload("Input.vue").orderedSfcStructure,
+        schemaVersion: 1,
+      },
+      props: members.map((member) => ({
+        ...member,
+        required: false,
+        hasDefault: true,
+        default: "false",
+      })),
+      events: members.map((member) => ({ ...member, name: `update:${member.name}` })),
+      slots: [{ name: "default", isScoped: true, bindings: members }],
+      exposed: members,
+    };
+
+    const result = mapComponentMeta(meta);
+
+    expect(result.props).toHaveLength(1);
+    expect(result.props[0]).toMatchObject({
+      name: "flag",
+      type: "any",
+      schema: "any",
+      required: false,
+      default: "false",
+    });
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0]).toMatchObject({
+      name: "update:flag",
+      type: "[any]",
+      schema: ["any"],
+    });
+    expect(result.slots[0].type).toBe("{ flag: any; }");
+    expect(result.slots[0].schema).toMatchObject({ schema: { flag: { type: "any" } } });
+    expect(result.slots[0].schema).not.toHaveProperty("schema.unavailable");
+    expect(result.exposed).toHaveLength(1);
+    expect(result.exposed[0]).toMatchObject({ name: "flag", type: "any", schema: "any" });
+
+    expect(result._verter).toBe(meta);
+    expect(meta.props?.[1].typeFact).toEqual({ kind: "complete", value: undefined });
+    expect(meta.props?.[1]).not.toHaveProperty("type");
+    expect(meta.events?.[1]).not.toHaveProperty("payload");
+    expect(meta.slots?.[0].bindings[1]).not.toHaveProperty("type");
+    expect(meta.exposed?.[1]).not.toHaveProperty("type");
+  });
+
   it("produces VolarComponentMeta shape with _verter", () => {
     const meta = {
       filePath: "test.vue",

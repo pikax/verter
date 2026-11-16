@@ -79,6 +79,14 @@ absence remains a complete fact with an undefined value. Unavailable semantic
 lanes are absent on both decoded native results and public `ComponentMeta`;
 their guarantees and original causes remain on `facts`. Event rows carry no
 `hasValidator` or `isDeclared` flags. Healthy siblings remain usable.
+Compat omits a member only when its type fact is unavailable (props also need
+a known requiredness boolean). An unannotated member's complete fact with no
+value is definite absence of an authored type: TypeScript treats it as `any`.
+`compat/checker.ts::unannotatedTypeAsAny` applies that rule to props, event
+payloads, slot bindings and exposed members. An untyped model's update event
+therefore remains in compat with the single-value payload tuple `[any]`, as
+Vue's model helper emits one value. Native rows keep their complete-absent
+`typeFact` and have no `type` or `payload` key; compat never mutates them.
 The JSON serializer uses the same borrowed fact projection as protobuf; it owns
 no parallel member store. Refusal delivery carries its original machine causes
 independently of recovery facets. Same-profile replay does not become complete;
