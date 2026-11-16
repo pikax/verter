@@ -19,6 +19,8 @@ use verter_protocol::verter::v1::{
     graph_closure_policy, type_info_graph_request, type_info_graph_response,
 };
 
+mod graph;
+
 /// Build a well-formed framework-surface request envelope for a default
 /// export component at `canonical`, read under the host-admitted
 /// `framework_profile` (schema 11: a reference the host advertised).
@@ -126,6 +128,7 @@ fn project_payload(payload: &FrameworkSurfacePayload) -> serde_json::Value {
         "framework": framework,
         "frameworkProfile": framework_profile,
         "surfaces": surfaces,
+        "graph": payload.graph.as_ref().map(|g| graph::project_graph(g, strings)),
     })
 }
 
@@ -145,20 +148,24 @@ fn project_kind_entry(entry: &FrameworkSurfaceKindEntry, strings: &[String]) -> 
         .map(|k| k.as_str_name().to_string())
         .unwrap_or_else(|_| format!("UNKNOWN({})", entry.kind));
 
-    let (support, diagnostics) = match &entry.status {
+    let (support, exactness, diagnostics) = match &entry.status {
         Some(status) => {
             let support = FrameworkSurfaceKindSupport::try_from(status.support)
                 .map(|s| s.as_str_name().to_string())
                 .unwrap_or_else(|_| format!("UNKNOWN({})", status.support));
-            let diags: Vec<String> = status
+            let exactness = wire::Exactness::try_from(status.exactness)
+                .map(|e| e.as_str_name().to_string())
+                .unwrap_or_else(|_| format!("UNKNOWN({})", status.exactness));
+            let diags: Vec<Option<&str>> = status
                 .diagnostics
                 .iter()
-                .map(|d| resolve_string(strings, d.message_name_id).to_string())
+                .map(|d| resolve_string(strings, d.message_name_id))
                 .collect();
-            (support, diags)
+            (support, Some(exactness), diags)
         }
         None => (
             "FRAMEWORK_SURFACE_KIND_SUPPORT_UNSPECIFIED".to_string(),
+            None,
             vec![],
         ),
     };
@@ -171,6 +178,7 @@ fn project_kind_entry(entry: &FrameworkSurfaceKindEntry, strings: &[String]) -> 
                 "name": resolve_string(strings, m.name_id),
                 "required": m.required,
                 "readonly": m.readonly,
+                "typeNodeId": m.type_node_id,
             });
             // Schema 4 add-only fields: the member's runtime DEFAULT source text
             // and its resolver-known declaration ORIGIN, surfaced only when
@@ -179,7 +187,7 @@ fn project_kind_entry(entry: &FrameworkSurfaceKindEntry, strings: &[String]) -> 
             if let Some(default_id) = m.default_value_id {
                 object.insert(
                     "default".to_string(),
-                    serde_json::Value::String(resolve_string(strings, default_id).to_string()),
+                    serde_json::json!(resolve_string(strings, default_id)),
                 );
             }
             if let Some(origin) = m.origin.as_ref() {
@@ -192,6 +200,7 @@ fn project_kind_entry(entry: &FrameworkSurfaceKindEntry, strings: &[String]) -> 
     serde_json::json!({
         "kind": kind,
         "support": support,
+        "exactness": exactness,
         "members": members,
         "diagnostics": diagnostics,
     })
@@ -261,7 +270,7 @@ fn insert_optional_string(
     if let Some(id) = id {
         obj.insert(
             key.to_string(),
-            serde_json::Value::String(resolve_string(strings, id).to_string()),
+            serde_json::json!(resolve_string(strings, id)),
         );
     }
 }
@@ -332,11 +341,9 @@ fn project_error_kind(error: &TypeInfoRequestError) -> serde_json::Value {
     }
 }
 
-/// Resolve an interned string-table index to its string, or a placeholder
-/// when out of range (a structurally-malformed payload would do this; the
-/// projection never panics on a bad index).
-fn resolve_string(strings: &[String], id: u32) -> &str {
-    strings.get(id as usize).map(String::as_str).unwrap_or("")
+/// Resolve an interned string-table index. An invalid id renders as JSON null.
+fn resolve_string(strings: &[String], id: u32) -> Option<&str> {
+    strings.get(id as usize).map(String::as_str)
 }
 
 #[cfg(test)]
@@ -385,16 +392,68 @@ mod tests {
 
     #[test]
     fn project_payload_resolves_member_names_through_the_string_table() {
+        use verter_protocol::verter::v1 as graph_wire;
         // A payload with one PROPS surface carrying a member whose name
         // interns at index 1 must project that name, not the raw index.
-        let payload = FrameworkSurfacePayload {
+        let mut payload = FrameworkSurfacePayload {
             schema_version: TYPEINFO_GRAPH_SCHEMA_VERSION,
             selector: None,
             framework: FrameworkTag::Vue as i32,
             graph: Some(wire::SemanticTypeGraph {
                 strings: Some(wire::StringTable {
-                    entries: vec!["".to_string(), "count".to_string()],
+                    entries: vec!["".to_string(), "count".to_string(), "items".to_string()],
                 }),
+                nodes: vec![
+                    wire::TypeNode {
+                        kind: Some(wire::TypeNodeKind::Tuple(wire::TupleNode {
+                            readonly: true,
+                            elements: vec![wire::TupleElement {
+                                label_name_id: 2,
+                                value_node_id: 1,
+                                optional: true,
+                                rest: true,
+                            }],
+                        })),
+                    },
+                    wire::TypeNode {
+                        kind: Some(wire::TypeNodeKind::Object(wire::ObjectNode {
+                            index_signatures: vec![wire::IndexSignature {
+                                key_kind: wire::IndexKeyKind::String as i32,
+                                value_node_id: 0,
+                                readonly: true,
+                            }],
+                            ..Default::default()
+                        })),
+                    },
+                    wire::TypeNode {
+                        kind: Some(wire::TypeNodeKind::Primitive(wire::PrimitiveNode {
+                            kind: wire::PrimitiveKind::Number as i32,
+                        })),
+                    },
+                ],
+                symbols: vec![wire::SymbolNode {
+                    name_id: 2,
+                    ..Default::default()
+                }],
+                signatures: vec![wire::Signature {
+                    return_type_node_id: 2,
+                    ..Default::default()
+                }],
+                root_ids: vec![0],
+                relation_proofs: vec![graph_wire::GraphRelationProofEntry {
+                    kind: Some(graph_wire::graph_relation_proof_entry::Kind::Assignable(
+                        graph_wire::GraphRelationDerivation {
+                            sub_derivations: vec![graph_wire::GraphSubRelationRef {
+                                source_node_id: 0,
+                                target_node_id: 2,
+                                position_kind: graph_wire::GraphSubRelationPositionKind::Parameter
+                                    as i32,
+                                position_name_id: 0,
+                                position_index: 1,
+                            }],
+                        },
+                    )),
+                }],
                 ..Default::default()
             }),
             surfaces: vec![FrameworkSurfaceKindEntry {
@@ -408,8 +467,8 @@ mod tests {
                     origin: None,
                 }],
                 status: Some(wire::FrameworkSurfaceKindStatus {
-                    support: FrameworkSurfaceKindSupport::Supported as i32,
-                    exactness: 0,
+                    support: FrameworkSurfaceKindSupport::Partial as i32,
+                    exactness: wire::Exactness::Partial as i32,
                     diagnostics: vec![],
                 }),
             }],
@@ -418,12 +477,48 @@ mod tests {
         assert_eq!(json["framework"], "FRAMEWORK_TAG_VUE");
         let surface = &json["surfaces"][0];
         assert_eq!(surface["kind"], "FRAMEWORK_SURFACE_KIND_PROPS");
-        assert_eq!(
-            surface["support"],
-            "FRAMEWORK_SURFACE_KIND_SUPPORT_SUPPORTED"
-        );
+        assert_eq!(surface["support"], "FRAMEWORK_SURFACE_KIND_SUPPORT_PARTIAL");
+        assert_eq!(surface["exactness"], "GRAPH_EXACTNESS_PARTIAL");
+        assert_eq!(surface["members"][0]["typeNodeId"], 0);
         assert_eq!(surface["members"][0]["name"], "count");
         assert_eq!(surface["members"][0]["required"], true);
+        assert_eq!(
+            json["graph"]["nodes"][0],
+            serde_json::json!({
+                "kind": "tuple", "readonly": true,
+                "elements": [{ "labelNameId": 2, "label": "items", "valueNodeId": 1, "optional": true, "rest": true }],
+            })
+        );
+        assert_eq!(
+            json["graph"]["nodes"][1]["indexSignatures"],
+            serde_json::json!([
+                { "keyKind": "GRAPH_INDEX_KEY_KIND_STRING", "valueNodeId": 0, "readonly": true }
+            ])
+        );
+        assert_eq!(
+            json["graph"]["nodes"][2],
+            serde_json::json!({
+                "kind": "primitive", "primitiveKind": "GRAPH_PRIMITIVE_KIND_NUMBER",
+            })
+        );
+        assert_eq!(json["graph"]["symbols"][0]["name"], "items");
+        assert_eq!(json["graph"]["signatures"][0]["returnTypeNodeId"], 2);
+        assert_eq!(json["graph"]["rootIds"], serde_json::json!([0]));
+        let proof = &json["graph"]["relationProofs"][0]["subDerivations"][0];
+        assert_eq!(
+            proof["positionKind"],
+            "GRAPH_SUB_RELATION_POSITION_KIND_PARAMETER"
+        );
+        assert_eq!(proof.get("positionName"), Some(&serde_json::Value::Null));
+
+        payload.graph = None;
+        payload.surfaces[0].status = None;
+        let absent = project_payload(&payload);
+        assert_eq!(absent.get("graph"), Some(&serde_json::Value::Null));
+        assert_eq!(
+            absent["surfaces"][0].get("exactness"),
+            Some(&serde_json::Value::Null)
+        );
     }
 
     #[test]
@@ -473,6 +568,11 @@ mod tests {
                     original_name_id: None,
                     alias_name_id: None,
                 },
+                wire::FrameworkSurfaceOriginHop {
+                    kind: wire::FrameworkSurfaceOriginHopKind::Import as i32,
+                    specifier_id: Some(99),
+                    ..Default::default()
+                },
             ],
         };
 
@@ -497,14 +597,12 @@ mod tests {
             );
         }
 
-        // IMPORT hop: from + importedName resolved; specifier OMITTED.
+        // IMPORT hop: from + importedName resolved; specifier omitted.
         let import = &chain[1];
         assert_eq!(import["kind"], "FRAMEWORK_SURFACE_ORIGIN_HOP_KIND_IMPORT");
         assert_eq!(import["from"], "/lib/props.ts");
         assert_eq!(import["importedName"], "Size");
-        assert!(
-            import.get("specifier").is_none(),
-            "an IMPORT hop with no recorded specifier must omit it, not fabricate entry 0"
-        );
+        assert!(import.get("specifier").is_none());
+        assert_eq!(chain[2].get("specifier"), Some(&serde_json::Value::Null));
     }
 }
