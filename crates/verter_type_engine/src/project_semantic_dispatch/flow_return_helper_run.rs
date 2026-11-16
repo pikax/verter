@@ -2,6 +2,57 @@
 
 use super::*;
 
+/// Answer every wait of an owned reading operation where its caller cannot suspend.
+pub(super) fn settle_now<T>(
+    mut step: ReadStep<T>,
+    mut answer: impl FnMut(ReadWait) -> ReadDelivery,
+    mut resume: impl FnMut(ReadDelivery) -> ReadStep<T>,
+) -> T {
+    loop {
+        match step {
+            ReadStep::Ready(value) => return value,
+            ReadStep::Wait(wait) => step = resume(answer(wait)),
+        }
+    }
+}
+
+pub(super) fn signature_list_in_place(
+    dispatch: &impl FlowDemandDriver,
+    canonical: &str,
+    subject: SemanticNodeId,
+    kind: SignatureKind,
+) -> Option<Vec<SemanticNodeId>> {
+    let (mut list, wait) = dispatch.request_signature_list(subject, kind);
+    settle_now(
+        ReadStep::Wait(wait),
+        |wait| dispatch.read_in_place(wait, canonical),
+        |delivery| dispatch.deliver_signature_list(&mut list, delivery),
+    )
+}
+
+pub(super) fn signature_buckets_in_place(
+    dispatch: &impl FlowDemandDriver,
+    canonical: &str,
+    subject: SemanticNodeId,
+) -> Option<(Vec<SemanticNodeId>, Vec<SemanticNodeId>)> {
+    let calls = signature_list_in_place(dispatch, canonical, subject, SignatureKind::Call)?;
+    let constructs =
+        signature_list_in_place(dispatch, canonical, subject, SignatureKind::Construct)?;
+    Some((calls, constructs))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// Exercise the native bucket reader with a graph-only subject.
+    pub fn flow_signature_buckets_for_tests(
+        &self,
+        canonical: &str,
+        subject: SemanticNodeId,
+    ) -> Option<(Vec<SemanticNodeId>, Vec<SemanticNodeId>)> {
+        signature_buckets_in_place(self, canonical, subject)
+    }
+}
+
 /// A helper's own stack, kept at the read it requests.
 pub(super) struct HelperRun<'e> {
     frames: Vec<HelperFrame<'e>>,
@@ -9,6 +60,10 @@ pub(super) struct HelperRun<'e> {
 
 pub(super) enum HelperFrame<'e> {
     MemberPath(MemberPathFrame<'e>),
+    List(
+        Box<super::super::continuation_stages::SignatureListRead>,
+        Option<ReadWait>,
+    ),
 }
 
 /// Only helpers that read, or call a reading helper, have frames. Pure
@@ -44,12 +99,21 @@ pub(super) struct NumericMember<'e> {
 
 pub(super) enum HelperValue {
     Node(Option<SemanticNodeId>),
+    List(Option<Box<[SemanticNodeId]>>),
 }
 
 impl HelperValue {
     pub(super) fn node(self) -> Option<SemanticNodeId> {
         match self {
             Self::Node(node) => node,
+            Self::List(_) => unreachable!("a member path answers a node"),
+        }
+    }
+
+    fn list(self) -> Option<Vec<SemanticNodeId>> {
+        match self {
+            Self::List(nodes) => nodes.map(|nodes| nodes.into_vec()),
+            Self::Node(_) => unreachable!("a signature list answers signature nodes"),
         }
     }
 }
@@ -60,6 +124,10 @@ pub(super) enum AfterHelper<'e> {
         member: &'e Arc<str>,
         span: verter_span::Span,
     },
+    ClassBase(
+        Box<class_expression::ClassEvalFrame<'e>>,
+        Box<class_expression::ClassBaseRead>,
+    ),
 }
 
 pub(super) struct HelperWait<'e> {
@@ -103,6 +171,20 @@ impl<'e> HelperRun<'e> {
 }
 
 impl<'e> HelperWait<'e> {
+    pub(super) fn class_base(
+        frame: Box<class_expression::ClassEvalFrame<'e>>,
+        base: class_expression::ClassBaseWait,
+    ) -> Self {
+        let class_expression::ClassBaseWait { base, list, wait } = base;
+        Self {
+            run: HelperRun {
+                frames: vec![HelperFrame::List(Box::new(list), Some(wait))],
+            },
+            then: AfterHelper::ClassBase(frame, Box::new(base)),
+            wait: None,
+        }
+    }
+
     pub(super) fn member_of(
         object: SemanticNodeId,
         member: &'e Arc<str>,
@@ -134,12 +216,40 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         delivered: Option<ReadDelivery>,
     ) -> ReadStep<HelperValue> {
         use MemberPathFrame as Frame;
-        let mut value = delivered.map(ReadDelivery::node);
+        let mut delivered = delivered;
+        let mut value = if matches!(run.frames.last(), Some(HelperFrame::List(..))) {
+            None
+        } else {
+            delivered.take().map(ReadDelivery::node)
+        };
         loop {
-            let Some(HelperFrame::MemberPath(frame)) = run.frames.pop() else {
+            let Some(frame) = run.frames.pop() else {
                 return ReadStep::Ready(HelperValue::Node(
                     value.expect("a finished helper has a value"),
                 ));
+            };
+            let frame = match frame {
+                HelperFrame::List(mut list, first) => {
+                    let step = match first {
+                        Some(wait) => ReadStep::Wait(wait),
+                        None => self.dispatch.deliver_signature_list(
+                            &mut list,
+                            delivered
+                                .take()
+                                .expect("the list receives its requested read"),
+                        ),
+                    };
+                    return match step {
+                        ReadStep::Wait(wait) => {
+                            run.frames.push(HelperFrame::List(list, None));
+                            ReadStep::Wait(wait)
+                        }
+                        ReadStep::Ready(nodes) => {
+                            ReadStep::Ready(HelperValue::List(nodes.map(Vec::into_boxed_slice)))
+                        }
+                    };
+                }
+                HelperFrame::MemberPath(frame) => frame,
             };
             let bind_this = !matches!(&frame, Frame::Unbound(..));
             match frame {
@@ -349,17 +459,23 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         self.member_path_in_place(MemberPathFrame::Read(base, path))
     }
 
-    fn after_helper(
+    fn after_helper_on_run<'e>(
         &mut self,
-        then: AfterHelper<'_>,
+        run: &mut ExprRun<'e>,
+        then: AfterHelper<'e>,
         value: HelperValue,
-    ) -> Positional<SemanticNodeId> {
+        suspend: bool,
+    ) -> ResumedCall {
         match then {
             AfterHelper::MemberOf {
                 object,
                 member,
                 span,
-            } => self.finish_member_of(object, member, span, value.node()),
+            } => ResumedCall::Value(self.finish_member_of(object, member, span, value.node())),
+            AfterHelper::ClassBase(mut frame, base) => {
+                let step = self.class_base_delivered(&mut frame, *base, value.list());
+                self.class_step_on_run(run, *frame, step, suspend)
+            }
         }
     }
 
@@ -374,7 +490,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         let value = self.settle_now(first, |this, delivery| {
             this.run_helper(&mut helper.run, Some(delivery))
         });
-        self.after_helper(helper.then, value)
+        self.finish_member_of(object, member, span, value.node())
     }
 
     pub(super) fn helper_step_on_run<'e>(
@@ -383,7 +499,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         mut helper: Box<HelperWait<'e>>,
         delivered: Option<ReadDelivery>,
         suspend: bool,
-    ) -> ReadStep<Positional<SemanticNodeId>> {
+    ) -> ResumedCall {
         let first = self.run_helper(&mut helper.run, delivered);
         if suspend && body_requests_reads() {
             match first {
@@ -394,15 +510,17 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                         .take()
                         .expect("a helper requests its waiting read once");
                     run.waiting.push(Waiting::Read(ReadSite::Helper(helper)));
-                    ReadStep::Wait(wait)
+                    ResumedCall::Wait(BodyWait::Read(wait))
                 }
-                ReadStep::Ready(value) => ReadStep::Ready(self.after_helper(helper.then, value)),
+                ReadStep::Ready(value) => {
+                    self.after_helper_on_run(run, helper.then, value, suspend)
+                }
             }
         } else {
             let value = self.settle_now(first, |this, delivery| {
                 this.run_helper(&mut helper.run, Some(delivery))
             });
-            ReadStep::Ready(self.after_helper(helper.then, value))
+            self.after_helper_on_run(run, helper.then, value, suspend)
         }
     }
 }

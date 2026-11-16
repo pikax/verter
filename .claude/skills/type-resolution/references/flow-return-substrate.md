@@ -68,6 +68,21 @@ Async generator wrapping and awaited operands evaluated outside the expression
 run retain their direct reads. Key construction and result finishing are shared
 by both routes.
 
+Signature lists outside call-value computation use `SignatureListRead` through
+`request_signature_list` and `deliver_signature_list` as well. Class heritage
+retains its prepared base and type arguments at `HelperFrame::List` on the
+expression stack, then finishes the base and resumes the class members. Native
+guard, statement-effect, iterator, contextual-method and prelude consumers settle
+the same list continuation in place, attributed as `read_in_place / signature_list`.
+Bucket consumers finish the call list before requesting the construct list and
+stop if the call list is unsettled. They preserve declaration order.
+
+An unsettled composite is named in the current signature epoch. If that epoch
+retires while its result request waits, the producer refuses the retired handle
+with `StaleHandle`; the list continuation copies the remaining descriptors into
+the current epoch and requests the result again, without rediscovering the list.
+A successful result already delivered through its lease remains consumable.
+
 Literal switch narrowing partitions the entering parent union once in
 `flow_return_branches.rs`. When every projected discriminant and case test is
 an exact concrete unit, each clause reuses its matching parent member(s), and

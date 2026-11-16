@@ -10,7 +10,7 @@ use verter_execution::sync_cell::SyncRefCell;
 
 use super::{
     signature_answer_is_frame_shadowed, FlowBinderEnv, FlowDemandDriver, FlowEvaluator,
-    FlowProductSubject, Positional,
+    FlowProductSubject, FlowReadDriver, Positional,
 };
 use crate::semantic_query::{
     AuthoredPropertyKey, PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember,
@@ -229,8 +229,24 @@ pub(super) enum ClassStep<'e> {
     Descend(&'e SliceExpr),
     /// This member function's signature.
     Nested(super::nested::NestedDemand),
+    /// The construct list of the prepared heritage value.
+    Base(Box<ClassBaseWait>),
     /// Nothing: the class's value.
     Done(Positional<SemanticNodeId>),
+}
+
+/// Heritage preparation retained while its construct list is read.
+pub(super) struct ClassBaseRead {
+    constructor: SemanticNodeId,
+    exact_source: Option<SemanticNodeId>,
+    settled: SemanticNodeId,
+    type_arguments: Vec<SemanticNodeId>,
+}
+
+pub(super) struct ClassBaseWait {
+    pub(super) base: ClassBaseRead,
+    pub(super) list: super::super::continuation_stages::SignatureListRead,
+    pub(super) wait: super::ReadWait,
 }
 
 /// Whether a member's value is a function evaluated after the others.
@@ -351,15 +367,30 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         // [`Self::eval_expr`] steps a class from its own stack; here the same
         // steps run with each child evaluated in place.
         let mut frame = self.class_eval_frame(class);
-        let mut delivered = None;
+        let mut step = self.class_eval_step(&mut frame, None);
         loop {
-            match self.class_eval_step(&mut frame, delivered.take()) {
+            step = match step {
                 ClassStep::Done(value) => return value,
-                ClassStep::Descend(child) => delivered = Some(self.eval_expr(child)),
-                ClassStep::Nested(demand) => {
-                    delivered = Some(Positional::Value(self.eval_nested_demand(demand)))
+                ClassStep::Descend(child) => {
+                    let value = self.eval_expr(child);
+                    self.class_eval_step(&mut frame, Some(value))
                 }
-            }
+                ClassStep::Nested(demand) => {
+                    let signature = self.eval_nested_demand(demand);
+                    self.class_eval_step(&mut frame, Some(Positional::Value(signature)))
+                }
+                ClassStep::Base(base) => {
+                    let ClassBaseWait {
+                        base,
+                        mut list,
+                        wait,
+                    } = *base;
+                    let nodes = self.settle_now(super::ReadStep::Wait(wait), |this, delivery| {
+                        this.dispatch.deliver_signature_list(&mut list, delivery)
+                    });
+                    self.class_base_delivered(&mut frame, base, nodes)
+                }
+            };
         }
     }
 
@@ -404,9 +435,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     }
 
     /// Step a class expression's evaluation until it needs its `extends`
-    /// value, a member initializer's value or a member function's signature
-    /// (whose body evaluates from the stack of evaluators), or is done, with
-    /// the child it asked for last `delivered`.
+    /// value, its base's construct list, a member initializer's value or a
+    /// member function's signature (whose body evaluates from the stack of
+    /// evaluators), or is done, with the child it asked for last `delivered`.
     ///
     /// Instance members run against the class's receiver: the non-function
     /// members first, then the functions, so a member body reads a sibling
@@ -445,11 +476,15 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     }
                     type_arguments.push(self.lower_type_in(env, argument.ty()));
                 }
-                match self.class_base(constructor, &type_arguments) {
-                    Some(base) => frame.base = Some(base),
+                let base = match self.prepare_class_base(constructor, type_arguments) {
+                    Some(base) => base,
                     None => return ClassStep::Done(Positional::Unmodeled),
-                }
-                self.class_begin_members(frame);
+                };
+                let (list, wait) = self.dispatch.request_signature_list(
+                    base.settled,
+                    crate::semantic_query::SignatureKind::Construct,
+                );
+                return ClassStep::Base(Box::new(ClassBaseWait { base, list, wait }));
             }
             ClassAwait::Member {
                 index,
@@ -503,6 +538,20 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             }
             ClassAwait::Nothing => unreachable!("an outcome delivered to no request"),
         }
+        self.class_next_member(frame)
+    }
+
+    pub(super) fn class_base_delivered<'e>(
+        &mut self,
+        frame: &mut ClassEvalFrame<'e>,
+        base: ClassBaseRead,
+        nodes: Option<Vec<SemanticNodeId>>,
+    ) -> ClassStep<'e> {
+        let Some(base) = nodes.and_then(|nodes| self.finish_class_base(base, nodes)) else {
+            return ClassStep::Done(Positional::Unmodeled);
+        };
+        frame.base = Some(base);
+        self.class_begin_members(frame);
         self.class_next_member(frame)
     }
 
@@ -1359,11 +1408,11 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
 
     /// The base a class expression's `extends` value provides, `None` when
     /// the class cannot be composed over it (see [`Self::eval_class_value`]).
-    fn class_base(
+    fn prepare_class_base(
         &mut self,
         constructor: SemanticNodeId,
-        type_arguments: &[SemanticNodeId],
-    ) -> Option<ClassBase> {
+        type_arguments: Vec<SemanticNodeId>,
+    ) -> Option<ClassBaseRead> {
         let graph = self.dispatch.graph();
         let exact_source = if matches!(
             self.st.constructive_values.get(&constructor),
@@ -1408,15 +1457,26 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         ) {
             return None;
         }
-        let signatures = match self
-            .dispatch
-            .shared_signature_nodes(settled, crate::semantic_query::SignatureKind::Construct)
-        {
-            super::super::signature_discovery::SharedSignatureNodes::Nodes(signatures) => {
-                signatures
-            }
-            super::super::signature_discovery::SharedSignatureNodes::Incomplete(_) => return None,
-        };
+        Some(ClassBaseRead {
+            constructor,
+            exact_source,
+            settled,
+            type_arguments,
+        })
+    }
+
+    fn finish_class_base(
+        &mut self,
+        base: ClassBaseRead,
+        signatures: Vec<SemanticNodeId>,
+    ) -> Option<ClassBase> {
+        let ClassBaseRead {
+            constructor,
+            exact_source,
+            settled,
+            type_arguments,
+        } = base;
+        let graph = self.dispatch.graph();
         // The base construct signatures that accept the `extends` type
         // arguments, instantiated with them
         // (`getInstantiatedConstructorsForTypeArguments`): a generic one
@@ -1432,7 +1492,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             };
             let accepted = if generic {
                 self.dispatch
-                    .instantiate_call_candidate(signature, type_arguments)
+                    .instantiate_call_candidate(signature, &type_arguments)
             } else {
                 type_arguments.is_empty().then_some(signature)
             };

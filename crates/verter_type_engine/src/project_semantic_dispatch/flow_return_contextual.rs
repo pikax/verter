@@ -298,20 +298,20 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
             let Some(ty) = self.contextual_property_type(contextual, name) else {
                 return false;
             };
-            match self
-                .dispatch
-                .shared_signature_nodes(ty, SignatureKind::Call)
-            {
-                super::super::signature_discovery::SharedSignatureNodes::Nodes(signatures) => {
-                    signatures.iter().any(|signature| {
-                        matches!(
-                            graph.node_data(*signature).as_deref(),
-                            Some(SemanticNodeData::Signature { params, .. })
-                                if crate::semantic_query::split_this_receiver(params).0.is_some()
-                        )
-                    })
-                }
-                super::super::signature_discovery::SharedSignatureNodes::Incomplete(_) => true,
+            match super::signature_list_in_place(
+                self.dispatch,
+                self.st.canonical,
+                ty,
+                SignatureKind::Call,
+            ) {
+                Some(signatures) => signatures.iter().any(|signature| {
+                    matches!(
+                        graph.node_data(*signature).as_deref(),
+                        Some(SemanticNodeData::Signature { params, .. })
+                            if crate::semantic_query::split_this_receiver(params).0.is_some()
+                    )
+                }),
+                None => true,
             }
         })
     }
@@ -334,15 +334,12 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         let mut read = self.begin_contextual_signature(contextual, function);
         let mut arm = read.arm()?;
         loop {
-            let nodes = match self
-                .dispatch
-                .shared_signature_nodes(arm, SignatureKind::Call)
-            {
-                super::super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
-                    Some(nodes)
-                }
-                super::super::signature_discovery::SharedSignatureNodes::Incomplete(_) => None,
-            };
+            let nodes = super::signature_list_in_place(
+                self.dispatch,
+                self.st.canonical,
+                arm,
+                SignatureKind::Call,
+            );
             match self.contextual_signature_arm(&mut read, nodes.as_deref()) {
                 ArmStep::Next(next) => arm = next,
                 ArmStep::Done(found) => {
