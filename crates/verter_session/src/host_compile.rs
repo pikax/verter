@@ -1228,7 +1228,7 @@ impl VerterHost {
         }
 
         // ONE atomic registration batch for the whole call.
-        for outcome in self.upsert_many_with_priority(
+        for outcome in self.upsert_many_for_compile(
             upsert_requests,
             options.priority.unwrap_or(Priority::Background),
         ) {

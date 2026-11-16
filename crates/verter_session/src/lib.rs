@@ -333,9 +333,12 @@ pub(crate) mod host_test_audit;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod host_test_force;
 mod host_upsert;
+pub use host_upsert::UpsertStatus;
+pub use verter_scheduler::stage::Priority;
 mod host_views;
 mod host_workspace_audit;
 mod id;
+pub use id::canonicalize_id;
 #[cfg(test)]
 mod intrinsic_registry_sdk_audit_tests;
 pub mod meta;

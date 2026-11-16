@@ -935,6 +935,15 @@ pub static VERTER_SESSION_PUB_SURFACE_SNAPSHOT: &[&str] = &[
         // `ReadSetSignature` — the return type of the public fact-signature
         // inspectors, named by the host crate's integration tests.
         "pub use verter_session_query::facts::fact_cache::ReadSetSignature",
+        // Bulk source admission for in-workspace callers (verter_tsc's
+        // checker, verter_dx_baseline's materializer, the semantic benchmark
+        // harness): the status projection of `upsert_many_for_compile`, the
+        // scheduler priority it takes, and the host's canonical-id
+        // normalization those callers deduplicate inputs with. No NAPI, WASM,
+        // protocol or MCP surface exposes them.
+        "pub use host_upsert::UpsertStatus",
+        "pub use verter_scheduler::stage::Priority",
+        "pub use id::canonicalize_id",
     ];
 
 /// Compare the live surface against the snapshot; report any

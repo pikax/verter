@@ -4,7 +4,15 @@ use std::borrow::Cow;
 
 use crate::types::{FileMeta, ParsedRawId, VirtualNodeKind};
 
-pub(crate) fn canonicalize_id(input: &str) -> Cow<'_, str> {
+/// Normalize an input or virtual ID to the host's canonical spelling.
+/// Returns a borrowed view when no transformation is needed.
+///
+/// This is the same normalization the host applies when it registers a
+/// source, so two inputs that canonicalize equal name the same file. Bulk
+/// callers use it to deduplicate inputs before
+/// [`crate::VerterHost::upsert_many_for_compile`], which requires unique
+/// canonical identities.
+pub fn canonicalize_id(input: &str) -> Cow<'_, str> {
     let trimmed = input.trim();
 
     // Strip Windows extended-length path prefix (`//?/` or `\\?\`) early.

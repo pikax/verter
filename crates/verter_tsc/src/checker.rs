@@ -880,6 +880,7 @@ pub fn run(
     let host = VerterHost::new_standalone(build_host_config());
     install_project_workspace(&host, &config.root_dir, tsconfig_path);
     let mut admission = CarrierAdmission::default();
+    let mut inputs = Vec::with_capacity(config.vue_files.len());
     for vue_path in &config.vue_files {
         let source = fs::read_to_string(vue_path).map_err(|error| {
             api_check::TypecheckError::new(format!(
@@ -889,20 +890,22 @@ pub fn run(
         })?;
         admission.admit(vue_path, &source);
         let canonical_id = canonical_path_id(vue_path);
-        let _update = host
-            .upsert(UpsertRequest {
-                canonical_id: Some(canonical_id.clone()),
-                input_id: canonical_id,
-                source: std::sync::Arc::<str>::from(source),
-                file_language: carrier_language(vue_path),
-                aliases: Vec::new(),
-            })
-            .map_err(|error| {
-                api_check::TypecheckError::new(format!(
-                    "verter-tsc: failed to ingest carrier source {}: {error}",
-                    vue_path.display()
-                ))
-            })?;
+        inputs.push(UpsertRequest {
+            canonical_id: Some(canonical_id.clone()),
+            input_id: canonical_id,
+            source: std::sync::Arc::<str>::from(source),
+            file_language: carrier_language(vue_path),
+            aliases: Vec::new(),
+        });
+    }
+    let outcomes = host.upsert_many_for_compile(inputs, verter_session::Priority::Background);
+    for (outcome, vue_path) in outcomes.into_iter().zip(&config.vue_files) {
+        outcome.result.map_err(|error| {
+            api_check::TypecheckError::new(format!(
+                "verter-tsc: failed to ingest carrier source {}: {error}",
+                vue_path.display()
+            ))
+        })?;
     }
 
     // ── Typecheck stage: in-memory tsgo `--api` (the `--noEmit` diagnostic set). ──

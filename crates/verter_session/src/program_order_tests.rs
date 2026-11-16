@@ -120,6 +120,103 @@ fn reads(host: &VerterHost) -> u64 {
         .reference_reads()
 }
 
+#[test]
+fn member_edits_skip_library_discovery_but_new_roots_and_configuration_do_not() {
+    let host = host(
+        serde_json::json!({ "compilerOptions": { "noLib": true }, "include": ["*.ts"] }),
+        &[("main.ts", "export const main = 1;\n")],
+    );
+    let builds = crate::program_order::library_builds_for_tests();
+    upsert(&host, "main.ts", "export const main = 2;\n");
+    assert_eq!(crate::program_order::library_builds_for_tests(), builds);
+
+    upsert(&host, "new.ts", "export const added = 1;\n");
+    let after_root = crate::program_order::library_builds_for_tests();
+    assert!(
+        after_root > builds,
+        "a new include root discovers libraries"
+    );
+
+    let workspace = host.workspace();
+    for configuration in [
+        serde_json::json!({ "compilerOptions": { "noLib": true }, "files": ["main.ts"] }),
+        serde_json::json!({ "compilerOptions": { "noLib": true }, "include": ["*.ts"] }),
+    ] {
+        let config = format!("{ROOT}/tsconfig.json");
+        host.notify_upsert(&config, Arc::from(configuration.to_string()));
+        let project = verter_workspace::configured_ide_project(
+            workspace.as_ref(),
+            ROOT.into(),
+            ROOT.into(),
+            &config,
+        );
+        let before = crate::program_order::library_builds_for_tests();
+        host.configure_projects(vec![project]);
+        assert!(
+            crate::program_order::library_builds_for_tests() > before,
+            "a replaced configuration rediscovers its program"
+        );
+    }
+}
+
+#[test]
+fn bulk_open_publishes_declaration_roots_and_script_contributors_together() {
+    let host = host(
+        serde_json::json!({ "compilerOptions": { "noLib": true }, "include": ["*.ts"] }),
+        &[],
+    );
+    let index = host
+        .project_type_store()
+        .indexed()
+        .global_contributor_index();
+    let before = index.snapshot().revision;
+    let inputs = std::iter::once((
+        "lib.d.ts".to_owned(),
+        "interface LibraryRoot { library: 1 }".to_owned(),
+    ))
+    .chain((0..4).map(|ordinal| {
+        (
+            format!("member-{ordinal}.ts"),
+            format!("interface Registry {{ member{ordinal}: number }}"),
+        )
+    }))
+    .map(|(name, source)| {
+        let canonical = format!("{ROOT}/{name}");
+        crate::UpsertRequest {
+            canonical_id: Some(canonical.clone()),
+            input_id: canonical,
+            source: Arc::from(source),
+            file_language: crate::FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        }
+    })
+    .collect();
+    let outcomes =
+        host.upsert_many_for_compile(inputs, verter_scheduler::stage::Priority::Interactive);
+    assert!(outcomes.iter().all(|outcome| outcome.result.is_ok()));
+    let population = index.snapshot();
+    let kind = crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation;
+    assert_eq!(
+        population
+            .lookup(&kind, "LibraryRoot", None, true)
+            .entries
+            .len(),
+        1
+    );
+    assert_eq!(
+        population
+            .lookup(&kind, "Registry", None, true)
+            .entries
+            .len(),
+        4
+    );
+    assert_eq!(
+        population.revision - before,
+        1,
+        "publish the complete bulk population once"
+    );
+}
+
 /// A program order is built once, reading each file once, and stays the
 /// published order while the workspace lists the same program: an edit to
 /// a file outside it keeps the order valid without a rebuild; an edit to
