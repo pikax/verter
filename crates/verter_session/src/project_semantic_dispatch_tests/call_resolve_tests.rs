@@ -3175,6 +3175,267 @@ fn nested_non_generic_candidate_deposits_nothing_into_outer_call_inference() {
     assert_eq!(bindings[0].param, t);
 }
 
+#[test]
+fn independent_literal_member_uses_the_pure_relation_without_a_frame() {
+    use super::inference::session::InferenceSessionSetup;
+    use verter_type_engine::semantic_query::{
+        ConstParamPolicy, ContextualInferenceMode, InferenceCandidatePriority, InferencePassKind,
+        NoInferMask, VariancePhase,
+    };
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
+    let (_demand, trip) = dispatch.enter_connected_demand(false);
+    assert!(trip.is_none());
+    let graph = dispatch.graph_arc();
+    let t = type_param(&dispatch, "T", 0);
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    dispatch
+        .dispatch_txn
+        .borrow_mut()
+        .reentry_mut()
+        .push_relate(
+            dispatch.relate_key_for(number, number),
+            InferenceOccurrence::ARGUMENT_COVARIANT,
+            0,
+        );
+    let literal = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_engine::semantic_query::LiteralValue::Number(1.0),
+    ));
+    let setup = InferenceSessionSetup::new(
+        graph.as_ref(),
+        dispatch.call_inference_infos(&[plain_decl(t, "T")]),
+        VariancePhase::Covariant,
+        InferencePassKind::CallApplicability,
+        InferenceCandidatePriority::Argument,
+        NoInferMask::empty(),
+        ConstParamPolicy::NonConst,
+        ContextualInferenceMode::None,
+    );
+    dispatch
+        .dispatch_txn
+        .borrow_mut()
+        .push_collecting_session(setup);
+    let before = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests();
+    let step = dispatch.execute_relate(dispatch.relate_key_for(literal, number));
+    assert!(
+        matches!(step, super::dispatch_txn::RelationStep::Assignable { .. }),
+        "{step:?}"
+    );
+    assert_eq!(
+        ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests() - before,
+        0,
+        "a literal pair independent of the collector needs no relation frame",
+    );
+    let collected = dispatch.execute_relate(dispatch.relate_key_for(literal, t));
+    assert!(matches!(
+        collected,
+        super::dispatch_txn::RelationStep::Assignable { .. }
+    ));
+    let matching = dispatch.execute_relate(dispatch.relate_key_for(literal, number));
+    assert!(matches!(
+        matching,
+        super::dispatch_txn::RelationStep::Assignable { .. }
+    ));
+    let bad = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_engine::semantic_query::LiteralValue::String("bad".to_owned()),
+    ));
+    let mismatching = dispatch.execute_relate(dispatch.relate_key_for(bad, number));
+    assert!(matches!(
+        mismatching,
+        super::dispatch_txn::RelationStep::NotAssignable
+    ));
+    dispatch
+        .dispatch_txn
+        .borrow_mut()
+        .relation
+        .sessions
+        .last_mut()
+        .unwrap()
+        .stage_fixation(|candidates, _| {
+            assert_eq!(
+                candidates,
+                &[literal],
+                "matching and mismatching concrete siblings preserve the same candidate journal"
+            );
+            number
+        })
+        .expect("the collector remains usable");
+    dispatch.dispatch_txn.borrow_mut().reentry_mut().pop();
+}
+
+#[test]
+fn session_independence_checks_both_operands_outer_sessions_and_value_carriers() {
+    use super::inference::session::InferenceSessionSetup;
+    use verter_type_engine::semantic_query::{
+        BinderScopeId, ConstParamPolicy, ContextualInferenceMode, InferenceCandidatePriority,
+        InferencePassKind, NoInferMask, NodeScopeId, ScopeId, ValueRootKey, VariancePhase,
+    };
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
+    let graph = dispatch.graph_arc();
+    let t = type_param(&dispatch, "Outer", 0);
+    let u = type_param(&dispatch, "Inner", 0);
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let setup = |parameter, name| {
+        InferenceSessionSetup::new(
+            graph.as_ref(),
+            dispatch.call_inference_infos(&[plain_decl(parameter, name)]),
+            VariancePhase::Covariant,
+            InferencePassKind::CallApplicability,
+            InferenceCandidatePriority::Argument,
+            NoInferMask::empty(),
+            ConstParamPolicy::NonConst,
+            ContextualInferenceMode::None,
+        )
+    };
+    dispatch
+        .dispatch_txn
+        .borrow_mut()
+        .push_collecting_session(setup(t, "Outer"));
+    dispatch
+        .dispatch_txn
+        .borrow_mut()
+        .push_collecting_session(setup(u, "Inner"));
+    assert!(dispatch.relation_pair_is_session_independent(&dispatch.relate_key_for(number, number)));
+    for (source, target) in [(t, number), (number, t), (u, number), (number, u)] {
+        assert!(
+            !dispatch
+                .relation_pair_is_session_independent(&dispatch.relate_key_for(source, target)),
+            "both operands of every visible collector matter"
+        );
+    }
+    let constrained = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Rigid"),
+        param_index: 0,
+        constraint: Some(t),
+        default: None,
+        display_name: verter_type_expr::OwnedStr::from("Rigid"),
+    });
+    assert!(!dispatch
+        .relation_pair_is_session_independent(&dispatch.relate_key_for(constrained, number)));
+    let carriers = [
+        SemanticNodeData::new_typeof(
+            ValueRootKey {
+                scope: ScopeId {
+                    canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    local_scope: None,
+                    binder_scope_id: BinderScopeId::file_scope(
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    ),
+                },
+                name: verter_type_expr::OwnedStr::from("x"),
+            },
+            verter_type_expr::OwnedSlice::default(),
+            Arc::from([]),
+        ),
+        SemanticNodeData::new_bare_ref(Arc::from("x"), NodeScopeId::Global, Arc::from([])),
+        SemanticNodeData::RawFallback {
+            value: verter_type_expr::UnknownValue::unsupported_syntax("x"),
+        },
+        SemanticNodeData::Opaque(verter_type_engine::semantic_query::QueryError::Miss),
+    ];
+    for data in carriers {
+        let carrier = graph.intern_node(data);
+        let wrapper = graph.intern_node(SemanticNodeData::Array {
+            element: carrier,
+            readonly: false,
+        });
+        for node in [carrier, wrapper] {
+            assert!(
+                !dispatch
+                    .relation_pair_is_session_independent(&dispatch.relate_key_for(node, number)),
+                "a value carrier may resolve to an inferred variable"
+            );
+            assert!(
+                !dispatch
+                    .relation_pair_is_session_independent(&dispatch.relate_key_for(number, node)),
+                "a nested value carrier may resolve to an inferred variable"
+            );
+        }
+    }
+    dispatch
+        .dispatch_txn
+        .borrow_mut()
+        .push_collecting_session(setup(u, "Candidates").reading_candidates_only());
+    assert!(
+        !dispatch.relation_pair_is_session_independent(&dispatch.relate_key_for(number, number)),
+        "candidate-only relations retain their inference route"
+    );
+}
+
+pub(super) fn concrete_no_infer_members_use_pure_verdicts_cold_and_warm_but_preserve_candidate_only_trials(
+) {
+    use super::dispatch_txn::RelationStep;
+    use super::inference::session::InferenceSessionSetup;
+    use verter_type_engine::semantic_query::{
+        CompilerIntrinsicTypeOp, ConstParamPolicy, ContextualInferenceMode,
+        InferenceCandidatePriority, InferencePassKind, LiteralValue, NoInferMask, PayloadArray,
+        VariancePhase,
+    };
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
+    let (_demand, trip) = dispatch.enter_connected_demand(false);
+    assert!(trip.is_none());
+    let graph = dispatch.graph_arc();
+    let t = type_param(&dispatch, "T", 0);
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    dispatch
+        .dispatch_txn
+        .borrow_mut()
+        .reentry_mut()
+        .push_relate(
+            dispatch.relate_key_for(number, number),
+            InferenceOccurrence::ARGUMENT_COVARIANT,
+            0,
+        );
+    let string = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "bad".to_owned(),
+    )));
+    let no_infer = graph.intern_node(SemanticNodeData::IntrinsicApplication {
+        op: CompilerIntrinsicTypeOp::NoInfer,
+        args: PayloadArray::from(vec![number].into_boxed_slice()),
+    });
+    let setup = || {
+        InferenceSessionSetup::new(
+            graph.as_ref(),
+            dispatch.call_inference_infos(&[plain_decl(t, "T")]),
+            VariancePhase::Covariant,
+            InferencePassKind::CallApplicability,
+            InferenceCandidatePriority::Argument,
+            NoInferMask::empty(),
+            ConstParamPolicy::NonConst,
+            ContextualInferenceMode::None,
+        )
+    };
+    dispatch
+        .dispatch_txn
+        .borrow_mut()
+        .push_collecting_session(setup());
+    let key = dispatch.relate_key_for(string, no_infer);
+    for _ in 0..2 {
+        let step = dispatch.execute_relate(key.clone());
+        assert!(
+            matches!(step, RelationStep::NotAssignable),
+            "a concrete NoInfer target is checked by the pure relation: {step:?}"
+        );
+    }
+    dispatch
+        .dispatch_txn
+        .borrow_mut()
+        .push_collecting_session(setup().reading_candidates_only());
+    let step = dispatch.execute_relate(key);
+    assert!(
+        matches!(step, RelationStep::Assignable { .. }),
+        "a candidates-only trial leaves this target to applicability: {step:?}"
+    );
+    dispatch.dispatch_txn.borrow_mut().reentry_mut().pop();
+}
+
 /// Literal elements inside a tuple ARGUMENT relate covariantly to concrete
 /// tuple-element targets, exactly as `tsc --strict` accepts
 /// `k([1, 1])` against `(x: [number, number])` and `k3(["a"])` against

@@ -1325,6 +1325,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: RelateMemoKey,
         occurrence: InferenceOccurrence,
     ) -> RelationStep {
+        if self.relation_pair_is_session_independent(&key) {
+            #[cfg(any(test, feature = "test-support"))]
+            self.check_independent_relation_for_tests(&key, occurrence);
+            return self
+                .with_binding_disabled(|| self.execute_relate_with_occurrence(key, occurrence));
+        }
         // Every nested relation stacks this frame, so everything it reads
         // before its cold compute lives in an outlined frame instead.
         let mut key = key;
@@ -1332,6 +1338,119 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return step;
         }
         self.relation_cold_compute(key, occurrence)
+    }
+
+    /// Compare the two routes without changing the caller's transaction or
+    /// admitting a shadow relation into the shared memo.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn check_independent_relation_for_tests(
+        &self,
+        key: &RelateMemoKey,
+        occurrence: InferenceOccurrence,
+    ) {
+        use crate::engine_test_knobs::{in_relation_shadow, relation_shadow_running};
+        if relation_shadow_running() {
+            return;
+        }
+        let Some(log) = self
+            .binding
+            .observers
+            .forcing
+            .relation_independence_shadow
+            .lock()
+            .clone()
+        else {
+            return;
+        };
+        let sessions: Vec<_> = {
+            let txn = self.dispatch_txn.borrow();
+            txn.relation
+                .visible_collecting_positions()
+                .map(|position| txn.relation.sessions[position].collecting_copy_for_shadow())
+                .collect()
+        };
+        crate::fact_tracing::tracing::without_fact_observers(|| {
+            in_relation_shadow(true, || {
+                let visible = Self::new(self.ctx);
+                let _construction = visible.enter_construction_scope();
+                let (_demand, trip) = visible.enter_connected_demand(false);
+                assert!(trip.is_none());
+                let checkpoints: Vec<_> = sessions
+                    .into_iter()
+                    .rev()
+                    .map(|mut session| {
+                        let mut txn = visible.dispatch_txn.borrow_mut();
+                        let id = txn.push_collecting_session(session.setup_for_shadow());
+                        session.id = id;
+                        session.opened_at_depth = txn.relation.session(id).unwrap().opened_at_depth;
+                        *txn.relation.session_mut(id).unwrap() = session;
+                        let session = txn.relation.session(id).unwrap();
+                        (id, session.checkpoint())
+                    })
+                    .collect();
+                let collecting = visible.execute_relate_inline(key.clone(), occurrence);
+                {
+                    let mut txn = visible.dispatch_txn.borrow_mut();
+                    for (id, checkpoint) in checkpoints {
+                        let session = txn.relation.session_mut(id).unwrap();
+                        let after = session.checkpoint();
+                        let unchanged = format!("{checkpoint:?}") == format!("{after:?}");
+                        session.rollback_to(&checkpoint);
+                        assert!(unchanged, "an independent pair accepted a deposit: {key:?}");
+                    }
+                }
+                let pure = Self::new(self.ctx);
+                let _construction = pure.enter_construction_scope();
+                let (_demand, trip) = pure.enter_connected_demand(false);
+                assert!(trip.is_none());
+                let ordinary = in_relation_shadow(false, || {
+                    pure.with_binding_disabled(|| {
+                        pure.execute_relate_inline(key.clone(), occurrence)
+                    })
+                });
+                log.checks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if format!("{collecting:?}") != format!("{ordinary:?}") {
+                    let reason = self.independent_relation_difference_for_tests(key)
+                    .unwrap_or_else(|| panic!("unclassified independent relation difference: {key:?}: collecting {collecting:?}, pure {ordinary:?}"));
+                    log.differences.lock().push(reason);
+                }
+            })
+        });
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn independent_relation_difference_for_tests(
+        &self,
+        key: &RelateMemoKey,
+    ) -> Option<&'static str> {
+        let graph = self.graph();
+        let mut stack = vec![key.source, key.target];
+        let mut seen = FxHashSet::default();
+        let mut reason = None;
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
+            match data.as_ref() {
+                SemanticNodeData::IntrinsicApplication {
+                    op: crate::semantic_query::CompilerIntrinsicTypeOp::NoInfer,
+                    ..
+                } => return Some("NoInfer target"),
+                SemanticNodeData::IndexedAccess { .. } => {
+                    reason = Some("rigid indexed-access constraint")
+                }
+                SemanticNodeData::Union(_) if !self.relation_strict_config().strict_null_checks => {
+                    reason.get_or_insert("non-strict-null union erasure");
+                }
+                _ => {}
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        reason
     }
 
     /// Step (3) of [`Self::execute_relate_with_occurrence`]: the cold
@@ -3604,6 +3723,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// the key carries a fingerprint and no session is active (a binding
     /// root). Also snapshots the strict configuration at the root push.
     fn relation_frame_open(&self, key: &RelateMemoKey, occurrence: InferenceOccurrence) -> usize {
+        #[cfg(any(test, feature = "test-support"))]
+        self.binding
+            .observers
+            .forcing
+            .relation_frames
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Snapshot the strict config + pattern BEFORE taking the borrow —
         // `relation_pattern_info` re-borrows the transaction (its
         // per-target cache lives there).
@@ -3682,7 +3807,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 },
             };
         }
+        // A collector can change a verdict without writing candidates. Keep
+        // such answers out of the pure key, while preserving admission under
+        // existing inference keys. A binding root opens its collector below;
+        // independent pairs arrive behind the binding barrier.
         if redischarge
+            || (key.relation == RelationKind::Assignable
+                && key.inference_context.is_none()
+                && txn.active_session().is_some())
             || key.inference_context.as_ref().is_some_and(|context| {
                 context.verdict_use == crate::semantic_query::InferenceVerdictUse::CandidatesOnly
             })
@@ -3704,6 +3836,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 );
                 txn.note_opened_session(idx, session_id);
             }
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if crate::engine_test_knobs::relation_shadow_running() {
+            txn.note_session_delta_range(idx, idx + 1);
         }
         idx
     }
@@ -10836,6 +10972,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Some(assignable(bindings))
     }
 
+    construction_ordinal_seam! {
+        /// Whether this pair can be decided without any visible collector.
+        /// Summaries are graph-owned; no operand walk is made at this entry.
+        fn relation_pair_is_session_independent(&self, key: &RelateMemoKey) -> bool {
+            #[cfg(any(test, feature = "test-support"))]
+            if crate::engine_test_knobs::relation_shadow_collecting() {
+                return false;
+            }
+            let txn = self.dispatch_txn.borrow();
+            if txn.active_session().is_none() {
+                return false;
+            }
+            for position in txn.relation.visible_collecting_positions() {
+                let session = &txn.relation.sessions[position];
+                if session.context_key().verdict_use != crate::semantic_query::InferenceVerdictUse::Decides
+                    || session.reverse_active()
+                    || self.pair_mentions_session_variable(session, [key.source, key.target])
+                {
+                    return false;
+                }
+            }
+            true
+        }
+    }
+
     /// Whether either side of `pair` mentions a variable `session` infers.
     /// The checker's inference walk stops at a target that could contain no
     /// type variable (`couldContainTypeVariables`), so a cycle the relation
@@ -10850,22 +11011,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         pair: [SemanticNodeId; 2],
     ) -> bool {
         let graph = self.graph();
-        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        let mut stack = pair.to_vec();
-        while let Some(node) = stack.pop() {
-            if session.infers(node) {
+        // A dependent target settles the question without preparing the
+        // source's summary, as in inference's ordinary target-first walk.
+        for node in pair.into_iter().rev() {
+            let summary = graph.binder_dependencies_for(node);
+            if summary.has_open_carrier() {
                 return true;
             }
-            if !seen.insert(node) {
+            if !summary.may_mention_binder() && !summary.has_infer_dependencies() {
                 continue;
             }
-            if let Some(data) = graph.node_data(node) {
-                if matches!(
-                    data.for_each_child(|child| stack.push(child)),
-                    crate::semantic_query::ChildWalk::Sealed
-                ) {
-                    return true;
-                }
+            if session
+                .context_key()
+                .inferable_params
+                .ids()
+                .iter()
+                .any(|&parameter| !self.binder_dependency_proves_absent(node, parameter))
+            {
+                return true;
             }
         }
         false
@@ -20027,6 +20190,10 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[path = "relation_session_cache_tests.rs"]
+pub mod session_cache_tests;
+
 /// The reverse-mapped inference ownership check, run by the host's relation
 /// suites: a reverse aggregate binds only through the frozen session setup
 /// and reaches bindings only through session fixation.
@@ -20035,6 +20202,98 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
 pub mod reverse_ownership_tests {
     use super::super::dispatch_txn::SessionId;
     use super::*;
+
+    /// A registered reverse frame changes even a concrete nested pair's
+    /// route; its collector must remain visible until the frame closes.
+    pub fn independent_pairs_keep_reverse_mapping_visible<
+        C: crate::resolver_core::ResolverCapabilities,
+    >(
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+    ) {
+        let graph = dispatch.graph();
+        let parameter = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic("T"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: verter_type_expr::OwnedStr::from("T"),
+        });
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let setup = InferenceSessionSetup::new(
+            &graph,
+            Arc::from([InferenceInfoSetup::new(parameter, Arc::from("T"))]),
+            VariancePhase::Covariant,
+            InferencePassKind::Ordinary,
+            InferenceCandidatePriority::HomomorphicMapped,
+            NoInferMask::empty(),
+            ConstParamPolicy::NonConst,
+            ContextualInferenceMode::None,
+        );
+        let id = dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .push_collecting_session(setup);
+        let key = dispatch.relate_key_for(number, number);
+        assert!(dispatch.relation_pair_is_session_independent(&key));
+        assert!(dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .relation
+            .session_mut(id)
+            .unwrap()
+            .open_reverse_frame(reverse_spec(parameter)));
+        assert!(
+            !dispatch.relation_pair_is_session_independent(&key),
+            "an open reverse frame excludes a concrete pair"
+        );
+        dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .relation
+            .session_mut(id)
+            .unwrap()
+            .close_reverse_frame();
+        assert!(dispatch.relation_pair_is_session_independent(&key));
+
+        let binder = crate::semantic_query::InferBinderFactory::synthetic(1);
+        let declaration = graph.intern_node(SemanticNodeData::Infer {
+            name: verter_type_expr::OwnedStr::from("U"),
+            binder: binder.clone(),
+            constraint: None,
+        });
+        let reference = graph.intern_node(SemanticNodeData::InferRef {
+            name: verter_type_expr::OwnedStr::from("U"),
+            binder,
+        });
+        let setup = InferenceSessionSetup::new(
+            &graph,
+            Arc::from([InferenceInfoSetup::new(declaration, Arc::from("U"))]),
+            VariancePhase::Covariant,
+            InferencePassKind::Ordinary,
+            InferenceCandidatePriority::Argument,
+            NoInferMask::empty(),
+            ConstParamPolicy::NonConst,
+            ContextualInferenceMode::None,
+        );
+        dispatch
+            .dispatch_txn
+            .borrow_mut()
+            .push_collecting_session(setup);
+        assert!(
+            !dispatch
+                .relation_pair_is_session_independent(&dispatch.relate_key_for(reference, number)),
+            "an infer reference names its declaration's variable"
+        );
+        let foreign = graph.intern_node(SemanticNodeData::InferRef {
+            name: verter_type_expr::OwnedStr::from("V"),
+            binder: crate::semantic_query::InferBinderFactory::synthetic(2),
+        });
+        assert!(
+            dispatch
+                .relation_pair_is_session_independent(&dispatch.relate_key_for(foreign, number)),
+            "another binder's infer reference is independent"
+        );
+    }
 
     fn reverse_setup(param: SemanticNodeId) -> InferenceSessionSetup {
         InferenceSessionSetup::new(

@@ -14,6 +14,7 @@ pub(crate) struct BinderDependencies {
     nodes: FxHashSet<SemanticNodeId>,
     infer: FxHashSet<InferBinderId>,
     has_declaration: bool,
+    has_open_carrier: bool,
     has_infer_declaration: bool,
     complete: bool,
 }
@@ -35,8 +36,19 @@ impl BinderDependencies {
         self.has_infer_declaration
     }
 
+    /// The declaration-sensitive deferred-operator gate. Bound infer
+    /// references are substituted separately rather than declaring binders.
     pub(crate) fn may_mention_binder(&self) -> bool {
         !self.complete || self.has_declaration
+    }
+
+    /// Declarations and references share the exact infer-identity set.
+    pub(crate) fn has_infer_dependencies(&self) -> bool {
+        !self.infer.is_empty()
+    }
+
+    pub(crate) fn has_open_carrier(&self) -> bool {
+        self.has_open_carrier
     }
 }
 
@@ -162,12 +174,18 @@ impl SemanticGraphStore {
                 SemanticNodeData::InferRef { binder, .. } => {
                     summary.infer.insert(binder.clone());
                 }
+                SemanticNodeData::TypeOf(_)
+                | SemanticNodeData::TypeOfNominal(_)
+                | SemanticNodeData::BareRef(_)
+                | SemanticNodeData::RawFallback { .. }
+                | SemanticNodeData::Opaque(_) => summary.has_open_carrier = true,
                 _ => {}
             }
             for child in children {
                 if let Some(child) = done.get(&child) {
                     summary.complete &= child.complete;
                     summary.has_declaration |= child.has_declaration;
+                    summary.has_open_carrier |= child.has_open_carrier;
                     // A nested conditional or signature owns its infer binders;
                     // they do not declare a binder in an enclosing pattern.
                     if !matches!(

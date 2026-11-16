@@ -403,6 +403,29 @@ impl InferenceSession {
         self.setup.context_key()
     }
 
+    /// Frozen setup for a test-only, isolated collecting trial.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn setup_for_shadow(&self) -> InferenceSessionSetup {
+        self.setup.clone()
+    }
+
+    /// Preserve the collector's current journals for an isolated trial. The
+    /// independence predicate excludes reverse mappings before this is called.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn collecting_copy_for_shadow(&self) -> Self {
+        assert_eq!(self.state, InferenceSessionState::Collecting);
+        assert!(!self.reverse_active());
+        let mut copy = Self::new(self.id, self.setup.clone());
+        copy.fresh_literal_deposits = self.fresh_literal_deposits.clone();
+        copy.duplicate_deposits = self.duplicate_deposits.clone();
+        copy.inference_circularity = self.inference_circularity;
+        for (target, source) in copy.infos.iter_mut().zip(&self.infos) {
+            target.candidates = source.candidates.clone();
+            target.implied_arity = source.implied_arity;
+        }
+        copy
+    }
+
     /// Open the journals of a reverse mapping of `spec`. Only a collecting
     /// session opens one.
     pub(crate) fn open_reverse_frame(

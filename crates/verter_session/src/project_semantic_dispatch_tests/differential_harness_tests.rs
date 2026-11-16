@@ -326,6 +326,8 @@ impl<'a> Matrix<'a> {
             "an installed-packages matrix is read through `verdicts`"
         );
         let host = Arc::new(matrix_host(self.settings));
+        *host.test_force.engine.relation_independence_shadow.lock() =
+            verter_type_engine::engine_test_knobs::requested_relation_shadow();
         let roots: Vec<String> = self
             .settings
             .iter()
@@ -434,6 +436,8 @@ impl<'a> Matrix<'a> {
             workspace,
         ));
         host.configure_projects(configs);
+        *host.test_force.engine.relation_independence_shadow.lock() =
+            verter_type_engine::engine_test_knobs::requested_relation_shadow();
         if self.installed_typescript_libs.is_some() {
             use verter_workspace::IntrinsicLibraryAccess;
             let sdk = verter_workspace::NativeIntrinsicLibrary::discover(std::path::Path::new(
