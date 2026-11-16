@@ -64,6 +64,7 @@ pub(crate) fn object_literal_this_name(offset: u32) -> String {
     format!("(object literal)@{offset}")
 }
 
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use verter_type_expr::OwnedStr;
 
@@ -541,6 +542,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         walk.children.clear();
         walk.values.clear();
+        walk.local.clear();
         walk.answer = None;
     }
 
@@ -745,6 +747,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if node == parameter {
                     return Some((arg, true));
                 }
+                if let Some(&(cached, _)) = walk
+                    .local
+                    .get(&(walk.frames.len(), SubstitutionCost(node, parameter, arg)))
+                {
+                    verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
+                        observer.record_event(verter_audit::AuditEvent::RecursiveSubstituteMemoHit);
+                    });
+                    return Some((cached, cached != node));
+                }
                 if let Some(cached) = self.priced_substitution_read(node, parameter, arg) {
                     verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
                         observer.record_event(verter_audit::AuditEvent::RecursiveSubstituteMemoHit);
@@ -753,7 +764,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
-        self.open_substitution_level(walk, node, parameter, arg)
+        self.open_substitution_level(walk, node, parameter, arg, arrival)
     }
 
     /// Open the level of `(node, parameter, arg)` after its memo missed:
@@ -765,6 +776,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         parameter: SemanticNodeId,
         arg: SemanticNodeId,
+        arrival: Arrival,
     ) -> Option<(SemanticNodeId, bool)> {
         verter_debug_assert!(node != parameter, "an arrival answers the binder itself");
         let epoch_before = self.canonical_evidence_epoch.get();
@@ -801,6 +813,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Opening::Children { flag } => (FrameStage::Children, flag),
             Opening::Capture(capture) => (FrameStage::Capture(capture), false),
         };
+        let interior = arrival == Arrival::Child
+            && !matches!(
+                data.as_ref(),
+                SemanticNodeData::InstantiationRef { .. } | SemanticNodeData::Conditional { .. }
+            );
         walk.frames.push(SubstitutionFrame {
             node,
             parameter,
@@ -813,6 +830,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             flag,
             epoch_before,
             recording,
+            interior,
+            local_head: None,
             stage,
         });
         None
@@ -831,6 +850,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .expect("the level finishing is the one on top");
         walk.children.truncate(frame.children_from);
         walk.values.truncate(frame.values_from);
+        // Every recorded level owns its own receipt, so its children may
+        // reuse only results computed within that level. The linked keys
+        // remove just its entries without scanning the rest of the table.
+        let scope = walk.frames.len() + 1;
+        let mut head = frame.local_head;
+        while let Some(key) = head {
+            head = walk
+                .local
+                .remove(&(scope, key))
+                .expect("a level owns its local entries")
+                .1;
+        }
+        if frame.interior
+            && frame.recording
+            && self.canonical_evidence_epoch.get() == frame.epoch_before
+            && self.connected_demand_trip().is_none()
+            && !self.cancellation.is_cancelled()
+        {
+            let parent = walk
+                .frames
+                .last_mut()
+                .expect("an interior level has a parent");
+            let key = SubstitutionCost(frame.node, frame.parameter, frame.arg);
+            let next = parent.local_head.replace(key);
+            walk.local.insert((scope - 1, key), (value.0, next));
+        }
         walk.answer = Some(self.settle_substitution_level(
             (frame.node, frame.parameter, frame.arg),
             frame.epoch_before,
@@ -2795,6 +2840,11 @@ pub(super) struct SubstitutionWalk {
     frames: Vec<SubstitutionFrame>,
     children: Vec<SemanticNodeId>,
     values: Vec<SemanticNodeId>,
+    /// Interior results keyed by their enclosing level and triple. Each
+    /// level links its entries for removal at its end; nested levels see
+    /// none of their parents' entries. Bare ids live exactly as the walk's
+    /// intermediate values do, including across a suspended template read.
+    local: FxHashMap<(usize, SubstitutionCost), (SemanticNodeId, Option<SubstitutionCost>)>,
     /// The value of the level or arrival just finished, for the level on
     /// top, and whether it changed.
     answer: Option<(SemanticNodeId, bool)>,
@@ -2837,6 +2887,10 @@ struct SubstitutionFrame {
     epoch_before: u64,
     /// Whether the level's cost recording is open.
     recording: bool,
+    /// A child other than a declaration reference or conditional boundary.
+    interior: bool,
+    /// The first entry owned by this level in the walk's local table.
+    local_head: Option<SubstitutionCost>,
     stage: FrameStage,
 }
 

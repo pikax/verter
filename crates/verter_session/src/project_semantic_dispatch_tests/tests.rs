@@ -34773,3 +34773,138 @@ mod nightly_scale {
         deep_finite_nested_demand_completes_and_warms_at(10_000);
     }
 }
+
+#[test]
+fn substitution_repeats_evidence_inside_a_later_reference_sibling() {
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    use verter_type_engine::semantic_query::{DeclIdentity, PayloadArray};
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
+
+    for pressured in [false, true] {
+        let host = host();
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            aggregate_ceiling_bytes: if pressured { 0 } else { usize::MAX },
+            ..RetentionLimits::defaults()
+        });
+        let fixture = GraphFixture::with_account(StoreAccount::new(Arc::clone(&account)));
+        let dispatch = ProjectSemanticDispatch::with_graph_fixture(&host, fixture);
+        let _builder = dispatch.enter_construction_scope();
+        let graph = dispatch.graph_arc();
+        let parameter = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic("T"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: "T".into(),
+        });
+        let number = primitive(graph, PrimitiveKind::Number);
+        let local = graph.intern_node(SemanticNodeData::Array {
+            element: parameter,
+            readonly: false,
+        });
+        let file_string = graph.intern_node_with_scope(
+            SemanticNodeData::Primitive(PrimitiveKind::String),
+            NodeScopeId::File {
+                canonical_id: "/w/substitution-arm.ts".into(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: [23; 16],
+                local_scope: None,
+            },
+        );
+        let evidence = graph.intern_node(SemanticNodeData::Union(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                [parameter, file_string],
+            )),
+        ));
+        let sibling = graph.intern_node(SemanticNodeData::InstantiationRef {
+            base: DeclIdentity::synthetic("Holder"),
+            args: PayloadArray::from([local, evidence, evidence]),
+        });
+        let root = simple_object(
+            graph,
+            &[
+                ("local", local),
+                ("evidence", evidence),
+                ("sibling", sibling),
+            ],
+        );
+        let epoch = dispatch.canonical_evidence_epoch.get();
+        let before = graph.stats_snapshot().substitution_child_visits;
+        let result = dispatch.substitute_semantic_type_param(root, parameter, number);
+        let visits = graph.stats_snapshot().substitution_child_visits - before;
+        assert_eq!(dispatch.canonical_evidence_epoch.get() - epoch, 3);
+        assert_eq!(
+            visits,
+            if pressured { 14 } else { 13 },
+            "retention pressure: {pressured}"
+        );
+        let data = graph.node_data(result).unwrap();
+        let SemanticNodeData::Object(surface) = data.as_ref() else {
+            panic!("substitution preserves the object surface")
+        };
+        assert_eq!(surface.positive_members().len(), 3);
+        for node in [evidence, sibling, root] {
+            assert_eq!(
+                graph.substitute_memo_get(node, parameter, number),
+                None,
+                "file evidence suppresses the level and its ancestors"
+            );
+        }
+        assert_eq!(
+            graph
+                .substitute_memo_get(local, parameter, number)
+                .is_some(),
+            !pressured,
+            "evidence-free publication still follows ordinary retention admission"
+        );
+    }
+}
+
+#[test]
+fn shared_substitution_children_stay_linear_when_retention_is_refused() {
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    use verter_type_engine::semantic_query::DeclIdentity;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
+
+    let host = host();
+    let account = SemanticRetentionAccount::new(RetentionLimits {
+        aggregate_ceiling_bytes: 0,
+        ..RetentionLimits::defaults()
+    });
+    let dispatch = ProjectSemanticDispatch::with_graph_fixture(
+        &host,
+        GraphFixture::with_account(StoreAccount::new(Arc::clone(&account))),
+    );
+    let _builder = dispatch.enter_construction_scope();
+    let graph = dispatch.graph_arc();
+    let parameter = graph.intern_node(SemanticNodeData::TypeParam {
+        decl: DeclIdentity::synthetic("T"),
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: "T".into(),
+    });
+    let number = primitive(graph, PrimitiveKind::Number);
+    for depth in [3, 5, 7] {
+        let mut root = parameter;
+        let mut expected = number;
+        for _ in 0..depth {
+            root = simple_object(graph, &[("left", root), ("right", root)]);
+            expected = simple_object(graph, &[("left", expected), ("right", expected)]);
+        }
+        let before = graph.stats_snapshot().substitution_child_visits;
+        let result = dispatch.substitute_semantic_type_param(root, parameter, number);
+        assert_eq!(result, expected);
+        assert_eq!(
+            graph.stats_snapshot().substitution_child_visits - before,
+            2 * depth,
+            "a shared child is walked once within its enclosing level"
+        );
+        assert_eq!(graph.substitute_memo_get(root, parameter, number), None);
+    }
+    assert!(account.snapshot().refusals_pressure > 0);
+}
