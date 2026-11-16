@@ -2718,6 +2718,11 @@ fn public_instance_builtin_exclusions_cover_rendered_constructor_omit_keys() {
         );
         }
         for key in crate::host_manage::PUBLIC_INSTANCE_OMITTED_BUILTINS {
+            // The augmentation class is excluded as a whole, independently of
+            // the fixed keys replaced or retained by the constructor.
+            if *key == "ComponentCustomProperties" {
+                continue;
+            }
             assert!(
                 vue_keys.contains(key),
                 "{key} must be a real Vue public-instance key"

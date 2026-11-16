@@ -126,9 +126,14 @@ report: a dynamic-name outlet withholds slot enumeration, including when no
 
 The sidecar builder records only registered script-setup geometry and the
 positive `options_member_free` geometry report. The existing macro-flags fold
-certifies that report only without an export-default options object and when
-every `defineOptions` call reports member-free arguments. The options extractor
-uses its existing property traversal and the fixed key set `name`, `inheritAttrs`;
+certifies that report only without an Options API default export and when
+every `defineOptions` call reports member-free arguments. Default-export
+identifiers follow the root binding index to their local initializer; Vue's
+`defineComponent` is recognized by its imported API identity, including aliases.
+An unresolved default export in a plain script withholds the member-free report
+and reports `OptionsApiMembers`; it never certifies an empty instance.
+The `defineOptions` extractor uses its existing property traversal and the fixed
+key set `name`, `inheritAttrs`;
 every argument must be an object literal containing only non-computed keys
 from that set. A spread, any other key or a non-literal argument withholds the
 report. The terminal sink alone reads all five
@@ -143,8 +148,13 @@ The cached sidecar stays Partial; finalization operates on the delivery clone.
 The fixed Vue built-ins excluded from this claim are enumerated beside the
 sidecar builder; a test renders the real IDE public-constructor projection and
 checks its omitted and retained built-in keys against that list and the
-sidecar's own members, then checks every exclusion is a real Vue built-in
+sidecar's own members, then checks every fixed-key exclusion is a real Vue built-in
 omitted or retained by the constructor. `$slots` is excluded only when the
 sidecar has no slots; otherwise it is listed as a sidecar member. The constant
 and its re-export are test-only; production inserts `$slots` directly when
 slots exist.
+
+The closed public-instance claim also excludes global members contributed by
+`ComponentCustomProperties`. Like the fixed built-ins, that augmentation class
+is outside the claim's domain. Its members are not modeled, and this exclusion
+adds no augmentation read or dependency.

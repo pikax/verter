@@ -385,10 +385,10 @@ fn build_public_instance_slots_member(
     }
 }
 
-/// Fixed `ComponentPublicInstance` built-ins excluded from the sidecar's
+/// `ComponentPublicInstance` built-ins and augmentation classes excluded from the sidecar's
 /// completeness claim. `$slots` is excluded exactly when the sidecar has no
 /// slots; when slots exist the sidecar lists it instead.
-/// These are the Vue built-ins, not user-defined or Options API members.
+/// `ComponentCustomProperties` denotes global augmentation members, not a literal key.
 #[cfg(test)]
 pub(crate) const PUBLIC_INSTANCE_OMITTED_BUILTINS: &[&str] = &[
     "$",
@@ -406,6 +406,7 @@ pub(crate) const PUBLIC_INSTANCE_OMITTED_BUILTINS: &[&str] = &[
     "$forceUpdate",
     "$nextTick",
     "$watch",
+    "ComponentCustomProperties",
 ];
 
 pub(crate) fn populate_public_instance_sidecar(
