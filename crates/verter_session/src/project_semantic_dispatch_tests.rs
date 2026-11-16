@@ -137,6 +137,7 @@ mod object_literal_key_tests;
 mod object_literal_union_tests;
 mod object_spread_projection_eval_tests;
 mod openness_depth_tests;
+mod type_lowering_read_tests;
 // Measures declaration lowering through optional provenance capture: runs in
 // the instrumentation lane.
 #[cfg(feature = "semantic-observe")]
