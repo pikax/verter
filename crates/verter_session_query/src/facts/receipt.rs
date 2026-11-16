@@ -34,12 +34,52 @@ use crate::retention::{
     ChargeClass, RetentionAdmission, RetentionCharge, RetentionRefusal, SemanticRetentionAccount,
 };
 
+/// A successful, fully strict validation in an unchanged base world.
+/// This bounded memo is not part of evidence identity.
+#[derive(Debug, Default)]
+pub struct PositiveValidationStamp {
+    token: parking_lot::Mutex<Option<crate::resolution::StoreViewValidationToken>>,
+    #[cfg(any(test, feature = "test-support"))]
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl PositiveValidationStamp {
+    /// Whether this evidence was fully validated under exactly `token`.
+    /// The caller must first establish base population and empty completion.
+    pub fn matches(&self, token: &crate::resolution::StoreViewValidationToken) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.token.lock().as_ref() == Some(token)
+    }
+
+    /// Remember a positive verdict only after every reachable fact passed,
+    /// every whole-file leaf was checked strictly, and base population and
+    /// empty completion held across the validation.
+    pub fn record_positive(&self, token: crate::resolution::StoreViewValidationToken) {
+        *self.token.lock() = Some(token);
+    }
+
+    /// How many validity lookups consulted this stamp.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reads_for_tests(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Inspect the proof metadata without counting a validator lookup.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn token_for_tests(&self) -> Option<crate::resolution::StoreViewValidationToken> {
+        *self.token.lock()
+    }
+}
+
 /// The evidence one completed result recorded: its own facts and the
 /// receipts of the results it consumed, in canonical order, with the
 /// summaries a consumer projecting a signature needs without walking it.
 #[derive(Debug)]
 pub struct ResultEvidence {
     facts: Arc<[FactVersionRef]>,
+    validation_stamp: PositiveValidationStamp,
     digest: u128,
     /// Every canonical a fact reachable from here names: a persistent set
     /// sharing its structure with the sets of the receipts it consumed.
@@ -381,6 +421,7 @@ impl ResultReceipt {
         )));
         Self(Arc::new(ResultEvidence {
             facts: facts.into(),
+            validation_stamp: PositiveValidationStamp::default(),
             digest,
             canonicals,
             aggregated: aggregated.into(),
@@ -409,6 +450,11 @@ impl ResultReceipt {
     #[must_use]
     pub fn facts(&self) -> &[FactVersionRef] {
         &self.0.facts
+    }
+
+    /// The positive validation metadata shared by every holder of this evidence.
+    pub fn validation_stamp(&self) -> &PositiveValidationStamp {
+        &self.0.validation_stamp
     }
 
     /// The evidence's digest.

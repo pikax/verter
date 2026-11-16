@@ -75,6 +75,19 @@ fn reads(
     (answer, view.leaf_validations_for_tests() - before)
 }
 
+fn receipt_stamp(
+    signature: &[FactVersionRef],
+) -> &verter_session_query::facts::receipt::PositiveValidationStamp {
+    let FactVersionRef::Receipt(receipt) = &signature[0] else {
+        panic!("fixture must hold a receipt");
+    };
+    receipt.validation_stamp()
+}
+
+fn stamp_reads(signature: &[FactVersionRef]) -> usize {
+    receipt_stamp(signature).reads_for_tests()
+}
+
 #[test]
 fn an_untracked_own_file_rejects_a_retained_signature() {
     let base = base_view();
@@ -84,6 +97,648 @@ fn an_untracked_own_file_rejects_a_retained_signature() {
     assert!(view.validates_retained_signature(&signature, &[]));
     assert!(!view.validates_retained_signature(&signature, &["/r/99.ts"]));
     assert!(view.validates_retained_signature(&signature, &["/unrelated.ts"]));
+}
+
+#[test]
+fn a_fully_strict_positive_receipt_reuses_validation_across_requests() {
+    const ID: &str = "/proj/button.ts";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_stamp_source(&host, ID, "export interface ButtonProps { label: string }");
+    let base = host.resolver_store_view_read().into_owned_view();
+    let fact = FactVersionRef::FileWholeHash {
+        canonical_id: ID.into(),
+        hash: base.whole_hash_for_tests(ID).expect("tracked file"),
+    };
+    let child = ResultReceipt::new(vec![fact]);
+    let parent = ResultReceipt::new(vec![FactVersionRef::Receipt(child.clone())]);
+    for (receipt, expected) in [(parent.clone(), 1), (parent.clone(), 0), (child, 0)] {
+        let view = RequestStoreView::new(&base, Arc::new(CanonicalCompletionOverlay::new()));
+        assert_eq!(
+            reads(&view, &[FactVersionRef::Receipt(receipt)], &[ID]),
+            (Ok(()), expected),
+            "an unchanged token reuses a strictly validated positive verdict"
+        );
+    }
+    upsert_stamp_source(&host, "/proj/unrelated.ts", "export const value = 1;");
+    let moved = host.resolver_store_view_read().into_owned_view();
+    assert_ne!(base.validation_token(), moved.validation_token());
+    for expected in [1, 0] {
+        let view = RequestStoreView::new(&moved, Arc::new(CanonicalCompletionOverlay::new()));
+        assert_eq!(
+            reads(&view, &[FactVersionRef::Receipt(parent.clone())], &[ID]),
+            (Ok(()), expected),
+            "a surviving receipt walks once and stamps the moved token"
+        );
+    }
+}
+
+#[test]
+fn a_lazily_validated_receipt_cannot_vouch_for_a_strict_root() {
+    let base = base_view();
+    let receipt = ResultReceipt::new(vec![whole(99)]);
+    let signature = [FactVersionRef::Receipt(receipt)];
+    let lazy = RequestStoreView::new(&base, Arc::new(CanonicalCompletionOverlay::new()));
+    assert_eq!(reads(&lazy, &signature, &[]), (Ok(()), 1));
+    let strict = RequestStoreView::new(&base, Arc::new(CanonicalCompletionOverlay::new()));
+    assert_eq!(reads(&strict, &signature, &["/r/99.ts"]), (Err(0), 1));
+}
+
+#[test]
+fn tracked_dependencies_can_supply_a_strict_receipt_stamp() {
+    const ID: &str = "/proj/button.ts";
+    let base = base_view();
+    let tracked = FactVersionRef::FileWholeHash {
+        canonical_id: ID.into(),
+        hash: base.whole_hash_for_tests(ID).expect("tracked dependency"),
+    };
+    for (fact, reusable) in [(tracked, true), (whole(99), false)] {
+        let signature = [FactVersionRef::Receipt(ResultReceipt::new(vec![fact]))];
+        for expected in [1, usize::from(!reusable)] {
+            let view = RequestStoreView::new(&base, Arc::new(CanonicalCompletionOverlay::new()));
+            assert_eq!(reads(&view, &signature, &[]), (Ok(()), expected));
+            assert_eq!(
+                receipt_stamp(&signature).token_for_tests().is_some(),
+                reusable
+            );
+        }
+    }
+}
+
+#[test]
+fn a_stale_receipt_is_never_reused_as_a_positive_verdict() {
+    const ID: &str = "/proj/button.ts";
+    let base = base_view();
+    let signature = [FactVersionRef::Receipt(ResultReceipt::new(vec![
+        FactVersionRef::FileWholeHash {
+            canonical_id: ID.into(),
+            hash: [0xEE; 16],
+        },
+    ]))];
+    for _ in 0..2 {
+        let view = RequestStoreView::new(&base, Arc::new(CanonicalCompletionOverlay::new()));
+        assert_eq!(reads(&view, &signature, &[ID]), (Err(0), 1));
+    }
+}
+
+#[test]
+fn completion_shadowing_never_reads_or_writes_a_positive_stamp() {
+    const ID: &str = "/proj/button.ts";
+    let base = base_view();
+    let signature = [FactVersionRef::Receipt(ResultReceipt::new(vec![
+        FactVersionRef::FileWholeHash {
+            canonical_id: ID.into(),
+            hash: base.whole_hash_for_tests(ID).expect("tracked file"),
+        },
+    ]))];
+    let view = RequestStoreView::new(&base, Arc::new(CanonicalCompletionOverlay::new()));
+    assert_eq!(reads(&view, &signature, &[ID]), (Ok(()), 1));
+    let lookups = stamp_reads(&signature);
+    for _ in 0..2 {
+        let overlay = Arc::new(CanonicalCompletionOverlay::new());
+        overlay.insert_whole_hash_for_tests(ID, [0xEE; 16]);
+        let shadow = RequestStoreView::new(&base, overlay);
+        assert_eq!(reads(&shadow, &signature, &[ID]), (Err(0), 1));
+        assert_eq!(stamp_reads(&signature), lookups);
+    }
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    overlay.insert_whole_hash_for_tests("/unrelated.ts", [9; 16]);
+    let unstamped = [FactVersionRef::Receipt(ResultReceipt::new(vec![
+        FactVersionRef::ProjectGeneration {
+            generation: base.validation_token().project_generation,
+        },
+    ]))];
+    for _ in 0..2 {
+        let shadow = RequestStoreView::new(&base, Arc::clone(&overlay));
+        assert_eq!(reads(&shadow, &unstamped, &[]), (Ok(()), 1));
+        assert_eq!(stamp_reads(&unstamped), 0);
+        assert!(receipt_stamp(&unstamped).token_for_tests().is_none());
+    }
+}
+
+#[test]
+fn session_populations_never_read_or_write_a_positive_stamp() {
+    use crate::session_view::OverlaidView;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let mut overlays = rustc_hash::FxHashMap::default();
+    overlays.insert("/session.ts".to_owned(), Arc::from("export const a = 1;"));
+    let session = OverlaidView::new(Arc::clone(&host), overlays);
+    let base = host.resolver_store_view_read().into_owned_view();
+    let overlaid = base.clone().with_session_overlay(&host, &session);
+    assert_ne!(overlaid.view_population(), base.view_population());
+    for stamped_in_base in [false, true] {
+        let signature = [FactVersionRef::Receipt(ResultReceipt::new(vec![
+            FactVersionRef::ProjectGeneration {
+                generation: base.validation_token().project_generation,
+            },
+        ]))];
+        if stamped_in_base {
+            let view = RequestStoreView::new(&base, Arc::new(CanonicalCompletionOverlay::new()));
+            assert_eq!(reads(&view, &signature, &[]), (Ok(()), 1));
+        }
+        let lookups = stamp_reads(&signature);
+        let recorded = receipt_stamp(&signature).token_for_tests();
+        for _ in 0..2 {
+            let view =
+                RequestStoreView::new(&overlaid, Arc::new(CanonicalCompletionOverlay::new()));
+            assert_eq!(reads(&view, &signature, &[]), (Ok(()), 1));
+            assert_eq!(stamp_reads(&signature), lookups);
+            assert_eq!(receipt_stamp(&signature).token_for_tests(), recorded);
+        }
+    }
+}
+
+#[test]
+fn a_stamp_lookup_refuses_a_completion_that_moves_during_the_lookup() {
+    const ID: &str = "/proj/button.ts";
+    let base = base_view();
+    let receipt = ResultReceipt::new(vec![FactVersionRef::FileWholeHash {
+        canonical_id: ID.into(),
+        hash: base.whole_hash_for_tests(ID).expect("tracked"),
+    }]);
+    let signature = [FactVersionRef::Receipt(receipt.clone())];
+    let first = RequestStoreView::new(&base, Arc::new(CanonicalCompletionOverlay::new()));
+    assert_eq!(reads(&first, &signature, &[ID]), (Ok(()), 1));
+    let overlay = Arc::new(CanonicalCompletionOverlay::new());
+    let mover = Arc::clone(&overlay);
+    let moving = RequestStoreView::new(&base, overlay).with_validation_step_hook_for_tests(
+        Arc::new(move |step| {
+            if step == 0 {
+                mover.insert_whole_hash_for_tests(ID, [0xEE; 16]);
+            }
+        }),
+    );
+    assert!(!moving.reuses_positive_validation_stamp(receipt.validation_stamp()));
+    assert_eq!(moving.peek_whole_hash_for_tests(ID), Some([0xEE; 16]));
+    assert_eq!(reads(&moving, &signature, &[ID]), (Err(0), 1));
+}
+
+fn upsert_stamp_source(host: &VerterHost, id: &str, source: &str) {
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(id.to_owned()),
+            input_id: id.to_owned(),
+            source: Arc::from(source),
+            file_language: FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .expect("source admitted");
+    host.ensure_indexed_ready(id).expect("source indexed");
+}
+
+/// Compare a moved-token read with a newly minted, unstamped copy of the
+/// same evidence. Both must take the complete ordinary validation path,
+/// including its first failure and leaf count.
+fn a_domain_move_rechecks_receipt(
+    host: &VerterHost,
+    facts: Vec<FactVersionRef>,
+    roots: &[&str],
+    change: impl FnOnce(),
+) {
+    let before = host.resolver_store_view_read().into_owned_view();
+    let receipt = ResultReceipt::new(facts.clone());
+    let signature = [FactVersionRef::Receipt(receipt)];
+    let first = RequestStoreView::new(&before, Arc::new(CanonicalCompletionOverlay::new()));
+    let (answer, work) = reads(&first, &signature, roots);
+    assert_eq!(answer, Ok(()));
+    assert!(work > 0);
+    let repeat = RequestStoreView::new(&before, Arc::new(CanonicalCompletionOverlay::new()));
+    assert_eq!(reads(&repeat, &signature, roots), (Ok(()), 0));
+    change();
+    let after = host.resolver_store_view_read().into_owned_view();
+    let control = [FactVersionRef::Receipt(ResultReceipt::new(facts))];
+    let ordinary = RequestStoreView::new(&after, Arc::new(CanonicalCompletionOverlay::new()));
+    let expected = reads(&ordinary, &control, roots);
+    assert!(expected.0.is_err(), "the changed fact must be stale");
+    assert!(expected.1 > 0, "the ordinary path must walk");
+    assert_ne!(
+        before.validation_token(),
+        after.validation_token(),
+        "the ordinary validation found stale evidence with {expected:?}"
+    );
+    for _ in 0..2 {
+        let moved = RequestStoreView::new(&after, Arc::new(CanonicalCompletionOverlay::new()));
+        assert_eq!(reads(&moved, &signature, roots), expected);
+    }
+}
+
+#[test]
+fn a_parse_domain_move_alone_rechecks_a_positive_receipt() {
+    use verter_session_query::facts::fact_cache::ParseFactRef;
+    use verter_session_query::facts::{FactKey, FactLane};
+    const ID: &str = "/proj/parse.ts";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_stamp_source(&host, ID, "export const a = 1;");
+    let indexed = host.ensure_indexed_ready(ID).expect("indexed");
+    let key = FactKey::SyntacticExportSet;
+    let artifact_key = host
+        .authoritative_current_artifact_key(ID)
+        .expect("artifact key");
+    let artifacts = host
+        .project_type_store()
+        .indexed()
+        .get_artifacts(&artifact_key)
+        .expect("artifact");
+    assert!(Arc::ptr_eq(&indexed, &artifacts.indexed));
+    let hash = artifacts
+        .facts
+        .lookup(&key)
+        .expect("export set")
+        .semantic_hash;
+    let token = host.current_validation_token();
+    a_domain_move_rechecks_receipt(
+        &host,
+        vec![FactVersionRef::Parse(ParseFactRef {
+            canonical_id: ID.into(),
+            key,
+            lane: FactLane::Semantic,
+            expected_hash: hash,
+        })],
+        &[],
+        || {
+            let mut next = artifacts.as_ref().clone();
+            let mut facts = next.facts.as_ref().clone();
+            let mut fact = facts
+                .lookup(&FactKey::SyntacticExportSet)
+                .expect("export set")
+                .clone();
+            fact.semantic_hash[0] ^= 1;
+            facts.registry_mut().insert(fact);
+            next.facts = Arc::new(facts);
+            host.project_type_store()
+                .indexed()
+                .insert_artifacts(artifact_key, Arc::new(next));
+            let mut moved = host.current_validation_token();
+            assert_ne!(moved.artifact_generation, token.artifact_generation);
+            moved.artifact_generation = token.artifact_generation;
+            assert_eq!(moved, token, "only parse facts were republished");
+        },
+    );
+}
+
+#[test]
+fn a_resolution_domain_move_alone_rechecks_a_positive_receipt() {
+    use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
+    const ID: &str = "/proj/importer.ts";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_stamp_source(
+        &host,
+        ID,
+        "import { value } from './dep'; export { value };",
+    );
+    let context = ResolutionContext {
+        phase: ResolvePhase::ProviderGraph,
+        kind: ResolveRequestKind::EsmImport,
+    };
+    let outcome = host.ws().resolve_import_outcome(ID, "./dep", context);
+    let verter_workspace::ResolutionPublication::Admitted(admitted) = outcome.into_publication()
+    else {
+        panic!("resolution witness must be admitted");
+    };
+    let facts = admitted
+        .signature()
+        .facts
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(facts
+        .iter()
+        .any(|fact| matches!(fact, FactVersionRef::ResolveImports(_))));
+    let token = host.current_validation_token();
+    a_domain_move_rechecks_receipt(&host, facts, &[], || {
+        let applied = host.ws().set_exact_resolutions(
+            ID,
+            vec![verter_workspace::ExactResolution {
+                specifier: "./dep".to_owned(),
+                phase: context.phase,
+                kind: context.kind,
+                resolved_canonical_id: Some("/proj/dep.ts".to_owned()),
+                possible_canonical_ids: vec!["/proj/dep.ts".to_owned()],
+            }],
+        );
+        assert!(applied.changed);
+        let mut moved = host.current_validation_token();
+        assert_ne!(
+            moved.resolution_fact_generation,
+            token.resolution_fact_generation
+        );
+        moved.resolution_fact_generation = token.resolution_fact_generation;
+        assert_eq!(moved, token, "only resolution currency moved");
+    });
+}
+
+#[test]
+fn a_route_surface_domain_move_alone_rechecks_a_positive_receipt() {
+    use crate::file_artifact_store::{
+        AugmentationPopulation, AugmentationTargetKey, AugmentationTargetKind,
+    };
+    use verter_session_query::facts::fact_cache::RouteSurfaceFactRef;
+    use verter_session_query::facts::{AugmentationTargetKindTag, FactKey, FactLane};
+    use verter_session_query::resolution::AugmenterSet;
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let env = host.host_view_env_hashes();
+    let project_identity = host.host_view_project_identity();
+    let key = AugmentationTargetKey {
+        project_identity,
+        resolve_env_hash: env.resolve_env_hash,
+        lib_env_hash: env.lib_env_hash,
+        population: AugmentationPopulation::Base,
+        target: AugmentationTargetKind::GlobalAugmentation,
+    };
+    let publish = |hash| {
+        host.project_type_store().indexed().populate_augmenter_set(
+            key.clone(),
+            Arc::new(AugmenterSet {
+                entries: Default::default(),
+                fingerprint: hash,
+            }),
+        )
+    };
+    publish([7; 16]);
+    let token = host.current_validation_token();
+    a_domain_move_rechecks_receipt(
+        &host,
+        vec![FactVersionRef::RouteSurface(RouteSurfaceFactRef {
+            canonical_id: "/proj/ambient.ts".into(),
+            key: FactKey::ModuleAugmentationIndexShape {
+                target_kind_tag: AugmentationTargetKindTag::GlobalAugmentation,
+                external_specifier: None,
+                resolved_relative_canonical: None,
+                wildcard_pattern: None,
+            },
+            lane: FactLane::Semantic,
+            expected_hash: [7; 16],
+        })],
+        &[],
+        || {
+            publish([8; 16]);
+            let mut moved = host.current_validation_token();
+            assert_ne!(moved.artifact_generation, token.artifact_generation);
+            moved.artifact_generation = token.artifact_generation;
+            assert_eq!(moved, token, "only the route population changed");
+        },
+    );
+}
+
+#[test]
+fn a_program_analysis_domain_move_alone_rechecks_a_positive_receipt() {
+    use verter_session_query::facts::fact_cache::{
+        ProgramAnalysisFactRef, ProgramAnalysisFunctionRef,
+    };
+    const ID: &str = "/proj/body.ts";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_stamp_source(&host, ID, "export function value() { return 1; }");
+    let indexed = host.ensure_indexed_ready(ID).expect("indexed");
+    let function = ProgramAnalysisFunctionRef {
+        canonical_id: ID.into(),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        merged_symbol_name: "value".into(),
+        symbol_space: verter_session_query::facts::SymbolSpace::Value,
+        function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    let hash = indexed
+        .shallow_state
+        .decl_bodies()
+        .function_program_index()
+        .value
+        .value_function(function.owner, "value", &function.function_part, 0)
+        .expect("function indexed")
+        .entry()
+        .flow_body_stable_hash();
+    let artifact_key = host
+        .authoritative_current_artifact_key(ID)
+        .expect("artifact key");
+    let artifacts = host
+        .project_type_store()
+        .indexed()
+        .get_artifacts(&artifact_key)
+        .expect("artifact");
+    let alternate = VerterHost::new_standalone(HostConfig::default());
+    upsert_stamp_source(&alternate, ID, "export function value() { return 2; }");
+    let alternate_indexed = alternate
+        .ensure_indexed_ready(ID)
+        .expect("alternate indexed");
+    assert_ne!(
+        alternate_indexed
+            .shallow_state
+            .decl_bodies()
+            .function_program_index()
+            .value
+            .value_function(function.owner, "value", &function.function_part, 0)
+            .expect("alternate function indexed")
+            .entry()
+            .flow_body_stable_hash(),
+        hash
+    );
+    let token = host.current_validation_token();
+    a_domain_move_rechecks_receipt(
+        &host,
+        vec![FactVersionRef::ProgramAnalysis(
+            ProgramAnalysisFactRef::FlowBody {
+                function,
+                flow_body_stable_hash: hash,
+            },
+        )],
+        &[],
+        || {
+            let mut next = artifacts.as_ref().clone();
+            let mut program = next.indexed.as_ref().clone();
+            program.shallow_state = Arc::clone(&alternate_indexed.shallow_state);
+            next.indexed = Arc::new(program);
+            assert!(Arc::ptr_eq(&next.facts, &artifacts.facts));
+            assert_eq!(next.indexed.whole_hash, indexed.whole_hash);
+            assert!(Arc::ptr_eq(&next.indexed.raw_source, &indexed.raw_source));
+            host.project_type_store()
+                .indexed()
+                .insert_artifacts(artifact_key, Arc::new(next));
+            let mut moved = host.current_validation_token();
+            assert_ne!(moved.artifact_generation, token.artifact_generation);
+            moved.artifact_generation = token.artifact_generation;
+            assert_eq!(moved, token, "only program analysis was republished");
+        },
+    );
+}
+
+#[test]
+fn a_source_environment_move_rechecks_a_positive_receipt_with_unchanged_content() {
+    const ID: &str = "/proj/language.ts";
+    const SOURCE: &str = "export const value = 1;";
+    let host = VerterHost::new_standalone(HostConfig::default());
+    upsert_stamp_source(&host, ID, SOURCE);
+    let key = host
+        .authoritative_current_artifact_key(ID)
+        .expect("source identity");
+    let whole_hash = key.content_hash;
+    let source_env = crate::resolver_store::live_source_env_identity(&host, &key);
+    a_domain_move_rechecks_receipt(
+        &host,
+        vec![FactVersionRef::FileSourceEnv {
+            canonical_id: ID.into(),
+            parse_env_hash: source_env.parse_env_hash,
+            parse_key: source_env.parse_key,
+            file_language_id: source_env.file_language_id,
+        }],
+        &[],
+        || {
+            let _ = host
+                .upsert(UpsertRequest {
+                    canonical_id: Some(ID.to_owned()),
+                    input_id: ID.to_owned(),
+                    source: Arc::from(SOURCE),
+                    file_language: FileLanguage::script(verter_language::ScriptSourceType::Tsx),
+                    aliases: Vec::new(),
+                })
+                .expect("new language admitted");
+            host.ensure_indexed_ready(ID).expect("new language indexed");
+            assert_eq!(
+                host.authoritative_current_artifact_key(ID)
+                    .expect("identity")
+                    .content_hash,
+                whole_hash
+            );
+        },
+    );
+}
+
+#[test]
+fn a_semantic_imports_domain_move_alone_rechecks_a_positive_receipt() {
+    use crate::session_view::{HostView, SessionView};
+    use verter_session_query::facts::fact_cache::ResolveImportsFactRef;
+    use verter_session_query::facts::registry::{InternedName, InternedSpecifier};
+    use verter_session_query::facts::{FactKey, FactLane};
+    use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
+    const ID: &str = "/proj/importer.ts";
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    upsert_stamp_source(&host, "/proj/dep.ts", "export const value = 1;");
+    upsert_stamp_source(&host, "/proj/other.ts", "export const value = 2;");
+    upsert_stamp_source(
+        &host,
+        ID,
+        "import { value } from './dep'; export const result = value;",
+    );
+    let routes = rustc_hash::FxHashMap::from_iter([(
+        "./dep".to_owned(),
+        crate::types::DependencyResolution {
+            specifier: "./dep".to_owned(),
+            resolved_canonical_id: Some("/proj/dep.ts".to_owned()),
+            possible_canonical_ids: Vec::new(),
+        },
+    )]);
+    assert!(host.admit_resolved_import_facts_for_owner(ID, &routes));
+    let session = HostView::new(Arc::clone(&host));
+    let payload = session
+        .resolved_import_facts(ID)
+        .expect("resolved import facts");
+    let entry = payload
+        .import_clauses
+        .iter()
+        .find(|entry| entry.binding.as_ref() == "value")
+        .expect("binding");
+    let fact = FactVersionRef::ResolveImports(ResolveImportsFactRef::Semantic {
+        canonical_id: ID.into(),
+        key: FactKey::ResolvedImportClause {
+            specifier: InternedSpecifier::from(entry.specifier.as_ref()),
+            binding: InternedName::from(entry.binding.as_ref()),
+            space: entry.space,
+            resolved_canonical: entry.resolved_canonical.as_ref().expect("resolved").clone(),
+            resolved_source_name: InternedName::from(entry.resolved_source_name.as_ref()),
+        },
+        lane: FactLane::Semantic,
+        expected_hash: entry.fact.semantic_hash,
+    });
+    let token = host.current_validation_token();
+    a_domain_move_rechecks_receipt(&host, vec![fact], &[], || {
+        let context = ResolutionContext {
+            phase: ResolvePhase::CodegenBlocker,
+            kind: ResolveRequestKind::TypeImport,
+        };
+        assert!(
+            host.ws()
+                .set_exact_resolutions(
+                    ID,
+                    vec![verter_workspace::ExactResolution {
+                        specifier: "./dep".to_owned(),
+                        phase: context.phase,
+                        kind: context.kind,
+                        resolved_canonical_id: Some("/proj/other.ts".to_owned()),
+                        possible_canonical_ids: vec!["/proj/other.ts".to_owned()],
+                    }]
+                )
+                .changed
+        );
+        let mut moved_routes = routes.clone();
+        moved_routes
+            .get_mut("./dep")
+            .expect("import route")
+            .resolved_canonical_id = Some("/proj/other.ts".to_owned());
+        assert!(host.admit_resolved_import_facts_for_owner(ID, &moved_routes));
+        let moved = session
+            .resolved_import_facts(ID)
+            .expect("retargeted import facts");
+        assert_eq!(
+            moved
+                .import_clauses
+                .iter()
+                .find(|entry| entry.binding.as_ref() == "value")
+                .expect("retargeted binding")
+                .resolved_canonical
+                .as_deref(),
+            Some("/proj/other.ts")
+        );
+        let mut current = host.current_validation_token();
+        assert_ne!(
+            current.resolution_fact_generation,
+            token.resolution_fact_generation
+        );
+        current.resolution_fact_generation = token.resolution_fact_generation;
+        assert_eq!(current, token, "only import resolution currency moved");
+    });
+}
+
+#[test]
+fn token_movement_rechecks_whole_file_derived_aggregate_and_world_evidence() {
+    use verter_session_query::facts::fact_cache::{
+        AggregatePopulation, AggregateStamp, CompactionDomain, DerivedFactKind,
+        DomainGenerationFact, ViewPopulation,
+    };
+    const ID: &str = "/proj/content.ts";
+    for kind in 0..5 {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert_stamp_source(&host, ID, "export const value = 1;");
+        let base = host.resolver_store_view_read().into_owned_view();
+        let hash = base.whole_hash_for_tests(ID).expect("tracked");
+        let fact = match kind {
+            0 => FactVersionRef::FileWholeHash {
+                canonical_id: ID.into(),
+                hash,
+            },
+            1 => FactVersionRef::DerivedFactHash {
+                canonical_id: ID.into(),
+                kind: DerivedFactKind::DirectSource,
+                hash,
+            },
+            2 => FactVersionRef::DomainGeneration(DomainGenerationFact {
+                domain: CompactionDomain::Content,
+                population: AggregatePopulation::View(ViewPopulation::Base),
+                stamp: AggregateStamp::Generation(base.validation_token().content_generation),
+            }),
+            3 => FactVersionRef::StrictSelfRootWorld(
+                base.strict_self_root_world_identity()
+                    .expect("strict world"),
+            ),
+            4 => FactVersionRef::ProjectGeneration {
+                generation: base.validation_token().project_generation,
+            },
+            _ => unreachable!(),
+        };
+        a_domain_move_rechecks_receipt(&host, vec![fact], &[ID], || {
+            if kind == 4 {
+                host.configure_projects(Vec::new());
+            } else {
+                upsert_stamp_source(&host, ID, "export const value = 2;");
+            }
+        });
+    }
 }
 
 #[test]

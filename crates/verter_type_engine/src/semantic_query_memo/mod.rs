@@ -2152,7 +2152,9 @@ impl SemanticGraphStore {
                     walker_diagnostics: entry.walker_diagnostics,
                     cache_suppress: false,
                     fact_status: crate::semantic_query::FactStatus::Complete,
-                    receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
+                    receipt: crate::semantic_query::ReadReceipt::Priced(Arc::clone(
+                        &entry.evidence.cost_receipt,
+                    )),
                 }
             })
         });
@@ -2312,7 +2314,9 @@ impl SemanticGraphStore {
                 walker_diagnostics: entry.walker_diagnostics,
                 cache_suppress: false,
                 fact_status: crate::semantic_query::FactStatus::Complete,
-                receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
+                receipt: crate::semantic_query::ReadReceipt::Priced(Arc::clone(
+                    &entry.evidence.cost_receipt,
+                )),
             }
         });
         crate::observe_request!(C::Observe => on crate::resolver_core::resolver_context::capture_targets(ctx).request.as_deref() => |rctx| {
@@ -2465,7 +2469,9 @@ impl SemanticGraphStore {
             walker_diagnostics: entry.walker_diagnostics,
             cache_suppress: false,
             fact_status: crate::semantic_query::FactStatus::Complete,
-            receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
+            receipt: crate::semantic_query::ReadReceipt::Priced(Arc::clone(
+                &entry.evidence.cost_receipt,
+            )),
         };
         self.note_warm_hit::<C::Observe>(
             crate::resolver_core::resolver_context::capture_targets(ctx),
@@ -2714,6 +2720,7 @@ impl SemanticGraphStore {
         let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
+            evidence: family::MemoEvidence::new(Arc::clone(cost_receipt)),
             lease: match self.lease_candidate(
                 family,
                 delivery_lease::DeliveredAllocations::read(
@@ -2734,7 +2741,6 @@ impl SemanticGraphStore {
             retention: None,
             validated_at_generation,
             admission_seq,
-            cost_receipt: Arc::clone(cost_receipt),
         };
         // Aggregate retention admission, BEFORE the per-family cap plan:
         // a refusal must not displace a resident candidate to make room
@@ -2971,6 +2977,7 @@ impl SemanticGraphStore {
         let validated_at_generation = flags.current_project_generation();
         let admission_seq = self.alloc_candidate_admission_seq();
         let mut entry = MemoEntry {
+            evidence: family::MemoEvidence::new(cost_receipt),
             lease: Default::default(),
             result: match result {
                 QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(node)),
@@ -2985,7 +2992,6 @@ impl SemanticGraphStore {
             retention: None,
             validated_at_generation,
             admission_seq,
-            cost_receipt,
         };
         entry.lease = match self.lease_candidate(
             family,
