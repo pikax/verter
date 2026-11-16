@@ -350,9 +350,12 @@ impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
     }
 
     /// A call's covariant inference from several candidates (the checker's
-    /// `getCommonSupertype` in `getCovariantInference`): the leftmost
-    /// candidate no later one is a supertype of, with each candidate's
-    /// `null` / `undefined` set aside under `strictNullChecks` and added
+    /// `getCommonSupertype` in `getCovariantInference`): fold left under
+    /// strict subtyping, keeping that winner if every candidate is its
+    /// strict subtype, else repeat under regular subtyping. Each fold
+    /// replaces its winner when it is a subtype of the next candidate.
+    /// Each candidate's `null` / `undefined` is set aside under
+    /// `strictNullChecks` and added
     /// back to the answer — `takes(u)` over `((x: unknown) => x is A) |
     /// ((x: unknown) => x is B)` infers `A`, where a conditional type's
     /// `infer` unions its candidates. Literals of one base primitive
@@ -472,19 +475,41 @@ impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
                 Some(self.intern_normalized_union_or_intersection(&primary, true))
             }
             [first, rest @ ..] => {
-                let mut supertype = *first;
-                for candidate in rest {
-                    match self.execute_relate_pair_kind(
-                        supertype,
-                        *candidate,
-                        crate::semantic_query::RelationKind::Subtype,
-                    ) {
-                        RelationStep::Assignable { .. } => supertype = *candidate,
-                        RelationStep::NotAssignable => {}
-                        _ => return None,
+                let fold = |kind| {
+                    let mut supertype = *first;
+                    for &candidate in rest {
+                        match decided(self.execute_relate_pair_kind(supertype, candidate, kind)) {
+                            Some(true) => supertype = candidate,
+                            Some(false) => {}
+                            None => return None,
+                        }
+                    }
+                    Some(supertype)
+                };
+                let candidate = fold(RelationKind::StrictSubtype)?;
+                let mut common = true;
+                for &other in &primary {
+                    if other == candidate {
+                        continue;
+                    }
+                    match decided(self.execute_relate_pair_kind(
+                        other,
+                        candidate,
+                        RelationKind::StrictSubtype,
+                    )) {
+                        Some(true) => {}
+                        Some(false) => {
+                            common = false;
+                            break;
+                        }
+                        None => return None,
                     }
                 }
-                Some(supertype)
+                if common {
+                    Some(candidate)
+                } else {
+                    fold(RelationKind::Subtype)
+                }
             }
         };
         let mut members: Vec<SemanticNodeId> = supertype.into_iter().collect();
