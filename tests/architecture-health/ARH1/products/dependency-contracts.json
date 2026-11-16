@@ -1404,6 +1404,7 @@
           "crates/verter_session/src/cross_file_augmentation_merge_equivalence_tests.rs",
           "crates/verter_session/src/decl_body_dispatch_equivalence_tests.rs",
           "crates/verter_session/src/error_propagation_lattice_tests.rs",
+          "crates/verter_session/src/fallthrough_admission_tests.rs",
           "crates/verter_session/src/flow_completion_inventory_tests.rs",
           "crates/verter_session/src/flow_gap_retraction_tests.rs",
           "crates/verter_session/src/for_tests.rs",
