@@ -26,6 +26,64 @@ fn named(name: &str, args: Vec<TypeExpr>) -> TypeExpr {
     }
 }
 
+fn signature(constructor: bool, generics: bool) -> TypeExpr {
+    let mut function = verter_type_expr::FunctionExpr::synthetic(
+        vec![verter_type_expr::FunctionParam::synthetic(
+            Some("a".into()),
+            value_type(&["x"], vec![]),
+            false,
+            false,
+        )],
+        Some(Arc::new(if generics {
+            named("T", vec![])
+        } else {
+            value_type(&["x"], vec![])
+        })),
+        if generics {
+            vec![verter_type_expr::TypeParam {
+                name: "T".into(),
+                constraint: Some(Arc::new(value_type(&["x"], vec![]))),
+                default: Some(Arc::new(value_type(&["y"], vec![]))),
+                is_const: false,
+            }]
+        } else {
+            vec![]
+        },
+    );
+    if generics {
+        function.predicate = Some(Arc::new(verter_type_expr::TypePredicate {
+            subject: verter_type_expr::TypePredicateSubject::Parameter(Arc::from("a")),
+            asserts: false,
+            ty: Some(Arc::new(value_type(&["x"], vec![]))),
+        }));
+    }
+    if constructor {
+        TypeExpr::ConstructorType(Arc::new(function))
+    } else {
+        TypeExpr::Function(Arc::new(function))
+    }
+}
+
+fn mapped(source: TypeExpr, value: TypeExpr, name: Option<TypeExpr>) -> TypeExpr {
+    TypeExpr::Mapped {
+        parameter: "K".into(),
+        source: Arc::new(source),
+        value: Arc::new(value),
+        optional: verter_type_expr::MappedModifier::None,
+        readonly: verter_type_expr::MappedModifier::None,
+        name_type: name.map(Arc::new),
+    }
+}
+
+fn imported(qualifier: &[&str], args: Vec<TypeExpr>) -> TypeExpr {
+    TypeExpr::ImportType {
+        specifier: "./m".into(),
+        qualifier: qualifier.iter().map(|s| (*s).into()).collect(),
+        typeof_query: false,
+        type_arguments: args.into(),
+    }
+}
+
 #[test]
 fn type_lowering_preserves_read_order_shapes_and_substitutions() {
     use LowerReadShape::{Node, Whole};
@@ -35,9 +93,17 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
         "/lower.ts",
         concat!(
             "export declare const x: number;\n",
+            "export declare const y: string;\n",
+            "export declare const obj: { a: string };\n",
+            "export declare const key: 'a';\n",
             "export type Box<T> = { value: T };\n",
             "export declare class C { static make<T>(value: T): T; }\n",
         ),
+    );
+    upsert_ts(
+        &host,
+        "/m.ts",
+        "export type A<T> = { value: T }; export type Nest = { inner: string }; export declare function f<T>(arg: T): T;",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
     let _construction = dispatch.enter_construction_scope();
@@ -80,7 +146,180 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
     );
     let mut env = FxHashMap::default();
     env.insert("T".to_owned(), object);
+    let number = dispatch.shallow_lower_type_expr_with_context_for_tests(
+        &TypeExpr::Primitive(PrimitiveName::Number),
+        &FxHashMap::default(),
+        &scope,
+        &names,
+        payload.as_ref(),
+        &shadowing,
+        &mut ignored,
+        context,
+    );
+    env.insert("U".to_owned(), number);
     let cases = [
+        (
+            "mapped infer source preserves outer value",
+            mapped(
+                TypeExpr::Infer {
+                    name: "U".into(),
+                    constraint: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+                },
+                named("U", vec![]),
+                None,
+            ),
+            vec![],
+        ),
+        (
+            "mapped infer source preserves outer remap",
+            mapped(
+                TypeExpr::Infer {
+                    name: "U".into(),
+                    constraint: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+                },
+                TypeExpr::Primitive(PrimitiveName::String),
+                Some(named("U", vec![])),
+            ),
+            vec![],
+        ),
+        (
+            "mapped keyof infer binds value and remap",
+            mapped(
+                TypeExpr::KeyOf(Arc::new(TypeExpr::Infer {
+                    name: "U".into(),
+                    constraint: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+                })),
+                named("U", vec![]),
+                Some(named("U", vec![])),
+            ),
+            vec![],
+        ),
+        (
+            "scope restoration",
+            TypeExpr::Tuple {
+                elements: [signature(false, true), named("T", vec![])]
+                    .into_iter()
+                    .map(|ty| verter_type_expr::TupleElement {
+                        label: None,
+                        ty,
+                        optional: false,
+                        rest: false,
+                    })
+                    .collect(),
+                readonly: false,
+            },
+            vec![("TypeOf", Node); 6],
+        ),
+        (
+            "function without binders or reads",
+            TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::synthetic(
+                vec![],
+                Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+                vec![],
+            ))),
+            vec![],
+        ),
+        (
+            "constructor children",
+            signature(true, false),
+            vec![("TypeOf", Node); 2],
+        ),
+        (
+            "function binder children",
+            signature(false, true),
+            vec![("TypeOf", Node); 6],
+        ),
+        (
+            "constructor binder children",
+            signature(true, true),
+            vec![("TypeOf", Node); 6],
+        ),
+        (
+            "mapped children",
+            mapped(
+                TypeExpr::KeyOf(Arc::new(value_type(&["obj"], vec![]))),
+                value_type(&["x"], vec![]),
+                Some(value_type(&["key"], vec![])),
+            ),
+            vec![
+                ("TypeOf", Node),
+                ("KeyOf", Node),
+                ("TypeOf", Node),
+                ("TypeOf", Node),
+                ("MappedType", Node),
+            ],
+        ),
+        (
+            "mapped source",
+            mapped(value_type(&["key"], vec![]), named("K", vec![]), None),
+            vec![("TypeOf", Node), ("MappedType", Node)],
+        ),
+        (
+            "mapped literal keys",
+            mapped(TypeExpr::string_literal("a"), named("K", vec![]), None),
+            vec![("MappedType", Node)],
+        ),
+        (
+            "import argument",
+            imported(&["A"], vec![value_type(&["x"], vec![])]),
+            vec![
+                ("ResolveDecl", Whole),
+                ("TypeOf", Node),
+                ("Instantiate", Whole),
+            ],
+        ),
+        (
+            "typeof import arguments",
+            TypeExpr::ImportType {
+                specifier: "./m".into(),
+                qualifier: vec![Arc::from("f")].into(),
+                typeof_query: true,
+                type_arguments: vec![value_type(&["x"], vec![])].into(),
+            },
+            vec![("TypeOf", Node), ("TypeOf", Whole)],
+        ),
+        (
+            "import tail",
+            imported(&["Nest", "inner"], vec![]),
+            vec![("ResolveDecl", Whole), ("ProjectPath", Whole)],
+        ),
+        (
+            "conditional infer constraint",
+            TypeExpr::Conditional {
+                check: Arc::new(value_type(&["x"], vec![])),
+                extends: Arc::new(TypeExpr::Infer {
+                    name: "U".into(),
+                    constraint: Some(Arc::new(value_type(&["x"], vec![]))),
+                }),
+                true_type: Arc::new(named("U", vec![])),
+                false_type: Arc::new(TypeExpr::number_literal(0.0)),
+            },
+            vec![("TypeOf", Node); 2],
+        ),
+        (
+            "function children",
+            TypeExpr::Function(Arc::new(verter_type_expr::FunctionExpr::synthetic(
+                vec![verter_type_expr::FunctionParam::synthetic(
+                    Some("a".into()),
+                    value_type(&["x"], vec![]),
+                    false,
+                    false,
+                )],
+                Some(Arc::new(value_type(&["x"], vec![]))),
+                vec![],
+            ))),
+            vec![("TypeOf", Node), ("TypeOf", Node)],
+        ),
+        (
+            "conditional operands",
+            TypeExpr::Conditional {
+                check: Arc::new(value_type(&["x"], vec![])),
+                extends: Arc::new(value_type(&["x"], vec![])),
+                true_type: Arc::new(TypeExpr::number_literal(1.0)),
+                false_type: Arc::new(TypeExpr::number_literal(2.0)),
+            },
+            vec![("TypeOf", Node), ("TypeOf", Node)],
+        ),
         (
             "typeof leaf",
             value_type(&["x"], vec![]),
@@ -133,6 +372,18 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
         ),
     ];
     for (label, expr, expected_reads) in cases {
+        // Inspect the mapped descriptor before key enumeration so its value
+        // and remap bindings remain observable.
+        let context = if matches!(
+            label,
+            "mapped infer source preserves outer value"
+                | "mapped infer source preserves outer remap"
+                | "mapped keyof infer binds value and remap"
+        ) {
+            context.into_structural_transit_with_mode(ProjectionMode::Navigate)
+        } else {
+            context
+        };
         let trace = dispatch.step_type_lowering_for_tests(
             &expr,
             &env,
@@ -152,11 +403,50 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
                     SemanticQueryKey::Instantiate { .. } => "Instantiate",
                     SemanticQueryKey::KeyOf { .. } => "KeyOf",
                     SemanticQueryKey::IndexedAccess { .. } => "IndexedAccess",
+                    SemanticQueryKey::MappedType { .. } => "MappedType",
+                    SemanticQueryKey::ProjectPath { .. } => "ProjectPath",
                     other => panic!("unexpected lowering read: {other:?}"),
                 };
                 (family, *shape)
             })
             .collect();
+
+        let value_reads: Vec<_> = trace
+            .requested
+            .iter()
+            .filter_map(|(key, _)| match key {
+                SemanticQueryKey::TypeOf { value_root, .. } => Some(value_root.root.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        if label == "function binder children"
+            || label == "constructor binder children"
+            || label == "scope restoration"
+        {
+            assert_eq!(
+                value_reads,
+                ["x", "y", "x", "x", "y", "x"],
+                "{label}: bounds precede parameters, published bounds and predicate"
+            );
+        }
+        if label == "mapped children" {
+            assert_eq!(
+                value_reads,
+                ["obj", "x", "key"],
+                "source precedes value and remap"
+            );
+        }
+        if label == "scope restoration" {
+            let data = dispatch.graph().node_data(trace.node).unwrap();
+            let SemanticNodeData::Tuple { elements, .. } = data.as_ref() else {
+                panic!("tuple expected")
+            };
+            assert_eq!(
+                elements[1].value, object,
+                "the outer binding returns after the signature finishes"
+            );
+        }
+
         assert_eq!(requested, expected_reads, "{label}");
         assert_eq!(
             trace.first_advance_done,
@@ -188,6 +478,49 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
             ),
             "{label}"
         );
+        if label == "mapped infer source preserves outer value"
+            || label == "mapped infer source preserves outer remap"
+            || label == "mapped keyof infer binds value and remap"
+        {
+            let data = dispatch.graph().node_data(trace.node).unwrap();
+            let SemanticNodeData::Mapped { source, mapper } = data.as_ref() else {
+                panic!("{label}: mapped carrier expected: {data:?}")
+            };
+            let expected = if label == "mapped keyof infer binds value and remap" {
+                let source_data = dispatch.graph().node_data(*source).unwrap();
+                let SemanticNodeData::Infer { name, binder, .. } = source_data.as_ref() else {
+                    panic!("infer source expected")
+                };
+                assert_eq!(
+                    dispatch.graph().node_data(mapper.value_expr).as_deref(),
+                    Some(&SemanticNodeData::InferRef {
+                        name: name.clone(),
+                        binder: binder.clone(),
+                    }),
+                    "{label}"
+                );
+                assert_eq!(mapper.name_remap, Some(mapper.value_expr), "{label}");
+                mapper.value_expr
+            } else {
+                let value = if label == "mapped infer source preserves outer value" {
+                    mapper.value_expr
+                } else {
+                    mapper.name_remap.expect("mapped name remap")
+                };
+                assert_eq!(value, number, "{label}: outer U must remain number");
+                value
+            };
+            let references = if mapper.name_remap == Some(mapper.value_expr) {
+                2
+            } else {
+                1
+            };
+            assert_eq!(
+                trace.substitutions,
+                vec![(Arc::from("U"), expected); references],
+                "{label}: preserve the selected binding's substitutions"
+            );
+        }
         if label == "indexed access" || label == "no read" {
             assert!(
                 matches!(
@@ -224,6 +557,25 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
                 dispatch.graph().node_data(*return_type).as_deref(),
                 Some(&SemanticNodeData::Primitive(expected)),
                 "{label}"
+            );
+        }
+        if label == "function binder children" || label == "constructor binder children" {
+            let data = dispatch.graph().node_data(trace.node).unwrap();
+            let SemanticNodeData::Signature {
+                return_type,
+                type_parameters,
+                ..
+            } = data.as_ref()
+            else {
+                panic!("signature expected")
+            };
+            assert_eq!(
+                *return_type, type_parameters[0].param,
+                "own binder must shadow outer T"
+            );
+            assert_ne!(
+                *return_type, object,
+                "outer substitution must not escape into the signature"
             );
         }
     }

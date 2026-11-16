@@ -60,6 +60,7 @@ pub struct TypeLoweringTrace {
 /// [`ProjectSemanticDispatch::lower_type_expr_with_infer_factory`] share
 /// with their children: everything but the reduction context, which each
 /// position derives for its own children.
+#[derive(Clone, Copy)]
 pub(super) struct TypeExprLowering<'a> {
     pub(super) env: &'a FxHashMap<String, SemanticNodeId>,
     pub(super) scope: &'a NodeScopeId,
@@ -86,12 +87,24 @@ impl TypeExprLowering<'_> {
 enum LowerStep<'e> {
     Value(SemanticNodeId),
     Descend(&'e TypeExpr, ProjectionReductionContext),
+    /// Lend a binding frame's environment until this child finishes. The
+    /// cursor restores its previous environment before resuming the parent.
+    Scoped(
+        &'e TypeExpr,
+        ProjectionReductionContext,
+        Arc<FxHashMap<String, SemanticNodeId>>,
+    ),
     Read(LowerRead),
 }
 
 /// A node of the explicit-stack lowering waiting for a child's value:
 /// what remains of its own lowering.
 enum LowerFrame<'e> {
+    Function(FunctionLowering<'e>),
+    Mapped(MappedLowering<'e>, MappedAwait),
+    Conditional(ConditionalLowering<'e>, ConditionalAwait),
+    ImportTail(super::carrier::QualifiedTail),
+    Environment(Option<Arc<FxHashMap<String, SemanticNodeId>>>),
     Read(LowerReadResume<'e>),
     TypeofArguments {
         base: SemanticNodeId,
@@ -153,17 +166,129 @@ enum LowerFrame<'e> {
     },
 }
 
+// A direct child and its environment restoration fit without allocating a
+// stack buffer. Deeper syntax spills onto the same explicit stack.
+type LowerFrames<'e> = smallvec::SmallVec<[LowerFrame<'e>; 2]>;
+
+enum ConditionalAwait {
+    Check,
+    Constraint,
+    Extends,
+}
+struct ConditionalLowering<'e> {
+    expr: &'e TypeExpr,
+    context: ProjectionReductionContext,
+    check: Option<SemanticNodeId>,
+    sites: Vec<crate::semantic_query::infer_binder_names::InferDeclarationSite<'e>>,
+    next: usize,
+    declarations: Vec<(Arc<str>, crate::semantic_query::InferBinderId)>,
+    pending_binder: Option<crate::semantic_query::InferBinderId>,
+    extends_env: Option<Arc<FxHashMap<String, SemanticNodeId>>>,
+    out_of_scope: Option<Arc<FxHashMap<String, SemanticNodeId>>>,
+}
+impl<'e> ConditionalLowering<'e> {
+    fn new(expr: &'e TypeExpr, context: ProjectionReductionContext) -> Self {
+        Self {
+            expr,
+            context,
+            check: None,
+            sites: Vec::new(),
+            next: 0,
+            declarations: Vec::new(),
+            pending_binder: None,
+            extends_env: None,
+            out_of_scope: None,
+        }
+    }
+}
+
+enum MappedAwait {
+    Source,
+    Value,
+    Name,
+}
+struct MappedLowering<'e> {
+    expr: &'e TypeExpr,
+    context: ProjectionReductionContext,
+    parameter_id: SemanticNodeId,
+    over_type_variable: bool,
+    source: Option<SemanticNodeId>,
+    key_space: Option<SemanticNodeId>,
+    value: Option<SemanticNodeId>,
+    environment: Option<Arc<FxHashMap<String, SemanticNodeId>>>,
+}
+
+enum FunctionStage {
+    // Initial bounds see earlier binders (and shells for later siblings in
+    // constraints). Published bounds see the completed signature environment.
+    BinderConstraint(usize),
+    BinderDefault(usize),
+    Binder(usize),
+    Parameter(usize),
+    Return,
+    PublishedConstraint(usize),
+    PublishedDefault(usize),
+    Published(usize),
+    Predicate,
+    Finish,
+}
+enum FunctionAwait {
+    Constraint,
+    Default,
+    Parameter(usize),
+    Return,
+    Predicate,
+}
+struct FunctionLowering<'e> {
+    func: &'e FunctionExpr,
+    kind: crate::semantic_query::SignatureKind,
+    context: ProjectionReductionContext,
+    // None keeps the lent environment without cloning or allocating.
+    scoped: Option<Arc<FxHashMap<String, SemanticNodeId>>>,
+    clause: Option<Arc<str>>,
+    shells: Vec<SemanticNodeId>,
+    params: Vec<crate::semantic_query::FunctionParam>,
+    type_parameters: Vec<crate::semantic_query::TypeParamDecl>,
+    constraint: Option<SemanticNodeId>,
+    default: Option<SemanticNodeId>,
+    return_type: Option<SemanticNodeId>,
+    return_carrier: Option<crate::semantic_query::SignatureReturnCarrier>,
+    inferred_predicate: Option<crate::semantic_query::SignaturePredicate>,
+    predicate_target: Option<SemanticNodeId>,
+    stage: FunctionStage,
+    awaiting: FunctionAwait,
+}
+impl FunctionLowering<'_> {
+    fn binder_identity(&self, scope: &NodeScopeId, ordinal: usize) -> (DeclIdentity, u16) {
+        match &self.clause {
+            Some(clause) => (
+                DeclIdentity::from_scope(scope, OwnedStr::from(Arc::clone(clause))),
+                u16::try_from(ordinal).unwrap_or(u16::MAX),
+            ),
+            None => (
+                DeclIdentity::from_scope(
+                    scope,
+                    OwnedStr::from(self.func.type_parameters[ordinal].name.as_str()),
+                ),
+                0,
+            ),
+        }
+    }
+}
+
 /// A lowering's position and completed structural children.
 struct TypeLowerCursor<'e> {
-    frames: Vec<LowerFrame<'e>>,
+    frames: LowerFrames<'e>,
     next: Option<(&'e TypeExpr, ProjectionReductionContext)>,
+    environment: Option<Arc<FxHashMap<String, SemanticNodeId>>>,
 }
 
 impl<'e> TypeLowerCursor<'e> {
     fn new(expr: &'e TypeExpr, context: ProjectionReductionContext) -> Self {
         Self {
-            frames: Vec::new(),
+            frames: LowerFrames::new(),
             next: Some((expr, context)),
+            environment: None,
         }
     }
 }
@@ -197,6 +322,12 @@ pub(super) enum LowerProgress {
 
 /// The operation waiting for a query answer, with its completed inputs.
 enum LowerReadResume<'e> {
+    ImportTail,
+    ImportAnchor {
+        anchor: Box<super::carrier::AnchorRead>,
+        arguments: &'e [TypeExpr],
+        context: ProjectionReductionContext,
+    },
     Anchor {
         anchor: Box<super::carrier::AnchorRead>,
         arguments: &'e [TypeExpr],
@@ -204,6 +335,7 @@ enum LowerReadResume<'e> {
     },
     CarrierFinish(super::carrier::CarrierFinishRead),
     KeyOf,
+    MappedKeySpace(MappedLowering<'e>),
     Indexed {
         object: SemanticNodeId,
         index: crate::semantic_query::IndexKey,
@@ -1352,15 +1484,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// factory — a named reference's arguments, union and intersection
     /// arms, an array's element, tuple elements, a template's holes, a
     /// parenthesised type, a `keyof` operand, an indexed access's object
-    /// and index, a `typeof` position's arguments, and an object type's
-    /// property values and index signatures — are lowered from an explicit stack of
-    /// [`LowerFrame`]s, not the native one: each such node records what
+    /// and index, `typeof` and import-type arguments, function/constructor
+    /// children, mapped children, conditional operands and infer constraints,
+    /// and an object type's property values and index signatures — are
+    /// lowered from an explicit stack of [`LowerFrame`]s: each node records what
     /// remains of its own lowering and resumes when its child's value is
     /// delivered. Children are lowered in the order, and under the
     /// contexts, the node's own lowering demands them, so every intern,
     /// query and substitution happens in the same sequence as a recursive
-    /// descent would make it. Every other form is lowered by
-    /// [`Self::lower_type_expr_leaf`] and costs one native level.
+    /// descent would make it. Conditional decisions and branch callbacks stay
+    /// in place; other leaf forms use [`Self::lower_type_expr_leaf`].
     #[allow(clippy::too_many_arguments)]
     pub(super) fn lower_type_expr_with_infer_factory(
         &self,
@@ -1460,14 +1593,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let Some(LowerFrame::Read(resume)) = cursor.frames.pop() else {
                 panic!("lowering received an answer without a pending read");
             };
-            self.resume_lower_read(resume, delivery, &mut cursor.frames)
+            let scoped = TypeExprLowering {
+                env: cursor.environment.as_deref().unwrap_or(lowering.env),
+                ..*lowering
+            };
+            self.resume_lower_read(&scoped, resume, delivery, &mut cursor.frames)
         } else {
             let (expr, context) = cursor
                 .next
                 .take()
                 .expect("lowering needs its pending answer");
+            let scoped = TypeExprLowering {
+                env: cursor.environment.as_deref().unwrap_or(lowering.env),
+                ..*lowering
+            };
             self.lower_type_expr_step(
-                lowering,
+                &scoped,
                 infer_binders,
                 expr,
                 context,
@@ -1478,9 +1619,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         loop {
             match step {
                 LowerStep::Read(request) => return LowerProgress::Read(request),
+                LowerStep::Scoped(expr, context, env) => {
+                    let previous = cursor.environment.replace(env);
+                    cursor.frames.push(LowerFrame::Environment(previous));
+                    step = LowerStep::Descend(expr, context);
+                }
                 LowerStep::Descend(expr, context) => {
+                    let scoped = TypeExprLowering {
+                        env: cursor.environment.as_deref().unwrap_or(lowering.env),
+                        ..*lowering
+                    };
                     step = self.lower_type_expr_step(
-                        lowering,
+                        &scoped,
                         infer_binders,
                         expr,
                         context,
@@ -1492,8 +1642,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let Some(frame) = cursor.frames.pop() else {
                         return LowerProgress::Done(value);
                     };
+                    if let LowerFrame::Environment(previous) = frame {
+                        cursor.environment = previous;
+                        step = LowerStep::Value(value);
+                        continue;
+                    }
+                    let scoped = TypeExprLowering {
+                        env: cursor.environment.as_deref().unwrap_or(lowering.env),
+                        ..*lowering
+                    };
                     step = self.resume_type_expr_frame(
-                        lowering,
+                        &scoped,
                         infer_binders,
                         frame,
                         value,
@@ -1507,11 +1666,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     fn resume_lower_read<'e>(
         &self,
+        lowering: &TypeExprLowering<'_>,
         resume: LowerReadResume<'e>,
         delivery: LowerDelivery,
-        frames: &mut Vec<LowerFrame<'e>>,
+        frames: &mut LowerFrames<'e>,
     ) -> LowerStep<'e> {
         match (resume, delivery) {
+            (LowerReadResume::ImportTail, LowerDelivery::Whole(read)) => {
+                LowerStep::Value(self.carrier_resolution_of(read).node)
+            }
+            (
+                LowerReadResume::ImportAnchor {
+                    anchor,
+                    arguments,
+                    context,
+                },
+                LowerDelivery::Whole(read),
+            ) => {
+                let answer = self.carrier_resolution_of(read);
+                match self.resume_anchor(*anchor, answer) {
+                    super::carrier::CarrierResolutionPlan::Ready(value) => {
+                        LowerStep::Value(value.node)
+                    }
+                    super::carrier::CarrierResolutionPlan::NeedsArgs(continuation) => {
+                        self.lower_import_arguments(continuation, arguments, context, frames)
+                    }
+                }
+            }
             (
                 LowerReadResume::Anchor {
                     anchor,
@@ -1533,6 +1714,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             (LowerReadResume::CarrierFinish(finish), LowerDelivery::Whole(read)) => {
                 let answer = self.carrier_resolution_of(read);
                 LowerStep::Value(self.resume_carrier_finish(finish, answer).node)
+            }
+            (LowerReadResume::MappedKeySpace(mut state), LowerDelivery::Node(answer)) => {
+                state.key_space = Some(match answer {
+                    QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+                    _ => self.opaque(QueryError::Miss),
+                });
+                self.mapped_value_step(lowering, state, frames)
             }
             (LowerReadResume::KeyOf, LowerDelivery::Node(answer)) => {
                 LowerStep::Value(match answer {
@@ -1579,7 +1767,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         continuation: super::carrier::CarrierArgsContinuation,
         args: Arc<[SemanticNodeId]>,
-        frames: &mut Vec<LowerFrame<'e>>,
+        frames: &mut LowerFrames<'e>,
     ) -> LowerStep<'e> {
         match self.plan_carrier_resolution_finish(continuation, args) {
             super::carrier::CarrierFinishPlan::Ready(value) => LowerStep::Value(value.node),
@@ -1605,7 +1793,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         expr: &'e TypeExpr,
         reduction_context: ProjectionReductionContext,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        frames: &mut Vec<LowerFrame<'e>>,
+        frames: &mut LowerFrames<'e>,
     ) -> LowerStep<'e> {
         // Captured execution can participate in hang investigation:
         // advance its heartbeat and answer a stall signal with a
@@ -1619,6 +1807,84 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let graph = self.graph();
         graph.record_decl_subexpression_lowering();
         match expr {
+            TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
+                self.begin_function_lowering(lowering, expr, func, reduction_context, frames)
+            }
+            TypeExpr::Mapped { .. } => {
+                self.begin_mapped_lowering(lowering, expr, reduction_context, frames)
+            }
+            TypeExpr::Conditional { check, .. } => {
+                if self.cancellation.is_cancelled() {
+                    return LowerStep::Value(self.opaque(QueryError::Miss));
+                }
+                let mut head = check.as_ref();
+                while let TypeExpr::Parenthesized(inner) = head {
+                    head = inner;
+                }
+                let context = if matches!(head, TypeExpr::TypeOf { .. }) {
+                    reduction_context
+                } else {
+                    Self::conditional_operand_context(reduction_context)
+                };
+                frames.push(LowerFrame::Conditional(
+                    ConditionalLowering::new(expr, reduction_context),
+                    ConditionalAwait::Check,
+                ));
+                LowerStep::Descend(check, context)
+            }
+            TypeExpr::ImportType {
+                specifier,
+                qualifier,
+                typeof_query,
+                type_arguments,
+            } => {
+                let NodeScopeId::File { canonical_id, .. } = lowering.scope else {
+                    return LowerStep::Value(self.opaque(QueryError::Miss));
+                };
+                let ctx = super::carrier::CarrierResolverContext::new(
+                    lowering.env,
+                    lowering.scope,
+                    lowering.name_resolution,
+                    lowering.scope_payload,
+                    lowering.shadowing,
+                    reduction_context,
+                );
+                let plan = self.plan_import_type_head_steps(
+                    &ctx,
+                    canonical_id.as_ref(),
+                    specifier,
+                    &verter_type_expr::OwnedSlice::<OwnedStr>::from(qualifier.as_ref()),
+                    *typeof_query,
+                    type_arguments.len(),
+                );
+                if let Some(tail) = plan.tail {
+                    frames.push(LowerFrame::ImportTail(tail));
+                }
+                match plan.head {
+                    super::carrier::HeadPlan::Ready(value) => LowerStep::Value(value.node),
+                    super::carrier::HeadPlan::NeedsArgs(continuation) => self
+                        .lower_import_arguments(
+                            continuation,
+                            type_arguments,
+                            reduction_context,
+                            frames,
+                        ),
+                    super::carrier::HeadPlan::ReadsAnchor(anchor) => {
+                        let key = anchor.key().clone();
+                        self.record_carrier_resolution_read_intent(&key);
+                        // Import arguments retain the caller's context, unlike bare-reference operands.
+                        frames.push(LowerFrame::Read(LowerReadResume::ImportAnchor {
+                            anchor: Box::new(anchor),
+                            arguments: type_arguments,
+                            context: reduction_context,
+                        }));
+                        LowerStep::Read(LowerRead {
+                            key,
+                            shape: LowerReadShape::Whole,
+                        })
+                    }
+                }
+            }
             // Named type reference (`type Foo<T> = { y: Other<T> }` ->
             // `Other<T>` at `y`'s position) that neither substitutes a bound
             // parameter nor names a script-setup generic parameter (those
@@ -1852,12 +2118,929 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    fn resume_conditional_lowering<'e>(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        infer_binders: &crate::semantic_query::InferBinderFactory,
+        pending: (ConditionalLowering<'e>, ConditionalAwait),
+        value: SemanticNodeId,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        frames: &mut LowerFrames<'e>,
+    ) -> LowerStep<'e> {
+        let (mut state, awaiting) = pending;
+        let TypeExpr::Conditional { extends, .. } = state.expr else {
+            unreachable!()
+        };
+        match awaiting {
+            ConditionalAwait::Check => {
+                state.check = Some(value);
+                let path=infer_binders.path_for_expr(state.expr).child(crate::semantic_query::infer_binder_names::InferSyntaxPathStep::ConditionalExtends);
+                state.sites =
+                    crate::semantic_query::infer_binder_names::collect_extends_infer_declarations(
+                        extends, &path,
+                    );
+                if !state.sites.is_empty() {
+                    let recovery = crate::semantic_query::checker_policy::checker_recovery(
+                        self.graph(),
+                        crate::semantic_query::checker_policy::unresolved_type_name(),
+                    );
+                    let mut outside = lowering.env.clone();
+                    for site in &state.sites {
+                        outside.insert(
+                            super::carrier::out_of_scope_infer_env_key(site.name.as_ref()),
+                            recovery,
+                        );
+                    }
+                    state.out_of_scope = Some(Arc::new(outside));
+                    state.extends_env = Some(Arc::new(lowering.env.clone()));
+                    state.declarations = Vec::with_capacity(state.sites.len());
+                }
+            }
+            ConditionalAwait::Constraint => {
+                self.commit_conditional_infer(lowering, &mut state, Some(value))
+            }
+            ConditionalAwait::Extends => {
+                return LowerStep::Value(self.finish_conditional_lowering(
+                    lowering,
+                    infer_binders,
+                    state,
+                    value,
+                    substitutions,
+                ))
+            }
+        }
+        self.advance_conditional_extends(lowering, infer_binders, state, frames)
+    }
+
+    fn commit_conditional_infer(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        state: &mut ConditionalLowering<'_>,
+        constraint: Option<SemanticNodeId>,
+    ) {
+        let site = &state.sites[state.next];
+        let binder = state
+            .pending_binder
+            .take()
+            .expect("infer binder selected before its constraint");
+        let declaration = self.graph().intern_node_with_scope(
+            SemanticNodeData::Infer {
+                name: OwnedStr::from(&site.name),
+                binder: binder.clone(),
+                constraint,
+            },
+            lowering.scope.clone(),
+        );
+        Arc::make_mut(state.extends_env.as_mut().expect("infer environment"))
+            .insert(infer_declaration_env_key(site.name.as_ref()), declaration);
+        state.declarations.push((Arc::clone(&site.name), binder));
+        state.next += 1;
+    }
+
+    fn advance_conditional_extends<'e>(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        infer_binders: &crate::semantic_query::InferBinderFactory,
+        mut state: ConditionalLowering<'e>,
+        frames: &mut LowerFrames<'e>,
+    ) -> LowerStep<'e> {
+        let context = Self::conditional_target_context(state.context);
+        while let Some(site) = state.sites.get(state.next) {
+            state.pending_binder = Some(infer_binders.binder_at(&site.path));
+            if let Some(constraint) = site.constraint {
+                let env = Arc::clone(
+                    state
+                        .out_of_scope
+                        .as_ref()
+                        .expect("infer constraint environment"),
+                );
+                frames.push(LowerFrame::Conditional(state, ConditionalAwait::Constraint));
+                return LowerStep::Scoped(constraint, context, env);
+            }
+            self.commit_conditional_infer(lowering, &mut state, None);
+        }
+        let TypeExpr::Conditional { extends, .. } = state.expr else {
+            unreachable!()
+        };
+        let env = state.extends_env.clone();
+        frames.push(LowerFrame::Conditional(state, ConditionalAwait::Extends));
+        match env {
+            Some(env) => LowerStep::Scoped(extends, context, env),
+            None => LowerStep::Descend(extends, context),
+        }
+    }
+
+    fn finish_conditional_lowering(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        infer_binders: &crate::semantic_query::InferBinderFactory,
+        state: ConditionalLowering<'_>,
+        extends_id: SemanticNodeId,
+        substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+    ) -> SemanticNodeId {
+        let TypeExpr::Conditional {
+            check,
+            true_type,
+            false_type,
+            ..
+        } = state.expr
+        else {
+            unreachable!()
+        };
+        let graph = self.graph();
+        let env = lowering.env;
+        let scope = lowering.scope;
+        let name_resolution = lowering.name_resolution;
+        let scope_payload = lowering.scope_payload;
+        let shadowing = lowering.shadowing;
+        let check_id = state.check.expect("conditional check");
+        let reduction_context = state.context;
+        let declarations = state.declarations;
+        let out_of_scope_env = state.out_of_scope.as_deref();
+        let mut lowered = [None, None];
+        let output = self.build_conditional_from_lowering(
+            check_id,
+            extends_id,
+            // A naked type parameter as the check type distributes
+            // it, an `infer` placeholder of an enclosing conditional
+            // among them (`X extends infer K ? K extends "a" ? 1 : 0
+            // : 2` distributes over the `K` it binds).
+            matches!(check.as_ref(), TypeExpr::TypeParameter(_))
+                || matches!(
+                    graph.node_data(check_id).as_deref(),
+                    Some(SemanticNodeData::TypeParam { .. } | SemanticNodeData::InferRef { .. })
+                ),
+            &mut |take_true| {
+                let index = usize::from(take_true);
+                if let Some(node) = lowered[index] {
+                    return node;
+                }
+                if self.cancellation.is_cancelled() {
+                    return self.opaque(QueryError::Miss);
+                }
+                let mut true_env;
+                let branch_env = if take_true && !declarations.is_empty() {
+                    true_env = env.clone();
+                    for (name, binder) in &declarations {
+                        let reference = graph.intern_node_with_scope(
+                            SemanticNodeData::InferRef {
+                                name: OwnedStr::from(name),
+                                binder: binder.clone(),
+                            },
+                            scope.clone(),
+                        );
+                        true_env.insert(name.to_string(), reference);
+                    }
+                    &true_env
+                } else if take_true {
+                    env
+                } else {
+                    out_of_scope_env.unwrap_or(env)
+                };
+                let node = self.lower_type_expr_with_infer_factory(
+                    infer_binders,
+                    if take_true { true_type } else { false_type },
+                    branch_env,
+                    scope,
+                    name_resolution,
+                    scope_payload,
+                    shadowing,
+                    substitutions,
+                    reduction_context,
+                );
+                lowered[index] = Some(node);
+                node
+            },
+        );
+        self.deposit_operand_self_roots(&output.observed_self_roots);
+        self.fold_into_top_build_local_taint_with(
+            output.result_is_partial(),
+            output.cache_suppress,
+            output.partial_reasons(),
+        );
+        match output.result {
+            QueryResult::Value(node) => node,
+            _ => self.opaque(QueryError::Miss),
+        }
+    }
+
+    fn begin_mapped_lowering<'e>(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        expr: &'e TypeExpr,
+        reduction_context: ProjectionReductionContext,
+        frames: &mut LowerFrames<'e>,
+    ) -> LowerStep<'e> {
+        let TypeExpr::Mapped {
+            parameter,
+            source,
+            value,
+            optional,
+            readonly,
+            name_type,
+        } = expr
+        else {
+            unreachable!()
+        };
+        let graph = self.graph();
+        let env = lowering.env;
+        let scope = lowering.scope;
+        let mapper_display_name: Arc<str> = Arc::from(parameter.as_str());
+        // The shell's structural identity distinguishes this mapper binder
+        // from declaration binders in the same file and owner.
+        let mapper_decl_name = crate::mapper_binder_registry::mapper_binder_decl_name(
+            graph.store(),
+            source,
+            value,
+            *optional,
+            *readonly,
+            name_type.as_ref(),
+        );
+        let mapper_decl = match scope {
+            NodeScopeId::Global => DeclIdentity {
+                canonical_id: verter_type_expr::OwnedStr::from(""),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: HashValue::default(),
+                decl_name: verter_type_expr::OwnedStr::from(mapper_decl_name.clone()),
+            },
+            NodeScopeId::File {
+                canonical_id,
+                owner,
+                whole_hash,
+                ..
+            } => DeclIdentity {
+                canonical_id: canonical_id.clone(),
+                owner: *owner,
+                whole_hash: *whole_hash,
+                decl_name: verter_type_expr::OwnedStr::from(mapper_decl_name.clone()),
+            },
+        };
+        // The host registry assigns the same ordinal to the same source
+        // mapper across dispatchers, and distinct ordinals to distinct
+        // structural fingerprints under one canonical/display-name pair.
+        let fingerprint = crate::mapper_binder_registry::MapperFingerprint::from_components(
+            source,
+            value,
+            *optional,
+            *readonly,
+            name_type.as_ref(),
+        );
+        let mapper_ordinal = self.binding.mapper_binders.as_ref().ordinal_for(
+            &mapper_decl.canonical_id,
+            &mapper_display_name,
+            fingerprint,
+        );
+        // Different ordinals under one display name may reflect substitution
+        // fanout as well as distinct source pointers; record that distinction
+        // beside the request's substitution observations.
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
+            let hb = mapper_decl.whole_hash;
+            let hash_u64 = u64::from_le_bytes([
+                hb[0], hb[1], hb[2], hb[3], hb[4], hb[5], hb[6], hb[7],
+            ]);
+            let identity = crate::request_context::MapperSourceIdentity {
+                canonical_id: std::sync::Arc::<str>::from(
+                    mapper_decl.canonical_id.as_str(),
+                ),
+                whole_hash: hash_u64,
+                display_name: Arc::clone(&mapper_display_name),
+            };
+            ctx.classify_mapper_binder_ordinal(identity, mapper_ordinal);
+        });
+        let parameter_id = graph.intern_node_with_scope(
+            SemanticNodeData::TypeParam {
+                decl: mapper_decl,
+                param_index: mapper_ordinal,
+                // Mapper parameters carry no declaration-site
+                // constraint or default in TS mapped syntax —
+                // the keyspace is expressed via the outer
+                // `[K in S]` binding, not via `T extends` on K.
+                constraint: None,
+                default: None,
+                display_name: OwnedStr::from(&mapper_display_name),
+            },
+            scope.clone(),
+        );
+        // A `keyof` operand the environment binds names a type
+        // parameter even once it lowers to its argument: the mapping
+        // stays homomorphic over it. An unbound operand is read off
+        // its lowered node below.
+        let over_type_variable = match source.as_ref() {
+            TypeExpr::KeyOf(inner) => match inner.as_ref() {
+                TypeExpr::TypeParameter(param) => env.contains_key(param.name.as_str()),
+                TypeExpr::Ref {
+                    name,
+                    type_arguments,
+                } => type_arguments.is_empty() && env.contains_key(name.as_ref()),
+                _ => false,
+            },
+            _ => false,
+        };
+
+        let state = MappedLowering {
+            expr,
+            context: reduction_context,
+            parameter_id,
+            over_type_variable,
+            source: None,
+            key_space: None,
+            value: None,
+            environment: None,
+        };
+        frames.push(LowerFrame::Mapped(state, MappedAwait::Source));
+        LowerStep::Descend(
+            match source.as_ref() {
+                TypeExpr::KeyOf(inner) => inner,
+                _ => source,
+            },
+            reduction_context,
+        )
+    }
+
+    fn resume_mapped_lowering<'e>(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        mut state: MappedLowering<'e>,
+        awaiting: MappedAwait,
+        value: SemanticNodeId,
+        frames: &mut LowerFrames<'e>,
+    ) -> LowerStep<'e> {
+        let TypeExpr::Mapped {
+            source, name_type, ..
+        } = state.expr
+        else {
+            unreachable!()
+        };
+        match awaiting {
+            MappedAwait::Source => {
+                state.source = Some(value);
+                if matches!(source.as_ref(), TypeExpr::KeyOf(_)) {
+                    let graph = self.graph();
+                    if matches!(
+                        graph.node_data(value).as_deref(),
+                        Some(SemanticNodeData::Infer { .. })
+                    ) {
+                        state.key_space = Some(graph.intern_node_with_scope(
+                            SemanticNodeData::KeyOf { base: value },
+                            lowering.scope.clone(),
+                        ));
+                    } else if crate::semantic_query::may_reduce_operator(state.context) {
+                        let key = SemanticQueryKey::KeyOf {
+                            base: value,
+                            context: state.context,
+                        };
+                        frames.push(LowerFrame::Read(LowerReadResume::MappedKeySpace(state)));
+                        return LowerStep::Read(LowerRead {
+                            key,
+                            shape: LowerReadShape::Node,
+                        });
+                    } else {
+                        state.key_space = Some(match graph.node_data(value).as_deref() {
+                            None => self.opaque(QueryError::Miss),
+                            _ if super::raise::node_is_unknown_materializing_failure(
+                                self, value,
+                            ) =>
+                            {
+                                self.opaque(QueryError::Miss)
+                            }
+                            _ => graph.intern_node_with_scope(
+                                SemanticNodeData::KeyOf { base: value },
+                                lowering.scope.clone(),
+                            ),
+                        });
+                    }
+                } else {
+                    state.key_space = Some(value);
+                }
+                self.mapped_value_step(lowering, state, frames)
+            }
+            MappedAwait::Value => {
+                state.value = Some(value);
+                if let Some(name) = name_type.as_deref() {
+                    let context = state
+                        .context
+                        .into_structural_transit_with_mode(ProjectionMode::Navigate);
+                    let env = Arc::clone(state.environment.as_ref().expect("mapped environment"));
+                    frames.push(LowerFrame::Mapped(state, MappedAwait::Name));
+                    LowerStep::Scoped(name, context, env)
+                } else {
+                    self.finish_mapped_lowering(lowering, state, None, frames)
+                }
+            }
+            MappedAwait::Name => self.finish_mapped_lowering(lowering, state, Some(value), frames),
+        }
+    }
+
+    fn mapped_value_step<'e>(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        mut state: MappedLowering<'e>,
+        frames: &mut LowerFrames<'e>,
+    ) -> LowerStep<'e> {
+        let TypeExpr::Mapped {
+            parameter,
+            source,
+            value,
+            ..
+        } = state.expr
+        else {
+            unreachable!()
+        };
+        let mut env = lowering.env.clone();
+        let graph = self.graph();
+        // Only a syntactic `keyof` source introduces its lowered infer binding.
+        if matches!(source.as_ref(), TypeExpr::KeyOf(_)) {
+            if let Some(SemanticNodeData::Infer { name, binder, .. }) = graph
+                .node_data(state.source.expect("mapped source"))
+                .as_deref()
+            {
+                let reference = graph.intern_node_with_scope(
+                    SemanticNodeData::InferRef {
+                        name: name.clone(),
+                        binder: binder.clone(),
+                    },
+                    lowering.scope.clone(),
+                );
+                env.insert(name.to_string(), reference);
+            }
+        }
+        env.insert(parameter.clone(), state.parameter_id);
+        let env = Arc::new(env);
+        state.environment = Some(Arc::clone(&env));
+        let context = state
+            .context
+            .into_structural_transit_with_mode(ProjectionMode::Navigate);
+        frames.push(LowerFrame::Mapped(state, MappedAwait::Value));
+        LowerStep::Scoped(value, context, env)
+    }
+
+    fn finish_mapped_lowering<'e>(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        state: MappedLowering<'e>,
+        name_remap: Option<SemanticNodeId>,
+        frames: &mut LowerFrames<'e>,
+    ) -> LowerStep<'e> {
+        use crate::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
+        use verter_type_expr::MappedModifier;
+        let TypeExpr::Mapped {
+            source,
+            optional,
+            readonly,
+            ..
+        } = state.expr
+        else {
+            unreachable!()
+        };
+        let graph = self.graph();
+        let scope = lowering.scope;
+        let reduction_context = state.context;
+        let source_sem = state.source.expect("mapped source");
+        let key_space_sem = state.key_space.expect("mapped key space");
+        let value_sem = state.value.expect("mapped value");
+        let parameter_id = state.parameter_id;
+        let over_type_variable = state.over_type_variable;
+        let optionality = match optional {
+            MappedModifier::Add => OptionalityMod::Add,
+            MappedModifier::Remove => OptionalityMod::Remove,
+            MappedModifier::None => OptionalityMod::Keep,
+        };
+        let readonly_mod = match readonly {
+            MappedModifier::Add => ReadonlyMod::Add,
+            MappedModifier::Remove => ReadonlyMod::Remove,
+            MappedModifier::None => ReadonlyMod::Keep,
+        };
+        // Classify `value_expr` once at lowering time so
+        // `build_mapped_type` matches on `mapper.kind`
+        // directly instead of re-inspecting the runtime AST
+        // shape on every call. Classification compares the
+        // indexed-access index node id against the mapper's
+        // binder node id directly, avoiding display-name
+        // conflation.
+        let kind = crate::semantic_query::MapperKind::classify_value_expr(
+            graph.store(),
+            value_sem,
+            source_sem,
+            parameter_id,
+        );
+        let mapper = MapperKey {
+            // The mapper carries the binder's interned
+            // `TypeParam` node id, not the display-name
+            // string — binder identity in the semantic graph
+            // is by `SemanticNodeId`, not by display name.
+            parameter_node: parameter_id,
+            key_space: key_space_sem,
+            value_expr: value_sem,
+            optionality,
+            readonly: readonly_mod,
+            name_remap,
+            kind,
+            over_type_variable: over_type_variable
+                || (matches!(source.as_ref(), TypeExpr::KeyOf(_))
+                    && crate::semantic_query::keyof_operand_is_type_variable(
+                        graph.store(),
+                        source_sem,
+                    )),
+            modifiers_type: match source.as_ref() {
+                TypeExpr::KeyOf(_) => None,
+                _ => crate::semantic_query::modifiers_type_of_key_parameter(
+                    graph.store(),
+                    source_sem,
+                ),
+            },
+        };
+
+        // Preserve an open mapped carrier in every mode. Closed surfaces
+        // reduce through the shared MappedType query at the caller's demand.
+        if !crate::semantic_query::may_reduce_operator(reduction_context)
+            || crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
+                self, source_sem, &mapper,
+            )
+        {
+            return LowerStep::Value(graph.intern_node_with_scope(
+                SemanticNodeData::Mapped {
+                    source: source_sem,
+                    mapper,
+                },
+                scope.clone(),
+            ));
+        }
+
+        frames.push(LowerFrame::Read(LowerReadResume::KeyOf));
+        LowerStep::Read(LowerRead {
+            key: SemanticQueryKey::MappedType {
+                source: source_sem,
+                mapper,
+                context: reduction_context,
+            },
+            shape: LowerReadShape::Node,
+        })
+    }
+
+    fn begin_function_lowering<'e>(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        expr: &'e TypeExpr,
+        func: &'e FunctionExpr,
+        context: ProjectionReductionContext,
+        frames: &mut LowerFrames<'e>,
+    ) -> LowerStep<'e> {
+        let graph = self.graph();
+        let mut state = FunctionLowering {
+            func,
+            kind: if matches!(expr, TypeExpr::ConstructorType(_)) {
+                crate::semantic_query::SignatureKind::Construct
+            } else {
+                crate::semantic_query::SignatureKind::Call
+            },
+            context,
+            scoped: (!func.type_parameters.is_empty()).then(|| Arc::new(lowering.env.clone())),
+            clause: (!func.type_parameters.is_empty() && func.flow_return.is_none()).then(|| {
+                crate::mapper_binder_registry::clause_binder_decl_name(graph.store(), expr)
+            }),
+            shells: Vec::with_capacity(func.type_parameters.len()),
+            params: Vec::with_capacity(func.parameters.len()),
+            type_parameters: Vec::with_capacity(func.type_parameters.len()),
+            constraint: None,
+            default: None,
+            return_type: None,
+            return_carrier: None,
+            inferred_predicate: None,
+            predicate_target: None,
+            stage: FunctionStage::BinderConstraint(0),
+            awaiting: FunctionAwait::Return,
+        };
+        for (ordinal, tp) in func.type_parameters.iter().enumerate() {
+            let (decl, param_index) = state.binder_identity(lowering.scope, ordinal);
+            state.shells.push(graph.intern_node_with_scope(
+                SemanticNodeData::TypeParam {
+                    decl,
+                    param_index,
+                    constraint: None,
+                    default: None,
+                    display_name: OwnedStr::from(tp.name.as_str()),
+                },
+                lowering.scope.clone(),
+            ));
+        }
+        self.advance_function_lowering(lowering, state, frames)
+    }
+
+    fn resume_function_lowering<'e>(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        mut state: FunctionLowering<'e>,
+        value: SemanticNodeId,
+        frames: &mut LowerFrames<'e>,
+    ) -> LowerStep<'e> {
+        match state.awaiting {
+            FunctionAwait::Constraint => state.constraint = Some(value),
+            FunctionAwait::Default => state.default = Some(value),
+            FunctionAwait::Parameter(index) => {
+                let param = &state.func.parameters[index];
+                state.params.push(crate::semantic_query::FunctionParam {
+                    name: param.name.as_deref().map(OwnedStr::from),
+                    ty: value,
+                    optional: param.optional,
+                    rest: param.rest,
+                    span: param.span,
+                    declared_literal: crate::semantic_query::declares_literal_type(&param.ty),
+                });
+            }
+            FunctionAwait::Return => {
+                state.return_type = Some(value);
+                state.return_carrier = Some(
+                    crate::semantic_query::SignatureReturnCarrier::Declared(value),
+                );
+            }
+            FunctionAwait::Predicate => state.predicate_target = Some(value),
+        }
+        self.advance_function_lowering(lowering, state, frames)
+    }
+
+    fn advance_function_lowering<'e>(
+        &self,
+        lowering: &TypeExprLowering<'_>,
+        mut state: FunctionLowering<'e>,
+        frames: &mut LowerFrames<'e>,
+    ) -> LowerStep<'e> {
+        let graph = self.graph();
+        loop {
+            let func = state.func;
+            let child = match state.stage {
+                FunctionStage::BinderConstraint(i) => {
+                    if i == func.type_parameters.len() {
+                        state.stage = FunctionStage::Parameter(0);
+                        continue;
+                    }
+                    state.stage = FunctionStage::BinderDefault(i);
+                    if let Some(expr) = func.type_parameters[i].constraint.as_deref() {
+                        let mut head = state
+                            .scoped
+                            .as_deref()
+                            .expect("generic environment")
+                            .clone();
+                        for (tp, shell) in func.type_parameters.iter().zip(&state.shells).skip(i) {
+                            head.insert(tp.name.clone(), *shell);
+                        }
+                        state.awaiting = FunctionAwait::Constraint;
+                        Some((expr, Some(Arc::new(head))))
+                    } else {
+                        None
+                    }
+                }
+                FunctionStage::BinderDefault(i) => {
+                    state.stage = FunctionStage::Binder(i);
+                    state.awaiting = FunctionAwait::Default;
+                    func.type_parameters[i]
+                        .default
+                        .as_deref()
+                        .map(|expr| (expr, state.scoped.clone()))
+                }
+                FunctionStage::Binder(i) => {
+                    let tp = &func.type_parameters[i];
+                    let (decl, param_index) = state.binder_identity(lowering.scope, i);
+                    let binder = graph.intern_node_with_scope(
+                        SemanticNodeData::TypeParam {
+                            decl,
+                            param_index,
+                            constraint: state.constraint.take(),
+                            default: state.default.take(),
+                            display_name: OwnedStr::from(tp.name.as_str()),
+                        },
+                        lowering.scope.clone(),
+                    );
+                    Arc::make_mut(state.scoped.as_mut().expect("generic environment"))
+                        .insert(tp.name.clone(), binder);
+                    state.stage = FunctionStage::BinderConstraint(i + 1);
+                    None
+                }
+                FunctionStage::Parameter(i) => {
+                    if i == func.parameters.len() {
+                        state.stage = FunctionStage::Return;
+                        continue;
+                    }
+                    state.stage = FunctionStage::Parameter(i + 1);
+                    state.awaiting = FunctionAwait::Parameter(i);
+                    Some((&func.parameters[i].ty, state.scoped.clone()))
+                }
+                FunctionStage::Return => {
+                    state.stage = FunctionStage::PublishedConstraint(0);
+                    if func.flow_return.is_none() {
+                        if let Some(expr) = func.return_type.as_deref() {
+                            state.awaiting = FunctionAwait::Return;
+                            Some((expr, state.scoped.clone()))
+                        } else {
+                            state.return_type = Some(self.opaque(QueryError::Miss));
+                            state.return_carrier =
+                                Some(crate::semantic_query::SignatureReturnCarrier::Function(
+                                    verter_type_expr::facts::FunctionReturnSource::Absent,
+                                ));
+                            None
+                        }
+                    } else {
+                        let (return_type, return_carrier, inferred_predicate) = self
+                            .lower_function_flow_return(
+                                func,
+                                state.scoped.as_deref().unwrap_or(lowering.env),
+                                lowering.scope,
+                            );
+                        state.return_type = Some(return_type);
+                        state.return_carrier = Some(return_carrier);
+                        state.inferred_predicate = inferred_predicate;
+                        None
+                    }
+                }
+                FunctionStage::PublishedConstraint(i) => {
+                    if i == func.type_parameters.len() {
+                        state.stage = FunctionStage::Predicate;
+                        continue;
+                    }
+                    state.stage = FunctionStage::PublishedDefault(i);
+                    state.awaiting = FunctionAwait::Constraint;
+                    func.type_parameters[i]
+                        .constraint
+                        .as_deref()
+                        .map(|expr| (expr, state.scoped.clone()))
+                }
+                FunctionStage::PublishedDefault(i) => {
+                    state.stage = FunctionStage::Published(i);
+                    state.awaiting = FunctionAwait::Default;
+                    func.type_parameters[i]
+                        .default
+                        .as_deref()
+                        .map(|expr| (expr, state.scoped.clone()))
+                }
+                FunctionStage::Published(i) => {
+                    let tp = &func.type_parameters[i];
+                    state
+                        .type_parameters
+                        .push(crate::semantic_query::TypeParamDecl {
+                            name: OwnedStr::from(tp.name.as_str()),
+                            param: *state
+                                .scoped
+                                .as_ref()
+                                .expect("generic environment")
+                                .get(tp.name.as_str())
+                                .expect("own binder"),
+                            constraint: state.constraint.take(),
+                            default: state.default.take(),
+                            original: None,
+                            is_const: tp.is_const,
+                        });
+                    state.stage = FunctionStage::PublishedConstraint(i + 1);
+                    None
+                }
+                FunctionStage::Predicate => {
+                    state.stage = FunctionStage::Finish;
+                    state.awaiting = FunctionAwait::Predicate;
+                    func.predicate
+                        .as_deref()
+                        .and_then(|p| p.ty.as_deref())
+                        .map(|expr| (expr, state.scoped.clone()))
+                }
+                FunctionStage::Finish => {
+                    let predicate = func
+                        .predicate
+                        .as_deref()
+                        .and_then(|p| {
+                            crate::semantic_query::SignaturePredicate::resolve(
+                                p,
+                                &state.params,
+                                state.predicate_target,
+                            )
+                        })
+                        .or(state.inferred_predicate);
+                    return LowerStep::Value(graph.intern_node_with_scope(
+                        crate::semantic_query::DeferredCallable::seal_signature_header(
+                            SemanticNodeData::Signature {
+                                kind: state.kind,
+                                params: crate::semantic_query::PayloadArray::from(
+                                    state.params.into_boxed_slice(),
+                                ),
+                                return_type: state.return_type.expect("lowered return"),
+                                type_parameters: crate::semantic_query::PayloadArray::from(
+                                    state.type_parameters.into_boxed_slice(),
+                                ),
+                                occurrence: None,
+                                return_carrier: state.return_carrier.expect("return carrier"),
+                                signature_span: func.spans.signature,
+                                return_type_span: func.spans.return_type,
+                                predicate,
+                                is_abstract: func.is_abstract,
+                            },
+                        ),
+                        lowering.scope.clone(),
+                    ));
+                }
+            };
+            if let Some((expr, env)) = child {
+                let context = state.context;
+                frames.push(LowerFrame::Function(state));
+                return match env {
+                    Some(env) => LowerStep::Scoped(expr, context, env),
+                    None => LowerStep::Descend(expr, context),
+                };
+            }
+        }
+    }
+
+    fn lower_function_flow_return(
+        &self,
+        func: &FunctionExpr,
+        env: &FxHashMap<String, SemanticNodeId>,
+        scope: &NodeScopeId,
+    ) -> (
+        SemanticNodeId,
+        crate::semantic_query::SignatureReturnCarrier,
+        Option<crate::semantic_query::SignaturePredicate>,
+    ) {
+        let identity = func
+            .flow_return
+            .as_ref()
+            .expect("body-derived return selected");
+        let mut inferred_predicate = None;
+        let (node, carrier) = {
+            let mut identity = identity.as_ref().clone();
+            let scope_canonical = match scope {
+                NodeScopeId::File {
+                    canonical_id,
+                    owner,
+                    ..
+                } => {
+                    identity.anchor.canonical_id = verter_type_expr::OwnedStr::from(canonical_id);
+                    identity.anchor.owner = *owner;
+                    Some(canonical_id.clone())
+                }
+                _ => None,
+            };
+            match scope_canonical {
+                Some(scope_canonical) => {
+                    let mut carrier = crate::semantic_query::SignatureReturnCarrier::Function(
+                        verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+                    );
+                    let return_type = match self
+                        .probe_signature_flow_return(&identity, scope_canonical.as_ref())
+                    {
+                        super::flow_return_fact::SignatureReturnProbe::Evaluated(result) => {
+                            inferred_predicate = result.inferred_predicate();
+                            result.return_type()
+                        }
+                        super::flow_return_fact::SignatureReturnProbe::Deferred(source) => {
+                            carrier = crate::semantic_query::SignatureReturnCarrier::DeferredFlow(
+                                source.with_bindings(
+                                    env.iter()
+                                        .filter(|(name, _)| {
+                                            !func
+                                                .type_parameters
+                                                .iter()
+                                                .any(|tp| tp.name == name.as_str())
+                                        })
+                                        .map(|(name, node)| (Arc::from(name.as_str()), *node)),
+                                ),
+                            );
+                            self.opaque(QueryError::Miss)
+                        }
+                    };
+                    (return_type, carrier)
+                }
+                None => (
+                    self.opaque(QueryError::Miss),
+                    crate::semantic_query::SignatureReturnCarrier::Function(
+                        verter_type_expr::facts::FunctionReturnSource::Absent,
+                    ),
+                ),
+            }
+        };
+        (node, carrier, inferred_predicate)
+    }
+
+    fn lower_import_arguments<'e>(
+        &self,
+        continuation: super::carrier::CarrierArgsContinuation,
+        arguments: &'e [TypeExpr],
+        context: ProjectionReductionContext,
+        frames: &mut LowerFrames<'e>,
+    ) -> LowerStep<'e> {
+        if let Some(first) = arguments.first() {
+            frames.push(LowerFrame::RefArguments {
+                continuation,
+                arguments,
+                context,
+                lowered: Vec::with_capacity(arguments.len()),
+            });
+            LowerStep::Descend(first, context)
+        } else {
+            self.lower_carrier_finish(continuation, Arc::from([]), frames)
+        }
+    }
+
     fn lower_ref_arguments<'e>(
         &self,
         continuation: super::carrier::CarrierArgsContinuation,
         type_arguments: &'e [TypeExpr],
         reduction_context: ProjectionReductionContext,
-        frames: &mut Vec<LowerFrame<'e>>,
+        frames: &mut LowerFrames<'e>,
     ) -> LowerStep<'e> {
         // Type ARGUMENTS lower as CARRIERS, never eagerly.
         //
@@ -1914,10 +3097,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         frame: LowerFrame<'e>,
         value: SemanticNodeId,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        frames: &mut Vec<LowerFrame<'e>>,
+        frames: &mut LowerFrames<'e>,
     ) -> LowerStep<'e> {
         let graph = self.graph();
         match frame {
+            LowerFrame::Environment(_) => unreachable!("environment restored by the cursor"),
+            LowerFrame::Function(state) => {
+                self.resume_function_lowering(lowering, state, value, frames)
+            }
+            LowerFrame::Mapped(state, awaiting) => {
+                self.resume_mapped_lowering(lowering, state, awaiting, value, frames)
+            }
+            LowerFrame::Conditional(state, awaiting) => self.resume_conditional_lowering(
+                lowering,
+                infer_binders,
+                (state, awaiting),
+                value,
+                substitutions,
+                frames,
+            ),
+            LowerFrame::ImportTail(tail) => {
+                let key = tail.key(value);
+                self.record_carrier_resolution_read_intent(&key);
+                // Only the node escapes this lowering; carrier fact status is folded by the read.
+                frames.push(LowerFrame::Read(LowerReadResume::ImportTail));
+                LowerStep::Read(LowerRead {
+                    key,
+                    shape: LowerReadShape::Whole,
+                })
+            }
             LowerFrame::Read(_) => unreachable!("a query frame needs a shaped delivery"),
             LowerFrame::TypeofArguments {
                 base,
@@ -2253,7 +3461,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         mut entries: Vec<SurfaceEntry>,
         context: ProjectionReductionContext,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        frames: &mut Vec<LowerFrame<'e>>,
+        frames: &mut LowerFrames<'e>,
     ) -> LowerStep<'e> {
         if object.empty_literal && object.properties.is_empty() {
             return LowerStep::Value(self.graph().intern_node_with_scope(
@@ -2476,7 +3684,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         base_id: SemanticNodeId,
         reduction_context: ProjectionReductionContext,
         scope: &NodeScopeId,
-        frames: &mut Vec<LowerFrame<'e>>,
+        frames: &mut LowerFrames<'e>,
     ) -> LowerStep<'e> {
         let graph = self.graph();
         if crate::semantic_query::may_reduce_operator(reduction_context) {
@@ -2509,7 +3717,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         index_key: crate::semantic_query::IndexKey,
         reduction_context: ProjectionReductionContext,
         lowering: &TypeExprLowering<'_>,
-        frames: &mut Vec<LowerFrame<'e>>,
+        frames: &mut LowerFrames<'e>,
     ) -> LowerStep<'e> {
         let graph = self.graph();
         let scope = lowering.scope;
@@ -2708,958 +3916,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     reduction_context,
                 )
             }
-            // Mapped types (`{ [K in keyof T]: T[K] }` and friends)
-            // route through `SemanticQueryKey::MappedType` so `build_mapped_type`
-            // produces the correct shell + per-member
-            // modifiers. The key insight for the common `keyof T`
-            // pattern: `TypeExpr::Mapped.source` is the key space
-            // expression (`keyof T`), not T itself. `build_mapped_type`'s
-            // `source` parameter wants T (the underlying object being
-            // mapped over) so it can project each key's value from T
-            // directly (see `mapped_type_value_materialised_from_source_member_for_known_keys`).
-            // We detect the `keyof T` shape and extract T; any other
-            // mapped-source shape falls back to passing the lowered
-            // source through for both slots.
-            TypeExpr::Mapped {
-                parameter,
-                source,
-                value,
-                optional,
-                readonly,
-                name_type,
-                ..
-            } => {
-                use crate::semantic_query::{MapperKey, OptionalityMod, ReadonlyMod};
-                use verter_type_expr::MappedModifier;
-
-                let mapper_display_name: Arc<str> = Arc::from(parameter.as_str());
-                // The mapper parameter K is introduced by the
-                // enclosing `[K in S]` binding; treat its declaration
-                // as the mapped-type shell itself. The scope's
-                // `canonical_id` + `whole_hash` identifies the file;
-                // `decl_name` is the mapping's reproducible identity
-                // (`mapper_binder_decl_name`), which distinguishes mapper
-                // parameters from user-declared interface / type-alias
-                // parameters and names the binder in its stable key.
-                //
-                // `param_index` is assigned from the host-owned
-                // [`MapperBinderRegistry`](crate::mapper_binder_registry)
-                // keyed by `(canonical, display_name,
-                // structural-fingerprint(source_ptr, value_ptr,
-                // name_type_ptr, optional, readonly))`. Two
-                // lowerings of the SAME source mapper share the
-                // same ordinal — and therefore the same
-                // `TypeParam` SemanticNodeId, the same
-                // `MapperKey`, and the same `MappedType` cache
-                // key. Two distinct `[K in ...]` binders in the
-                // same scope still get distinct ordinals via
-                // distinct fingerprints. See
-                // [`crate::mapper_binder_registry`].
-                let mapper_decl_name = crate::mapper_binder_registry::mapper_binder_decl_name(
-                    graph.store(),
-                    source,
-                    value,
-                    *optional,
-                    *readonly,
-                    name_type.as_ref(),
-                );
-                let mapper_decl = match scope {
-                    NodeScopeId::Global => DeclIdentity {
-                        canonical_id: verter_type_expr::OwnedStr::from(""),
-                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        whole_hash: HashValue::default(),
-                        decl_name: verter_type_expr::OwnedStr::from(mapper_decl_name.clone()),
-                    },
-                    NodeScopeId::File {
-                        canonical_id,
-                        owner,
-                        whole_hash,
-                        ..
-                    } => DeclIdentity {
-                        canonical_id: canonical_id.clone(),
-                        owner: *owner,
-                        whole_hash: *whole_hash,
-                        decl_name: verter_type_expr::OwnedStr::from(mapper_decl_name.clone()),
-                    },
-                };
-                // Fix: resolve the `param_index` ordinal
-                // through the host-owned
-                // [`MapperBinderRegistry`](crate::mapper_binder_registry::MapperBinderRegistry)
-                // keyed by `(canonical, display_name,
-                // fingerprint(source_ptr, value_ptr,
-                // name_type_ptr, optional, readonly))`. Two
-                // lowerings of the SAME source mapper get the
-                // SAME ordinal — and therefore the SAME
-                // `TypeParam` SemanticNodeId, the SAME
-                // `MapperKey`, and the SAME
-                // `SemanticQueryKey::MappedType` cache key.
-                //
-                // This replaces the per-dispatcher counter
-                // (`ProjectSemanticDispatch::next_mapped_binder_ordinal`)
-                // which destabilised mapper identity across
-                // dispatcher instances — the concern empirically
-                // confirmed (258,546 ordinal
-                // collisions ≈ 258,611 cold MappedType builds on
-                // ChatMessages.vue).
-                let fingerprint = crate::mapper_binder_registry::MapperFingerprint::from_components(
-                    source,
-                    value,
-                    *optional,
-                    *readonly,
-                    name_type.as_ref(),
-                );
-                let mapper_ordinal = self.binding.mapper_binders.as_ref().ordinal_for(
-                    &mapper_decl.canonical_id,
-                    &mapper_display_name,
-                    fingerprint,
-                );
-                // Mapper-binder-ordinal classification. The counter
-                // bumps whenever the SAME `(canonical, display_name)`
-                // triple is observed with a DIFFERENT ordinal in the
-                // same request — i.e. two `ordinal_for` calls for the
-                // same display-name slot landed in different
-                // [`MapperFingerprint`] entries.
-                //
-                // Dual meaning: a non-zero
-                // count does NOT necessarily mean the host-owned
-                // registry is "failing to stabilise mapper identity"
-                // — the registry only deduplicates fingerprints that
-                // share `(source_ptr, value_ptr, name_type_ptr,
-                // optional, readonly)`. A non-zero count therefore
-                // means at least one of:
-                //   (a) genuine registry instability — the SAME
-                //       logical mapper hashed to two pointers (e.g.
-                //       prepared-body re-decoding handed out fresh
-                //       Arcs across calls); OR
-                //   (b) genuine substitution fanout — different
-                //       instantiations of the same generic decl
-                //       lower to structurally distinct Mapped
-                //       subtrees with different lowered `source` /
-                //       `value` SemanticNodeIds, which is
-                //       semantically correct (each instantiation IS
-                //       a distinct mapped type).
-                //
-                // To attribute the count between (a) and (b),
-                // compare against `recursive_substitute_unique` /
-                // `substitute_top_level_calls` on the audit
-                // footprint: a substitution-driven fanout will show
-                // up there too. Empirically on ChatMessages.vue the
-                // 258K-collision count tracks 258K cold MappedType
-                // dispatches, indicating (b) — the registry is
-                // doing what it can.
-                crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
-                    let hb = mapper_decl.whole_hash;
-                    let hash_u64 = u64::from_le_bytes([
-                        hb[0], hb[1], hb[2], hb[3], hb[4], hb[5], hb[6], hb[7],
-                    ]);
-                    let identity = crate::request_context::MapperSourceIdentity {
-                        canonical_id: std::sync::Arc::<str>::from(
-                            mapper_decl.canonical_id.as_str(),
-                        ),
-                        whole_hash: hash_u64,
-                        display_name: Arc::clone(&mapper_display_name),
-                    };
-                    ctx.classify_mapper_binder_ordinal(identity, mapper_ordinal);
-                });
-                let parameter_id = graph.intern_node_with_scope(
-                    SemanticNodeData::TypeParam {
-                        decl: mapper_decl,
-                        param_index: mapper_ordinal,
-                        // Mapper parameters carry no declaration-site
-                        // constraint or default in TS mapped syntax —
-                        // the keyspace is expressed via the outer
-                        // `[K in S]` binding, not via `T extends` on K.
-                        constraint: None,
-                        default: None,
-                        display_name: OwnedStr::from(&mapper_display_name),
-                    },
-                    scope.clone(),
-                );
-                // A `keyof` operand the environment binds names a type
-                // parameter even once it lowers to its argument: the mapping
-                // stays homomorphic over it. An unbound operand is read off
-                // its lowered node below.
-                let over_type_variable = match source.as_ref() {
-                    TypeExpr::KeyOf(inner) => match inner.as_ref() {
-                        TypeExpr::TypeParameter(param) => env.contains_key(param.name.as_str()),
-                        TypeExpr::Ref {
-                            name,
-                            type_arguments,
-                        } => type_arguments.is_empty() && env.contains_key(name.as_ref()),
-                        _ => false,
-                    },
-                    _ => false,
-                };
-                let (source_sem, key_space_sem, base_infer_name) = match source.as_ref() {
-                    // `{ [K in keyof T]: ... }` — extract T.
-                    TypeExpr::KeyOf(inner) => {
-                        let inner_id = self.lower_type_expr_with_infer_factory(
-                            infer_binders,
-                            inner,
-                            env,
-                            scope,
-                            name_resolution,
-                            scope_payload,
-                            shadowing,
-                            substitutions,
-                            reduction_context,
-                        );
-                        // `keyof infer T` is the descriptor of the exact
-                        // reverse-homomorphic pattern. The selected `Infer`
-                        // is intentionally open until the enclosing
-                        // conditional relation fixes it, so eagerly asking
-                        // the `KeyOf` reducer here can only return `Miss` and
-                        // destroy the descriptor. Preserve that exact
-                        // structurally selected operand as a `KeyOf` shell in
-                        // every reduction mode; ordinary concrete operands
-                        // retain the established eager-reduction path.
-                        let selected_base_is_infer = matches!(
-                            graph.node_data(inner_id).as_deref(),
-                            Some(SemanticNodeData::Infer { .. })
-                        );
-                        let key_space = if selected_base_is_infer {
-                            graph.intern_node_with_scope(
-                                SemanticNodeData::KeyOf { base: inner_id },
-                                scope.clone(),
-                            )
-                        } else if crate::semantic_query::may_reduce_operator(reduction_context) {
-                            match self.execute_type_node(SemanticQueryKey::KeyOf {
-                                base: inner_id,
-                                context: reduction_context,
-                            }) {
-                                QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                                _ => self.opaque(QueryError::Miss),
-                            }
-                        } else {
-                            match graph.node_data(inner_id).as_deref() {
-                                None => self.opaque(QueryError::Miss),
-                                _ if super::raise::node_is_unknown_materializing_failure(
-                                    self, inner_id,
-                                ) =>
-                                {
-                                    self.opaque(QueryError::Miss)
-                                }
-                                _ => graph.intern_node_with_scope(
-                                    SemanticNodeData::KeyOf { base: inner_id },
-                                    scope.clone(),
-                                ),
-                            }
-                        };
-                        let base_infer = match graph.node_data(inner_id).as_deref() {
-                            Some(SemanticNodeData::Infer { name, binder, .. }) => {
-                                Some((Arc::<str>::from(name), binder.clone()))
-                            }
-                            _ => None,
-                        };
-                        (inner_id, key_space, base_infer)
-                    }
-                    // Fallback: the source shape IS the key space.
-                    _ => {
-                        let lowered = self.lower_type_expr_with_infer_factory(
-                            infer_binders,
-                            source,
-                            env,
-                            scope,
-                            name_resolution,
-                            scope_payload,
-                            shadowing,
-                            substitutions,
-                            reduction_context,
-                        );
-                        (lowered, lowered, None)
-                    }
-                };
-
-                // A reverse-homomorphic source introduces `infer T` from the
-                // exact lowered `keyof infer T` operand. Seed only that selected
-                // declaration as a scoped reference while lowering the mapped
-                // body; an ambient/imported same-name reference never enters
-                // this environment. Insert the mapped binder afterwards so it
-                // remains the innermost binding when the names collide.
-                let mut mapper_env = env.clone();
-                if let Some((base_infer_name, binder)) = base_infer_name {
-                    let reference = graph.intern_node_with_scope(
-                        SemanticNodeData::InferRef {
-                            name: OwnedStr::from(&base_infer_name),
-                            binder,
-                        },
-                        scope.clone(),
-                    );
-                    mapper_env.insert(base_infer_name.to_string(), reference);
-                }
-                mapper_env.insert(parameter.clone(), parameter_id);
-
-                // The binder is not a selected key yet. Keep helper
-                // applications and operators intact until per-key substitution.
-                let value_sem = self.lower_type_expr_with_infer_factory(
-                    infer_binders,
-                    value,
-                    &mapper_env,
-                    scope,
-                    name_resolution,
-                    scope_payload,
-                    shadowing,
-                    substitutions,
-                    reduction_context.into_structural_transit_with_mode(ProjectionMode::Navigate),
-                );
-
-                let optionality = match optional {
-                    MappedModifier::Add => OptionalityMod::Add,
-                    MappedModifier::Remove => OptionalityMod::Remove,
-                    MappedModifier::None => OptionalityMod::Keep,
-                };
-                let readonly_mod = match readonly {
-                    MappedModifier::Add => ReadonlyMod::Add,
-                    MappedModifier::Remove => ReadonlyMod::Remove,
-                    MappedModifier::None => ReadonlyMod::Keep,
-                };
-
-                let name_remap = name_type.as_ref().map(|nt| {
-                    self.lower_type_expr_with_infer_factory(
-                        infer_binders,
-                        nt,
-                        &mapper_env,
-                        scope,
-                        name_resolution,
-                        scope_payload,
-                        shadowing,
-                        substitutions,
-                        reduction_context
-                            .into_structural_transit_with_mode(ProjectionMode::Navigate),
-                    )
-                });
-
-                // Classify `value_expr` once at lowering time so
-                // `build_mapped_type` matches on `mapper.kind`
-                // directly instead of re-inspecting the runtime AST
-                // shape on every call. Classification compares the
-                // indexed-access index node id against the mapper's
-                // binder node id directly, avoiding display-name
-                // conflation.
-                let kind = crate::semantic_query::MapperKind::classify_value_expr(
-                    graph.store(),
-                    value_sem,
-                    source_sem,
-                    parameter_id,
-                );
-                let mapper = MapperKey {
-                    // The mapper carries the binder's interned
-                    // `TypeParam` node id, not the display-name
-                    // string — binder identity in the semantic graph
-                    // is by `SemanticNodeId`, not by display name.
-                    parameter_node: parameter_id,
-                    key_space: key_space_sem,
-                    value_expr: value_sem,
-                    optionality,
-                    readonly: readonly_mod,
-                    name_remap,
-                    kind,
-                    over_type_variable: over_type_variable
-                        || (matches!(source.as_ref(), TypeExpr::KeyOf(_))
-                            && crate::semantic_query::keyof_operand_is_type_variable(
-                                graph.store(),
-                                source_sem,
-                            )),
-                    modifiers_type: match source.as_ref() {
-                        TypeExpr::KeyOf(_) => None,
-                        _ => crate::semantic_query::modifiers_type_of_key_parameter(
-                            graph.store(),
-                            source_sem,
-                        ),
-                    },
-                };
-
-                // Route/mode-INDEPENDENT L1 carrier-stop (LOWERING
-                // entrance), MAPPED-TYPE family. A mapped type whose
-                // produced surface still depends on an unbound OUTER
-                // generic — an open source / key space, or a value body /
-                // name remap reaching the outer generic (NOT the bound
-                // mapper binder `K`) — preserves the deferred
-                // `SemanticNodeData::Mapped` carrier shell in ANY mode
-                // (Navigate / Expanded / Shallow / Skeleton /
-                // StructuralTransit) WITHOUT dispatching the `MappedType`
-                // query that would enumerate the keys and materialise the
-                // per-key value (the `ChatMessagesSlots<T>` /
-                // `TableSlots<T>` storm). The shells (`source_sem` /
-                // `key_space_sem` / `value_sem` / `name_remap`) are
-                // preserved verbatim. A CLOSED mapped type falls through
-                // to the `MappedType` dispatch and materialises
-                // path-precisely under a publication demand. The shared
-                // open-mapped predicate decides openness (no second
-                // walker).
-                if !crate::semantic_query::may_reduce_operator(reduction_context)
-                    || crate::project_semantic_dispatch::raise::mapped_type_is_open_or_unknown(
-                        self, source_sem, &mapper,
-                    )
-                {
-                    return graph.intern_node_with_scope(
-                        SemanticNodeData::Mapped {
-                            source: source_sem,
-                            mapper,
-                        },
-                        scope.clone(),
-                    );
-                }
-
-                match self.execute_type_node(SemanticQueryKey::MappedType {
-                    source: source_sem,
-                    mapper,
-                    context: reduction_context,
-                }) {
-                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                    _ => self.opaque(QueryError::Miss),
-                }
-            }
-            TypeExpr::Conditional {
-                check,
-                extends,
-                true_type,
-                false_type,
-            } => {
-                if self.cancellation.is_cancelled() {
-                    return self.opaque(QueryError::Miss);
-                }
-                // Relation operands retain their declaration identity and
-                // arguments until the shared relation authority consumes
-                // them. Eager expansion here would compare object bodies
-                // instead of applying the generic's variance annotations.
-                // The check consumes its value at the caller's demand; the
-                // target pattern stays structural. The selected branch keeps
-                // the caller's publication context.
-                let mut check_head = check.as_ref();
-                while let TypeExpr::Parenthesized(inner) = check_head {
-                    check_head = inner;
-                }
-                let check_context = if matches!(check_head, TypeExpr::TypeOf { .. }) {
-                    // A value-root lookup names no generic declaration whose
-                    // variance could apply. Navigation would leave its module
-                    // object's member values unread, and the relation compares
-                    // those values.
-                    reduction_context
-                } else {
-                    Self::conditional_operand_context(reduction_context)
-                };
-                let extends_context = Self::conditional_target_context(reduction_context);
-                let check_id = self.lower_type_expr_with_infer_factory(
-                    infer_binders,
-                    check,
-                    env,
-                    scope,
-                    name_resolution,
-                    scope_payload,
-                    shadowing,
-                    substitutions,
-                    check_context,
-                );
-                let extends_path = infer_binders.path_for_expr(expr).child(
-                    crate::semantic_query::infer_binder_names::
-                        InferSyntaxPathStep::ConditionalExtends,
-                );
-                let infer_sites =
-                    crate::semantic_query::infer_binder_names::collect_extends_infer_declarations(
-                        extends,
-                        &extends_path,
-                    );
-                // A declared constraint is read where the conditional is
-                // written, and the false branch outside the pattern: no
-                // `infer` of the pattern is in scope there (`[infer A, infer
-                // B extends A]` reports TS2304 for `A`).
-                let out_of_scope_env = (!infer_sites.is_empty()).then(|| {
-                    let recovery = crate::semantic_query::checker_policy::checker_recovery(
-                        graph,
-                        crate::semantic_query::checker_policy::unresolved_type_name(),
-                    );
-                    let mut out_of_scope = env.clone();
-                    for site in &infer_sites {
-                        out_of_scope.insert(
-                            super::carrier::out_of_scope_infer_env_key(site.name.as_ref()),
-                            recovery,
-                        );
-                    }
-                    out_of_scope
-                });
-                let mut extends_env_owned;
-                let mut declarations = Vec::with_capacity(infer_sites.len());
-                let extends_env = if infer_sites.is_empty() {
-                    env
-                } else {
-                    extends_env_owned = env.clone();
-                    let constraint_env = out_of_scope_env.as_ref().unwrap_or(env);
-                    for site in infer_sites {
-                        let binder = infer_binders.binder_at(&site.path);
-                        let constraint = site.constraint.map(|constraint| {
-                            self.lower_type_expr_with_infer_factory(
-                                infer_binders,
-                                constraint,
-                                constraint_env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                extends_context,
-                            )
-                        });
-                        let declaration = graph.intern_node_with_scope(
-                            SemanticNodeData::Infer {
-                                name: OwnedStr::from(&site.name),
-                                binder: binder.clone(),
-                                constraint,
-                            },
-                            scope.clone(),
-                        );
-                        extends_env_owned
-                            .insert(infer_declaration_env_key(site.name.as_ref()), declaration);
-                        declarations.push((site.name, binder));
-                    }
-                    &extends_env_owned
-                };
-                let extends_id = self.lower_type_expr_with_infer_factory(
-                    infer_binders,
-                    extends,
-                    extends_env,
-                    scope,
-                    name_resolution,
-                    scope_payload,
-                    shadowing,
-                    substitutions,
-                    extends_context,
-                );
-                let mut lowered = [None, None];
-                let output = self.build_conditional_from_lowering(
-                    check_id,
-                    extends_id,
-                    // A naked type parameter as the check type distributes
-                    // it, an `infer` placeholder of an enclosing conditional
-                    // among them (`X extends infer K ? K extends "a" ? 1 : 0
-                    // : 2` distributes over the `K` it binds).
-                    matches!(check.as_ref(), TypeExpr::TypeParameter(_))
-                        || matches!(
-                            graph.node_data(check_id).as_deref(),
-                            Some(
-                                SemanticNodeData::TypeParam { .. }
-                                    | SemanticNodeData::InferRef { .. }
-                            )
-                        ),
-                    &mut |take_true| {
-                        let index = usize::from(take_true);
-                        if let Some(node) = lowered[index] {
-                            return node;
-                        }
-                        if self.cancellation.is_cancelled() {
-                            return self.opaque(QueryError::Miss);
-                        }
-                        let mut true_env;
-                        let branch_env = if take_true && !declarations.is_empty() {
-                            true_env = env.clone();
-                            for (name, binder) in &declarations {
-                                let reference = graph.intern_node_with_scope(
-                                    SemanticNodeData::InferRef {
-                                        name: OwnedStr::from(name),
-                                        binder: binder.clone(),
-                                    },
-                                    scope.clone(),
-                                );
-                                true_env.insert(name.to_string(), reference);
-                            }
-                            &true_env
-                        } else if take_true {
-                            env
-                        } else {
-                            out_of_scope_env.as_ref().unwrap_or(env)
-                        };
-                        let node = self.lower_type_expr_with_infer_factory(
-                            infer_binders,
-                            if take_true { true_type } else { false_type },
-                            branch_env,
-                            scope,
-                            name_resolution,
-                            scope_payload,
-                            shadowing,
-                            substitutions,
-                            reduction_context,
-                        );
-                        lowered[index] = Some(node);
-                        node
-                    },
-                );
-                self.deposit_operand_self_roots(&output.observed_self_roots);
-                self.fold_into_top_build_local_taint_with(
-                    output.result_is_partial(),
-                    output.cache_suppress,
-                    output.partial_reasons(),
-                );
-                match output.result {
-                    QueryResult::Value(node) => node,
-                    _ => self.opaque(QueryError::Miss),
-                }
-            }
-
-            // Function-type lowering. Produces a
-            // canonical `SemanticNodeData::Signature` carrier with
-            // lowered parameters and return type. Type parameters
-            // lower to `TypeParamDecl` — constraints/defaults lower
-            // recursively. `RecursiveRef`, `Infer`, `Rest`, and
-            // `Unknown` remain scratch-only per §7.14.
-            //
-            // `ConstructorType` (a bare `new (...) => R`) lowers through
-            // the SAME `SemanticNodeData::Signature` path with
-            // `kind: Construct` — the call/construct distinction is
-            // SEMANTIC and must survive lowering (`Construct` raises back
-            // to `TypeExpr::ConstructorType`). Without this explicit arm
-            // the wildcard `_ => opaque(QueryError::Miss)` below would
-            // regress constructor-type props to `Unknown("semanticMiss")`.
-            TypeExpr::Function(func) | TypeExpr::ConstructorType(func) => {
-                use crate::semantic_query::{FunctionParam, TypeParamDecl};
-                // Function generic shadowing + binder binding: a function
-                // type's OWN `<T>` shadows an identically-named outer
-                // generic parameter, so the outer instantiation argument
-                // must NOT substitute into this function's params /
-                // return / type-param constraints+defaults. Each own
-                // parameter binds to its interned `TypeParam` BINDER node,
-                // so a body reference that reaches this lowering
-                // un-normalised — a prepared declaration signature carries
-                // `Ref("T")`, not `TypeParameter(T)` — lowers to the
-                // binder node instead of a `ResolveDecl` miss. The storage
-                // binding lives for the whole arm; `env` is re-bound to it
-                // only when the function declares its own type parameters
-                // (functions with none pay nothing — they keep the outer
-                // `env` by reference).
-                //
-                // The binder's identity is its declaring clause: the
-                // clause's span-blind content digest
-                // ([`clause_binder_decl_name`]) at the parameter's ordinal,
-                // so a same-name clause written inside a generic
-                // declaration (`const id: <T>(z: T) => T` in `l0<T>`) never
-                // shares the enclosing `T`'s node, and instantiating the
-                // one never reaches the other. A body-derived clause
-                // (`flow_return`) keeps the file-scoped name-keyed
-                // signature convention (`BinderIdentityMode::Signature`,
-                // ordinal 0): its return is the flow lane's node, built
-                // under the root frame's name-keyed binders, and the
-                // flow-return read-off finds them by name.
-                //
-                // [`clause_binder_decl_name`]: crate::mapper_binder_registry::clause_binder_decl_name
-                let scoped_env_storage;
-                let env: &FxHashMap<String, SemanticNodeId> = if func.type_parameters.is_empty() {
-                    env
-                } else {
-                    let mut scoped = env.clone();
-                    let clause_decl_name = func.flow_return.is_none().then(|| {
-                        crate::mapper_binder_registry::clause_binder_decl_name(graph.store(), expr)
-                    });
-                    let identity = |ordinal: usize, display_name: &OwnedStr| match &clause_decl_name
-                    {
-                        Some(clause) => (
-                            crate::semantic_query::DeclIdentity::from_scope(
-                                scope,
-                                OwnedStr::from(Arc::clone(clause)),
-                            ),
-                            u16::try_from(ordinal).unwrap_or(u16::MAX),
-                        ),
-                        None => (
-                            crate::semantic_query::DeclIdentity::from_scope(
-                                scope,
-                                display_name.clone(),
-                            ),
-                            0,
-                        ),
-                    };
-                    // Every parameter predeclared as a bound-free binder,
-                    // as the shared binder-frame constructor does: the shell
-                    // a constraint's self or later-sibling reference names
-                    // (`T extends U` in `<T extends U, U>`), never an outer
-                    // or free binder of the same name.
-                    let shells: Vec<SemanticNodeId> = func
-                        .type_parameters
-                        .iter()
-                        .enumerate()
-                        .map(|(ordinal, tp)| {
-                            let display_name = OwnedStr::from(tp.name.as_str());
-                            let (decl, param_index) = identity(ordinal, &display_name);
-                            graph.intern_node_with_scope(
-                                SemanticNodeData::TypeParam {
-                                    decl,
-                                    param_index,
-                                    constraint: None,
-                                    default: None,
-                                    display_name,
-                                },
-                                scope.clone(),
-                            )
-                        })
-                        .collect();
-                    for (ordinal, tp) in func.type_parameters.iter().enumerate() {
-                        let display_name = OwnedStr::from(tp.name.as_str());
-                        // Bounds lower under the outer env and the clause's
-                        // earlier own binders, so a constraint referencing an
-                        // outer generic still substitutes and `K extends
-                        // keyof T` in `<T, K extends keyof T>` names this
-                        // clause's `T`. A constraint also sees this
-                        // parameter and the later ones as their shells; a
-                        // default sees the earlier ones only.
-                        let constraint = tp.constraint.as_deref().map(|c| {
-                            let mut head = scoped.clone();
-                            for (later, shell) in
-                                func.type_parameters.iter().zip(&shells).skip(ordinal)
-                            {
-                                head.insert(later.name.clone(), *shell);
-                            }
-                            self.lower_type_expr_with_infer_factory(
-                                infer_binders,
-                                c,
-                                &head,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context,
-                            )
-                        });
-                        let default = tp.default.as_deref().map(|d| {
-                            self.lower_type_expr_with_infer_factory(
-                                infer_binders,
-                                d,
-                                &scoped,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context,
-                            )
-                        });
-                        let (decl, param_index) = identity(ordinal, &display_name);
-                        let binder = graph.intern_node_with_scope(
-                            SemanticNodeData::TypeParam {
-                                decl,
-                                param_index,
-                                constraint,
-                                default,
-                                display_name,
-                            },
-                            scope.clone(),
-                        );
-                        scoped.insert(tp.name.clone(), binder);
-                    }
-                    scoped_env_storage = scoped;
-                    &scoped_env_storage
-                };
-                let params: Vec<FunctionParam> = func
-                    .parameters
-                    .iter()
-                    .map(|param| FunctionParam {
-                        name: param.name.as_deref().map(OwnedStr::from),
-                        ty: self.lower_type_expr_with_infer_factory(
-                            infer_binders,
-                            &param.ty,
-                            env,
-                            scope,
-                            name_resolution,
-                            scope_payload,
-                            shadowing,
-                            substitutions,
-                            reduction_context,
-                        ),
-                        optional: param.optional,
-                        rest: param.rest,
-                        // Carry the IR parameter's OXC span verbatim.
-                        span: param.span,
-                        declared_literal: crate::semantic_query::declares_literal_type(&param.ty),
-                    })
-                    .collect();
-                // A body-derived return carries the predicate the checker infers
-                // from the body beside it.
-                let mut inferred_predicate = None;
-                let (return_type, return_carrier) = match &func.flow_return {
-                    // A body-derived return is demanded from the
-                    // whole-function producer through the sealed helper:
-                    // the extractor marked the served position with the
-                    // declaration name; canonical / owner fill from THIS
-                    // lowering scope (the defining file's). The carrier
-                    // records the SAME served position so the call resolver
-                    // holds the `FlowReturn` obligation instead of treating
-                    // the evaluated node as a concrete seed.
-                    Some(identity) => {
-                        let mut identity = identity.as_ref().clone();
-                        let scope_canonical = match scope {
-                            NodeScopeId::File {
-                                canonical_id,
-                                owner,
-                                ..
-                            } => {
-                                identity.anchor.canonical_id =
-                                    verter_type_expr::OwnedStr::from(canonical_id);
-                                identity.anchor.owner = *owner;
-                                Some(canonical_id.clone())
-                            }
-                            _ => None,
-                        };
-                        match scope_canonical {
-                            Some(scope_canonical) => {
-                                let mut carrier =
-                                    crate::semantic_query::SignatureReturnCarrier::Function(
-                                        verter_type_expr::facts::FunctionReturnSource::Flow(
-                                            identity.clone(),
-                                        ),
-                                    );
-                                let return_type = match self.probe_signature_flow_return(
-                                    &identity,
-                                    scope_canonical.as_ref(),
-                                ) {
-                                    super::flow_return_fact::SignatureReturnProbe::Evaluated(
-                                        result,
-                                    ) => {
-                                        inferred_predicate = result.inferred_predicate();
-                                        result.return_type()
-                                    }
-                                    super::flow_return_fact::SignatureReturnProbe::Deferred(
-                                        source,
-                                    ) => {
-                                        carrier = crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source.with_bindings(
-                                            env.iter()
-                                                .filter(|(name, _)| !func.type_parameters.iter().any(|tp| tp.name == name.as_str()))
-                                                .map(|(name, node)| (Arc::from(name.as_str()), *node)),
-                                        ));
-                                        self.opaque(QueryError::Miss)
-                                    }
-                                };
-                                (return_type, carrier)
-                            }
-                            None => (
-                                self.opaque(QueryError::Miss),
-                                crate::semantic_query::SignatureReturnCarrier::Function(
-                                    verter_type_expr::facts::FunctionReturnSource::Absent,
-                                ),
-                            ),
-                        }
-                    }
-                    None => match func.return_type.as_deref() {
-                        Some(ret) => {
-                            let return_type = self.lower_type_expr_with_infer_factory(
-                                infer_binders,
-                                ret,
-                                env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context,
-                            );
-                            (
-                                return_type,
-                                crate::semantic_query::SignatureReturnCarrier::Declared(
-                                    return_type,
-                                ),
-                            )
-                        }
-                        None => (
-                            self.opaque(QueryError::Miss),
-                            crate::semantic_query::SignatureReturnCarrier::Function(
-                                verter_type_expr::facts::FunctionReturnSource::Absent,
-                            ),
-                        ),
-                    },
-                };
-                let type_parameters: Vec<TypeParamDecl> = func
-                    .type_parameters
-                    .iter()
-                    .map(|tp| TypeParamDecl {
-                        name: OwnedStr::from(tp.name.as_str()),
-                        // The exact binder node interned above for this own
-                        // parameter — the identity inference binds.
-                        param: env
-                            .get(tp.name.as_str())
-                            .copied()
-                            .expect("own type parameter binder interned in the scoped env"),
-                        constraint: tp.constraint.as_deref().map(|c| {
-                            self.lower_type_expr_with_infer_factory(
-                                infer_binders,
-                                c,
-                                env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context,
-                            )
-                        }),
-                        default: tp.default.as_deref().map(|d| {
-                            self.lower_type_expr_with_infer_factory(
-                                infer_binders,
-                                d,
-                                env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context,
-                            )
-                        }),
-                        original: None,
-                        is_const: tp.is_const,
-                    })
-                    .collect();
-                // The predicate target lowers under the signature's own
-                // binders, exactly like the return it rides beside.
-                let predicate = func
-                    .predicate
-                    .as_deref()
-                    .and_then(|predicate| {
-                        let target = predicate.ty.as_deref().map(|target| {
-                            self.lower_type_expr_with_infer_factory(
-                                infer_binders,
-                                target,
-                                env,
-                                scope,
-                                name_resolution,
-                                scope_payload,
-                                shadowing,
-                                substitutions,
-                                reduction_context,
-                            )
-                        });
-                        crate::semantic_query::SignaturePredicate::resolve(
-                            predicate, &params, target,
-                        )
-                    })
-                    .or(inferred_predicate);
-                let kind = match expr {
-                    TypeExpr::ConstructorType(_) => crate::semantic_query::SignatureKind::Construct,
-                    _ => crate::semantic_query::SignatureKind::Call,
-                };
-                graph.intern_node_with_scope(
-                    crate::semantic_query::DeferredCallable::seal_signature_header(
-                        SemanticNodeData::Signature {
-                            kind,
-                            params: crate::semantic_query::PayloadArray::from(
-                                params.into_boxed_slice(),
-                            ),
-                            return_type,
-                            type_parameters: crate::semantic_query::PayloadArray::from(
-                                type_parameters.into_boxed_slice(),
-                            ),
-                            // The generic type-expression lowering carries no
-                            // declaration occurrence: occurrence-aware provenance
-                            // arrives through the locator-driven rails (the
-                            // `LowerLocator` producer patches the ROOT signature).
-                            occurrence: None,
-                            return_carrier,
-                            // Stamp the whole-signature + return spans from the IR
-                            // FunctionExpr (NOT recovered from child node ids).
-                            signature_span: func.spans.signature,
-                            return_type_span: func.spans.return_type,
-                            predicate,
-                            is_abstract: func.is_abstract,
-                        },
-                    ),
-                    scope.clone(),
-                )
-            }
             // `infer X` placeholder in a conditional's `extends` arm
             // Explicit semantic variant rather
             // than encoded via scope overloading. Substitution picks
@@ -3683,77 +3939,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     )
                 }
             }
-            // `import("./m")` / `import("./m").Member` / `typeof import("./m")`
-            // — a dynamic-import type reference. Resolve the module specifier
-            // to a canonical file id (TS-first, workspace-bounded) through the
-            // SHARED module resolver, then route to the value-namespace
-            // (`typeof_query`) or TYPE-export (bare import) rail. No raw-text
-            // reparsing — the typed-IR carrier drives the whole resolution.
-            // `import("specifier").qualifier<args>` / `typeof import("...")`.
-            // Lower the args structurally HERE, then route through the shared
-            // `resolve_import_type_head` resolver, whose TYPE-position qualifier
-            // head segment delegates to the ONE `resolve_bare_ref_head` (over an
-            // injected name-resolution entry) -- no parallel import resolver. The
-            // owner canonical (which resolves the relative specifier) is the
-            // file scope; a non-file scope is an honest miss.
-            TypeExpr::ImportType {
-                specifier,
-                qualifier,
-                typeof_query,
-                type_arguments,
-            } => {
-                let NodeScopeId::File {
-                    canonical_id: owner_canonical,
-                    ..
-                } = scope
-                else {
-                    return self.opaque(QueryError::Miss);
-                };
-                let ctx = crate::project_semantic_dispatch::carrier::CarrierResolverContext::new(
-                    env,
-                    scope,
-                    name_resolution,
-                    scope_payload,
-                    shadowing,
-                    reduction_context,
-                );
-                // Lower the type-args LAZILY — only when the import head actually
-                // consumes them (a resolvable specifier + terminal qualifier).
-                // An unresolvable specifier / multi-segment-with-args misses
-                // without lowering + dispatching dead args. The import-type arm
-                // lowers args under the caller's `reduction_context` (NOT
-                // `into_structural_provenance`) — the import-type args stay tied
-                // to the caller's evaluation mode/provenance.
-                self.resolve_import_type_head(
-                    &ctx,
-                    owner_canonical.as_ref(),
-                    specifier,
-                    &verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
-                        qualifier.as_ref(),
-                    ),
-                    *typeof_query,
-                    type_arguments.len(),
-                    || {
-                        let arg_ids: Vec<SemanticNodeId> = type_arguments
-                            .iter()
-                            .map(|arg| {
-                                self.lower_type_expr_with_infer_factory(
-                                    infer_binders,
-                                    arg,
-                                    env,
-                                    scope,
-                                    name_resolution,
-                                    scope_payload,
-                                    shadowing,
-                                    substitutions,
-                                    reduction_context,
-                                )
-                            })
-                            .collect();
-                        Arc::from(arg_ids.into_boxed_slice())
-                    },
-                )
-            }
             // A spread-bearing object literal folds through the shared
             // spread materializer (ordered left fold over direct members
             // and spread operands).
@@ -3776,7 +3961,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             }
             // Every other structural position lowers from the explicit stack.
-            TypeExpr::Ref { .. }
+            TypeExpr::Mapped { .. }
+            | TypeExpr::Conditional { .. }
+            | TypeExpr::Function(_)
+            | TypeExpr::ConstructorType(_)
+            | TypeExpr::ImportType { .. }
+            | TypeExpr::Ref { .. }
             | TypeExpr::Union(_)
             | TypeExpr::Intersection(_)
             | TypeExpr::Array { .. }
@@ -3796,10 +3986,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 substitutions,
                 reduction_context,
             ),
-            // Conditionals, rest, recursive-ref, and unknown
-            // constructs remain out of this pass's scope — they route
-            // through their own dispatch builders (conditional /
-            // userland-equivalence) or stay solver-scratch-only.
+            // Unsupported leaf forms keep the typed miss.
             _ => self.opaque(QueryError::Miss),
         }
     }
