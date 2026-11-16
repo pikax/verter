@@ -428,7 +428,7 @@ fn intersection_types_relate_as_the_checker_relates_them() {
         ("[string] extends [Brand] ? 1 : 2", "2"),
         ("[string & number] extends [never] ? 1 : 2", "1"),
         ("[never] extends [string & number] ? 1 : 2", "1"),
-        // TypeScript 7.0.2: `tsc --noEmit --strict` accepts IsNever = true
+        // The pinned TypeScript checker: `tsc --noEmit --strict` accepts IsNever = true
         // and IsAny = false for both forms; assigning 1 gives TS2322
         // (`Type '1' is not assignable to type 'never'`).
         // checker.ts getIntersectionType checks DisjointDomains before Any:
@@ -459,7 +459,7 @@ fn intersection_types_relate_as_the_checker_relates_them() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// TypeScript 7.0.2, `tsc --noEmit --strict`, with each combination of
+/// The pinned TypeScript checker, `tsc --noEmit --strict`, with each combination of
 /// `--strictNullChecks true|false --noImplicitAny true|false`: both the
 /// Never test and `0 extends (1 & R)` distinguish Never from Any.
 /// `getIntersectionType` checks nullable/object, its listed domain pairs,
@@ -518,7 +518,7 @@ fn intersection_contradictions_before_any_match_the_checker() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// TypeScript 7.0.2, `tsc --noEmit --strict`, all four combinations of
+/// The pinned TypeScript checker, `tsc --noEmit --strict`, all four combinations of
 /// strictNullChecks/noImplicitAny: equal-valued members of one enum are
 /// one unit; another enum or a plain literal supplies a distinct unit.
 /// `getEnumLiteralType` interns by enum identity, value kind and value.

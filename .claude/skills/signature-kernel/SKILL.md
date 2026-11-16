@@ -153,7 +153,7 @@ independently of structural deduplication and authored heads:
 | Null / undefined | Separate intrinsic singleton for each kind | `PrimitiveKind::Null` / `Undefined`; erasure prevents insertion, not Unit history. |
 | Void | Intrinsic singleton, but **not** a Unit | `PrimitiveKind::Void` contributes VoidLike only. |
 
-Checker sources (TypeScript 7.0.2):
+Checker sources (the pinned TypeScript checker):
 [intrinsic and boolean singletons](https://github.com/microsoft/TypeScript/blob/v7.0.2/src/compiler/checker.ts#L2087-L2111),
 [literal interning and unique symbols](https://github.com/microsoft/TypeScript/blob/v7.0.2/src/compiler/checker.ts#L20276-L20364),
 [enum declaration/member caching](https://github.com/microsoft/TypeScript/blob/v7.0.2/src/compiler/checker.ts#L13544-L13597),
