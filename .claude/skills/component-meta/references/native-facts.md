@@ -40,6 +40,22 @@ The session preserves the membership guarantee before member normalization.
 The macro producer returns its typed surface claim through DTO construction,
 including complete no-surface and unavailable answers. A completeness summary
 never reconstructs this guarantee, and a second surface probe is unnecessary.
+Vue props, events, slots, models and exposed domains read that claim from the
+framework-surface bundle, never from expanded `define_*` shape rows. Runtime
+props, emits and expose bundles use the analyzer's enumeration certificate:
+complete/closed when fully enumerated, otherwise approximate/open with cause
+103. Runtime emits arrays and objects publish their captured event names through
+the shared runtime-object surface synthesis used by props and expose. A literal
+`defineEmits(['saved'])` therefore reports Supported with the `saved` member;
+an identifier argument or spread reports Partial and retains only captured
+literal members. A runtime `defineSlots()` without a type argument certifies
+nothing: its bundle states approximate/open with cause 103 and its empty
+framework surface reports Partial. Component meta reads these same bundle
+claims. A runtime macro without a bundle claim uses the analyzer certificate
+under the same rule. The framework-surface operation preserves a bundle's
+approximate membership as a partial surface status.
+`ExpandedObjectShape.domain_guarantee` remains an output-only mirror for the
+public `evaluateTypes` JSON response; it does not authorize component facts.
 Output-only numeric mirrors travel with shallow metadata and never drive
 semantic evaluation. Missing evidence refuses a guarantee. Materialization
 failure of a published member produces a failed publication with no type value;
@@ -116,6 +132,8 @@ certifies absent domains; runtime props, emits and expose extractors record
 `AnalyzedMacro::runtime_members_fully_enumerated` during their existing
 member traversal. Literal objects with static names and literal name arrays
 can certify enumeration; an omitted member or non-literal input cannot.
+Calls to `defineProps()`, `defineEmits()` and `defineExpose()` with neither a
+runtime argument nor a type argument certify empty, closed domains.
 Type-based domains use their existing complete, closed producer claims.
 Type-based expose retains the resolved surface producer's authority.
 The model producer withholds its certificate because the sidecar lists model
@@ -138,7 +156,8 @@ closed domain claim becomes Exact. Otherwise the instance stays Partial with
 approximation cause 103, or the failed domain producer's more specific causes;
 measured partiality is merged into the same lane. Plain literal runtime
 `defineProps({ label: String, size: Number })` is eligible. The props-domain
-runtime claim remains independent of the enumeration certificate.
+runtime claim uses the analyzer's enumeration evidence; published member
+value types remain independent.
 The cached sidecar stays Partial; finalization operates on the delivery clone.
 The fixed Vue built-ins excluded from this claim are enumerated beside the
 sidecar builder; a test renders the real IDE public-constructor projection and

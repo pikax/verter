@@ -798,7 +798,12 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, '_, M> {
             .unwrap_or_else(
                 crate::typeinfo::framework_surface::MacroDtosRefusal::into_partial_read,
             );
-            any_partial |= dtos_read.is_partial();
+            any_partial |= dtos_read.is_partial()
+                || dtos_read
+                    .dtos
+                    .domain_guarantee
+                    .as_ref()
+                    .is_some_and(|claim| claim.kind != 1);
             fold_requested_slot(&mut aggregate, requested_kind, &dtos_read.dtos);
             if let Ok(index) = u32::try_from(macro_index) {
                 self.reads.borrow_mut().push(ProducerRead {
@@ -817,15 +822,13 @@ impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, '_, M> {
             return ResolvedOutcome::Missing;
         }
         if any_partial {
-            // A contributing macro surface tripped a fuse mid-resolution: the
-            // aggregate carries a usable subset but is structurally incomplete.
+            // A contributing macro reports incomplete membership or a partial
+            // compute: the aggregate carries only a usable subset.
             // Surface PARTIAL (maps to the wire `PARTIAL` support status) rather
             // than masquerading as a fully-resolved surface.
             return ResolvedOutcome::Partial {
                 value: Arc::new(aggregate),
-                diagnostics: vec!["macro surface resolution hit a budget / fatal diagnostic; \
-                     surface is partial"
-                    .to_string()],
+                diagnostics: vec!["macro surface membership or resolution is partial".to_string()],
             };
         }
         ResolvedOutcome::Resolved(Arc::new(aggregate))

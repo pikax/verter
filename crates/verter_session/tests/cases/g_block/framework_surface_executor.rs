@@ -172,6 +172,162 @@ fn entries_by_kind(
     payload.surfaces.iter().map(|e| (e.kind, e)).collect()
 }
 
+#[test]
+fn runtime_macro_framework_surface_preserves_enumeration_guarantee() {
+    use verter_session::{FileLanguage, UpsertRequest};
+    use AnalyzedMacroKind::{DefineEmits, DefineExpose, DefineProps, DefineSlots};
+    use FrameworkSurfaceKind::{Emits, Expose, Props, Slots};
+
+    for (body, kind, macro_kind, approximate, names) in [
+        (
+            "const shared = { hidden: Number }; defineProps({ ...shared, a: String })",
+            Props,
+            DefineProps,
+            true,
+            vec!["a"],
+        ),
+        (
+            "const key = 'hidden'; defineProps({ [key]: Number, a: String })",
+            Props,
+            DefineProps,
+            true,
+            vec!["a"],
+        ),
+        (
+            "const shared = { hidden: Number }; defineProps(shared)",
+            Props,
+            DefineProps,
+            true,
+            vec![],
+        ),
+        (
+            "defineProps({ a: String })",
+            Props,
+            DefineProps,
+            false,
+            vec!["a"],
+        ),
+        ("defineProps()", Props, DefineProps, false, vec![]),
+        (
+            "const events = ['saved']; defineEmits(events)",
+            Emits,
+            DefineEmits,
+            true,
+            vec![],
+        ),
+        (
+            "defineEmits(['saved'])",
+            Emits,
+            DefineEmits,
+            false,
+            vec!["saved"],
+        ),
+        (
+            "defineEmits({ saved: null })",
+            Emits,
+            DefineEmits,
+            false,
+            vec!["saved"],
+        ),
+        (
+            "const base = ['saved']; defineEmits([...base, 'x'])",
+            Emits,
+            DefineEmits,
+            true,
+            vec!["x"],
+        ),
+        (
+            "const base = { saved: null }; defineEmits({ ...base, x: null })",
+            Emits,
+            DefineEmits,
+            true,
+            vec!["x"],
+        ),
+        ("defineEmits()", Emits, DefineEmits, false, vec![]),
+        ("defineSlots()", Slots, DefineSlots, true, vec![]),
+        (
+            "defineExpose({ a: 1 })",
+            Expose,
+            DefineExpose,
+            false,
+            vec!["a"],
+        ),
+        (
+            "const base = { hidden: 1 }; defineExpose({ ...base, a: 1 })",
+            Expose,
+            DefineExpose,
+            true,
+            vec!["a"],
+        ),
+    ] {
+        let host = VerterHost::new_standalone(Default::default());
+        let canonical = "/Runtime.vue";
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical.to_string()),
+                input_id: canonical.to_string(),
+                source: Arc::from(format!("<script setup lang=\"ts\">{body}</script>")),
+                file_language: FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        let result = host.type_info_with_audit(framework_envelope_demanding(
+            &host,
+            canonical,
+            "vue",
+            &[kind],
+        ));
+        let meta = host.get_component_meta(canonical).unwrap();
+        let meta_claim = match kind {
+            Props => &meta.domain_guarantees.props,
+            Emits => &meta.domain_guarantees.events,
+            Slots => &meta.domain_guarantees.slots,
+            Expose => &meta.domain_guarantees.exposed,
+            _ => unreachable!(),
+        };
+        let payload = expect_payload(result.as_result().unwrap());
+        let entry = &payload.surfaces[0];
+        assert_eq!(member_keys(payload, entry), names, "{body}");
+        let status = entry.status.as_ref().unwrap();
+        assert_eq!(
+            status.support,
+            if meta_claim.kind == 1 {
+                FrameworkSurfaceKindSupport::Supported
+            } else {
+                FrameworkSurfaceKindSupport::Partial
+            } as i32,
+            "framework surface and component meta agree: {body}"
+        );
+        assert_eq!(
+            status.support,
+            if approximate {
+                FrameworkSurfaceKindSupport::Partial
+            } else {
+                FrameworkSurfaceKindSupport::Supported
+            } as i32,
+            "{body}"
+        );
+        let dtos = host
+            .vue_macro_dtos(&VueMacroSurfaceRequest {
+                owner_canonical: Arc::from(canonical),
+                macro_index: 0,
+                macro_kind,
+                root_identity: [0; 16],
+                level: TypeInfoQueryLevel::FullMetadata,
+            })
+            .unwrap();
+        let claim = dtos.domain_guarantee.as_ref().unwrap();
+        assert_eq!(claim.kind, if approximate { 2 } else { 1 }, "{body}");
+        assert_eq!(claim.open, approximate, "{body}");
+        assert_eq!(
+            claim.causes,
+            if approximate { vec![103] } else { vec![] },
+            "{body}"
+        );
+        assert_eq!(meta_claim, claim, "{body}");
+    }
+}
+
 /// Resolve a payload entry's member NAMES (interned through the graph string
 /// table).
 fn member_keys(
