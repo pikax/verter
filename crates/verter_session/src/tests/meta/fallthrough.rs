@@ -1567,9 +1567,8 @@ defineProps<Root>()
 /// instance-owned authored body, and the prop keeps the constructor's type.
 ///
 /// This is a positive end-to-end check, NOT the negative control for the
-/// `(owner, name)` join. The demand vector's order is not a contract (it
-/// reaches the `evaluateTypes` payload verbatim), so this fixture must not
-/// force the wrong row to sort first to manufacture a name-only failure.
+/// `(owner, name)` join. This fixture does not force the wrong row to sort
+/// first to manufacture a name-only failure.
 /// `extract_exposed_matches_resolved_binding_owner_not_first_name`
 /// (verter_semantic) builds the colliding lane directly with the module row
 /// first and is what actually discriminates a first-name join.

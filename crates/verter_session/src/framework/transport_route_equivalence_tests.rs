@@ -919,7 +919,6 @@ const NAPI_OUT_OF_SCOPE: &[(&str, &str)] = &[
         "cross-file optimizer, not a product route",
     ),
     ("configureProjects", "lifecycle/config"),
-    ("evaluateTypes", "type-resolution product"),
     ("getAnalysis", "analysis product"),
     ("getAuditRecords", "audit records"),
     ("getBundlerBatchSummary", "audit aggregation"),
