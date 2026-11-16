@@ -803,3 +803,6 @@ mod canonical_identity_allocation;
 
 #[path = "allocation_cases/root_sets.rs"]
 mod root_set_allocation;
+
+#[path = "allocation_cases/strict_root_validation.rs"]
+mod strict_root_validation;
