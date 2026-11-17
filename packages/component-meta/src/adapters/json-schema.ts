@@ -146,10 +146,10 @@ export function propsToJsonSchema(meta: ComponentMeta): JSONSchema {
   const required: string[] = [];
 
   for (const prop of meta.props ?? []) {
-    if (prop.type === undefined) continue;
-    // Keep the known type when `required` is unavailable. Only an exact
-    // true enters `required`; absence does not assert requiredness.
-    properties[prop.name] = typeToJsonSchema(prop.type);
+    // A prop whose type is not known keeps its key with an unconstrained
+    // value schema, so requiredness is still stated. Only an exact true
+    // enters `required`; absence does not assert requiredness.
+    properties[prop.name] = prop.type === undefined ? {} : typeToJsonSchema(prop.type);
     if (prop.required === true) {
       required.push(prop.name);
     }

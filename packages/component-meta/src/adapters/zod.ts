@@ -192,8 +192,8 @@ export function typeToZodString(type: TypeDescriptor): string {
  */
 export function propsToZodString(meta: ComponentMeta): string {
   const fields = (meta.props ?? []).flatMap((prop) => {
-    if (prop.type === undefined) return [];
-    const schema = typeToZodString(prop.type);
+    // A prop whose type is not known keeps its key, so Zod does not strip it.
+    const schema = prop.type === undefined ? "z.unknown()" : typeToZodString(prop.type);
     // Unavailable requiredness stays in the shape so Zod does not strip a
     // present value, and is not emitted as a required key.
     const optSuffix = prop.required === true ? "" : ".optional()";
@@ -236,8 +236,9 @@ export function propsToZodSchema(meta: ComponentMeta): unknown {
   const shape: Record<string, any> = {};
 
   for (const prop of meta.props ?? []) {
-    if (prop.type === undefined) continue;
-    let schema = buildZodSchema(z, prop.type);
+    // Same rule as the generated string: a prop whose type is not known keeps
+    // its key with an unconstrained value.
+    let schema = prop.type === undefined ? z.unknown() : buildZodSchema(z, prop.type);
     // Same rule as the generated string: keep the known type, and do not
     // require the key unless requiredness is exactly true.
     if (prop.required !== true) {

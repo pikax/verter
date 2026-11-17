@@ -99,7 +99,7 @@ pub enum BinderReach {
 
 /// One alias instantiation read through the shared `Instantiate` demand
 /// ([`ProjectSemanticDispatch::alias_instantiation_expansion`]).
-enum AliasExpansion {
+pub(super) enum AliasExpansion {
     /// The node the instantiation expands to, one level down.
     Expanded(SemanticNodeId),
     /// The instantiation expands to nothing else: a terminal nominal, a
@@ -5698,12 +5698,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// [`Self::expand_alias_instantiation_one_level`]'s read, telling an
     /// instantiation that expands to nothing else from one whose
-    /// expansion the demand could not read in full.
+    /// expansion the demand could not read in full: the
+    /// [`Self::alias_instantiation_key`] read made in place, answered by
+    /// [`Self::alias_expansion_from`].
     fn alias_instantiation_expansion(&self, structure: SemanticNodeId) -> AliasExpansion {
+        match self.alias_instantiation_key(structure) {
+            Some(key) => Self::alias_expansion_from(structure, &self.execute_read(key)),
+            None => AliasExpansion::Terminal,
+        }
+    }
+
+    /// The one `Instantiate` demand that expands the alias instantiation
+    /// `structure` one level. Reads only the graph. `None` when `structure`
+    /// is terminal without a read: no alias instantiation at all, or the
+    /// lib `Function` global's carrier.
+    pub(super) fn alias_instantiation_key(
+        &self,
+        structure: SemanticNodeId,
+    ) -> Option<SemanticQueryKey> {
         let graph = self.graph();
         let data = graph.node_data(structure);
         let Some(SemanticNodeData::InstantiationRef { base, args }) = data.as_deref() else {
-            return AliasExpansion::Terminal;
+            return None;
         };
         // The lib `Function` global's carrier is a TERMINAL nominal, not
         // an alias instantiation: its `__builtin__` base names no
@@ -5713,7 +5729,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if self.runtime_nominal_identity(base)
             == Some(crate::intrinsic_registry::RuntimeNominal::Function)
         {
-            return AliasExpansion::Terminal;
+            return None;
         }
         let oracle_demand = ProjectionReductionContext::structural_transit_with_mode(
             crate::semantic_query::ProjectionMode::Navigate,
@@ -5725,22 +5741,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             base.decl_name.clone(),
         );
         let args = Arc::clone(args.as_arc());
-        let read = self.execute_read(SemanticQueryKey::Instantiate(
+        Some(SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(
                 slot,
                 args,
                 self.instantiate_context_for(&owner_canonical, oracle_demand),
             ),
-        ));
-        crate::request_context::observe_component_meta_read_suppress(&read);
+        ))
+    }
+
+    /// The expansion an [`Self::alias_instantiation_key`] read of
+    /// `structure` answered. A partial read marks the enclosing
+    /// component-meta request partial here, as every reader of this
+    /// demand must.
+    pub(super) fn alias_expansion_from(
+        structure: SemanticNodeId,
+        read: &crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> AliasExpansion {
+        crate::request_context::observe_component_meta_read_suppress(read);
         if read.result_is_partial() {
             return AliasExpansion::Incomplete;
         }
-        match read.value {
-            QueryResult::Value(id) if id != structure => AliasExpansion::Expanded(id),
+        match &read.value {
+            QueryResult::Value(id) if *id != structure => AliasExpansion::Expanded(*id),
             QueryResult::Value(_) => AliasExpansion::Terminal,
             QueryResult::Recursive(_) => AliasExpansion::Incomplete,
-            QueryResult::Error(error) if error_leaves_expansion_unknown(&error) => {
+            QueryResult::Error(error) if error_leaves_expansion_unknown(error) => {
                 AliasExpansion::Incomplete
             }
             QueryResult::Error(_) => AliasExpansion::Terminal,
