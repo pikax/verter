@@ -67,6 +67,57 @@ pub(super) fn render_tsc_node<M: verter_audit::observe::ObserveExec>(
     Ok(TscSpliceText::new(rendered.text))
 }
 
+/// Render the same retained modifiers payload the framework props surface
+/// publishes. The compiler receives terminal text, never a second type derivation.
+pub(super) fn project_tsc_model_modifiers<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    rails: &ComputeRails,
+    owner_canonical: &str,
+    mac: &AnalyzedMacro,
+    effective_index: usize,
+    counters: &mut VueMacroCodegenCounters,
+) -> Result<TscPropRow, ProjectionFailure> {
+    use verter_type_engine::project_semantic_dispatch::semantic_source::{
+        SourceRaiseContext, SourceRaiseOutcome,
+    };
+    use verter_type_expr::facts::SemanticTypeSource;
+    use verter_type_expr::locators::AuthoredBodyLocator;
+
+    let payload = mac
+        .prop_fields
+        .get(1)
+        .and_then(|field| field.payload.as_ref())
+        .ok_or_else(resolution_failure)?;
+    let source = SemanticTypeSource::Authored(
+        AuthoredBodyLocator::MacroPayload(payload.clone()).absolutized_against(owner_canonical),
+    );
+    let (raised, local) = rails.observe(|| {
+        dispatch.owning().raise_semantic_type_source_to_hot(
+            &source,
+            SourceRaiseContext {
+                scope_canonical_id: owner_canonical,
+                scope_owner: mac.owner,
+                context: ProjectionReductionContext::structural_transit_with_mode(
+                    ProjectionMode::Shallow,
+                ),
+                interior_failures: None,
+            },
+        )
+    });
+    if local.is_partial() {
+        return Err(failure_from_local(local));
+    }
+    let SourceRaiseOutcome::Raised(hot) = raised.value() else {
+        return Err(resolution_failure());
+    };
+    let type_text = render_tsc_node(dispatch, rails, owner_canonical, hot.node(), counters)?;
+    Ok(TscPropRow::model_modifiers(
+        mac.model_name.as_deref().unwrap_or("modelValue"),
+        type_text,
+        macro_index(effective_index),
+    ))
+}
+
 /// Same underlying render as [`render_tsc_node`], for the ONE caller whose
 /// authored SPLICE TEXT is never emitted verbatim: `defineProps`'s
 /// `testing_rows` are a testing-mode binding surface (see

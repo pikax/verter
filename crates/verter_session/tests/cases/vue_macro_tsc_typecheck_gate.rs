@@ -303,7 +303,7 @@ const emit = defineEmits<{
   save: [payload: Payload<"x">]
   choose: [kind: Kind]
 }>()
-const model = defineModel<Payload<"x">>("modelValue")
+const model = defineModel<Payload<"x">, 'trim' | 'lazy'>("modelValue")
 </script>
 <template><div /></template>"#;
 
@@ -331,6 +331,19 @@ type DeclarationInstance = InstanceType<typeof DeclarationComponent>
 declare const publicInstance: PublicInstance
 declare const testingInstance: TestingInstance
 declare const declarationInstance: DeclarationInstance
+
+type ModifierRecord = Partial<Record<'trim' | 'lazy', true>>
+type PublicModifiersExact = Expect<IsExactly<NonNullable<PublicInstance['$props']['modelModifiers']>, ModifierRecord>>
+type TestingModifiersExact = Expect<IsExactly<NonNullable<TestingInstance['$props']['modelModifiers']>, ModifierRecord>>
+type DeclarationModifiersExact = Expect<IsExactly<NonNullable<DeclarationInstance['$props']['modelModifiers']>, ModifierRecord>>
+type PublicModifierKeysExact = Expect<IsExactly<keyof NonNullable<PublicInstance['$props']['modelModifiers']>, 'trim' | 'lazy'>>
+type TestingModifierKeysExact = Expect<IsExactly<keyof NonNullable<TestingInstance['$props']['modelModifiers']>, 'trim' | 'lazy'>>
+type DeclarationModifierKeysExact = Expect<IsExactly<keyof NonNullable<DeclarationInstance['$props']['modelModifiers']>, 'trim' | 'lazy'>>
+const validModifiers: NonNullable<PublicInstance['$props']['modelModifiers']> = { trim: true }
+// @ts-expect-error modifiers only accept Vue's true marker
+const invalidModifiers: NonNullable<PublicInstance['$props']['modelModifiers']> = { trim: false }
+// @ts-expect-error only the declared modifier keys are accepted
+const invalidModifierKey: NonNullable<PublicInstance['$props']['modelModifiers']> = { other: true }
 
 const publicPayload = publicInstance.$props.payload
 const publicPayloadNotAny: IsAny<typeof publicPayload> = false

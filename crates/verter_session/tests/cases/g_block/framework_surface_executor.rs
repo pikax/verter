@@ -1053,6 +1053,7 @@ fn define_model_surface_carries_the_model_binding() {
     );
     // The default model binding is named `modelValue`.
     let names = member_keys(payload, model);
+    assert_eq!(names, vec!["modelValue".to_string()]);
     assert!(
         names.contains(&"modelValue".to_string()),
         "the default defineModel binding is `modelValue`, got {names:?}"
@@ -1079,9 +1080,9 @@ fn define_model_only_component_surfaces_modelvalue_in_props() {
         .get(&(FrameworkSurfaceKind::Props as i32))
         .expect("props entry present");
     let names = member_keys(payload, props);
-    assert!(
-        names.contains(&"modelValue".to_string()),
-        "a defineModel-only component must surface `modelValue` in PROPS, got {names:?}"
+    assert_eq!(
+        names,
+        vec!["modelValue".to_string(), "modelModifiers".to_string()]
     );
 }
 

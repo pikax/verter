@@ -168,8 +168,13 @@ Calls to `defineProps()`, `defineEmits()` and `defineExpose()` with neither a
 runtime argument nor a type argument certify empty, closed domains.
 Type-based domains use their existing complete, closed producer claims.
 Type-based expose retains the resolved surface producer's authority.
-The model producer withholds its certificate because the sidecar lists model
-value props but omits their modifiers props.
+The model producer lists both the value prop and Vue's optional modifiers prop:
+`modelModifiers` for the default model, or `<name>Modifiers` otherwise. The
+modifiers type is `Partial<Record<M, true>>` for an explicit second type argument,
+and `Record<string, true | undefined>` otherwise. Its retained macro-field payload
+is shared with the declaration producer. Model bindings and update events still
+describe only value rows. Complete model claims can certify enumeration, so a
+member-free script-setup component with a model can have a closed exact sidecar.
 The slots fold also reads the template's existing `has_dynamic_slot_outlet`
 report: a dynamic-name outlet withholds slot enumeration, including when no
 `defineSlots` macro is present. Static-name outlets retain their enumeration.

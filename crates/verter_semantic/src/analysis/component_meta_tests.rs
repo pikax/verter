@@ -3003,7 +3003,14 @@ fn extracts_model_from_define_model() {
         edit_anchors: Default::default(),
         kind: AnalyzedMacroKind::DefineModel,
         model_name: None, // default model → "modelValue"
-        prop_fields: vec![make_prop("modelValue", Some("string"), true)],
+        prop_fields: vec![
+            make_prop("modelValue", Some("string"), true),
+            make_prop(
+                "modelModifiers",
+                Some("Partial<Record<'trim', true>>"),
+                true,
+            ),
+        ],
         ..make_define_props(vec![])
     }];
 
@@ -3013,10 +3020,13 @@ fn extracts_model_from_define_model() {
     assert_eq!(result.models[0].name, "modelValue");
     assert_eq!(
         result.props.len(),
-        1,
-        "defineModel should synthesize a model prop"
+        2,
+        "defineModel should publish the model value and modifiers props"
     );
     assert_eq!(result.props[0].name, "modelValue");
+    assert_eq!(result.props[1].name, "modelModifiers");
+    assert!(!result.props[1].required);
+    assert!(!result.props[1].has_default);
     assert_eq!(
         result.events.len(),
         1,

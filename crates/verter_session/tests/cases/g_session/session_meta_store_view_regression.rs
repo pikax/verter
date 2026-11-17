@@ -87,11 +87,11 @@ fn session_payload_cross_file_macros_resolve_via_real_ctx() {
     let text = String::from_utf8(payload).expect("payload is the marker string");
 
     // Discriminating content: the cross-file `ButtonProps` (label, size)
-    // plus `defineModel`'s `modelValue` => 3 props; `ButtonEmits` (click)
+    // plus `defineModel`'s value and modifiers => 4 props; `ButtonEmits` (click)
     // plus model's `update:modelValue` => 2 events; `ButtonSlots`
     // (default, row) => 2 slots.
     assert_eq!(
-        text, "props=3 events=2 slots=2",
+        text, "props=4 events=2 slots=2",
         "session payload path must resolve the cross-file macro surface; got `{text}`"
     );
 }
@@ -126,6 +126,10 @@ fn session_structured_cross_file_macros_resolve_via_real_ctx() {
     assert!(
         prop_names.contains(&"modelValue"),
         "defineModel must publish modelValue; got {prop_names:?}"
+    );
+    assert!(
+        prop_names.contains(&"modelModifiers"),
+        "defineModel must publish modelModifiers; got {prop_names:?}"
     );
     // Cross-file `ButtonEmits` event + the model update event.
     assert!(

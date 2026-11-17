@@ -540,11 +540,7 @@ pub(super) fn process_macro_item<'a>(
                 state.models.push(ModelSection {
                     prop_name: model_name.to_string(),
                     prop_options: options_src.unwrap_or("{}").to_string(),
-                    modifiers_name: if model_name == "modelValue" {
-                        "modelModifiers".to_string()
-                    } else {
-                        format!("{model_name}Modifiers")
-                    },
+                    modifiers_name: verter_macro_dto::model_modifiers_prop_name(model_name),
                     update_event: format!("update:{model_name}"),
                 });
             }

@@ -483,8 +483,56 @@ pub struct TscModelProjection {
     pub name: String,
     pub optional: bool,
     pub value_type: TscSpliceText,
+    /// Vue's optional modifiers prop, with its terminal record type.
+    pub modifiers_prop: TscPropRow,
     pub anchor: MacroAnchor,
     pub scope: TscScopeRequirements,
+}
+
+/// Vue's modifiers prop name for a decoded model name.
+pub fn model_modifiers_prop_name(name: &str) -> String {
+    if name == "modelValue" {
+        "modelModifiers".to_owned()
+    } else {
+        format!("{name}Modifiers")
+    }
+}
+
+impl TscPropRow {
+    /// Construct the modifiers row shared by typed and untyped model projections.
+    pub fn model_modifiers(name: &str, type_text: TscSpliceText, macro_index: u32) -> Self {
+        Self {
+            name: model_modifiers_prop_name(name),
+            optional: true,
+            type_text,
+            anchor: MacroAnchor::Synthesized {
+                macro_index,
+                row: SynthesizedRowKind::ModelModifiersProp,
+            },
+            degraded: None,
+        }
+    }
+}
+
+impl TscModelProjection {
+    /// Project an unannotated model with Vue's default string modifier keys.
+    pub fn untyped(name: &str, optional: bool, macro_index: u32) -> Self {
+        Self {
+            name: name.to_owned(),
+            optional,
+            value_type: TscSpliceText::new("unknown"),
+            modifiers_prop: TscPropRow::model_modifiers(
+                name,
+                TscSpliceText::new("Record<string, true | undefined>"),
+                macro_index,
+            ),
+            anchor: MacroAnchor::Synthesized {
+                macro_index,
+                row: SynthesizedRowKind::ModelProp,
+            },
+            scope: TscScopeRequirements::default(),
+        }
+    }
 }
 
 /// Scope facts required by role-specific terminal output.

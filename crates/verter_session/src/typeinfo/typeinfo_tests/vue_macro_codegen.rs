@@ -934,6 +934,19 @@ defineModel<string>('selected')
     };
     assert_eq!(model.name, "selected");
     assert_eq!(model.value_type.as_str(), "string");
+    assert_eq!(model.modifiers_prop.name, "selectedModifiers");
+    assert!(model.modifiers_prop.optional);
+    assert!(model
+        .modifiers_prop
+        .type_text
+        .as_str()
+        .starts_with("Record<string, "));
+    assert!(model.modifiers_prop.type_text.as_str().contains("true"));
+    assert!(model
+        .modifiers_prop
+        .type_text
+        .as_str()
+        .contains("undefined"));
     assert!(output.completeness.is_partial());
     assert!(!output.facts_cacheable());
 }
