@@ -65,7 +65,7 @@ export function refineMetaForBenchmark(meta: any) {
     exposed: (meta?.exposed ?? []).map((member: any) => stripInternalSchemaNoise(member)),
     models: (sourceMeta?.models ?? []).map((model: any) => ({
       name: model.name,
-      type: benchmarkTypeDescriptorToString(model.type),
+      ...(model.type === undefined ? {} : { type: benchmarkTypeDescriptorToString(model.type) }),
       description: null,
       tags: [],
       schema: null,

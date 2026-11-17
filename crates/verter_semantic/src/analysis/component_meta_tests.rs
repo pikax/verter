@@ -4095,6 +4095,88 @@ fn type_registry_comes_from_resolved_inputs_not_macro_local_types() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn options_api_constructor_annotations_are_not_unannotated() {
+    let owner = verter_type_expr::TopLevelOwnerId::module(0);
+    let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
+        bindings: vec![test_expanded_field_owned(
+            owner,
+            "Thing",
+            SourcePosition::Present(closed_ref("Thing")),
+        )],
+        ..Default::default()
+    };
+    for constructor in ["Date", "Thing"] {
+        let opts = AnalyzedOptionsApi {
+            props: vec![verter_session_query::analysis::types::AnalyzedOptionsProp {
+                name: "when".to_string(),
+                type_constructor: Some(constructor.to_string()),
+                is_required: false,
+                has_default: false,
+                default_value: None,
+                type_annotation: None,
+                payload: None,
+                type_expr_scope: None,
+                description: None,
+                tags: Vec::new(),
+                span: verter_span::Span::default(),
+                constructor_bindings: vec![if constructor == "Date" {
+                    global_entry(constructor)
+                } else {
+                    local_entry(constructor, owner, constructor)
+                }],
+            }],
+            ..Default::default()
+        };
+        let mut input = empty_input(&[]);
+        input.options_api = Some(&opts);
+        input.evaluated_types = Some(&evaluated);
+        let result = extract_component_meta(input);
+        // A constructor is an annotation: a non-primitive global publishes
+        // the same member value as the `defineProps` route, and a local
+        // class publishes its resolved reference.
+        let expected = if constructor == "Date" {
+            SourcePosition::runtime_member_value_unknown()
+        } else {
+            SourcePosition::Present(closed_ref("Thing"))
+        };
+        assert_eq!(
+            result.props[0].publication.source_position(),
+            expected,
+            "{constructor} is an annotation"
+        );
+    }
+}
+
+#[test]
+fn options_api_array_prop_is_unannotated() {
+    let opts = AnalyzedOptionsApi {
+        props: vec![verter_session_query::analysis::types::AnalyzedOptionsProp {
+            name: "x".to_string(),
+            type_constructor: None,
+            is_required: false,
+            has_default: false,
+            default_value: None,
+            type_annotation: None,
+            payload: None,
+            type_expr_scope: None,
+            description: None,
+            tags: Vec::new(),
+            span: verter_span::Span::default(),
+            constructor_bindings: Vec::new(),
+        }],
+        ..Default::default()
+    };
+    let mut input = empty_input(&[]);
+    input.options_api = Some(&opts);
+    let result = extract_component_meta(input);
+    assert_eq!(result.props[0].name, "x");
+    assert_eq!(
+        result.props[0].publication.source_position(),
+        SourcePosition::unannotated()
+    );
+}
+
+#[test]
 fn options_api_props_used_when_no_composition_props() {
     let opts = AnalyzedOptionsApi {
         props: vec![verter_session_query::analysis::types::AnalyzedOptionsProp {
@@ -4192,12 +4274,13 @@ fn options_api_prop_without_locator_does_not_fabricate_authored_evidence() {
 
     assert_eq!(result.props.len(), 1);
     // An Options-API `PropType<T>` annotation has no macro-anchored payload
-    // position at this layer, so no typed source is fabricated — the typed
-    // channel is host-raised while the display text is preserved verbatim.
+    // position at this layer, so its type is not re-derived from display
+    // text: the `Object` constructor publishes the runtime-object
+    // member-value `unknown`, and no authored evidence is minted.
     assert_eq!(
         result.props[0].publication.source_position(),
-        SourcePosition::unannotated(),
-        "no fabricated typed source for an Options-API PropType<T> annotation",
+        SourcePosition::runtime_member_value_unknown(),
+        "an `Object` constructor publishes the same member value as `defineProps`",
     );
     assert_eq!(
         result.props[0]
@@ -6330,8 +6413,13 @@ fn constructor_empty_bindings_is_no_position() {
 
 #[test]
 fn constructor_global_nonprimitive_keeps_display_only_route() {
-    let bindings = vec![global_entry("Array")];
-    assert_eq!(constructor_binding_source_position(&bindings, None), None);
+    for bindings in [
+        vec![global_entry("Array")],
+        vec![global_entry("Date")],
+        vec![global_entry("String"), global_entry("Date")],
+    ] {
+        assert_eq!(constructor_binding_source_position(&bindings, None), None);
+    }
 }
 
 #[test]

@@ -4569,6 +4569,25 @@ impl SourcePosition {
         SourcePosition::Absent(SchemaAbsence::Unannotated)
     }
 
+    /// The runtime-object member-value policy, shared by every runtime-props
+    /// route: a runtime prop declared with a constructor that has no closed
+    /// primitive (`Date`, `Object`, `[String, Date]`) publishes a PRESENT
+    /// closed `unknown` member value — `Present(Closed(Leaf(Primitive(Unknown))))`.
+    /// The constructor is an annotation, so the position is never
+    /// [`unannotated`](Self::unannotated); its real type is not re-derived,
+    /// so the value is the honest `unknown`.
+    ///
+    /// This is the same policy the type engine's runtime-object macro surface
+    /// applies through `unknown_member_value_node` for `defineProps({...})`;
+    /// the Options API `props: {...}` route publishes it through this
+    /// constructor so both routes agree.
+    #[must_use]
+    pub fn runtime_member_value_unknown() -> Self {
+        SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
+            LeafTypeFact::Primitive(PrimitiveName::Unknown),
+        )))
+    }
+
     /// The present source, when this position carries one. `Absent` and
     /// `Failed` positions expose NO source — a `present()`-only consumer can
     /// never mistake either state for a value.

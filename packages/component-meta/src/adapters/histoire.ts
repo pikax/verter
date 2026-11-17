@@ -36,7 +36,8 @@ export function toHistoireConfig(meta: ComponentMeta): HistoireStoryConfig {
 export function generateDefaultProps(meta: ComponentMeta): Record<string, unknown> {
   const defaults: Record<string, unknown> = {};
 
-  for (const prop of meta.props) {
+  for (const prop of meta.props ?? []) {
+    if (prop.type === undefined) continue;
     const value = typeToDefaultValue(prop.type);
     if (value !== undefined) {
       defaults[prop.name] = value;
@@ -115,11 +116,11 @@ export function generateVariants(meta: ComponentMeta): HistoireVariant[] {
   const base = generateDefaultProps(meta);
 
   // Find props that have literal union types → generate a variant per value
-  const unionProp = meta.props.find(
-    (p) => p.type.kind === "union" && p.type.types.every((t) => t.kind === "literal"),
+  const unionProp = (meta.props ?? []).find(
+    (p) => p.type?.kind === "union" && p.type.types.every((t) => t.kind === "literal"),
   );
 
-  if (unionProp && unionProp.type.kind === "union") {
+  if (unionProp && unionProp.type?.kind === "union") {
     for (const member of unionProp.type.types) {
       if (member.kind === "literal") {
         variants.push({

@@ -173,8 +173,6 @@ enum NegShape {
     /// `type_annotation`. What the seven non-primitive recognised
     /// constructors, and an unresolvable macro-path payload, publish.
     UnknownPrimitive,
-    /// The typed missing-output carrier.
-    UnknownCarrier,
     /// A resolved object type with exactly these property keys.
     ObjectKeys(&'static [&'static str]),
     /// A class value's `typeof` shape: one construct signature returning
@@ -186,7 +184,6 @@ impl NegShape {
     fn tag(self) -> ShapeTag {
         match self {
             Self::UnknownPrimitive => ShapeTag::UnknownPrimitive,
-            Self::UnknownCarrier => ShapeTag::UnknownCarrier,
             Self::ObjectKeys(keys) => {
                 ShapeTag::ObjectKeys(keys.iter().map(|k| (*k).to_string()).collect())
             }
@@ -790,18 +787,10 @@ export default {
             prop("value", Expect::Union(STRING_NUMBER), false, false),
             prop("maybe", Expect::Union(STRING_NULL), false, false),
             string("size", false, true),
-            prop(
-                "when",
-                Expect::NotFolded(NegShape::UnknownCarrier),
-                false,
-                false,
-            ),
-            prop(
-                "mixed",
-                Expect::NotFolded(NegShape::UnknownCarrier),
-                false,
-                false,
-            ),
+            // An Options API constructor publishes the same member value as
+            // the `defineProps` route.
+            display_only("when", false),
+            display_only("mixed", false),
             // The Options path resolves the class value to its real
             // `typeof` shape rather than degrading to `unknown` — pinned
             // exactly, so a regression in EITHER direction fails.

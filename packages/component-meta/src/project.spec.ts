@@ -1,3 +1,4 @@
+import { withNativeTypeFacts } from "./type-graph.test-utils.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { ComponentMetaSession, evictComponentMetaSession, shutdownMetaRuntime } from "./project.js";
 import { createMetaRuntime, getMetaRuntime, resolvePath } from "./runtime/index.js";
@@ -18,7 +19,7 @@ function resolvedTypeRow(display: string) {
 }
 
 function nativeMetaPayload(filePath: string) {
-  return {
+  return withNativeTypeFacts({
     filePath,
     optionsApi: false,
     props: [
@@ -87,7 +88,7 @@ function nativeMetaPayload(filePath: string) {
       blocks: [],
       markupNodes: [],
     },
-  } satisfies NativeComponentMetaResult;
+  } satisfies NativeComponentMetaResult);
 }
 
 /** Mock native session with in-memory file tracking. */
@@ -390,18 +391,31 @@ describe("ComponentMetaSession public API", () => {
       upsert() {},
       delete() {},
       getComponentMeta(id: string) {
-        return {
+        return withNativeTypeFacts({
           ...nativeMetaPayload(id),
           props: [
             {
               name: "searchInput",
-              type: { kind: "primitive", name: "boolean" },
+              type: {
+                kind: "union",
+                types: [
+                  { kind: "primitive", name: "boolean" },
+                  {
+                    kind: "ref",
+                    name: "Omit",
+                    typeArguments: [
+                      { kind: "ref", name: "InputProps", typeArguments: [] },
+                      { kind: "literal", literalKind: "string", value: "modelValue" },
+                    ],
+                  },
+                ],
+              },
               ...resolvedTypeRow("boolean | Omit<InputProps, 'modelValue'>"),
               required: false,
               hasDefault: false,
             },
           ],
-        };
+        });
       },
       getEffectiveSource() {
         return `<script setup lang="ts">defineProps<{ searchInput?: boolean | Omit<InputProps, 'modelValue'> }>()</script>`;
@@ -428,7 +442,7 @@ describe("ComponentMetaSession public API", () => {
       upsert() {},
       delete() {},
       getComponentMeta(id: string) {
-        return {
+        return withNativeTypeFacts({
           ...nativeMetaPayload(id),
           events: [
             {
@@ -601,7 +615,7 @@ describe("ComponentMetaSession public API", () => {
               ],
             },
           },
-        };
+        });
       },
       getEffectiveSource() {
         return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;
@@ -697,7 +711,7 @@ describe("ComponentMetaSession public API", () => {
       upsert() {},
       delete() {},
       getComponentMeta(id: string) {
-        return {
+        return withNativeTypeFacts({
           ...nativeMetaPayload(id),
           typeRegistry: [
             {
@@ -763,7 +777,7 @@ describe("ComponentMetaSession public API", () => {
               },
             ],
           },
-        };
+        });
       },
       getResolvedComponentMeta(id: string) {
         return this.getComponentMeta(id);
@@ -865,7 +879,7 @@ describe("ComponentMetaSession public API", () => {
       upsert() {},
       delete() {},
       getComponentMeta() {
-        return {
+        return withNativeTypeFacts({
           ...nativeMetaPayload("/test/App.vue"),
           exposed: [
             {
@@ -905,7 +919,7 @@ describe("ComponentMetaSession public API", () => {
               },
             ],
           },
-        };
+        });
       },
       getEffectiveSource() {
         return `<script setup lang="ts">defineProps<{ label: string }>()</script>`;

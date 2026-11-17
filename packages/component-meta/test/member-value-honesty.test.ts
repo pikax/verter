@@ -35,6 +35,7 @@ describe("member value honesty (native)", () => {
     // never a failure and never a fabricated `unknown`.
     const onClick = meta._verter!.props.find((prop) => prop.name === "onClick");
     expect(onClick, "the imported function-valued prop publishes").toBeDefined();
+    expect(onClick!.typeFact).toEqual({ kind: "complete", value: onClick!.type });
     expect(onClick!.type).toEqual({
       kind: "function",
       parameters: [],

@@ -58,17 +58,24 @@ const _published_payload_helper: Equals<
 
 // The published result is the NATIVE shape: `fallthroughSurface` and
 // `acceptedProps` are native-only fields, so a published declaration that
-// carried the Volar `ComponentMeta` shape instead fails here.
-const _published_result_is_native_shaped: PublishedNativeComponentMetaResult extends {
-  filePath: string;
-  fallthroughSurface: unknown;
-  acceptedProps: unknown;
-}
+// carried the Volar `ComponentMeta` shape instead fails here. The native
+// lanes may be absent when unavailable, but their keys remain declared.
+type HasNativeSurfaceKeys<T> = "fallthroughSurface" | "acceptedProps" extends keyof T
   ? true
-  : false = true;
+  : false;
+
+const _published_result_is_native_shaped: HasNativeSurfaceKeys<PublishedNativeComponentMetaResult> =
+  true;
+const _published_result_has_file_path: Equals<
+  PublishedNativeComponentMetaResult["filePath"],
+  string
+> = true;
+const _volar_result_is_not_native_shaped: HasNativeSurfaceKeys<PublishedCompat.ComponentMeta> = false;
 
 void _source_result_helper;
 void _source_payload_helper;
 void _published_result_helper;
 void _published_payload_helper;
 void _published_result_is_native_shaped;
+void _published_result_has_file_path;
+void _volar_result_is_not_native_shaped;

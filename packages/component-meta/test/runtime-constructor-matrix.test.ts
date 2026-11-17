@@ -283,6 +283,10 @@ const CELLS: Cell[] = [
     ],
   },
   {
+    file: "RcOptionsArray.vue",
+    props: [notFolded("x", "any")],
+  },
+  {
     file: "RcShadowOptions.vue",
     props: [
       notFolded("count", "{ parse: number } | undefined"),

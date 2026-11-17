@@ -89,18 +89,61 @@ the full resolved state retain completeness explicitly with the products.
 `@verter/component-meta` exposes `FactResult`, `FactCause`, `FactCauses` and
 `NativeComponentFacts`. Native `ComponentMeta` includes the facts. Compatibility
 arrays are derived projections and confer no independent completeness claim.
-Public descriptor arrays omit explicitly unavailable member values while the
-facts retain their membership and causes; healthy siblings remain usable.
+Public descriptor arrays retain every known member, including unavailable values.
+Each prop, event payload, slot binding, model, exposed/public-instance member,
+accepted member and fallthrough member has a `typeFact` transcribed to descriptors.
+Its `type` or `payload` is absent for an unavailable value. Complete optional
+absence remains a complete fact with an undefined value and the wire publication's
+`absence` reason (`unannotated` or `branchDivergent`).
+An Absent/Unannotated publication decodes with no value even when the wire
+attaches a graph node: that node is the output sink's missing-output placeholder,
+not a type descriptor. Other absence reasons preserve a supplied descriptor.
+A runtime constructor outside the closed primitive classification (`Date`,
+`Object`, `[String, Date]`, ...) is an annotation, never Unannotated: a runtime
+`defineProps` object publishes the runtime-object surface's Present `unknown`
+member value for it, and an Options API `props: {...}` object publishes the same
+Present `unknown` member value (`SourcePosition::runtime_member_value_unknown`,
+the one runtime-object member-value policy shared by every runtime-props route).
+Local binding resolution retains its existing evaluated
+source or typed failure; no instance-type resolver is inferred from display
+text. Array-form prop names such as `props: ['x']` remain Unannotated.
+Unavailable semantic
+lanes are absent on both decoded native results and public `ComponentMeta`;
+their guarantees and original causes remain on `facts`. Event rows carry no
+`hasValidator` or `isDeclared` flags. Healthy siblings remain usable.
+Compat omits members without a usable descriptor or an explicitly unannotated
+type fact (props also need a known requiredness boolean). Only a complete fact
+with no value and `absence: "unannotated"` proves absence of an authored type:
+TypeScript treats it as `any`. Other absence reasons never authorize this mapping;
+descriptors for other publications, including structured `unknown`, pass through
+unchanged. A Present `unknown` constructor value therefore renders as compat
+`unknown` (with `| undefined` when optional).
+`compat/checker.ts::unannotatedTypeAsAny` applies the scalar rule to props,
+slot bindings and exposed members. `unannotatedEventPayloadAsAnyArray` maps
+unannotated event payloads to variadic `any[]`, including runtime array emits.
+Compat represents this with a rest-array tuple, classified as an argument array
+for the existing display and schema renderers. An untyped model's update event
+also renders `any[]`: the decoded event row carries no typed model-provenance
+fact authorizing a single-value tuple. A producer-owned model-provenance fact
+on the wire would permit that distinction; an `update:` name never proves it.
+Unannotated native rows without a descriptor keep their complete-absent
+`typeFact` and have no `type` or `payload` key; compat never mutates them.
 The JSON serializer uses the same borrowed fact projection as protobuf; it owns
 no parallel member store. Refusal delivery carries its original machine causes
 independently of recovery facets. Same-profile replay does not become complete;
 a larger profile or an edit can recompute and heal.
 
-Schema-12 decoding uses a separate legacy carrier. Its summary cannot prove a
-closed domain: arrays retain open membership even when the summary is complete.
-Partial arrays adapt conservatively with a legacy partiality cause.
-Current decoding ignores an inconsistent legacy summary and
-derives the summary from published facts. Graph validation marks invalid nodes
+The decoder accepts exactly schema 15 and rejects schema 12. The legacy proto
+messages remain Rust encoder build intermediates, not a readable JS transport.
+The decoder reads measured completeness from body field 27 and root info from
+field 21. Unknown closed summary reasons fail decoding. Accepted-surface
+completeness alone is a JS projection: `projectAcceptedSurfaceCompleteness`
+reads the accepted-props guarantee, shared by accepted events and fallthrough.
+Only `ComponentMetaGraphError` can be localized; programming errors propagate.
+A localized bad publication uses the existing publication-failure cause 102;
+a bad direct graph reference uses missing-semantic-node cause 11. Invalid
+envelope facts preserve nonempty wire causes or raise an error when none exist.
+The decoder owns no cause-100 sentinel. Graph validation marks invalid nodes
 and their reverse dependency closure once; a bad member value does not erase
 an independently decoded sibling or the known member domain.
 
@@ -152,8 +195,7 @@ boundary without depending on its request context. Such partial outputs never
 enter the encoded-payload cache. A localized projected-member miss keeps its
 semantic-query-fault cause. Independent approximate domains, including the
 public-instance lower bound, do not add reasons to this summary. This summary
-never authorizes a domain; current TypeScript decoding still derives its own
-compatibility summary from the independent facts.
+never authorizes a domain; TypeScript decodes that measured value unchanged.
 
 Public-instance exactness is finalized per delivery at the terminal output
 sink, after it merges the measured completeness with materialization failures.
@@ -214,3 +256,10 @@ The closed public-instance claim also excludes global members contributed by
 `ComponentCustomProperties`. Like the fixed built-ins, that augmentation class
 is outside the claim's domain. Its members are not modeled, and this exclusion
 adds no augmentation read or dependency.
+
+Both public package entries re-export all of `@verter/type-ir`. The browser
+entry also exports `nativeComponentMetaToComponentMeta`; its display component
+name is derived from the final file path segment without Node APIs. Conversion
+consumes decoded protobuf results, whose member value facts are required.
+Structured v-model usage entries transcribe the `vModels` wire name list.
+A richer structured v-model wire entry belongs to the schema-16 change.

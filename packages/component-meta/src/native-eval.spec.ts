@@ -83,6 +83,37 @@ describe("native evaluator integration", () => {
     shutdownMetaRuntime();
   });
 
+  it("keeps protobuf and JSON measured completeness equal with an approximate instance", async () => {
+    const { ComponentMetaHost, captureAvailability } = await import("@verter/native");
+    const { decodeComponentMetaPayload } = await import("./type-graph.js");
+    const host = new ComponentMetaHost({ auditEnabled: true, footprintCapture: true });
+    const session = host.openSession();
+    try {
+      session.upsert(
+        "/Summary.vue",
+        '<script setup lang="ts">const shared = {}; defineProps({ ...shared, a: String })</script><template><div /></template>',
+      );
+      const bytes = session.getComponentMeta("/Summary.vue");
+      expect(bytes).not.toBeNull();
+      const decoded = decodeComponentMetaPayload(bytes!);
+      expect(decoded.facts!.publicInstance.kind).toBe("approximate");
+      expect(decoded.resultCompleteness).toEqual({ kind: "complete" });
+      if (captureAvailability() === "Unavailable") {
+        expect(() => session.getComponentMetaWithAudit("/Summary.vue")).toThrow(
+          /audit capture is unavailable/,
+        );
+        return;
+      }
+      const audit = session.getComponentMetaWithAudit("/Summary.vue");
+      expect(audit).not.toBeNull();
+      const json = JSON.parse(audit!.toString("utf8")).analysis;
+      expect(decoded.resultCompleteness).toEqual(json.resultCompleteness);
+    } finally {
+      session.close();
+      host.shutdown();
+    }
+  });
+
   it("evaluates simple typed props", async () => {
     const checker = await createRuntimeChecker("native-eval-basic");
 
@@ -321,6 +352,35 @@ defineProps<ButtonProps>()
     expect(slot?.type).toContain("ComponentConfig");
     expect(slot?.type).toContain("undefined");
     expectStructuredSchema(slot?.schema);
+  });
+
+  it.each([
+    ["script setup", `<script setup lang="ts">defineEmits(['change', 'update:flag'])</script>`],
+    [
+      "Options API",
+      `<script lang="ts">export default { emits: ['change', 'update:flag'] }</script>`,
+    ],
+  ])("renders runtime array emits as variadic any[] in %s", async (_kind, script) => {
+    const checker = await createRuntimeChecker("native-eval-array-emits");
+    checker.updateFile("Emitter.vue", `${script}<template><div /></template>`);
+
+    const meta = await checker.getComponentMeta("Emitter.vue");
+
+    expect(meta.events).toHaveLength(2);
+    for (const name of ["change", "update:flag"]) {
+      expect(meta.events.find((event) => event.name === name)).toMatchObject({
+        type: "any[]",
+        schema: [{ kind: "array", type: "any[]", schema: ["any"] }],
+      });
+      const nativeEvent = meta._verter!.events.find((event) => event.name === name);
+      expect(nativeEvent).toBeDefined();
+      expect(nativeEvent!.typeFact).toEqual({
+        kind: "complete",
+        value: undefined,
+        absence: "unannotated",
+      });
+      expect(nativeEvent).not.toHaveProperty("payload");
+    }
   });
 
   it("evaluates emit types", async () => {
@@ -593,6 +653,7 @@ const flag = defineModel('flag', { default: false })
     // default value the same way as the typed form.
     const flagProp = meta.props.find((p) => p.name === "flag");
     expect(flagProp).toBeDefined();
+    expect(flagProp!.type).toBe("any");
     expect(flagProp!.required).toBe(false);
     expect(flagProp!.default).toBe("false");
 
@@ -601,6 +662,10 @@ const flag = defineModel('flag', { default: false })
     expect(meta.events.find((e) => e.name === "update:required")).toBeDefined();
     expect(meta.events.find((e) => e.name === "update:defaulted")).toBeDefined();
     expect(meta.events.find((e) => e.name === "update:flag")).toBeDefined();
+    expect(meta.events.find((e) => e.name === "update:flag")).toMatchObject({
+      type: "any[]",
+      schema: [{ kind: "array", type: "any[]", schema: ["any"] }],
+    });
 
     // ── Native structured surface (`_verter.props`): the descriptors stay
     //    BARE `T` (never a synthesized `T | undefined` union) plus the typed
@@ -632,9 +697,24 @@ const flag = defineModel('flag', { default: false })
 
     const nativeFlag = nativeProps.find((p) => p.name === "flag");
     expect(nativeFlag).toBeDefined();
+    expect(nativeFlag!.typeFact).toEqual({
+      kind: "complete",
+      value: undefined,
+      absence: "unannotated",
+    });
+    expect(nativeFlag).not.toHaveProperty("type");
     expect(nativeFlag!.required).toBe(false);
     expect(nativeFlag!.hasDefault).toBe(true);
     expect(nativeFlag!.default).toBe("false");
+
+    const nativeFlagUpdate = meta._verter!.events.find((event) => event.name === "update:flag");
+    expect(nativeFlagUpdate).toBeDefined();
+    expect(nativeFlagUpdate!.typeFact).toEqual({
+      kind: "complete",
+      value: undefined,
+      absence: "unannotated",
+    });
+    expect(nativeFlagUpdate).not.toHaveProperty("payload");
 
     // Negative: no native descriptor carries a decorated undefined arm.
     for (const prop of [nativeModel!, nativeRequired!, nativeDefaulted!]) {

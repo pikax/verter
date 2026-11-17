@@ -1,3 +1,4 @@
+import type { FactResult } from "./facts.js";
 import type { NativeComponentFacts } from "./native-component-meta.js";
 /**
  * Component metadata types extracted from Vue SFCs.
@@ -18,8 +19,8 @@ export interface ComponentMeta {
   componentName: string;
   /** Whether the component uses the Options API (`export default { ... }`). */
   optionsApi: boolean;
-  /** Mandatory structured Vue/Svelte public-contract availability. */
-  componentPublicContract: NativeComponentContractAvailability;
+  /** Structured public contract, absent when its fact is unavailable. */
+  componentPublicContract?: NativeComponentContractAvailability;
   /**
    * Whether this metadata is the component's FULL surface, or a partial one
    * whose resolution degraded. An empty-because-degraded result is otherwise
@@ -30,15 +31,15 @@ export interface ComponentMeta {
   /** Typed native facts; compatibility arrays below are derived projections. */
   facts?: NativeComponentFacts;
   /** Props declared via `defineProps` or Options API `props`. */
-  props: PropMeta[];
+  props?: PropMeta[];
   /** Events declared via `defineEmits` or Options API `emits`. */
-  events: EventMeta[];
+  events?: EventMeta[];
   /** Slots discovered in the template. */
-  slots: SlotMeta[];
+  slots?: SlotMeta[];
   /** Models declared via `defineModel`. */
-  models: ModelMeta[];
+  models?: ModelMeta[];
   /** Members exposed via `defineExpose` or Options API `expose`. */
-  exposed: ExposedMeta[];
+  exposed?: ExposedMeta[];
   /** Host-derived runtime public-instance surface for ref-accessible members. */
   publicInstance?: PublicInstanceMeta;
   /** Mandatory schema-8 ordered structure from the registered artifact. */
@@ -68,17 +69,17 @@ export interface ComponentMeta {
   // ── Fallthrough surface ────────────────────────────────────────
 
   /** Accepted props: declared props + inherited attrs (computed by the host). */
-  acceptedProps: AcceptedPropMeta[];
+  acceptedProps?: AcceptedPropMeta[];
   /** Accepted events: declared emits + inherited listeners (computed by the host). */
-  acceptedEvents: AcceptedEventMeta[];
+  acceptedEvents?: AcceptedEventMeta[];
   /** Whether `acceptedProps`/`acceptedEvents` are exact or only a sound lower bound. */
   acceptedSurfaceCompleteness: AcceptedSurfaceCompleteness;
   /** First-class root summary for consumers that do not want the full branch graph. */
   rootInfo?: RootInfo;
   /** Root reachability classification for fallthrough inheritance. */
-  rootReachability: RootReachability;
+  rootReachability?: RootReachability;
   /** Branch-structured inherited surface (declared members do NOT appear here). */
-  fallthroughSurface: FallthroughSurface;
+  fallthroughSurface?: FallthroughSurface;
 
   // ── Flags ──────────────────────────────────────────────────────
 
@@ -134,7 +135,9 @@ export interface PropMeta {
   /** Prop name as declared in `defineProps` or Options API. */
   name: string;
   /** Parsed type descriptor. */
-  type: TypeDescriptor;
+  type?: TypeDescriptor;
+  /** Producer value fact transcribed into descriptor form. */
+  typeFact: FactResult<TypeDescriptor | undefined>;
   /** Native expansion exactness/status for the prop type, when available. */
   typeExpansion?: TypeExpansionMeta;
   /**
@@ -166,8 +169,7 @@ export interface PropMeta {
    * policy to preserve Vue intrinsics (`class`/`style`/etc.) and `on{Event}`
    * shadow-emit props the author kept on purpose.
    *
-   * Default `false` so older payloads without the field do NOT silently
-   * mark every prop as author-declared.
+   * This flag is transcribed from the exact-version producer payload.
    */
   declaredInMacroTypeArg?: boolean;
 }
@@ -177,13 +179,11 @@ export interface EventMeta {
   /** Event name (e.g. `"click"`, `"update:modelValue"`). */
   name: string;
   /** Payload type descriptor. */
-  payload: TypeDescriptor;
+  payload?: TypeDescriptor;
+  /** Producer payload fact transcribed into descriptor form. */
+  typeFact: FactResult<TypeDescriptor | undefined>;
   /** Native expansion exactness/status for the payload type, when available. */
   payloadExpansion?: TypeExpansionMeta;
-  /** Whether the event has a runtime validator function. */
-  hasValidator: boolean;
-  /** Whether the event is explicitly declared (vs. inferred from template usage). */
-  isDeclared: boolean;
   /** Original emit signature string. */
   rawSignature?: string;
   /** JSDoc description from the leading `/** ... *​/` comment. */
@@ -224,7 +224,9 @@ export interface SlotBinding {
   /** Binding name available in the slot scope. */
   name: string;
   /** Type descriptor for the binding value. */
-  type: TypeDescriptor;
+  type?: TypeDescriptor;
+  /** Producer value fact transcribed into descriptor form. */
+  typeFact: FactResult<TypeDescriptor | undefined>;
   /** Native expansion exactness/status for the binding type, when available. */
   typeExpansion?: TypeExpansionMeta;
   /** The expression text (e.g. `"row"`, `"i"`) — may differ from `name`. */
@@ -238,7 +240,9 @@ export interface ModelMeta {
   /** Model name (`"modelValue"` for the default model). */
   name: string;
   /** Type descriptor for the model value. */
-  type: TypeDescriptor;
+  type?: TypeDescriptor;
+  /** Producer value fact transcribed into descriptor form. */
+  typeFact: FactResult<TypeDescriptor | undefined>;
 }
 
 /** Metadata for a member exposed via `defineExpose`. */
@@ -246,7 +250,9 @@ export interface ExposedMeta {
   /** Exposed member name. */
   name: string;
   /** Type descriptor for the exposed value. */
-  type: TypeDescriptor;
+  type?: TypeDescriptor;
+  /** Producer value fact transcribed into descriptor form. */
+  typeFact: FactResult<TypeDescriptor | undefined>;
   /** Native expansion exactness/status for the exposed type, when available. */
   typeExpansion?: TypeExpansionMeta;
   /** JSDoc description from the leading `/** ... *​/` comment. */
@@ -270,7 +276,9 @@ export interface PublicInstanceMemberMeta {
   /** What kind of instance member this is. */
   kind: "prop" | "slotContainer" | "exposed";
   /** Type descriptor for the public value. */
-  type: TypeDescriptor;
+  type?: TypeDescriptor;
+  /** Producer value fact transcribed into descriptor form. */
+  typeFact: FactResult<TypeDescriptor | undefined>;
   /** Native expansion exactness/status for the member type, when available. */
   typeExpansion?: TypeExpansionMeta;
   /** Original TS type annotation text when available. */
@@ -535,7 +543,9 @@ export interface AcceptedPropMeta {
   /** Prop/attr name. */
   name: string;
   /** Parsed type descriptor. */
-  type: TypeDescriptor;
+  type?: TypeDescriptor;
+  /** Producer value fact transcribed into descriptor form. */
+  typeFact: FactResult<TypeDescriptor | undefined>;
   /** Original TS type annotation string. */
   rawType?: string;
   /** Whether the prop is required. */
@@ -553,7 +563,9 @@ export interface AcceptedEventMeta {
   /** Event/listener name. */
   name: string;
   /** Payload type descriptor. */
-  payload: TypeDescriptor;
+  payload?: TypeDescriptor;
+  /** Producer payload fact transcribed into descriptor form. */
+  typeFact: FactResult<TypeDescriptor | undefined>;
   /** Original emit signature string. */
   rawSignature?: string;
   /** How this member arrived on the surface. */
@@ -569,7 +581,7 @@ export type RootReachability =
   | { kind: "noFallthrough"; reason: NoFallthroughReason }
   | { kind: "branches"; branches: RootBranch[] };
 
-/** First-class root summary derived from reachability facts. */
+/** Producer-owned root summary decoded from the wire. */
 export interface RootInfo {
   /** Coarse root shape. */
   kind: "none" | "single" | "conditional" | "multiple";
@@ -677,7 +689,9 @@ export interface FallthroughPropEntry {
   /** Prop/attr name. */
   name: string;
   /** Parsed type descriptor. */
-  type: TypeDescriptor;
+  type?: TypeDescriptor;
+  /** Producer value fact transcribed into descriptor form. */
+  typeFact: FactResult<TypeDescriptor | undefined>;
   /** Original TS type annotation string. */
   rawType?: string;
   /** Where this member was inherited from. */
@@ -689,7 +703,9 @@ export interface FallthroughEventEntry {
   /** Event/listener name. */
   name: string;
   /** Payload type descriptor. */
-  payload: TypeDescriptor;
+  payload?: TypeDescriptor;
+  /** Producer payload fact transcribed into descriptor form. */
+  typeFact: FactResult<TypeDescriptor | undefined>;
   /** Original emit signature string. */
   rawSignature?: string;
   /** Where this member was inherited from. */

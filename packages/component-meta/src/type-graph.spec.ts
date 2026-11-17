@@ -3,7 +3,7 @@
  */
 
 import { create, toBinary } from "@bufbuild/protobuf";
-import { LegacyComponentMetaPayloadSchema as ComponentMetaPayloadSchema } from "@verter/proto";
+import { ComponentMetaPayloadSchema } from "@verter/proto";
 import {
   ExpansionExactness,
   ExpansionExecutionStatus,
@@ -468,12 +468,12 @@ describe("decodeComponentMetaPayload", () => {
     expect(() => decodeComponentMetaPayload(wrongVersion)).toThrow(/version/i);
 
     // A dangling type node stays on its prop as a failed publication.
-    // Schema-12 adaptation must not abort the payload or invent an exact type.
+    // Invalid values preserve the known member without inventing a type.
     const badNodePayload = buildTestComponentMetaProtoPayload({
       filePath: "/project/src/Button.vue",
       props: [{ name: "label", type: { kind: "primitive", name: "string" } }],
     });
-    badNodePayload.body!.props[0]!.typeNodeId = 999;
+    badNodePayload.body!.facts!.props!.value!.entries[0]!.typeNodeId = 999;
 
     const decoded = decodeComponentMetaPayload(
       toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, badNodePayload)),
@@ -489,7 +489,10 @@ describe("decodeComponentMetaPayload", () => {
       typeFact: { kind: "unavailable", causes: [102] },
     });
     expect(decoded.props[0]?.type).toBeUndefined();
-    expect(nativeComponentMetaToComponentMeta(decoded).props).toEqual([]);
+    expect(nativeComponentMetaToComponentMeta(decoded).props![0].typeFact).toEqual({
+      kind: "unavailable",
+      causes: [102],
+    });
   });
 
   it("decodes macroExpansionDiagnostics correctly from protobuf", () => {

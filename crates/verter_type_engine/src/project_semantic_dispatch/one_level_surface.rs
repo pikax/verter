@@ -1140,6 +1140,7 @@ pub fn project_macro_argument_surface_claim<C: crate::resolver_core::ResolverCap
 /// not re-derived by [`runtime_object_macro_surface`]. Content-addressed like
 /// every other `intern_node` call: repeated calls across members / requests
 /// collapse onto the same node.
+/// Same policy as `verter_type_expr::facts::SourcePosition::runtime_member_value_unknown`.
 fn unknown_member_value_node<C: crate::resolver_core::ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
 ) -> SemanticNodeId {

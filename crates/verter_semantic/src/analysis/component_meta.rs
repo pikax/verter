@@ -2680,13 +2680,20 @@ fn extract_props_from_options(
         // else the binding-index-gated runtime-constructor fold (closed
         // primitive fact for `Global` String/Number/Boolean, a resolved
         // local reference for `Local`, a typed failure for `Indeterminate`);
-        // else the PROVEN unannotated absence (a non-primitive `Global`
-        // spelling keeps its display-text-only route via `raw_type`, and a
-        // genuinely annotation-less prop has no source at all).
+        // else, for a constructor with no closed primitive (`Date`,
+        // `Object`, `[String, Date]`), the runtime-object member-value
+        // policy `defineProps({...})` publishes too; else (`props: ['x']`,
+        // no constructor and no payload) the PROVEN unannotated absence.
         let position = authored_payload_source(prop.payload.as_ref())
             .map(SourcePosition::Present)
             .or_else(|| constructor_binding_source_position(&prop.constructor_bindings, evaluated))
-            .unwrap_or_else(SourcePosition::unannotated);
+            .unwrap_or_else(|| {
+                if prop.constructor_bindings.is_empty() {
+                    SourcePosition::unannotated()
+                } else {
+                    SourcePosition::runtime_member_value_unknown()
+                }
+            });
         out.push(PropAnalysis {
             name: prop.name.clone(),
             callable_role: verter_type_expr::PropCallableRole::Other,

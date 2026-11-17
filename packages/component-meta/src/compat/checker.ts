@@ -19,6 +19,7 @@ import {
 import { projectDeclaredOnlyNativeResult } from "./native-projection.js";
 import { compatSlotSurvives } from "../published-surface.js";
 import type { TypeDescriptor } from "@verter/type-ir";
+import type { FactResult } from "../facts.js";
 import { intrinsicDisplayName } from "@verter/type-ir";
 import { tupleDescriptorToString } from "../type-expr-bridge.js";
 import type { VerterHostAdapter } from "../host-adapter.js";
@@ -220,11 +221,52 @@ async function readFileSafe(absPath: string, ws: CheckerWorkspace): Promise<stri
   return (await ws.readFile(runtimeNormalizePath(absPath))) ?? null;
 }
 
-/** Volar's `required` flag is a boolean and cannot carry an unavailable fact. */
-type KnownRequiredProp = PropMeta & { required: boolean };
+/**
+ * Only the wire's Unannotated absence proves no type was authored and permits
+ * compat `any`. Supplied descriptors pass through; unavailable facts stay omitted.
+ */
+function unannotatedTypeAsAny(
+  type: TypeDescriptor | undefined,
+  typeFact: FactResult<TypeDescriptor | undefined>,
+): TypeDescriptor | undefined {
+  if (typeFact?.kind === "unavailable") return undefined;
+  if (type === undefined && typeFact?.kind === "complete" && typeFact.absence === "unannotated") {
+    return { kind: "primitive", name: "any" };
+  }
+  return type;
+}
+
+/**
+ * Unannotated event payloads are variadic `any[]`, unlike scalar member types.
+ * Only Unannotated absence proves no payload annotation; unavailable facts stay omitted.
+ */
+function unannotatedEventPayloadAsAnyArray(
+  payload: TypeDescriptor | undefined,
+  typeFact: FactResult<TypeDescriptor | undefined>,
+): TypeDescriptor | undefined {
+  if (typeFact?.kind === "unavailable") return undefined;
+  if (
+    payload === undefined &&
+    typeFact?.kind === "complete" &&
+    typeFact.absence === "unannotated"
+  ) {
+    return {
+      kind: "tuple",
+      elements: [{ kind: "array", element: { kind: "primitive", name: "any" } }],
+      modifiers: [{ rest: true }],
+    };
+  }
+  return payload;
+}
+
+function hasType<T extends { type?: TypeDescriptor }>(row: T): row is T & { type: TypeDescriptor } {
+  return row.type !== undefined;
+}
+
+type KnownRequiredProp = PropMeta & { required: boolean; type: TypeDescriptor };
 
 function hasRequiredFact(prop: PropMeta): prop is KnownRequiredProp {
-  return typeof prop.required === "boolean";
+  return typeof prop.required === "boolean" && prop.type !== undefined;
 }
 
 /**
@@ -237,8 +279,11 @@ export function mapPropMeta(
   options?: MetaCheckerOptions,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMeta {
+  prop = { ...prop, type: unannotatedTypeAsAny(prop.type, prop.typeFact) };
   if (!hasRequiredFact(prop)) {
-    throw new Error(`component-meta compat cannot project ${prop.name} without a required fact`);
+    throw new Error(
+      `component-meta compat cannot project ${prop.name} without a required fact or type`,
+    );
   }
   const classification = classifyCompatPropDescriptor(prop, typeRegistry);
   switch (classification.kind) {
@@ -1583,12 +1628,16 @@ function buildSlotBindingsType(slot: SlotMeta, typeRegistry?: Map<string, TypeDe
   }
 
   return `{ ${slot.bindings
-    .map((binding) => `${binding.name}: ${compatSlotBindingTypeText(binding, typeRegistry)}`)
+    .filter(hasType)
+    .map(
+      (binding) =>
+        `${binding.name}: ${compatSlotBindingTypeText({ ...binding, type: binding.type }, typeRegistry)}`,
+    )
     .join("; ")}; }`;
 }
 
 function compatSlotBindingTypeText(
-  binding: SlotMeta["bindings"][number],
+  binding: SlotMeta["bindings"][number] & { type: TypeDescriptor },
   typeRegistry?: Map<string, TypeDescriptor>,
 ): string {
   const compatUiBinding = buildCompatUiBindingType(binding);
@@ -1604,7 +1653,7 @@ function compatSlotBindingTypeText(
 }
 
 function buildCompatUiBindingType(binding: SlotMeta["bindings"][number]): string | undefined {
-  if (!descriptorCarriesUiHelperMarker(binding.type)) {
+  if (binding.type === undefined || !descriptorCarriesUiHelperMarker(binding.type)) {
     return undefined;
   }
 
@@ -1665,7 +1714,7 @@ function unwrapComponentUiDescriptor(
 function buildSlotBindingsDescriptor(slot: SlotMeta): TypeDescriptor {
   return {
     kind: "object",
-    properties: slot.bindings.map((binding) => ({
+    properties: slot.bindings.filter(hasType).map((binding) => ({
       name: binding.name,
       type: binding.type,
       optional: false,
@@ -1683,7 +1732,7 @@ function wrapOptionalEmptySlotSchema(type: string, schema: PropertyMetaSchema): 
 
 type CompatEventPayloadClassification =
   | { kind: "empty" }
-  | { kind: "tuple"; elements: readonly TypeDescriptor[] }
+  | { kind: "arguments"; payload: TypeDescriptor; elements: readonly TypeDescriptor[] }
   | { kind: "function"; payload: FunctionDescriptor }
   | { kind: "single"; payload: TypeDescriptor }
   | { kind: "unsupported"; payload: TypeDescriptor };
@@ -1696,7 +1745,15 @@ function classifyCompatEventPayload(payload: TypeDescriptor): CompatEventPayload
     return { kind: "empty" };
   }
   if (payload.kind === "tuple") {
-    return { kind: "tuple", elements: payload.elements };
+    // A sole rest-array tuple is the array itself as an argument list.
+    const rest =
+      payload.elements.length === 1 && payload.modifiers?.[0]?.rest
+        ? payload.elements[0]
+        : undefined;
+    if (rest?.kind === "array" && !payload.readonly) {
+      return { kind: "arguments", payload: rest, elements: [rest] };
+    }
+    return { kind: "arguments", payload, elements: payload.elements };
   }
   if (payload.kind === "function") {
     return { kind: "function", payload };
@@ -1716,7 +1773,7 @@ function buildEventPayloadSchema(
   switch (classification.kind) {
     case "empty":
       return [];
-    case "tuple":
+    case "arguments":
       return classification.elements.map((element) =>
         typeDescriptorToSchema(element, options, typeRegistry),
       );
@@ -1730,15 +1787,17 @@ function buildEventPayloadSchema(
 }
 
 function buildEventPayloadType(
-  event: EventMeta,
+  event: EventMeta & { payload: TypeDescriptor },
   typeRegistry?: Map<string, TypeDescriptor>,
 ): string {
   const classification = classifyCompatEventPayload(event.payload);
   switch (classification.kind) {
     case "empty":
       return "[]";
-    case "tuple":
-      return normalizeTypeString(typeDescriptorToCompatDisplay(event.payload, typeRegistry));
+    case "arguments":
+      return normalizeTypeString(
+        typeDescriptorToCompatDisplay(classification.payload, typeRegistry),
+      );
     case "function":
       return renderEventFunctionTupleType(classification.payload, typeRegistry);
     case "single":
@@ -1784,17 +1843,20 @@ export function mapEventMeta(
   options?: MetaCheckerOptions,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMeta {
+  const payload = unannotatedEventPayloadAsAnyArray(event.payload, event.typeFact);
+  if (payload === undefined)
+    throw new Error(`component-meta compat cannot project ${event.name} without a payload`);
   return {
     name: event.name,
     description: event.description ?? "",
-    type: buildEventPayloadType(event, typeRegistry),
+    type: buildEventPayloadType({ ...event, payload }, typeRegistry),
     required: false,
     global: false,
     tags: (event.tags ?? []).map((t) => ({
       name: t.name,
       ...(t.text != null && { text: t.text }),
     })),
-    schema: buildEventPayloadSchema(event.payload, options, typeRegistry),
+    schema: buildEventPayloadSchema(payload, options, typeRegistry),
   };
 }
 
@@ -1806,6 +1868,13 @@ export function mapSlotMeta(
   options?: MetaCheckerOptions,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMeta {
+  slot = {
+    ...slot,
+    bindings: slot.bindings.flatMap((binding) => {
+      const type = unannotatedTypeAsAny(binding.type, binding.typeFact);
+      return type === undefined ? [] : [{ ...binding, type }];
+    }),
+  };
   const type = buildSlotBindingsType(slot, typeRegistry);
   const bindingsSchema = buildCompatSlotBindingsSchema(slot, options, typeRegistry);
   return {
@@ -1834,6 +1903,7 @@ function buildCompatSlotBindingsSchema(
   let usedCompatUiBinding = false;
 
   for (const binding of slot.bindings) {
+    if (binding.type === undefined) continue;
     const compatUiBinding = buildCompatUiBindingType(binding);
     if (compatUiBinding) {
       usedCompatUiBinding = true;
@@ -1855,7 +1925,7 @@ function buildCompatSlotBindingsSchema(
       description: "",
       tags: [],
       required: true,
-      type: compatSlotBindingTypeText(binding, typeRegistry),
+      type: compatSlotBindingTypeText({ ...binding, type: binding.type }, typeRegistry),
       schema: typeDescriptorToSchema(binding.type, options, typeRegistry),
     } as unknown as PropertyMetaSchema;
   }
@@ -1879,14 +1949,17 @@ export function mapExposedMeta(
   options?: MetaCheckerOptions,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMeta {
+  const type = unannotatedTypeAsAny(exposed.type, exposed.typeFact);
+  if (type === undefined)
+    throw new Error(`component-meta compat cannot project ${exposed.name} without a type`);
   return {
     name: exposed.name,
     description: exposed.description ?? "",
-    type: typeDescriptorToString(exposed.type),
+    type: typeDescriptorToString(type),
     required: false,
     global: false,
     tags: normalizeCompatTags(exposed.tags),
-    schema: typeDescriptorToSchema(exposed.type, options, typeRegistry),
+    schema: typeDescriptorToSchema(type, options, typeRegistry),
   };
 }
 
@@ -1900,12 +1973,24 @@ export function mapComponentMeta(
 ): VolarComponentMeta {
   return {
     type: 0,
-    props: meta.props.filter(hasRequiredFact).map((p) => mapPropMeta(p, options, typeRegistry)),
-    events: meta.events.map((e) => mapEventMeta(e, options, typeRegistry)),
-    slots: meta.slots
+    props: (meta.props ?? [])
+      .filter(
+        (prop) =>
+          typeof prop.required === "boolean" &&
+          unannotatedTypeAsAny(prop.type, prop.typeFact) !== undefined,
+      )
+      .map((p) => mapPropMeta(p, options, typeRegistry)),
+    events: (meta.events ?? [])
+      .filter(
+        (event) => unannotatedEventPayloadAsAnyArray(event.payload, event.typeFact) !== undefined,
+      )
+      .map((e) => mapEventMeta(e, options, typeRegistry)),
+    slots: (meta.slots ?? [])
       .filter((s) => isCompatVisibleSlot(s))
       .map((s) => mapSlotMeta(s, options, typeRegistry)),
-    exposed: meta.exposed.map((e) => mapExposedMeta(e, options, typeRegistry)),
+    exposed: (meta.exposed ?? [])
+      .filter((member) => unannotatedTypeAsAny(member.type, member.typeFact) !== undefined)
+      .map((e) => mapExposedMeta(e, options, typeRegistry)),
     _verter: meta,
   };
 }

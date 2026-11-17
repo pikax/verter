@@ -1,3 +1,8 @@
+import { withNativeTypeFacts } from "../type-graph.test-utils.js";
+import { create, toBinary } from "@bufbuild/protobuf";
+import { ComponentMetaPayloadSchema, createTestComponentMetaPayload } from "@verter/proto";
+import { decodeTypedComponentMetaPayload } from "../type-graph-proto-decode.js";
+import { nativeComponentMetaToComponentMeta } from "../native-component-meta.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -32,7 +37,9 @@ import {
   unknown,
 } from "@verter/type-ir";
 import { typeExprToDescriptor } from "../type-expr-bridge.js";
-import type { PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
+import type { ComponentMeta, PropMeta, EventMeta, SlotMeta, ExposedMeta } from "../types.js";
+import type { FactResult } from "../facts.js";
+import type { TypeDescriptor } from "@verter/type-ir";
 
 let nextProjectRootId = 1;
 
@@ -67,7 +74,7 @@ async function settleNativeProject(): Promise<void> {
 }
 
 function nativeMetaPayload(filePath: string) {
-  return {
+  return withNativeTypeFacts({
     filePath,
     optionsApi: false,
     props: [
@@ -118,7 +125,7 @@ function nativeMetaPayload(filePath: string) {
       blocks: [],
       markupNodes: [],
     },
-  };
+  });
 }
 
 // ── Mapper unit tests ───────────────────────────────────────────────
@@ -879,8 +886,6 @@ describe("mapEventMeta", () => {
     const event: EventMeta = {
       name: "click",
       payload: unknown("unknown"),
-      hasValidator: false,
-      isDeclared: true,
       description: "Fired on click",
       tags: [{ name: "deprecated" }],
     };
@@ -902,8 +907,6 @@ describe("mapEventMeta", () => {
         elements: [ref("Item"), primitive("boolean")],
         modifiers: [{ label: "item" }, { label: "exact" }],
       },
-      hasValidator: false,
-      isDeclared: true,
       rawSignature: "DECOY_SIGNATURE",
     };
     const typeRegistry = new Map<string, any>([
@@ -951,8 +954,6 @@ describe("mapEventMeta", () => {
         ],
         modifiers: [{ label: "transform" }, { label: "exact" }],
       },
-      hasValidator: false,
-      isDeclared: true,
       rawSignature: "DECOY_SIGNATURE",
     };
 
@@ -965,8 +966,6 @@ describe("mapEventMeta", () => {
     const event: EventMeta = {
       name: "update:open",
       payload: primitive("boolean"),
-      hasValidator: false,
-      isDeclared: true,
       rawSignature: "[value: boolean]",
     };
 
@@ -1279,6 +1278,126 @@ describe("mapExposedMeta", () => {
 });
 
 describe("mapComponentMeta", () => {
+  it.each([
+    { kind: "complete", value: undefined, absence: "branchDivergent" },
+    { kind: "complete", value: undefined },
+    { kind: "approximate", value: undefined, causes: [103] },
+  ] as const)("does not infer an annotation from absence %j", (typeFact) => {
+    const meta: ComponentMeta = {
+      ...nativeMetaPayload("Input.vue"),
+      componentName: "Input",
+      props: [{ name: "absent", typeFact, required: false, hasDefault: false }],
+      events: [{ name: "absent", typeFact }],
+      slots: [{ name: "default", isScoped: true, bindings: [{ name: "absent", typeFact }] }],
+      exposed: [{ name: "absent", typeFact }],
+    };
+    const result = mapComponentMeta(meta);
+    expect(result.props).toEqual([]);
+    expect(result.events).toEqual([]);
+    expect(result.exposed).toEqual([]);
+    expect(result.slots[0].type).toBe("{}");
+    expect(result.slots[0].schema).not.toHaveProperty("schema.absent");
+  });
+
+  it.each(["complete", "approximate"] as const)(
+    "passes through a %s unknown descriptor",
+    (kind) => {
+      const type = primitive("unknown");
+      const typeFact: FactResult<TypeDescriptor | undefined> =
+        kind === "complete" ? { kind, value: type } : { kind, value: type, causes: [103] };
+      const result = mapPropMeta({
+        name: "unresolved",
+        type,
+        typeFact,
+        required: false,
+        hasDefault: false,
+      });
+      expect(result.type).toBe("unknown | undefined");
+      expect(result.schema).toMatchObject({ kind: "enum", type: "unknown | undefined" });
+    },
+  );
+
+  it("omits unavailable types but keeps unannotated members as any", () => {
+    const fixture = createTestComponentMetaPayload();
+    const wireProp = fixture.body!.facts!.props!.value!.entries![0]!;
+    wireProp.publication = { kind: 2, absence: 1, provenance: 1 };
+    fixture.typeGraph!.nodes![Number(wireProp.typeNodeId) - 1] = {
+      kind: { case: "unknown", value: { rawId: 0 } },
+    };
+    const decodedProp = nativeComponentMetaToComponentMeta(
+      decodeTypedComponentMetaPayload(
+        toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, fixture)),
+      ),
+    ).props![0]!;
+    const members: Array<{ name: string; typeFact: FactResult<TypeDescriptor | undefined> }> = [
+      { name: "unavailable", typeFact: { kind: "unavailable", causes: [102] } },
+      { ...decodedProp, name: "flag" },
+    ];
+    const meta: ComponentMeta = {
+      ...nativeMetaPayload("Input.vue"),
+      componentName: "Input",
+      resultCompleteness: { kind: "complete" },
+      acceptedSurfaceCompleteness: "exact",
+      orderedSfcStructure: {
+        ...nativeMetaPayload("Input.vue").orderedSfcStructure,
+        schemaVersion: 1,
+      },
+      props: members.map((member) => ({
+        ...member,
+        required: false,
+        hasDefault: true,
+        default: "false",
+      })),
+      events: [
+        ...members.map((member) => ({ ...member, name: `update:${member.name}` })),
+        {
+          name: "change",
+          typeFact: { kind: "complete", value: undefined, absence: "unannotated" },
+        },
+      ],
+      slots: [{ name: "default", isScoped: true, bindings: members }],
+      exposed: members,
+    };
+
+    const result = mapComponentMeta(meta);
+
+    expect(result.props).toHaveLength(1);
+    expect(result.props[0]).toMatchObject({
+      name: "flag",
+      type: "any",
+      schema: "any",
+      required: false,
+      default: "false",
+    });
+    expect(result.events).toHaveLength(2);
+    expect(result.events[0]).toMatchObject({
+      name: "update:flag",
+      type: "any[]",
+      schema: [{ kind: "array", type: "any[]", schema: ["any"] }],
+    });
+    expect(result.events[1]).toMatchObject({
+      name: "change",
+      type: "any[]",
+      schema: [{ kind: "array", type: "any[]", schema: ["any"] }],
+    });
+    expect(result.slots[0].type).toBe("{ flag: any; }");
+    expect(result.slots[0].schema).toMatchObject({ schema: { flag: { type: "any" } } });
+    expect(result.slots[0].schema).not.toHaveProperty("schema.unavailable");
+    expect(result.exposed).toHaveLength(1);
+    expect(result.exposed[0]).toMatchObject({ name: "flag", type: "any", schema: "any" });
+
+    expect(result._verter).toBe(meta);
+    expect(meta.props?.[1].typeFact).toEqual({
+      kind: "complete",
+      value: undefined,
+      absence: "unannotated",
+    });
+    expect(meta.props?.[1]).not.toHaveProperty("type");
+    expect(meta.events?.[1]).not.toHaveProperty("payload");
+    expect(meta.slots?.[0].bindings[1]).not.toHaveProperty("type");
+    expect(meta.exposed?.[1]).not.toHaveProperty("type");
+  });
+
   it("produces VolarComponentMeta shape with _verter", () => {
     const meta = {
       filePath: "test.vue",

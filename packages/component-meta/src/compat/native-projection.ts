@@ -28,15 +28,14 @@
 import { decodeComponentMetaPayload } from "../type-graph.js";
 import type {
   NativeComponentMetaResult,
-  NativeAcceptedPropMeta,
-  NativeAcceptedEventMeta,
   NativeFallthroughSurface,
   NativeNoFallthroughReason,
 } from "../native-component-meta.js";
 
 function deriveDeclaredOnlyFallthroughReason(
-  surface: NativeFallthroughSurface,
-): NativeNoFallthroughReason {
+  surface: NativeFallthroughSurface | undefined,
+): NativeNoFallthroughReason | undefined {
+  if (surface === undefined) return undefined;
   if (surface.kind === "none") {
     return surface.reason;
   }
@@ -58,22 +57,23 @@ export function projectDeclaredOnlyNativeResult(
     return null;
   }
 
-  const acceptedProps: NativeAcceptedPropMeta[] = meta.acceptedProps.filter(
+  const acceptedProps = meta.acceptedProps?.filter((entry) => entry.provenance.kind === "declared");
+  const acceptedEvents = meta.acceptedEvents?.filter(
     (entry) => entry.provenance.kind === "declared",
   );
-  const acceptedEvents: NativeAcceptedEventMeta[] = meta.acceptedEvents.filter(
-    (entry) => entry.provenance.kind === "declared",
-  );
-  const fallthroughSurface: NativeFallthroughSurface = {
-    kind: "none",
-    reason: deriveDeclaredOnlyFallthroughReason(meta.fallthroughSurface),
-  };
+  const fallthroughSurface: NativeFallthroughSurface | undefined =
+    meta.fallthroughSurface === undefined
+      ? undefined
+      : {
+          kind: "none",
+          reason: deriveDeclaredOnlyFallthroughReason(meta.fallthroughSurface)!,
+        };
 
   return {
     ...meta,
-    acceptedProps,
-    acceptedEvents,
-    fallthroughSurface,
+    ...(acceptedProps === undefined ? {} : { acceptedProps }),
+    ...(acceptedEvents === undefined ? {} : { acceptedEvents }),
+    ...(fallthroughSurface === undefined ? {} : { fallthroughSurface }),
   };
 }
 

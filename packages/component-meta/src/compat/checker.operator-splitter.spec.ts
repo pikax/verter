@@ -323,8 +323,6 @@ describe("operator splitters consume TypeDescriptor (not prop.rawType)", () => {
         // Decoy rawSignature: malformed string the legacy splitter could not parse;
         // the walker reads structurally from `event.payload`.
         rawSignature: "definitely not a parseable signature",
-        hasValidator: false,
-        isDeclared: true,
       };
       const result = mapEventMeta(event);
       // Structural walk drops the leading event-name literal arm
@@ -339,8 +337,6 @@ describe("operator splitters consume TypeDescriptor (not prop.rawType)", () => {
           name: "close",
           payload: primitive(name),
           rawSignature: "DECOY_SIGNATURE",
-          hasValidator: false,
-          isDeclared: true,
         });
 
         expect(result.type).toBe("[]");
@@ -353,8 +349,6 @@ describe("operator splitters consume TypeDescriptor (not prop.rawType)", () => {
         name: "close",
         payload: { kind: "unknown", rawType: "void" },
         rawSignature: "[]",
-        hasValidator: false,
-        isDeclared: true,
       });
 
       expect(result.type).toBe("[unknown]");

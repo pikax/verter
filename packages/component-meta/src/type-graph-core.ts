@@ -277,9 +277,7 @@ export class DecodedTypeGraph {
     return this.getString(id);
   }
 
-  factMode = false;
   /** Invalid nodes stay in the table; dependents refuse locally instead of aborting the payload. */
-  localizeFailures = false;
   readonly invalidNodeIds = new Set<number>();
 
   getNode(id: number): GraphNodeRecord {
@@ -318,6 +316,8 @@ export function isGraphTypeExprRef(value: unknown): value is GraphTypeExprRef {
   );
 }
 
+export class ComponentMetaGraphError extends Error {}
+
 function graphError(message: string): Error {
-  return new Error(message);
+  return new ComponentMetaGraphError(message);
 }

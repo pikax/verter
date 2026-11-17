@@ -29,11 +29,11 @@ export interface StorybookArgType {
 export function toArgTypes(meta: ComponentMeta): Record<string, StorybookArgType> {
   const argTypes: Record<string, StorybookArgType> = {};
 
-  for (const prop of meta.props) {
+  for (const prop of meta.props ?? []) {
     argTypes[prop.name] = propToArgType(prop);
   }
 
-  for (const event of meta.events) {
+  for (const event of meta.events ?? []) {
     argTypes[eventToArgName(event.name)] = eventToArgType(event);
   }
 
@@ -41,6 +41,7 @@ export function toArgTypes(meta: ComponentMeta): Record<string, StorybookArgType
 }
 
 function propToArgType(prop: PropMeta): StorybookArgType {
+  if (prop.type === undefined) return { table: { category: "props" } };
   return {
     type: {
       name: typeToStorybookName(prop.type),

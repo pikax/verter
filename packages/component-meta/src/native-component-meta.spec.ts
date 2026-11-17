@@ -3,21 +3,26 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { withNativeTypeFacts } from "./type-graph.test-utils.js";
 import {
   nativeComponentMetaToComponentMeta as mapNativeComponentMeta,
   nativeTypeRegistryToMap,
 } from "./native-component-meta.js";
 
 function nativeComponentMetaToComponentMeta(meta: any) {
-  return mapNativeComponentMeta({
-    orderedSfcStructure: {
-      schemaVersion: 1,
-      artifactToken: "a".repeat(43),
-      blocks: [],
-      markupNodes: [],
-    },
-    ...meta,
-  });
+  for (const row of [...(meta.props ?? []), ...(meta.slots ?? [])])
+    row.declaredInMacroTypeArg ??= false;
+  return mapNativeComponentMeta(
+    withNativeTypeFacts({
+      orderedSfcStructure: {
+        schemaVersion: 1,
+        artifactToken: "a".repeat(43),
+        blocks: [],
+        markupNodes: [],
+      },
+      ...meta,
+    }),
+  );
 }
 
 /** Default fallthrough surface fields for test payloads. */
@@ -95,6 +100,70 @@ function nativeMetaWithProp(prop: Record<string, unknown>) {
 }
 
 describe("nativeComponentMetaToComponentMeta", () => {
+  it("keeps unavailable lanes and unsent root info absent", () => {
+    const native = nativeMetaWithProp({
+      name: "value",
+      type: { kind: "primitive", name: "string" },
+      ...publishedTypeFields("string"),
+    });
+    for (const key of [
+      "props",
+      "events",
+      "slots",
+      "models",
+      "exposed",
+      "acceptedProps",
+      "acceptedEvents",
+      "rootReachability",
+      "fallthroughSurface",
+      "componentPublicContract",
+    ])
+      delete native[key];
+    const mapped = nativeComponentMetaToComponentMeta(native);
+    for (const key of [
+      "props",
+      "events",
+      "slots",
+      "models",
+      "exposed",
+      "acceptedProps",
+      "acceptedEvents",
+      "rootReachability",
+      "fallthroughSurface",
+      "componentPublicContract",
+      "rootInfo",
+    ]) {
+      expect(Object.hasOwn(mapped, key)).toBe(false);
+    }
+  });
+
+  it("keeps unavailable member rows beside healthy siblings", () => {
+    const native = nativeMetaWithProp({
+      name: "missing",
+      publication: {
+        kind: "failed",
+        failure: "unrepresentableRequiredMemberValue",
+        provenance: "schema",
+      },
+      terminalDisplay: {},
+      typeFact: { kind: "unavailable", causes: [102] },
+    });
+    native.props.push({
+      name: "healthy",
+      type: { kind: "primitive", name: "string" },
+      typeFact: { kind: "complete", value: { kind: "primitive", name: "string" } },
+      ...publishedTypeFields("string"),
+      required: true,
+      hasDefault: false,
+    });
+    const result = nativeComponentMetaToComponentMeta(native);
+    expect(result.props!.map((prop) => prop.name)).toEqual(["missing", "healthy"]);
+    expect(Object.hasOwn(result.props![0]!, "type")).toBe(false);
+    expect(result.props![0]!.typeFact).toEqual({ kind: "unavailable", causes: [102] });
+    expect(result.props![1]!.type).toEqual({ kind: "primitive", name: "string" });
+    expect(result.props![1]!.typeFact).toEqual({ kind: "complete", value: result.props![1]!.type });
+  });
+
   it("exposes mandatory contract availability on ComponentMeta", () => {
     const native = nativeMetaWithProp({
       name: "value",
@@ -109,7 +178,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
     expect(mapped.componentPublicContract).toBe(native.componentPublicContract);
   });
 
-  it("projects compat rawType only from terminal display and rejects Failed publication", () => {
+  it("projects compat rawType only from terminal display and keeps failed rows", () => {
     const published = nativeComponentMetaToComponentMeta(
       nativeMetaWithProp({
         name: "value",
@@ -132,22 +201,22 @@ describe("nativeComponentMetaToComponentMeta", () => {
     );
     expect(perturbed.props[0].type).toEqual(published.props[0].type);
     expect(perturbed.props[0].rawType).not.toBe(published.props[0].rawType);
-    expect(() =>
-      nativeComponentMetaToComponentMeta(
-        nativeMetaWithProp({
-          name: "value",
-          type: { kind: "primitive", name: "string" },
-          publication: {
-            kind: "failed",
-            failure: "unrepresentableRequiredMemberValue",
-            provenance: "semanticEvaluator",
-          },
-          terminalDisplay: {},
-          required: true,
-          hasDefault: false,
-        }),
-      ),
-    ).toThrow(/failed type publication/i);
+    const failed = nativeComponentMetaToComponentMeta(
+      nativeMetaWithProp({
+        name: "value",
+        typeFact: { kind: "unavailable", causes: [102] },
+        publication: {
+          kind: "failed",
+          failure: "unrepresentableRequiredMemberValue",
+          provenance: "semanticEvaluator",
+        },
+        terminalDisplay: {},
+        required: true,
+        hasDefault: false,
+      }),
+    );
+    expect(failed.props![0].typeFact).toEqual({ kind: "unavailable", causes: [102] });
+    expect(Object.hasOwn(failed.props![0], "type")).toBe(false);
   });
 
   it("preserves full metadata fields from the native result", () => {
@@ -180,7 +249,6 @@ describe("nativeComponentMetaToComponentMeta", () => {
           staticClasses: ["primary"],
           hasDynamicClass: true,
           vModels: ["modelValue"],
-          vModelEntries: [{ bindingName: "modelValue" }],
         },
       ],
       templateRefs: [{ name: "button", isDynamic: false, targetTag: "FancyButton" }],
@@ -907,7 +975,7 @@ describe("nativeComponentMetaToComponentMeta", () => {
     });
   });
 
-  it("derives a direct root summary from root reachability branches", () => {
+  it("copies the independently supplied root summary", () => {
     const meta = nativeComponentMetaToComponentMeta({
       filePath: "/project/src/App.vue",
       optionsApi: false,
@@ -936,6 +1004,19 @@ describe("nativeComponentMetaToComponentMeta", () => {
       acceptedProps: [],
       acceptedEvents: [],
       acceptedSurfaceCompleteness: "exact",
+      rootInfo: {
+        kind: "conditional",
+        targets: [
+          {
+            kind: "componentUsage",
+            elementIndex: 1,
+            usageIndex: 0,
+            name: "PrimaryButton",
+            importSource: "./PrimaryButton.vue",
+          },
+          { kind: "nativeElement", elementIndex: 2, tag: "button" },
+        ],
+      },
       rootReachability: {
         kind: "branches",
         branches: [
@@ -1043,8 +1124,6 @@ describe("nativeComponentMetaToComponentMeta", () => {
         bindings: [],
         isRequired: false,
         returnType: "VNode[]",
-        // Forward-compat coercion: a native payload without the producer
-        // fact reads `false` (the compat name block applies).
         declaredInMacroTypeArg: false,
       },
     ]);

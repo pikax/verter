@@ -1,3 +1,4 @@
+import { withNativeTypeFacts } from "../type-graph.test-utils.js";
 /**
  * @ai-generated - Guards the compat checker against falling back to the removed JS semantic pipeline.
  */
@@ -113,51 +114,52 @@ describe("ComponentMetaChecker session requirement", () => {
 
   // @ai-generated - Proves checker batch dispatch stays one native call and preserves positional slots.
   it("dispatches one positional native batch without scalar component-meta calls", async () => {
-    const nativeMeta = (filePath: string, propName: string): any => ({
-      filePath,
-      optionsApi: false,
-      props: [
-        {
-          name: propName,
-          type: { kind: "primitive", name: "string" },
-          ...resolvedTypeRow("string"),
-          required: true,
-          hasDefault: false,
+    const nativeMeta = (filePath: string, propName: string): any =>
+      withNativeTypeFacts({
+        filePath,
+        optionsApi: false,
+        props: [
+          {
+            name: propName,
+            type: { kind: "primitive", name: "string" },
+            ...resolvedTypeRow("string"),
+            required: true,
+            hasDefault: false,
+          },
+        ],
+        events: [],
+        slots: [],
+        models: [],
+        exposed: [],
+        components: [],
+        templateRefs: [],
+        imports: [],
+        bindings: [],
+        vueApiCalls: [],
+        styles: [],
+        flags: {
+          asyncSetup: false,
+          hasReactiveState: false,
+          hasComputed: false,
+          hasWatchers: false,
+          hasLifecycleHooks: false,
+          hasProvide: false,
+          hasInject: false,
+          hasInheritAttrsFalse: false,
+          hasStoreUsage: false,
         },
-      ],
-      events: [],
-      slots: [],
-      models: [],
-      exposed: [],
-      components: [],
-      templateRefs: [],
-      imports: [],
-      bindings: [],
-      vueApiCalls: [],
-      styles: [],
-      flags: {
-        asyncSetup: false,
-        hasReactiveState: false,
-        hasComputed: false,
-        hasWatchers: false,
-        hasLifecycleHooks: false,
-        hasProvide: false,
-        hasInject: false,
-        hasInheritAttrsFalse: false,
-        hasStoreUsage: false,
-      },
-      acceptedProps: [],
-      acceptedEvents: [],
-      acceptedSurfaceCompleteness: "exact",
-      rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
-      fallthroughSurface: { kind: "none", reason: "noTemplate" },
-      orderedSfcStructure: {
-        schemaVersion: 1,
-        artifactToken: "a".repeat(43),
-        blocks: [],
-        markupNodes: [],
-      },
-    });
+        acceptedProps: [],
+        acceptedEvents: [],
+        acceptedSurfaceCompleteness: "exact",
+        rootReachability: { kind: "noFallthrough", reason: "noTemplate" },
+        fallthroughSurface: { kind: "none", reason: "noTemplate" },
+        orderedSfcStructure: {
+          schemaVersion: 1,
+          artifactToken: "a".repeat(43),
+          blocks: [],
+          markupNodes: [],
+        },
+      });
     const getComponentMeta = vi.fn();
     const getComponentMetaBatch = vi.fn(() => [
       nativeMeta("/project/src/Zebra.vue", "first"),
@@ -300,7 +302,7 @@ describe("ComponentMetaChecker session requirement", () => {
   });
 
   it("uses one canonical native query for public Verter compat output and _verter", async () => {
-    const fullMeta: any = {
+    const fullMeta: any = withNativeTypeFacts({
       filePath: "C:/project/src/App.vue",
       optionsApi: false,
       props: [
@@ -363,7 +365,7 @@ describe("ComponentMetaChecker session requirement", () => {
         blocks: [],
         markupNodes: [],
       },
-    };
+    });
     const getComponentMeta = vi.fn(() => fullMeta);
 
     const checker = new ComponentMetaChecker(
@@ -411,7 +413,7 @@ describe("ComponentMetaChecker session requirement", () => {
 
   // @ai-generated - Proves terminal display text cannot rewrite a structurally rendered schema.
   it("keeps Booleanish terminal display text from rewriting a non-Booleanish schema", async () => {
-    const nativeMeta: any = {
+    const nativeMeta: any = withNativeTypeFacts({
       filePath: "C:/project/src/App.vue",
       optionsApi: false,
       props: [
@@ -455,7 +457,7 @@ describe("ComponentMetaChecker session requirement", () => {
         blocks: [],
         markupNodes: [],
       },
-    };
+    });
     const checker = new ComponentMetaChecker({ upsert: vi.fn() }, "C:\\project", {}, {
       closed: false,
       engine: { state: "active" as const },

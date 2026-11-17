@@ -60,44 +60,7 @@ export type {
   ResolvedRootStep,
 } from "./types.js";
 
-// Type IR — re-exported from @verter/type-ir for public-API stability.
-export type {
-  TypeDescriptor,
-  PrimitiveName,
-  PrimitiveType,
-  LiteralType,
-  UnionType,
-  IntersectionType,
-  ArrayType,
-  TupleType,
-  ObjectType,
-  ObjectProperty,
-  ObjectIndexSignature,
-  FunctionType,
-  FunctionParameter,
-  TypeParameterType,
-  EnumType,
-  EnumMember,
-  RefType,
-  RecursiveRefType,
-  RecursiveRefConditionalFrame,
-  UnknownType,
-} from "@verter/type-ir";
-
-export {
-  primitive,
-  literal,
-  union,
-  intersection,
-  array,
-  tuple,
-  object,
-  func,
-  typeParameter,
-  ref,
-  recursiveRef,
-  unknown,
-} from "@verter/type-ir";
+export * from "@verter/type-ir";
 
 // Native type evaluation bridge
 export { typeExprToDescriptor, buildEvaluatedTypeMap } from "./type-expr-bridge.js";
@@ -151,7 +114,6 @@ export type {
   NativeComponentFlags,
   NativeComponentUsage,
   NativeComponentPropUsage,
-  NativeComponentVModelEntry,
   NativeTemplateRefMeta,
   NativeImportMeta,
   NativeImportBindingMeta,
