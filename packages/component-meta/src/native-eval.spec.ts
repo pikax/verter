@@ -91,7 +91,7 @@ describe("native evaluator integration", () => {
     try {
       session.upsert(
         "/Summary.vue",
-        '<script setup lang="ts">defineModel<number>()</script><template><div /></template>',
+        '<script setup lang="ts">const shared = {}; defineProps({ ...shared, a: String })</script><template><div /></template>',
       );
       const bytes = session.getComponentMeta("/Summary.vue");
       expect(bytes).not.toBeNull();
