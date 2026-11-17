@@ -364,3 +364,21 @@ no installed thread or build-local observation. This helper exposes those
 specific boundaries; it does not convert the synchronous shared helpers reached
 inside argument preparation, declaration printing or final composite reduction,
 or make an arbitrary semantic root nonblocking.
+
+### Indexed argument reads in flow bodies
+
+The flow reader advances the shared `IndexedValueRun` with suspension enabled.
+An argument fallback retains its call route, indexed expression owner and read
+observation in `HelperFrame::Indexed`, reached through `ReadSite::Helper`.
+Each `TypeOf` need requests a node; an `Instantiate` need for a lazy declared
+return requests the whole cache read so operation-budget recovery remains
+distinguishable from other partial answers. Already consumed flow deliveries
+enter the walk without replaying their facts, rails or receipts a second time.
+Expression-source continuations keep consuming their runtime `FrameDelivery`
+envelopes inside their existing observation.
+
+Receiver fallbacks and native call-route drivers settle the same walk through
+`settle_now`, attributed `read_in_place / indexed_value`. A machinery-root call
+need also settles through `settle_now` and the existing indexed call resolver
+with that attribution; it never becomes a `ReadWait`. The call helper request
+relay owns suspension of that remaining call need.

@@ -3628,6 +3628,151 @@ fn a_requested_list_reads_as_the_list_read_in_place() {
     }
 }
 
+fn indexed_argument_read(
+    name: &str,
+    polled: bool,
+) -> (
+    usize,
+    semantic_poll_contract::JoinedEvidence,
+    CountedBodyReads,
+) {
+    const FILE: &str = "/semantic-task/indexed-argument.ts";
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host();
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(
+            super::differential_call_tests::OVERLOADS_AND_UNION_MEMBERS,
+        ),
+        crate::FileLanguage::script_ts(),
+    );
+    list_read_on_host(host, FILE, name, polled)
+}
+
+#[test]
+fn an_indexed_argument_requests_its_value_without_an_in_place_typeof() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::with_body_reads_in_place_for_tests;
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    for (name, expected) in [("oMethod", "'wide'"), ("oProperty", "'fallback'")] {
+        let (requests, evidence, rows) = indexed_argument_read(name, false);
+        let (in_place_requests, in_place, in_place_rows) =
+            with_body_reads_in_place_for_tests(|| indexed_argument_read(name, false));
+        assert_eq!(evidence.0 .0, expected);
+        assert!(!evidence.0 .3, "the indexed argument is completely modeled");
+        assert_eq!(in_place_requests, 0);
+        let indexed_reads = in_place_rows
+            .iter()
+            .filter(|((stage, site, family), _)| {
+                *stage == Some("read_in_place")
+                    && *site == "indexed_value"
+                    && *family == SemanticQueryKeyTag::TypeOf
+            })
+            .map(|(_, count)| *count)
+            .sum::<u64>();
+        assert!(
+            indexed_reads > 0,
+            "the native driver attributes the indexed value: {in_place_rows:?}"
+        );
+        let list_reads = in_place_rows
+            .iter()
+            .filter(|((stage, site, _), _)| {
+                *stage == Some("read_in_place") && *site == "signature_list"
+            })
+            .map(|(_, count)| *count)
+            .sum::<u64>();
+        assert_eq!(
+            requests as u64,
+            indexed_reads + list_reads,
+            "the indexed value adds exactly its reads to the call's list requests: {rows:?}"
+        );
+        assert!(
+            rows.iter().all(|((stage, site, family), _)| {
+                *site != "evaluate_indexed_value"
+                    && !(*stage == Some("read_in_place")
+                        && *site == "indexed_value"
+                        && *family == SemanticQueryKeyTag::TypeOf)
+            }),
+            "the root answers the indexed TypeOf: {rows:?}"
+        );
+        assert_eq!(
+            evidence, in_place,
+            "{name} preserves value, facts, diagnostics and receipt work and footprint"
+        );
+    }
+}
+
+#[test]
+fn a_polled_indexed_argument_matches_its_synchronous_value() {
+    for name in ["oMethod", "oProperty"] {
+        let (requests, synchronous, _) = indexed_argument_read(name, false);
+        let (polled_requests, polled, _) = indexed_argument_read(name, true);
+        assert!(requests > 0);
+        assert_eq!(polled_requests, requests);
+        semantic_poll_contract::assert_joined_matches(polled, &synchronous);
+    }
+}
+
+/// A chain of `length` functions, each returning `sink(make_i()!)`: the
+/// indexed argument's call declares its return as the return of the
+/// function before it, which `sink` never inspects.
+fn unchecked_declared_return_chain(length: usize) -> String {
+    let mut source = String::from(
+        "declare function sink(value: any): 0;\n\
+         export function f0() { return 0 as const; }\n",
+    );
+    for index in 1..=length {
+        let previous = index - 1;
+        source.push_str(&format!(
+            "type A{index} = ReturnType<typeof f{previous}>;\n\
+             declare function make{index}(): A{index};\n\
+             export function f{index}() {{ return sink(make{index}()!); }}\n"
+        ));
+    }
+    source
+}
+
+/// A body a checker probe evaluates inline under its running drive does not
+/// check an indexed argument's lazy declared return there: the call keeps
+/// its carrier, so probing the last function of a chain evaluates no
+/// earlier function's body, however long the chain.
+///
+/// The checker answers `ReturnType<typeof f6>` as `0`.
+#[test]
+fn an_indexed_argument_keeps_its_unchecked_declared_return_under_a_probe() {
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::{checker_syntax, render_node};
+    use verter_type_engine::project_semantic_dispatch::flow_return::flow_evaluations_for_tests;
+    let expected = checker_syntax::parse("0").expect("the checker type parses");
+    let evaluations = |length: usize| {
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        let before = flow_evaluations_for_tests();
+        let probe = format!("ReturnType<typeof f{length}>");
+        super::checker_probe_lane_tests::with_probe_outcome_on_host(
+            &host,
+            Default::default(),
+            &unchecked_declared_return_chain(length),
+            &probe,
+            |dispatch, outcome| {
+                let evaluated = flow_evaluations_for_tests() - before;
+                let node = outcome
+                    .into_usable_node()
+                    .unwrap_or_else(|| panic!("`{probe}` answers"));
+                assert!(
+                    checker_syntax::matches_node(dispatch, node, &expected, 0),
+                    "`{probe}` is `0`, got {}",
+                    render_node(dispatch, node, 0)
+                );
+                evaluated
+            },
+        )
+    };
+    let short = evaluations(2);
+    let long = evaluations(6);
+    assert_eq!(
+        long, short,
+        "the probe evaluates the same bodies whatever the chain's length"
+    );
+}
+
 const SIGNATURE_CONSUMERS_FILE: &str = "/ws/signature-consumers.ts";
 // Iterator keys are resolved from the project's registered global library.
 const SIGNATURE_CONSUMERS_LIB: &str = r#"

@@ -327,6 +327,8 @@ pub(super) enum CallStep<'e> {
     Function(Box<CallFunctionWait<'e>>),
     /// A read made by a signature list.
     Read(Box<CallListWait<'e>>),
+    /// An indexed argument, with its enclosing call retained.
+    Indexed(Box<CallInFlight<'e>>, Box<IndexedArgumentRead<'e>>),
     /// Nothing: the call's value.
     Done(Positional<SemanticNodeId>),
 }
@@ -514,8 +516,27 @@ pub(super) enum ResolveCallProgress<'e> {
     Function(Box<RouteFunction<'e>>),
     /// A signature list read by the route's driver.
     List(Box<RouteList<'e>>),
+    /// The owner-scope value of an indexed argument.
+    Indexed(Box<IndexedArgumentRead<'e>>),
     /// Nothing: the route's step.
     Done(Option<Positional<ResolveCallStep>>),
+}
+
+/// The argument's route and observation stay open while its indexed walk
+/// requests values. The route's shared index owns the expression.
+pub(super) struct IndexedArgumentRead<'e> {
+    route: ResolveCallFrame<'e>,
+    observations: super::super::flow_return_fact::HeldReadObservation,
+    const_view: Option<SemanticNodeId>,
+    frame: Option<Box<helper_run::IndexedArgumentFrame>>,
+}
+
+impl IndexedArgumentRead<'_> {
+    pub(super) fn take_frame(&mut self) -> Box<helper_run::IndexedArgumentFrame> {
+        self.frame
+            .take()
+            .expect("the indexed argument's driver takes its retained walk once")
+    }
 }
 
 /// One argument's type, and how it was typed.
@@ -852,7 +873,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     }
 
     /// Continue a call whose executor route made `progress`.
-    fn continue_call_route<'e>(
+    pub(super) fn continue_call_route<'e>(
         &mut self,
         flight: Box<CallInFlight<'e>>,
         progress: ResolveCallProgress<'e>,
@@ -873,6 +894,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     ) -> Result<CallStep<'e>, (Box<CallInFlight<'e>>, CallNext<'e>)> {
         loop {
             match progress {
+                ResolveCallProgress::Indexed(argument) => {
+                    return Ok(CallStep::Indexed(flight, argument));
+                }
                 ResolveCallProgress::List(route) => {
                     if let Some(nodes) = flight.lists.settled(route.subject, route.kind) {
                         progress = self.deliver_route_list(route, Some(nodes));
@@ -1258,18 +1282,62 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                                     }),
                                     _ => None,
                                 };
-                                frame_value.or_else(|| {
-                                    let value = self.eval_indexed_call_argument(
+                                let node = if let Some(value) = frame_value {
+                                    Some(value)
+                                } else if let Some(value) =
+                                    self.indexed_call_argument_binding(&binding)
+                                {
+                                    value.map(|value| {
+                                        fresh_call = value.fresh;
+                                        value.node
+                                    })
+                                } else {
+                                    let mut run = IndexedValueRun::new(false);
+                                    match self.dispatch.advance_indexed_value(
+                                        self.st.canonical,
+                                        self.st.owner,
                                         &argument.expression,
-                                        &binding,
-                                    )?;
-                                    fresh_call = value.fresh;
-                                    Some(value.node)
-                                })
+                                        &mut run,
+                                        None,
+                                    ) {
+                                        ReadStep::Ready(value) => value.map(|value| {
+                                            fresh_call = value.fresh;
+                                            value.node
+                                        }),
+                                        ReadStep::Wait(wait) => {
+                                            let frame = Box::new(
+                                                helper_run::IndexedArgumentFrame::waiting(
+                                                    Arc::clone(&indexed),
+                                                    ordinal,
+                                                    run,
+                                                    wait,
+                                                ),
+                                            );
+                                            return Err(frame);
+                                        }
+                                    }
+                                };
+                                Ok(node)
                             });
                             let Ok((node, observations)) = read.split() else {
                                 self.adopt_argument_observations(&mut route.argument_observations);
                                 return ResolveCallProgress::Done(None);
+                            };
+                            let node = match node {
+                                Ok(node) => node,
+                                Err(frame) => {
+                                    let held = self.hold_read_observation();
+                                    let _ = self.dispatch.adopt_read(observations);
+                                    route.awaiting = Some(binding);
+                                    return ResolveCallProgress::Indexed(Box::new(
+                                        IndexedArgumentRead {
+                                            route,
+                                            observations: held,
+                                            const_view,
+                                            frame: Some(frame),
+                                        },
+                                    ));
+                                }
                             };
                             if argument.context_sensitive && node.is_some() {
                                 route.argument_observations[ordinal] = Some(observations);
@@ -1387,6 +1455,53 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             self.finish_argument(&mut route, ordinal, typed, reads_widening_local, first_pass);
         }
         self.finish_resolve_call(route)
+    }
+
+    /// Drive the retained argument where its call cannot suspend.
+    pub(super) fn settle_indexed_call_argument<'e>(
+        &mut self,
+        mut argument: Box<IndexedArgumentRead<'e>>,
+    ) -> ResolveCallProgress<'e> {
+        let mut helper = helper_run::HelperRun::indexed_argument(argument.take_frame());
+        let first = self.run_helper(&mut helper, None);
+        let value = self.settle_now(first, |this, delivery| {
+            this.run_helper(&mut helper, Some(delivery))
+        });
+        self.deliver_indexed_call_argument(argument, value.indexed())
+    }
+
+    /// Finish the same argument after its retained indexed walk answers.
+    pub(super) fn deliver_indexed_call_argument<'e>(
+        &mut self,
+        argument: Box<IndexedArgumentRead<'e>>,
+        value: Option<IndexedValue>,
+    ) -> ResolveCallProgress<'e> {
+        let IndexedArgumentRead {
+            mut route,
+            observations,
+            const_view,
+            frame: _,
+        } = *argument;
+        let ordinal = route.args.len();
+        let read = self.finish_held_read_observation(observations);
+        let Ok(((), observations)) = read.split() else {
+            self.adopt_argument_observations(&mut route.argument_observations);
+            return ResolveCallProgress::Done(None);
+        };
+        if route.indexed.call.args[ordinal].context_sensitive && value.is_some() {
+            route.argument_observations[ordinal] = Some(observations);
+        } else {
+            let _ = self.dispatch.adopt_read(observations);
+        }
+        self.advance_resolve_call(
+            route,
+            Some(TypedArgument {
+                node: value.map(|value| value.node),
+                fresh_call: value.is_some_and(|value| value.fresh),
+                const_view,
+                literal_provenance: None,
+            }),
+        )
     }
 
     /// The context-sensitive object's non-inferring first pass, after its own typing.
