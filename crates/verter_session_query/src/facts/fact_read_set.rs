@@ -1551,6 +1551,13 @@ pub fn begin_demand_fact_memos() {
     DEMAND_MEMOS_ACTIVE.with(|active| active.set(true));
 }
 
+/// Whether this thread's per-demand proof memos accept entries now.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn demand_fact_memos_active_for_tests() -> bool {
+    DEMAND_MEMOS_ACTIVE.with(std::cell::Cell::get)
+}
+
 /// The demand's last tracer popped: drop the per-demand proof memos whose
 /// payloads pin fact storage, and remember nothing further — a finished
 /// demand retains nothing through them.
