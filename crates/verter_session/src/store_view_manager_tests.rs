@@ -252,10 +252,7 @@ fn token_advances_on_augmentation_index_populate() {
         population: AugmentationPopulation::Base,
         target: AugmentationTargetKind::GlobalAugmentation,
     };
-    let set = Arc::new(AugmenterSet {
-        entries: SmallVec::new(),
-        fingerprint: [7u8; 16],
-    });
+    let set = Arc::new(AugmenterSet::new(SmallVec::new(), [7u8; 16]));
     host.project_type_store()
         .indexed()
         .populate_augmenter_set(key, set);

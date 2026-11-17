@@ -755,11 +755,7 @@ impl TypeInfoCore {
             .unwrap_or(macro_index_value);
         let dto_macro_index = macro_index(effective_index);
         let name = mac.model_name.as_deref().unwrap_or("modelValue");
-        let modifiers_name = if name == "modelValue" {
-            "modelModifiers".to_owned()
-        } else {
-            format!("{name}Modifiers")
-        };
+        let modifiers_name = verter_macro_dto::model_modifiers_prop_name(name);
         let optional = mac
             .prop_fields
             .first()

@@ -447,11 +447,13 @@ pub fn fixture_slots_typed() -> SnapshotView {
 //     - model: name + concrete `T` (no `| undefined`).
 //     - prop: name + BARE `T`, `required: false`,
 //       `has_default: false`.
+//     - optional modifiers prop: `Record<string, true | undefined>` because
+//       neither call supplies a second type argument; no default.
 //     - event: `update:<name>` with display payload
 //       `[value: T | undefined]`.
 //
 //   `SnapshotView::from_analysis` sorts every collection
-//   alphabetically by name, so `count` precedes `modelValue`.
+//   alphabetically by name: count, countModifiers, modelModifiers, modelValue.
 //
 //   Rule citation: Verter macros §model
 //   (`./.claude/skills/component-meta`). Handled via the
@@ -464,6 +466,22 @@ pub fn fixture_models() -> SnapshotView {
             PropView {
                 name: "count".to_string(),
                 type_signature: "number".to_string(),
+                required: false,
+                has_default: false,
+                default_signature: None,
+                doc: None,
+            },
+            PropView {
+                name: "countModifiers".to_string(),
+                type_signature: "Record<string, true | undefined>".to_string(),
+                required: false,
+                has_default: false,
+                default_signature: None,
+                doc: None,
+            },
+            PropView {
+                name: "modelModifiers".to_string(),
+                type_signature: "Record<string, true | undefined>".to_string(),
                 required: false,
                 has_default: false,
                 default_signature: None,

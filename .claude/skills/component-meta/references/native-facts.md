@@ -94,17 +94,19 @@ Each prop, event payload, slot binding, model, exposed/public-instance member,
 accepted member and fallthrough member has a `typeFact` transcribed to descriptors.
 Its `type` or `payload` is absent for an unavailable value. Complete optional
 absence remains a complete fact with an undefined value and the wire publication's
-`absence` reason (`unannotated`, `branchDivergent` or `unclassifiedConstructor`).
+`absence` reason (`unannotated` or `branchDivergent`).
 An Absent/Unannotated publication decodes with no value even when the wire
 attaches a graph node: that node is the output sink's missing-output placeholder,
 not a type descriptor. Other absence reasons preserve a supplied descriptor.
-Runtime constructor annotations outside the closed primitive classification
-publish `UnclassifiedConstructor` (wire absence 3), never `Unannotated`.
-The shared constructor helper applies this to Options API props, runtime
-`defineProps` objects and constructor arrays. Local binding resolution retains
-its existing evaluated source or typed failure; no instance-type resolver is
-inferred from display text. Array-form prop names such as `props: ['x']`
-remain Unannotated.
+A runtime constructor outside the closed primitive classification (`Date`,
+`Object`, `[String, Date]`, ...) is an annotation, never Unannotated: a runtime
+`defineProps` object publishes the runtime-object surface's Present `unknown`
+member value for it, and an Options API `props: {...}` object publishes the same
+Present `unknown` member value (`SourcePosition::runtime_member_value_unknown`,
+the one runtime-object member-value policy shared by every runtime-props route).
+Local binding resolution retains its existing evaluated
+source or typed failure; no instance-type resolver is inferred from display
+text. Array-form prop names such as `props: ['x']` remain Unannotated.
 Unavailable semantic
 lanes are absent on both decoded native results and public `ComponentMeta`;
 their guarantees and original causes remain on `facts`. Event rows carry no
@@ -114,8 +116,8 @@ type fact (props also need a known requiredness boolean). Only a complete fact
 with no value and `absence: "unannotated"` proves absence of an authored type:
 TypeScript treats it as `any`. Other absence reasons never authorize this mapping;
 descriptors for other publications, including structured `unknown`, pass through
-unchanged. Unclassified constructors therefore keep their existing compat
-`unknown` rendering (with `| undefined` when optional).
+unchanged. A Present `unknown` constructor value therefore renders as compat
+`unknown` (with `| undefined` when optional).
 `compat/checker.ts::unannotatedTypeAsAny` applies the scalar rule to props,
 slot bindings and exposed members. `unannotatedEventPayloadAsAnyArray` maps
 unannotated event payloads to variadic `any[]`, including runtime array emits.
@@ -208,8 +210,13 @@ Calls to `defineProps()`, `defineEmits()` and `defineExpose()` with neither a
 runtime argument nor a type argument certify empty, closed domains.
 Type-based domains use their existing complete, closed producer claims.
 Type-based expose retains the resolved surface producer's authority.
-The model producer withholds its certificate because the sidecar lists model
-value props but omits their modifiers props.
+The model producer lists both the value prop and Vue's optional modifiers prop:
+`modelModifiers` for the default model, or `<name>Modifiers` otherwise. The
+modifiers type is `Partial<Record<M, true>>` for an explicit second type argument,
+and `Record<string, true | undefined>` otherwise. Its retained macro-field payload
+is shared with the declaration producer. Model bindings and update events still
+describe only value rows. Complete model claims can certify enumeration, so a
+member-free script-setup component with a model can have a closed exact sidecar.
 The slots fold also reads the template's existing `has_dynamic_slot_outlet`
 report: a dynamic-name outlet withholds slot enumeration, including when no
 `defineSlots` macro is present. Static-name outlets retain their enumeration.

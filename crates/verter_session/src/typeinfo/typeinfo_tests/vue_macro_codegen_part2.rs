@@ -482,19 +482,19 @@ fn tsc_emits_models_and_scope_are_explicit_role_rows() {
     upsert_ts(
         &host,
         "/src/types.ts",
-        "export interface Payload { id: number }",
+        "export interface Payload { id: number }; export type Modifiers = 'trim' | 'lazy'",
     );
     upsert(
         &host,
         "/src/TscRows.vue",
         r#"<script setup lang="ts">
-import type { Payload } from './types'
+import type { Payload, Modifiers } from './types'
 interface Local { payload: Payload }
 defineEmits<{
   save: [value: Local]
   (event: 'cancel', reason?: string): void
 }>()
-defineModel<Payload>('selected')
+defineModel<Payload, Modifiers>('selected')
 </script>"#,
     );
 
@@ -534,6 +534,17 @@ defineModel<Payload>('selected')
     };
     assert_eq!(model.name, "selected");
     assert_eq!(model.value_type.as_str(), "Payload");
+    assert_eq!(model.modifiers_prop.name, "selectedModifiers");
+    assert!(model.modifiers_prop.optional);
+    assert_eq!(
+        model.modifiers_prop.type_text.as_str(),
+        "Partial<Record<Modifiers, true>>"
+    );
+    assert!(model
+        .scope
+        .retained_bindings
+        .iter()
+        .any(|binding| binding.local_name == "Modifiers"));
 }
 
 #[test]

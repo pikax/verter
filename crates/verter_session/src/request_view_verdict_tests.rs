@@ -447,10 +447,7 @@ fn a_route_surface_domain_move_alone_rechecks_a_positive_receipt() {
     let publish = |hash| {
         host.project_type_store().indexed().populate_augmenter_set(
             key.clone(),
-            Arc::new(AugmenterSet {
-                entries: Default::default(),
-                fingerprint: hash,
-            }),
+            Arc::new(AugmenterSet::new(Default::default(), hash)),
         )
     };
     publish([7; 16]);

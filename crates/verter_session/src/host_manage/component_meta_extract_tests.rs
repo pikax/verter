@@ -28,6 +28,82 @@ fn make_project() -> Arc<MetaProject> {
 }
 
 #[test]
+fn model_modifiers_props_close_the_script_setup_instance() {
+    use verter_session_query::analysis::component_meta::PublicInstanceCompleteness;
+
+    for (call, value_name, modifiers_name) in [
+        ("defineModel()", "modelValue", "modelModifiers"),
+        ("defineModel('count')", "count", "countModifiers"),
+        (
+            "defineModel<string, 'trim'>()",
+            "modelValue",
+            "modelModifiers",
+        ),
+    ] {
+        let project = make_project();
+        project
+            .upsert_base(
+                "/Model.vue",
+                &format!("<script setup lang=\"ts\">const model = {call}</script>"),
+            )
+            .unwrap();
+        let output = project
+            .host()
+            .get_component_meta_output("/Model.vue")
+            .unwrap()
+            .expect("model component output");
+        let (analysis, _, _) = output.into_parts();
+        assert_eq!(
+            analysis
+                .props
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![value_name, modifiers_name],
+            "{call}"
+        );
+        assert!(!analysis.props[1].required, "{call}");
+        assert!(!analysis.props[1].has_default, "{call}");
+        assert_eq!(
+            analysis
+                .models
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![value_name],
+            "{call}"
+        );
+        assert_eq!(
+            analysis
+                .events
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![format!("update:{value_name}")],
+            "{call}"
+        );
+        assert!(analysis.domain_guarantees.enumeration.models, "{call}");
+        assert_eq!(analysis.domain_guarantees.public_instance.kind, 1, "{call}");
+        assert!(!analysis.domain_guarantees.public_instance.open, "{call}");
+        let instance = analysis.public_instance.expect("model instance sidecar");
+        assert_eq!(
+            instance.completeness,
+            PublicInstanceCompleteness::Exact,
+            "{call}"
+        );
+        assert_eq!(
+            instance
+                .members
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![value_name, modifiers_name],
+            "{call}"
+        );
+    }
+}
+
+#[test]
 fn public_instance_indirect_options_exports_report_options_api_members() {
     use verter_session_query::analysis::component_meta::{
         PublicInstanceCompleteness, PublicInstanceStructuralFailure,

@@ -1520,8 +1520,8 @@ fn define_model_type_string() {
     let fields = &macros[0].prop_fields;
     assert_eq!(
         fields.len(),
-        1,
-        "defineModel<string> should produce 1 prop field"
+        2,
+        "defineModel<string> declares the value and modifiers props"
     );
     assert_eq!(fields[0].name, "modelValue");
     assert_eq!(
@@ -1530,6 +1530,8 @@ fn define_model_type_string() {
         "type_annotation should be 'string'"
     );
     assert!(fields[0].is_optional);
+    assert_eq!(fields[1].name, "modelModifiers");
+    assert!(fields[1].is_optional);
 }
 
 #[test]
@@ -1538,12 +1540,14 @@ fn define_model_named_with_type() {
     let macros = parse_macros(code);
     assert_eq!(macros.len(), 1);
     let fields = &macros[0].prop_fields;
-    assert_eq!(fields.len(), 1);
+    assert_eq!(fields.len(), 2);
     assert_eq!(
         fields[0].name, "count",
         "named model should use the name argument"
     );
     assert_eq!(fields[0].type_annotation.as_deref(), Some("number"));
+    assert_eq!(fields[1].name, "countModifiers");
+    assert!(fields[1].is_optional);
 }
 
 #[test]
@@ -1551,7 +1555,7 @@ fn define_model_complex_type() {
     let code = "defineModel<string | number>()";
     let macros = parse_macros(code);
     let fields = &macros[0].prop_fields;
-    assert_eq!(fields.len(), 1);
+    assert_eq!(fields.len(), 2);
     assert_eq!(fields[0].name, "modelValue");
     assert_eq!(
         fields[0].type_annotation.as_deref(),
@@ -1564,10 +1568,15 @@ fn define_model_no_type_param() {
     let code = "defineModel()";
     let macros = parse_macros(code);
     assert_eq!(macros.len(), 1);
-    assert!(
-        macros[0].prop_fields.is_empty(),
-        "defineModel without type param should have no prop_fields"
-    );
+    let fields = &macros[0].prop_fields;
+    assert_eq!(fields.len(), 2);
+    assert_eq!(fields[0].name, "modelValue");
+    assert!(fields[0].is_optional);
+    assert!(fields[0].payload.is_none());
+    assert_eq!(fields[1].name, "modelModifiers");
+    assert!(fields[1].is_optional);
+    assert!(fields[1].payload.is_some());
+    assert!(fields[1].type_annotation.is_none());
 }
 
 #[test]
@@ -1576,10 +1585,14 @@ fn define_model_required_option_marks_prop_required() {
     let macros = parse_macros(code);
     let fields = &macros[0].prop_fields;
 
-    assert_eq!(fields.len(), 1);
+    assert_eq!(fields.len(), 2);
     assert!(
         !fields[0].is_optional,
         "defineModel({{ required: true }}) should keep the generated prop required"
+    );
+    assert!(
+        fields[1].is_optional,
+        "modifiers remain optional for a required model"
     );
 }
 
@@ -2832,6 +2845,44 @@ mod field_payload_deref_replay {
             ),
             "model payload must lower to the type argument, got {lowering:?}"
         );
+    }
+
+    #[test]
+    fn define_model_modifiers_payload_replays_vue_record_types() {
+        let defaults = TypeExpr::named_with_args(
+            "Record",
+            vec![
+                TypeExpr::Primitive(PrimitiveName::String),
+                TypeExpr::union(vec![
+                    TypeExpr::boolean_literal(true),
+                    TypeExpr::Primitive(PrimitiveName::Undefined),
+                ]),
+            ],
+        );
+        let typed = TypeExpr::named_with_args(
+            "Partial",
+            vec![TypeExpr::named_with_args(
+                "Record",
+                vec![
+                    TypeExpr::union(vec![
+                        TypeExpr::string_literal("trim"),
+                        TypeExpr::string_literal("lazy"),
+                    ]),
+                    TypeExpr::boolean_literal(true),
+                ],
+            )],
+        );
+        for (source, expected) in [
+            ("defineModel();", defaults.clone()),
+            ("defineModel('count');", defaults),
+            ("defineModel<string, 'trim' | 'lazy'>();", typed),
+        ] {
+            let lowering = replay(source, 0, 1);
+            let MacroFieldPayloadLowering::Payload(actual) = lowering else {
+                panic!("modifiers payload must lower: {source}: {lowering:?}");
+            };
+            assert_eq!(actual, expected, "{source}");
+        }
     }
 
     /// A runtime `as PropType<T>` assertion replays the asserted argument.

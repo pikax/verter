@@ -3,10 +3,10 @@
 use super::*;
 
 /// Answer every wait of an owned reading operation where its caller cannot suspend.
-pub(super) fn settle_now<T>(
-    mut step: ReadStep<T>,
-    mut answer: impl FnMut(ReadWait) -> ReadDelivery,
-    mut resume: impl FnMut(ReadDelivery) -> ReadStep<T>,
+pub(super) fn settle_now<T, W, V>(
+    mut step: ReadStep<T, W>,
+    mut answer: impl FnMut(W) -> V,
+    mut resume: impl FnMut(V) -> ReadStep<T, W>,
 ) -> T {
     loop {
         match step {
@@ -64,6 +64,30 @@ pub(super) enum HelperFrame<'e> {
         Box<super::super::continuation_stages::SignatureListRead>,
         Option<ReadWait>,
     ),
+    Indexed(Box<IndexedArgumentFrame>),
+}
+
+pub(super) struct IndexedArgumentFrame {
+    indexed: Arc<verter_session_query::source::indexed_call::IndexedFlowCallExpression>,
+    ordinal: usize,
+    run: IndexedValueRun,
+    wait: Option<ReadWait>,
+}
+
+impl IndexedArgumentFrame {
+    pub(super) fn waiting(
+        indexed: Arc<verter_session_query::source::indexed_call::IndexedFlowCallExpression>,
+        ordinal: usize,
+        run: IndexedValueRun,
+        wait: ReadWait,
+    ) -> Self {
+        Self {
+            indexed,
+            ordinal,
+            run,
+            wait: Some(wait),
+        }
+    }
 }
 
 /// Only helpers that read, or call a reading helper, have frames. Pure
@@ -100,20 +124,32 @@ pub(super) struct NumericMember<'e> {
 pub(super) enum HelperValue {
     Node(Option<SemanticNodeId>),
     List(Option<Box<[SemanticNodeId]>>),
+    Indexed(Option<IndexedValue>),
 }
 
 impl HelperValue {
     pub(super) fn node(self) -> Option<SemanticNodeId> {
         match self {
             Self::Node(node) => node,
-            Self::List(_) => unreachable!("a member path answers a node"),
+            Self::List(_) | Self::Indexed(_) => unreachable!("a member path answers a node"),
         }
     }
 
     fn list(self) -> Option<Vec<SemanticNodeId>> {
         match self {
             Self::List(nodes) => nodes.map(|nodes| nodes.into_vec()),
-            Self::Node(_) => unreachable!("a signature list answers signature nodes"),
+            Self::Node(_) | Self::Indexed(_) => {
+                unreachable!("a signature list answers signature nodes")
+            }
+        }
+    }
+
+    pub(super) fn indexed(self) -> Option<IndexedValue> {
+        match self {
+            Self::Indexed(value) => value,
+            Self::Node(_) | Self::List(_) => {
+                unreachable!("an indexed read answers an indexed value")
+            }
         }
     }
 }
@@ -127,6 +163,10 @@ pub(super) enum AfterHelper<'e> {
     ClassBase(
         Box<class_expression::ClassEvalFrame<'e>>,
         Box<class_expression::ClassBaseRead>,
+    ),
+    IndexedArgument(
+        Box<CallInFlight<'e>>,
+        Box<call_stack::IndexedArgumentRead<'e>>,
     ),
 }
 
@@ -159,6 +199,12 @@ impl<'e> Pending<'e> {
 }
 
 impl<'e> HelperRun<'e> {
+    pub(super) fn indexed_argument(frame: Box<IndexedArgumentFrame>) -> Self {
+        Self {
+            frames: vec![HelperFrame::Indexed(frame)],
+        }
+    }
+
     fn at(frame: MemberPathFrame<'e>) -> Self {
         Self {
             frames: vec![HelperFrame::MemberPath(frame)],
@@ -171,6 +217,18 @@ impl<'e> HelperRun<'e> {
 }
 
 impl<'e> HelperWait<'e> {
+    pub(super) fn indexed_argument(
+        flight: Box<CallInFlight<'e>>,
+        mut argument: Box<call_stack::IndexedArgumentRead<'e>>,
+    ) -> Self {
+        let run = HelperRun::indexed_argument(argument.take_frame());
+        Self {
+            run,
+            then: AfterHelper::IndexedArgument(flight, argument),
+            wait: None,
+        }
+    }
+
     pub(super) fn class_base(
         frame: Box<class_expression::ClassEvalFrame<'e>>,
         base: class_expression::ClassBaseWait,
@@ -207,6 +265,7 @@ impl<'e> HelperWait<'e> {
 
 static_assertions::const_assert!(std::mem::size_of::<HelperValue>() <= 24);
 static_assertions::const_assert!(std::mem::size_of::<HelperFrame<'static>>() <= 32);
+static_assertions::const_assert!(std::mem::size_of::<IndexedValueDelivery<'static>>() <= 24);
 
 impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// Advance the standing chain exactly once, to its next read or value.
@@ -217,7 +276,10 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     ) -> ReadStep<HelperValue> {
         use MemberPathFrame as Frame;
         let mut delivered = delivered;
-        let mut value = if matches!(run.frames.last(), Some(HelperFrame::List(..))) {
+        let mut value = if matches!(
+            run.frames.last(),
+            Some(HelperFrame::List(..) | HelperFrame::Indexed(_))
+        ) {
             None
         } else {
             delivered.take().map(ReadDelivery::node)
@@ -229,6 +291,25 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                 ));
             };
             let frame = match frame {
+                HelperFrame::Indexed(mut frame) => {
+                    let step = match frame.wait.take() {
+                        Some(wait) => ReadStep::Wait(wait),
+                        None => self.dispatch.advance_indexed_value(
+                            self.st.canonical,
+                            self.st.owner,
+                            &frame.indexed.call.args[frame.ordinal].expression,
+                            &mut frame.run,
+                            delivered.take(),
+                        ),
+                    };
+                    return match step {
+                        ReadStep::Ready(value) => ReadStep::Ready(HelperValue::Indexed(value)),
+                        ReadStep::Wait(wait) => {
+                            run.frames.push(HelperFrame::Indexed(frame));
+                            ReadStep::Wait(wait)
+                        }
+                    };
+                }
                 HelperFrame::List(mut list, first) => {
                     let step = match first {
                         Some(wait) => ReadStep::Wait(wait),
@@ -467,6 +548,11 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         suspend: bool,
     ) -> ResumedCall {
         match then {
+            AfterHelper::IndexedArgument(flight, argument) => {
+                let progress = self.deliver_indexed_call_argument(argument, value.indexed());
+                let step = self.continue_call_route(flight, progress);
+                self.call_step_on_run(run, step, suspend)
+            }
             AfterHelper::MemberOf {
                 object,
                 member,

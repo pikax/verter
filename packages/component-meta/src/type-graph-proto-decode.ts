@@ -1331,17 +1331,12 @@ function decodeTypePublication(publication: ProtoRecord): NativeTypePublication 
     }
     case TYPE_PUBLICATION_ABSENT: {
       const absence = Number(publication.absence ?? 0);
-      if (absence !== 1 && absence !== 2 && absence !== 3) {
+      if (absence !== 1 && absence !== 2) {
         throw graphError(`component-meta graph payload has unknown publication absence ${absence}`);
       }
       return {
         kind: "absent",
-        absence:
-          absence === 1
-            ? "unannotated"
-            : absence === 2
-              ? "branchDivergent"
-              : "unclassifiedConstructor",
+        absence: absence === 1 ? "unannotated" : "branchDivergent",
         provenance: decodeResolutionProvenance(Number(publication.provenance ?? 0)),
       };
     }

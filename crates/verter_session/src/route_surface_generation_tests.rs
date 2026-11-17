@@ -149,10 +149,7 @@ fn a_same_fingerprint_republish_does_not_advance_the_clock() {
     let before = clock(&host);
 
     // Republish byte-identically, exactly as the self-heal does.
-    let republished = Arc::new(AugmenterSet {
-        entries: set.entries.clone(),
-        fingerprint: set.fingerprint,
-    });
+    let republished = Arc::new(AugmenterSet::new(set.entries.clone(), set.fingerprint));
     let prev = host
         .project_type_store()
         .indexed()
@@ -195,13 +192,9 @@ fn replacing_a_published_set_with_a_different_fingerprint_advances_the_clock() {
         "fixture invariant: the replacement fingerprint must actually differ"
     );
 
-    host.project_type_store().indexed().populate_augmenter_set(
-        key,
-        Arc::new(AugmenterSet {
-            entries: SmallVec::new(),
-            fingerprint: different,
-        }),
-    );
+    host.project_type_store()
+        .indexed()
+        .populate_augmenter_set(key, Arc::new(AugmenterSet::new(SmallVec::new(), different)));
 
     assert_ne!(
         clock(&host),

@@ -2277,18 +2277,32 @@ invalidation from observing an empty index between the check and publication.
 A raced or unsettled scan answers return-only and leaves no shared row; the
 next stable scan discovers the full population.
 
-A stale captured key may be refreshed without moving the population fingerprint; parse identities include
-content and must be reacquired with the exact current key. The stitcher then folds
+A stale captured key may be refreshed without moving the membership fingerprint;
+its content fingerprint is republished with the exact current source identities.
+Content movement advances the existing route-surface and artifact clocks even
+when membership stays identical. The stitcher then folds
 each augmenter's `(owner, augmented_name, space)` contributions, together with
 the base declaration's own contributors, into ONE `SemanticNodeData::MergedDecl`
 carrier. The result's `ReadSetSignature.facts` records the
-`RouteSurface(ModuleAugmentationIndexShape)` fact plus per-contributor
-`FileWholeHash` anchors (with `self_root_canonicals = {base} ∪ {augmenters}`)
+`RouteSurface(ModuleAugmentationIndexShape)` membership facts and one
+`RouteSurface(AugmentationPopulationContent)` fact for a type-body stitch.
+The content fact joins fixed-size identities maintained with the immutable
+augmenter-set and named global-contributor view publications. Each hashes
+canonical id, whole content, exact parse key, runtime language and actual
+`IndexedReady.parse_env_hash` (never the artifact key's base sentinel/overlay
+discriminator). A warm read uses the existing preparation and route-surface
+validator under the caller population, requiring both publication currency
+and strict source identity. Only matching population whole-content/source-env
+observations and contributor roots inside the recorded fold/projection
+boundary are substituted; nested cached work keeps its own complete evidence,
+receipts stay intact, and dependencies outside the population survive.
+Declaring-file and argument self-roots remain strict. Enum/function folds and
+compile-tier consumers retain their per-source observations
 so:
 
 - adding / removing an augmenter changes the augmenter-set fingerprint →
   consumer invalidates (G1);
-- editing one augmenter's body changes that file's whole hash → consumer
+- editing one augmenter's body or source environment changes the content identity → consumer
   invalidates;
 - editing an unrelated file (not in the augmenter set) leaves the signature
   valid → consumer warm-hits (R14 / R28 narrow scope).
@@ -2342,8 +2356,7 @@ Session(overlay-set fingerprint)}`. A `Base` scan filters to base
   entry the stitch produces, and `ComponentMetaResultDb` downstream of it — keep
   CONTENT-FREE keys: the overlay-set content fingerprint NEVER enters a
   query-identity key (R6). Overlay CONTENT identity is rooted on the VALUE's
-  `ReadSetSignature.facts` (the `ModuleAugmentationIndexShape` augmenter-set
-  fingerprint fact + per-contributor `FileWholeHash` anchors), revalidated
+  `ReadSetSignature.facts` (membership and population-content facts), revalidated
   against the live view on every warm hit — so a within-session overlay edit
   invalidates through facts, not through a new key. The base/session split is
   therefore enforced at VALIDATION, not in the key: the route-surface validator

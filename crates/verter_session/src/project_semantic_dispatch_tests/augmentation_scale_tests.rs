@@ -344,6 +344,325 @@ fn contributor_bodies_lower_once_in_batches_per_shard() {
     }
 }
 
+#[test]
+fn merged_contributor_content_observations_have_constant_width() {
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    use verter_session_query::facts::fact_read_set::FactReadSetFinalise;
+
+    for global in [true, false] {
+        let mut widths = Vec::new();
+        for size in [4, 8, 12] {
+            let host = contributor_host(size, global);
+            let (canonical, name) = if global {
+                ("/reg-0000.ts", "BenchRegistry")
+            } else {
+                ("/core.ts", "Props")
+            };
+            host.ingest_program_ambient_roots();
+            let files: Vec<_> = (0..size).map(|i| contributor(i, global).0).collect();
+            let _ = host.declaration_order(canonical, files.iter().map(String::as_str));
+            // Trace the stitched declaration itself. The indexed-access
+            // consumer has independent canonicalization source evidence.
+            // Settle publication before tracing the warm consumer's evidence.
+            let _cold = host
+                .resolve_named_symbol(canonical, name, Some(ProjectionMode::Expanded))
+                .expect("cold probe answers");
+            let (_warm, finalise) = crate::for_tests::install_fact_tracer_for_tests(&host, || {
+                host.resolve_named_symbol(canonical, name, Some(ProjectionMode::Expanded))
+                    .expect("warm probe answers")
+            });
+            let FactReadSetFinalise::Ok(facts) = finalise else {
+                panic!("stable merged probe must supply cacheable evidence: {finalise:?}");
+            };
+            let contributor_content_facts = facts
+                .iter()
+                .filter(|fact| {
+                    let canonical = match fact {
+                        FactVersionRef::FileWholeHash { canonical_id, .. }
+                        | FactVersionRef::FileSourceEnv { canonical_id, .. } => canonical_id,
+                        _ => return false,
+                    };
+                    (0..size).any(|i| contributor(i, global).0 == canonical.as_ref())
+                })
+                .count();
+            assert!(
+                contributor_content_facts <= 2,
+                "population content must replace contributor facts: global={global}, size={size}, count={contributor_content_facts}, facts={facts:?}"
+            );
+            let population_facts = facts.iter().filter(|fact| matches!(fact,
+                FactVersionRef::RouteSurface(route)
+                    if matches!(&route.key, verter_session_query::facts::FactKey::AugmentationPopulationContent { target_kind_tag, decl_name, .. }
+                        if decl_name.as_ref() == name && *target_kind_tag == if global {
+                            verter_session_query::facts::AugmentationTargetKindTag::GlobalAugmentation
+                        } else {
+                            verter_session_query::facts::AugmentationTargetKindTag::ResolvedRelativeCanonical
+                        })
+            )).count();
+            assert_eq!(population_facts, 1, "one stitch population: {facts:?}");
+            // Count the content evidence this boundary replaces. Independent
+            // syntactic route facts remain observable on the public lookup.
+            widths.push(contributor_content_facts + population_facts);
+        }
+        assert!(widths[2] <= widths[0] + 2,
+            "merged content evidence must stay constant as the population grows: global={global}, widths={widths:?}");
+    }
+}
+
+fn assert_merged_contributor_mutations(global: bool, i: usize) {
+    fn publish_population(host: &VerterHost, global: bool, files: &[String]) {
+        use verter_session_query::resolution::AugmentationTargetKind;
+        use verter_type_engine::resolver_core::request_ports::OwnedLowering;
+
+        host.ingest_program_ambient_roots();
+        // Settle the exact index publication before capturing the read's view.
+        // A pending index must not mask an omitted content-digest input.
+        let _ = OwnedLowering::augmentation_index_with_resolutions(
+            host,
+            AugmentationTargetKind::ResolvedRelativeCanonical(Arc::from("/core.ts")),
+        );
+        if global {
+            let _ = OwnedLowering::augmentation_index_with_resolutions(
+                host,
+                AugmentationTargetKind::GlobalAugmentation,
+            );
+        }
+        let _ = host.declaration_order("/core.ts", files.iter().map(String::as_str));
+    }
+
+    fn host_for(global: bool, sources: &[String], tsx: Option<usize>) -> VerterHost {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert_ts(
+            &host,
+            "/core.ts",
+            if global {
+                "interface Shared { base: -1 }"
+            } else {
+                "export interface Shared { base: -1 }"
+            },
+        );
+        for (i, source) in sources.iter().enumerate() {
+            let canonical = format!("/contributor-{i}.ts");
+            let _ = host
+                .upsert(UpsertRequest {
+                    canonical_id: Some(canonical.clone()),
+                    input_id: canonical.clone(),
+                    source: Arc::from(source.as_str()),
+                    file_language: FileLanguage::script(if tsx == Some(i) {
+                        verter_language::ScriptSourceType::Tsx
+                    } else {
+                        verter_language::ScriptSourceType::Ts
+                    }),
+                    aliases: Vec::new(),
+                })
+                .expect("publish cold contributor");
+            host.ensure_indexed_ready(&canonical).expect("indexed slot");
+        }
+        let files: Vec<_> = std::iter::once("/core.ts".to_owned())
+            .chain((0..sources.len()).map(|i| format!("/contributor-{i}.ts")))
+            .collect();
+        publish_population(&host, global, &files);
+        host
+    }
+    fn answer(host: &VerterHost) -> (BTreeSet<String>, u64) {
+        let node = host
+            .resolve_named_symbol("/core.ts", "Shared", Some(ProjectionMode::Expanded))
+            .expect("stitched declaration");
+        let builds_after_read = host
+            .project_type_store()
+            .semantic_graph()
+            .stats_snapshot()
+            .instantiate_count;
+        let ty = host
+            .project_node_to_type_expr_for_test(node.id())
+            .expect("complete object surface");
+        let verter_type_expr::TypeExpr::Object(shape) = &ty else {
+            panic!("expected a complete merged object, got {ty:?}");
+        };
+        let values = shape
+            .properties
+            .iter()
+            .map(|member| {
+                let verter_type_expr::ObjectMember::Property(property) = member else {
+                    panic!("numeric property fixture, got {member:?}");
+                };
+                match &property.ty {
+                    verter_type_expr::TypeExpr::Literal(
+                        verter_type_expr::LiteralValue::Number(value),
+                    ) => value.to_string(),
+                    other => panic!("expected every numeric contribution, got {other:?}"),
+                }
+            })
+            .collect();
+        (values, builds_after_read)
+    }
+    for operation in ["add", "edit", "language", "remove"] {
+        let mut sources: Vec<_> = (0..3).map(|other| {
+        if other == i && operation == "add" {
+            "export {};".to_owned()
+        } else if global {
+            format!("interface Shared {{ p{other}: {other} }}")
+        } else {
+            format!("export {{}}; declare module './core' {{ interface Shared {{ p{other}: {other} }} }}")
+        }
+    }).collect();
+        let host = host_for(global, &sources, None);
+        let files: Vec<_> = std::iter::once("/core.ts".to_owned())
+            .chain((0..sources.len()).map(|i| format!("/contributor-{i}.ts")))
+            .collect();
+        let mut tsx = None;
+        let graph = host.project_type_store().semantic_graph();
+        assert_eq!(answer(&host).0, answer(&host_for(global, &sources, tsx)).0);
+        let expected = answer(&host).0;
+        let before = graph.stats_snapshot().instantiate_count;
+        let (warm, builds_after_read) = answer(&host);
+        assert_eq!(warm, expected);
+        assert_eq!(
+            builds_after_read, before,
+            "warm control: global={global}, contributor={i}, operation={operation}"
+        );
+        sources[i] = match operation {
+            "language" => sources[i].clone(),
+            "remove" => "export {};".to_owned(),
+            _ => {
+                let value = i + if operation == "edit" { 10 } else { 0 };
+                if global {
+                    format!("interface Shared {{ p{i}: {value} }}")
+                } else {
+                    format!("export {{}}; declare module './core' {{ interface Shared {{ p{i}: {value} }} }}")
+                }
+            }
+        };
+        let canonical = format!("/contributor-{i}.ts");
+        if operation == "language" {
+            tsx = Some(i);
+            let old_hash = host.authoritative_current_content_hash(&canonical);
+            let _ = host
+                .upsert(UpsertRequest {
+                    canonical_id: Some(canonical.clone()),
+                    input_id: canonical.clone(),
+                    source: Arc::from(sources[i].as_str()),
+                    file_language: FileLanguage::script(verter_language::ScriptSourceType::Tsx),
+                    aliases: Vec::new(),
+                })
+                .expect("publish contributor language");
+            assert_eq!(
+                host.authoritative_current_content_hash(&canonical),
+                old_hash
+            );
+        } else {
+            tsx = None;
+            upsert_ts(&host, &canonical, &sources[i]);
+        }
+        host.ensure_indexed_ready(&canonical)
+            .expect("publish contributor artifact");
+        publish_population(&host, global, &files);
+        let before_read = graph.stats_snapshot().instantiate_count;
+        let (updated, builds_after_read) = answer(&host);
+        assert!(
+            builds_after_read > before_read,
+            "global={global}, contributor={i}, operation={operation}: the warm read must miss"
+        );
+        if operation == "language" {
+            assert_eq!(updated, expected, "unchanged source keeps the answer");
+        } else {
+            assert_ne!(
+                updated, expected,
+                "the changed contribution reaches the answer"
+            );
+        }
+        assert_eq!(
+            updated,
+            answer(&host_for(global, &sources, tsx)).0,
+            "global={global}, contributor={i}, operation={operation}: cold-host equivalence"
+        );
+    }
+}
+
+#[test]
+fn merged_contributor_global_0_mutations_reject_the_warm_answer() {
+    assert_merged_contributor_mutations(true, 0);
+}
+
+#[test]
+fn merged_contributor_global_1_mutations_reject_the_warm_answer() {
+    assert_merged_contributor_mutations(true, 1);
+}
+
+#[test]
+fn merged_contributor_global_2_mutations_reject_the_warm_answer() {
+    assert_merged_contributor_mutations(true, 2);
+}
+
+#[test]
+fn merged_contributor_module_0_mutations_reject_the_warm_answer() {
+    assert_merged_contributor_mutations(false, 0);
+}
+
+#[test]
+fn merged_contributor_module_1_mutations_reject_the_warm_answer() {
+    assert_merged_contributor_mutations(false, 1);
+}
+
+#[test]
+fn merged_contributor_module_2_mutations_reject_the_warm_answer() {
+    assert_merged_contributor_mutations(false, 2);
+}
+
+#[test]
+fn merged_contributor_evidence_keeps_dependencies_outside_the_population() {
+    for global in [true, false] {
+        let host = VerterHost::new_standalone(HostConfig::default());
+        upsert_ts(&host, "/dep.ts", "export type Value = 1;");
+        upsert_ts(
+            &host,
+            "/core.ts",
+            if global {
+                "interface Shared { base: 0 }"
+            } else {
+                "export interface Shared { base: 0 }"
+            },
+        );
+        upsert_ts(
+            &host,
+            "/contributor.ts",
+            &format!(
+                "import type {{ Value }} from './dep'; declare {} {{ interface Shared {{ dependency: Value }} }}",
+                if global { "global" } else { "module './core'" }
+            ),
+        );
+        host.ensure_indexed_ready("/contributor.ts")
+            .expect("indexed contributor");
+        upsert_ts(
+            &host,
+            "/read.ts",
+            if global {
+                "type Answer = Shared['dependency'];"
+            } else {
+                "import type { Shared } from './core'; type Answer = Shared['dependency'];"
+            },
+        );
+        let answer = || {
+            let node = host
+                .resolve_named_symbol("/read.ts", "Answer", Some(ProjectionMode::Expanded))
+                .expect("dependency answer");
+            host.project_node_to_type_expr_for_test(node.id())
+                .expect("projected dependency")
+        };
+        let first = answer();
+        assert_eq!(
+            first,
+            verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0))
+        );
+        assert_eq!(answer(), first);
+        upsert_ts(&host, "/dep.ts", "export type Value = 2;");
+        assert_eq!(
+            answer(),
+            verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::Number(2.0)),
+            "a dependency outside the contributor population must invalidate the answer"
+        );
+    }
+}
+
 /// A merged declaration read through `M[keyof M]` is instantiated under
 /// more than one projection context in one request (the index evaluates
 /// `keyof M` published, the access reads `M` in structural transit). Its

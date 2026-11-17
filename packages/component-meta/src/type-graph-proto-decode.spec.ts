@@ -289,11 +289,14 @@ describe("decodeTypedComponentMetaPayload", () => {
     },
   );
 
-  it.each([1, 2, 3])("decodes a supplied unknown node with absence %s", (absence) => {
+  it.each([1, 2])("decodes a supplied unknown node with absence %s", (absence) => {
     const fixture = factFixture();
     const prop = fixture.body!.facts!.props!.value!.entries![0]!;
     prop.publication = { kind: 2, absence, provenance: 1 };
     prop.requiredFact = { guarantee: { kind: 1, causes: [] }, value: false };
+    // The supplied node replaces the base row's named reference, so the
+    // row keeps none of that reference's display text either.
+    prop.terminalDisplay = { textId: 0 };
     fixture.typeGraph!.nodes![Number(prop.typeNodeId) - 1] = {
       kind: { case: "primitive", value: { primitive: 7 } },
     };
@@ -301,8 +304,7 @@ describe("decodeTypedComponentMetaPayload", () => {
       toBinary(FactPayloadSchema, create(FactPayloadSchema, fixture)),
     );
     const nativeProp = decoded.props![0]!;
-    const expectedAbsence =
-      absence === 1 ? "unannotated" : absence === 2 ? "branchDivergent" : "unclassifiedConstructor";
+    const expectedAbsence = absence === 1 ? "unannotated" : "branchDivergent";
     expect(nativeProp.typeFact).toEqual({
       kind: "complete",
       value: nativeProp.type,

@@ -3530,6 +3530,67 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
                 self.snapshot.roots.program_file_order_fingerprint(program)
                     == Some(fact.expected_hash)
             }
+            FactKey::AugmentationPopulationContent {
+                target_kind_tag,
+                external_specifier,
+                resolved_relative_canonical,
+                wildcard_pattern,
+                decl_name,
+            } => {
+                let Some(target) = augmentation_target_kind_from_shape(
+                    *target_kind_tag,
+                    external_specifier.as_ref().map(|s| s.as_ref()),
+                    resolved_relative_canonical.as_deref(),
+                    wildcard_pattern.as_ref().map(|s| s.as_ref()),
+                ) else {
+                    return false;
+                };
+                let population = self.augmentation_population();
+                let overlay = match population {
+                    crate::file_artifact_store::AugmentationPopulation::Base => None,
+                    crate::file_artifact_store::AugmentationPopulation::Session(fingerprint) => {
+                        Some(
+                            crate::session_view::overlay_artifact_discriminator_for_fingerprint(
+                                fingerprint,
+                            ),
+                        )
+                    }
+                };
+                let Some((augmenters, contributors)) =
+                    self.snapshot.roots.augmentation_content_population(
+                        target,
+                        decl_name.as_ref(),
+                        population,
+                        overlay,
+                    )
+                else {
+                    return false;
+                };
+                if verter_session_query::source::augmentation_keys::join_augmentation_population_content(
+                    augmenters.content_fingerprint, contributors.content_fingerprint,
+                ) != fact.expected_hash {
+                    return false;
+                }
+                // A publication is a content identity, never a licence to
+                // accept an untracked source or an environment that moved
+                // before its replacement artifact was published.
+                let source_is_current =
+                    |key: &verter_session_query::source::artifact_key::FileArtifactKey,
+                     source_parse_env_hash| {
+                        self.validates_self_root_whole_hash(&key.canonical, &key.content_hash)
+                        && self.validates_file_source_env(
+                            &key.canonical,
+                            verter_session_query::facts::fact_cache::ParseEnvHash::from_env_hash(source_parse_env_hash),
+                            &key.parse_key,
+                            &key.file_language_id,
+                        )
+                    };
+                augmenters.entries.iter().all(|entry| {
+                    source_is_current(&entry.artifact_key, entry.source_parse_env_hash)
+                }) && contributors.entries.iter().all(|entry| {
+                    source_is_current(&entry.artifact_key, entry.source_parse_env_hash)
+                })
+            }
             // Other parse-domain / resolve-domain keys do not belong
             // to the route-surface domain; the dispatch layer guards
             // against this so the match is exhaustive defensively.

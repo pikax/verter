@@ -377,7 +377,7 @@ impl RuntimeConstructorIdentity {
 
     /// The closed primitive fact this identity folds to, for the identities
     /// that HAVE one. `None` means "no closed primitive fact exists for this
-    /// identity". It is not evidence of an unannotated position.
+    /// identity" — the caller keeps its existing display-text-only route.
     /// Exhaustive over the enum: adding an arm is a compile error here.
     #[must_use]
     pub const fn primitive(&self) -> Option<PrimitiveName> {
@@ -4481,9 +4481,6 @@ pub enum SchemaAbsence {
     /// the merged row has no single representable source, proven by the
     /// branch fold itself.
     BranchDivergent,
-    /// A runtime constructor annotation exists, but its instance type is
-    /// outside the producer's closed primitive classification.
-    UnclassifiedConstructor,
 }
 
 /// A typed source-construction failure at a REQUIRED source position. The
@@ -4570,6 +4567,25 @@ impl SourcePosition {
     #[must_use]
     pub fn unannotated() -> Self {
         SourcePosition::Absent(SchemaAbsence::Unannotated)
+    }
+
+    /// The runtime-object member-value policy, shared by every runtime-props
+    /// route: a runtime prop declared with a constructor that has no closed
+    /// primitive (`Date`, `Object`, `[String, Date]`) publishes a PRESENT
+    /// closed `unknown` member value — `Present(Closed(Leaf(Primitive(Unknown))))`.
+    /// The constructor is an annotation, so the position is never
+    /// [`unannotated`](Self::unannotated); its real type is not re-derived,
+    /// so the value is the honest `unknown`.
+    ///
+    /// This is the same policy the type engine's runtime-object macro surface
+    /// applies through `unknown_member_value_node` for `defineProps({...})`;
+    /// the Options API `props: {...}` route publishes it through this
+    /// constructor so both routes agree.
+    #[must_use]
+    pub fn runtime_member_value_unknown() -> Self {
+        SourcePosition::Present(SemanticTypeSource::Closed(ClosedTypeFact::Leaf(
+            LeafTypeFact::Primitive(PrimitiveName::Unknown),
+        )))
     }
 
     /// The present source, when this position carries one. `Absent` and

@@ -92,7 +92,7 @@ export type NativeTypePublication =
     }
   | {
       kind: "absent";
-      absence: "unannotated" | "branchDivergent" | "unclassifiedConstructor";
+      absence: "unannotated" | "branchDivergent";
       provenance: NativeResolutionProvenance;
     }
   | {

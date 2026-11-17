@@ -78,7 +78,16 @@ impl<'a> AugmentationRequestDriver<'a> {
                 for entry in &existing.entries {
                     match current(entry.canonical()) {
                         Some(key) if key.canonical == entry.artifact_key.canonical => {
-                            unchanged &= key == entry.artifact_key;
+                            if let Some(artifact) = self.db.get_artifacts(&key) {
+                                unchanged &= key == entry.artifact_key
+                                    && artifact.indexed.parse_env_hash
+                                        == entry.source_parse_env_hash;
+                            } else {
+                                unchanged = false;
+                                retainable = false;
+                                verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                                    verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource);
+                            }
                         }
                         _ => {
                             unchanged = false;
@@ -149,6 +158,7 @@ impl<'a> AugmentationRequestDriver<'a> {
             if !matching.is_empty() && seen_canonicals.insert(Arc::clone(&candidate.canonical)) {
                 matched.push(AugmenterEntry {
                     artifact_key: candidate.clone(),
+                    source_parse_env_hash: artifact.indexed.parse_env_hash,
                     parse_stable_hash: artifact.parse_stable_hash,
                     population_hash:
                         verter_session_query::source::augmentation::augmentation_population_hash(
@@ -163,10 +173,7 @@ impl<'a> AugmentationRequestDriver<'a> {
         let augmenter_count = matched.len() as u32;
         let fingerprint = compute_augmenter_set_fingerprint(&matched);
         let entries: SmallVec<[AugmenterEntry; 2]> = matched.into_iter().collect();
-        let set = Arc::new(AugmenterSet {
-            entries,
-            fingerprint,
-        });
+        let set = Arc::new(AugmenterSet::new(entries, fingerprint));
 
         // A set fed by a resolution the process did not keep (or could not
         // trust) answers this request only: the shared index never holds it.
@@ -175,7 +182,7 @@ impl<'a> AugmentationRequestDriver<'a> {
         }
 
         // Passive publication retains the shared route-surface clock bracket and
-        // changes artifact generation only when the fingerprint changes.
+        // changes artifact generation when shape or content identity changes.
         let Some(prev) =
             self.db
                 .populate_augmenter_set_at_root(key.clone(), Arc::clone(&set), &scan_root)

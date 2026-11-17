@@ -43,8 +43,8 @@ use verter_macro_dto::{
     MacroAnchor, MacroFailure, MacroInvalidReason, MacroPartialReason, MacroTscBundle,
     MacroTscOutcome, MacroTscProjection, SynthesizedRowKind, TscBindingUsage,
     TscDeclarationFailureReason, TscExposeMemberType, TscInferredClassMember,
-    TscInferredClassTypePosition, TscOwnerValueDependency, TscPublicPropsProjection,
-    TscRetainedValueCarrier, TscScopeRequirements, TscScriptOwner,
+    TscInferredClassTypePosition, TscModelProjection, TscOwnerValueDependency, TscPropRow,
+    TscPublicPropsProjection, TscRetainedValueCarrier, TscScopeRequirements, TscScriptOwner,
     TscSemanticInferenceUnavailableReason, UnresolvedReason, UnsupportedReason,
 };
 use verter_parser::oxc_parse::Parser;
@@ -78,7 +78,7 @@ declare function defineExpose<Exposed extends Record<string, any> = Record<strin
 declare function defineOptions(options: Record<string, unknown>): void\n\
 declare function defineSlots<Slots extends Record<string, any>>(): Slots\n\
 declare function withDefaults<Props, Defaults extends Partial<Props>>(props: Props, defaults: Defaults): Omit<Props, keyof Defaults> & { [K in keyof Defaults]-?: K extends keyof Props ? Exclude<Props[K], undefined> : never }\n\
-declare function defineModel<Model = unknown>(nameOrOptions?: string | unknown, options?: unknown): import(\"vue\").Ref<Model | undefined>\n";
+declare function defineModel<Model = unknown, Modifiers extends PropertyKey = string>(nameOrOptions?: string | unknown, options?: unknown): import(\"vue\").Ref<Model | undefined>\n";
 
 const TERMINAL_EMITS_TO_PROPS_TYPE: &str = "type __Verter_EmitsToProps<T> = T extends (...args: infer A) => any ? A extends [infer E extends string, ...infer P] ? { [K in E as `on${Capitalize<K>}`]?: (...args: P) => void } : {} : T extends Record<string, any> ? { [K in keyof T as K extends string ? `on${Capitalize<K>}` : never]?: (...args: T[K] extends any[] ? T[K] : T[K] extends (...args: infer P) => any ? P : unknown[]) => void } : {}\n";
 
@@ -1159,7 +1159,20 @@ struct ModelEntry {
     name: String,
     optional: bool,
     ts_type: String,
+    modifiers_prop: TscPropRow,
     map_span: Option<Span>,
+}
+
+impl ModelEntry {
+    fn from_projection(model: &TscModelProjection, map_span: Option<Span>) -> Self {
+        Self {
+            name: model.name.clone(),
+            optional: model.optional,
+            ts_type: model.value_type.as_str().to_owned(),
+            modifiers_prop: model.modifiers_prop.clone(),
+            map_span,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -3757,7 +3770,14 @@ fn build_macro_state<'a>(
                         authored_props: None,
                     });
                 } else {
-                    process_model(*span, *name, *name_span, content_offset, &mut state);
+                    process_model(
+                        *span,
+                        *name,
+                        *name_span,
+                        content_offset,
+                        effective_macro_index,
+                        &mut state,
+                    );
                 }
             }
             ScriptMacro::WithDefaults {
@@ -3961,12 +3981,27 @@ fn apply_tsc_bundle(
             (TscSemanticRole::Model { name }, MacroTscProjection::Model(model))
                 if name == &model.name =>
             {
-                state.models.push(ModelEntry {
-                    name: model.name.clone(),
-                    optional: model.optional,
-                    ts_type: model.value_type.as_str().to_string(),
-                    map_span: macro_anchor_span(&slot, model.anchor)?,
-                });
+                if model.modifiers_prop.name != verter_macro_dto::model_modifiers_prop_name(name)
+                    || !model.modifiers_prop.optional
+                {
+                    return Err(TscGenerationError::RoleMismatch {
+                        subject: TscFailureSubject::macro_syntax(slot.syntax_index),
+                    });
+                }
+                if model.modifiers_prop.anchor
+                    != (MacroAnchor::Synthesized {
+                        macro_index: slot.effective_macro_index,
+                        row: SynthesizedRowKind::ModelModifiersProp,
+                    })
+                {
+                    return Err(TscGenerationError::InvalidMacroAnchor {
+                        subject: TscFailureSubject::macro_syntax(slot.syntax_index),
+                    });
+                }
+                state.models.push(ModelEntry::from_projection(
+                    model,
+                    macro_anchor_span(&slot, model.anchor)?,
+                ));
                 apply_scope_requirements(state, &model.scope, slot.syntax_index)?;
             }
             _ => {
@@ -4801,17 +4836,17 @@ fn process_model(
     name: Option<&str>,
     name_span: Option<Span>,
     content_offset: u32,
+    macro_index: u32,
     state: &mut TscMacroState,
 ) {
-    state.models.push(ModelEntry {
-        name: name.unwrap_or("modelValue").to_string(),
-        optional: true,
-        ts_type: "unknown".to_string(),
-        map_span: Some(local_to_sfc_span(
+    let projection = TscModelProjection::untyped(name.unwrap_or("modelValue"), true, macro_index);
+    state.models.push(ModelEntry::from_projection(
+        &projection,
+        Some(local_to_sfc_span(
             name_span.unwrap_or(macro_span),
             content_offset,
         )),
-    });
+    ));
 }
 
 fn process_slots(
@@ -6915,7 +6950,11 @@ fn render_model_props_type(models: &[ModelEntry]) -> Vec<RenderedText> {
             }
             rendered.push_str("?: (v: ");
             rendered.push_str(&model.ts_type);
-            rendered.push_str(") => void }");
+            rendered.push_str(") => void; ");
+            rendered.push_str(&render_member_key(&model.modifiers_prop.name));
+            rendered.push_str("?: ");
+            rendered.push_str(model.modifiers_prop.type_text.as_str());
+            rendered.push_str(" }");
             rendered
         })
         .collect()

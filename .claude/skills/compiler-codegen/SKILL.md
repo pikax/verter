@@ -324,6 +324,17 @@ splice. A property-form emits tuple remains one terminal rest-tuple parameter
 `handler_parameters`; flattening it to `value: T` loses the authored tuple
 shape and is forbidden.
 
+`TscModelProjection` owns the value row and the optional `modifiers_prop` row.
+The latter uses `ModelModifiersProp` identity and is emitted by the same
+`render_model_props_type` used for constructor props and `$props`. Typed modifier
+records replay the analyzer's retained model `Field(1)` payload through the shared
+source-raise and TSC render funnel: explicit M becomes `Partial<Record<M, true>>`,
+otherwise `Record<string, true | undefined>`. `Field(0)` remains the value type.
+The syntax-only unannotated model path uses the same projection schema and renderer.
+The retained Testing-body macro declaration accepts Vue's second modifier type
+parameter (`extends PropertyKey = string`); public modifiers prop types still
+come exclusively from the model projection.
+
 Profile-aware public-API projection treats a script/content block override as
 an immutable one-file session overlay. The batch fixed view, TypeInfo macro
 producer (`SessionResolverContext`), syntax extraction, and whole-hash revision

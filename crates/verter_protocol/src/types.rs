@@ -1612,7 +1612,6 @@ pub enum FfiTypePublicationFailure {
 pub enum FfiTypePublicationAbsence {
     Unannotated,
     BranchDivergent,
-    UnclassifiedConstructor,
 }
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]

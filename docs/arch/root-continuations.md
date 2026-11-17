@@ -2296,6 +2296,22 @@ compares the exact cold synchronous receipt and checks completed-member work.
 Internal relation/inference stages, winner processing and nested queries
 evaluated inside other synchronous adapters still require continuation conversion.
 
+A failed call relation's explanation (`checker_relation_failure`,
+`call_resolve_elaboration.rs`) is a named exception: it reads in place on a
+frame and its reads are counted and attributed to it. Its own step-picking
+reads (call signatures, structural facts, carrier settles) sit at 28 call
+sites inside a mutually recursive walk: the explanation re-enters itself,
+runs a nested explanation inside its property loop, holds positions in six
+loops across a read and threads a borrowed site, chain and overflow memo.
+Holding its position across a suspension would mean rewriting the walk as
+an explicit frame machine of about eight frame kinds, run by the in-place
+drive as well, which replaces the explanation wholesale; replaying it over
+delivered answers would be re-execution. The exception covers its operand
+printing too (object-spread and mapped-object projections). Converting it
+is warranted only when a diagnostic on a frame must suspend; its signature
+reads could then reuse the frame-side signature-list device the contextual
+call already steps.
+
 Family continuations (above) cover declaration lookups along their
 import/export route, macro payloads, intersection reductions, overload
 sets, apparent types with their global

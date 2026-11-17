@@ -451,11 +451,7 @@ fn validate_model_shape(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> bool {
     let expected_name = slot.model_name.as_deref().unwrap_or("modelValue");
-    let expected_modifiers = if expected_name == "modelValue" {
-        "modelModifiers".to_owned()
-    } else {
-        format!("{expected_name}Modifiers")
-    };
+    let expected_modifiers = verter_macro_dto::model_modifiers_prop_name(expected_name);
     if model.prop.name != expected_name
         || model.update_event.name != format!("update:{expected_name}")
         || model.modifiers_prop.name != expected_modifiers

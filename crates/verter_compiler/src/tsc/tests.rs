@@ -36,6 +36,7 @@ enum TscFixture<'a> {
         name: &'a str,
         optional: bool,
         value_type: &'a str,
+        modifiers_type: &'a str,
         imports: &'a [&'a str],
         declarations: &'a [(&'a str, &'a str)],
     },
@@ -249,6 +250,7 @@ fn model_fixture_identity<'a>(
         name,
         optional: true,
         value_type,
+        modifiers_type: "Record<string, true | undefined>",
         imports,
         declarations,
     }
@@ -350,6 +352,7 @@ fn fixture_bundle(fixtures: &[TscFixture<'_>]) -> MacroTscBundle {
                     name,
                     optional,
                     value_type,
+                    modifiers_type,
                     imports,
                     declarations,
                 } => MacroTscEntry {
@@ -360,6 +363,11 @@ fn fixture_bundle(fixtures: &[TscFixture<'_>]) -> MacroTscBundle {
                             name: (*name).to_owned(),
                             optional: *optional,
                             value_type: TscSpliceText::new(*value_type),
+                            modifiers_prop: TscPropRow::model_modifiers(
+                                name,
+                                TscSpliceText::new(*modifiers_type),
+                                *anchor_macro_index,
+                            ),
                             anchor: MacroAnchor::Synthesized {
                                 macro_index: *anchor_macro_index,
                                 row: SynthesizedRowKind::ModelProp,
@@ -709,6 +717,20 @@ withDefaults(defineProps<{ value?: string }>(), { value: "x" })
         super::script::TscGenerationError::InvalidMacroAnchor {
             subject: macro_subject(0),
         }
+    );
+
+    let mut wrong_modifiers_anchor = fixture_bundle(&[model_fixture("title", "string")]);
+    let MacroTscOutcome::Complete(MacroTscProjection::Model(model)) =
+        &mut wrong_modifiers_anchor.entries[0].outcome
+    else {
+        unreachable!()
+    };
+    model.modifiers_prop.anchor = model.anchor;
+    assert_eq!(
+        generate_with_bundle(model_source, TscMode::Public, &wrong_modifiers_anchor).unwrap_err(),
+        super::script::TscGenerationError::InvalidMacroAnchor {
+            subject: macro_subject(0)
+        },
     );
 }
 
@@ -2403,6 +2425,36 @@ const val = defineModel('value')
         r.contains("value?: unknown"),
         "TS type is unknown without type param"
     );
+}
+
+#[test]
+fn tsc_codegen_define_model_modifiers_props() {
+    for (call, name, typed_modifiers) in [
+        ("defineModel()", "modelModifiers", None),
+        ("defineModel('count')", "countModifiers", None),
+        (
+            "defineModel<string, 'trim' | 'lazy'>()",
+            "modelModifiers",
+            Some("Partial<Record<'trim' | 'lazy', true>>"),
+        ),
+    ] {
+        let source = format!("<script setup lang=\"ts\">const model = {call}</script><template/>");
+        let output = if let Some(modifier_type) = typed_modifiers {
+            let mut fixture = model_fixture("modelValue", "string");
+            if let TscFixture::Model { modifiers_type, .. } = &mut fixture {
+                *modifiers_type = modifier_type;
+            }
+            gen_tsc_with(&source, &[fixture])
+        } else {
+            gen_tsc(&source)
+        };
+        assert_generated_tsx_parses(&output);
+        let modifier_type = typed_modifiers.unwrap_or("Record<string, true | undefined>");
+        assert!(
+            output.contains(&format!("{name}?: {modifier_type}")),
+            "{call}: missing optional modifiers prop in declaration:\n{output}"
+        );
+    }
 }
 
 // ── defineModel with imported type ──────────────────────────────────────────

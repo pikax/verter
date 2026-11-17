@@ -8,7 +8,7 @@ export type FactResult<T> =
       readonly value: T;
       readonly open?: boolean;
       /** The wire publication's absence reason, independent of any supplied descriptor. */
-      readonly absence?: "unannotated" | "branchDivergent" | "unclassifiedConstructor";
+      readonly absence?: "unannotated" | "branchDivergent";
     }
   | {
       readonly kind: "approximate";

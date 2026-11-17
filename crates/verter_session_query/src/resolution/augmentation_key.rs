@@ -150,6 +150,9 @@ pub struct AugmentationTargetKey {
 pub struct AugmenterEntry {
     /// Exact content-addressed key of the augmenter artifact.
     pub artifact_key: crate::source::artifact_key::FileArtifactKey,
+    /// Actual parse environment of the publication, separate from the key's
+    /// base sentinel or session discriminator.
+    pub source_parse_env_hash: Hash16,
     /// Required content-free matching binding membership and exact owners.
     pub population_hash: Hash16,
     /// Structural content metadata of the captured artifact; not population evidence.
@@ -173,4 +176,23 @@ pub struct AugmenterSet {
     /// Cached `stable_hash(entries)` — the basis of
     /// `ModuleAugmentationIndexShape`.
     pub fingerprint: Hash16,
+    /// Whole-content and source-environment identity, published with entries.
+    pub content_fingerprint: Hash16,
+}
+
+impl AugmenterSet {
+    /// Publish the content identity with the exact population it describes.
+    pub fn new(entries: smallvec::SmallVec<[AugmenterEntry; 2]>, fingerprint: Hash16) -> Self {
+        let content_fingerprint =
+            crate::source::augmentation_keys::augmentation_population_content_fingerprint(
+                entries
+                    .iter()
+                    .map(|entry| (&entry.artifact_key, entry.source_parse_env_hash)),
+            );
+        Self {
+            entries,
+            fingerprint,
+            content_fingerprint,
+        }
+    }
 }

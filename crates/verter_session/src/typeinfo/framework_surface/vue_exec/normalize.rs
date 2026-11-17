@@ -71,7 +71,7 @@ use verter_type_engine::semantic_query::{
 ///   value-type position never degrades to a fabricated `unknown` success.
 ///
 /// `defineModel` does NOT carry an object type argument; its surface has no
-/// named members and the synthesized model prop is appended from the analyzer
+/// named members and synthesized value and modifiers props come from the analyzer
 /// facts ([`AnalyzedMacroKind::DefineModel`]'s `prop_fields`).
 #[must_use]
 pub(crate) fn props_from_typeinfo_surface<C: crate::session_attachment::SessionCapabilities>(
@@ -84,8 +84,8 @@ pub(crate) fn props_from_typeinfo_surface<C: crate::session_attachment::SessionC
     // host the active `ctx` is installed against; the view-sensitive type
     // resolution (`raise_member_value`) flows through `ctx`.
 
-    // `defineModel` contributes its synthesized model prop directly from the
-    // analyzer facts (the type argument is the model VALUE type).
+    // `defineModel` contributes both synthesized props from analyzer facts;
+    // its first type argument is the model VALUE, not a props object.
     if macro_surface.macro_kind == AnalyzedMacroKind::DefineModel {
         return model_prop_fields(ctx, resolved);
     }
@@ -676,11 +676,11 @@ fn closed_tuple_fact<C: verter_type_engine::resolver_core::ResolverCapabilities>
     })
 }
 
-/// Build the `defineModel` synthesized prop field from the analyzer facts.
+/// Build the `defineModel` synthesized prop fields from the analyzer facts.
 /// `defineModel<T>('name', { … })` synthesizes a prop named `name`
-/// (default `modelValue`) typed `T`; the analyzer already captured this as the
-/// macro's single `prop_fields` entry. Re-scope the typed form to the SFC owner
-/// so nested `Ref`s resolve in the SFC.
+/// (default `modelValue`) typed `T`, plus an optional modifiers record. The
+/// analyzer captures both `prop_fields` entries. Re-scope payloads to the SFC
+/// owner so nested `Ref`s resolve there.
 ///
 /// The owner SFC's `IndexedReady` is fetched through the ACTIVE `ctx`
 /// (`ctx.ensure_indexed_ready_serve`), NOT the base `VerterHost`, so an overlay
@@ -703,7 +703,7 @@ pub(crate) fn model_prop_fields<C: verter_type_engine::resolver_core::ResolverCa
     mac.prop_fields
         .iter()
         .map(|field| {
-            // The analyzer stamps an empty scope on the synthesized model prop;
+            // The analyzer stamps an empty scope on synthesized payloads;
             // re-anchor it to the SFC owner so the pairing invariant
             // (`payload.is_some() <=> type_expr_scope.is_some()`) holds with a
             // real scope.
@@ -711,8 +711,8 @@ pub(crate) fn model_prop_fields<C: verter_type_engine::resolver_core::ResolverCa
                 .payload
                 .as_ref()
                 .map(|_| TypeExprScope::new(macro_surface.owner_canonical.as_ref()));
-            // The synthesized model prop's SOURCE is its own authored
-            // type-argument payload position (`defineModel<T>()`'s T); an
+            // The value payload replays T; the modifiers payload derives its
+            // record from M through the same retained call. An
             // UNTYPED `defineModel()` has no annotation — a PROVEN
             // unannotated schema absence, never a fabricated `unknown`
             // value and never a required-position failure.

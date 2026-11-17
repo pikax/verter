@@ -986,6 +986,20 @@ pub fn project_macro_argument_surface_claim<C: crate::resolver_core::ResolverCap
     let Some(mac) = indexed.snapshot.macros.get(macro_index) else {
         return SurfaceResolution::no_surface();
     };
+    // `defineModel` does NOT carry a props OBJECT type argument — its type
+    // argument is the model VALUE type (`defineModel<string>()`), which has
+    // no one-level member surface. Its props come from the analyzer-
+    // synthesized value and modifiers props (`AnalyzedMacro.prop_fields`), so the macro
+    // surface is the EMPTY object surface.
+    if macro_kind == AnalyzedMacroKind::DefineModel {
+        return SurfaceResolution::resolved(MacroArgumentSurface {
+            surface: OneLevelSurface::empty(),
+            macro_call_span: mac.span,
+            // The empty model surface projects nothing — no arms.
+            unresolved_surface_arms: Vec::new(),
+        });
+    }
+
     if !mac.is_type_based {
         // A runtime `defineExpose({...})` / `defineProps({...})` / `defineEmits(...)`
         // has no type argument to lower, but the analyzer already
@@ -1001,20 +1015,6 @@ pub fn project_macro_argument_surface_claim<C: crate::resolver_core::ResolverCap
             Some(surface) => SurfaceResolution::resolved(surface),
             None => SurfaceResolution::no_surface(),
         };
-    }
-
-    // `defineModel` does NOT carry a props OBJECT type argument — its type
-    // argument is the model VALUE type (`defineModel<string>()`), which has
-    // no one-level member surface. Its props come from the analyzer-
-    // synthesized model prop (`AnalyzedMacro.prop_fields`), so the macro
-    // surface is the EMPTY object surface.
-    if macro_kind == AnalyzedMacroKind::DefineModel {
-        return SurfaceResolution::resolved(MacroArgumentSurface {
-            surface: OneLevelSurface::empty(),
-            macro_call_span: mac.span,
-            // The empty model surface projects nothing — no arms.
-            unresolved_surface_arms: Vec::new(),
-        });
     }
 
     if mac.parsed_type_argument.is_none() {
@@ -1140,6 +1140,7 @@ pub fn project_macro_argument_surface_claim<C: crate::resolver_core::ResolverCap
 /// not re-derived by [`runtime_object_macro_surface`]. Content-addressed like
 /// every other `intern_node` call: repeated calls across members / requests
 /// collapse onto the same node.
+/// Same policy as `verter_type_expr::facts::SourcePosition::runtime_member_value_unknown`.
 fn unknown_member_value_node<C: crate::resolver_core::ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
 ) -> SemanticNodeId {

@@ -43,6 +43,25 @@ import type { TypeDescriptor } from "@verter/type-ir";
 
 let nextProjectRootId = 1;
 
+describe("model modifiers props", () => {
+  it.each([
+    ["defineModel()", "modelValue", "modelModifiers"],
+    ["defineModel('count')", "count", "countModifiers"],
+    ["defineModel<string, 'trim'>()", "modelValue", "modelModifiers"],
+  ])("publishes the optional modifiers prop for %s", async (call, valueName, modifiersName) => {
+    const checker = await createRuntimeChecker();
+    try {
+      checker.updateFile("Model.vue", `<script setup lang="ts">const model = ${call}</script>`);
+      const meta = await checker.getComponentMeta("Model.vue");
+      expect(meta.props.map((prop) => prop.name)).toEqual([valueName, modifiersName]);
+      expect(meta.props.find((prop) => prop.name === modifiersName)?.required).toBe(false);
+      expect(meta.events.map((event) => event.name)).toEqual([`update:${valueName}`]);
+    } finally {
+      checker.close();
+    }
+  });
+});
+
 async function createRuntimeChecker(
   name = "component-meta-checker",
 ): Promise<ComponentMetaChecker> {

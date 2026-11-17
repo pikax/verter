@@ -123,6 +123,9 @@ fn may_absorb_a_literal(
 
 #[path = "tuple_product.rs"]
 mod tuple_product;
+
+#[path = "augmentation_population_reads.rs"]
+mod population_reads;
 pub(super) use tuple_product::ExpressionSplice;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -177,14 +180,9 @@ pub(super) type EffectivePreparedValueDecl = (
     verter_retention::heap_size::OwnedValue<verter_session_query::type_solver::PreparedValueDecl>,
 );
 
-/// One folded cross-file augmentation contributor: its version self-root
-/// (`canonical` + the `FileWholeHash` the body was lowered from) TOGETHER
-/// WITH the exact artifact key the contributor's locator-backed body read
-/// served from. One carrier BY CONSTRUCTION: a contributor cannot enter the
-/// parent's `self_root_canonicals` without its source-env identity — the
-/// version-root fields and the `artifact_key` are inseparable, and the fact
-/// emission records the contributor's `FileWholeHash` observation AND its
-/// `FileSourceEnv` observation from the SAME element in one step.
+/// One folded contributor's exact served source identity. Type-body folds
+/// check it against their published population evidence; enum/function folds
+/// emit paired `FileWholeHash` and `FileSourceEnv` facts from this carrier.
 #[derive(Clone)]
 struct AugmentationContributorRoot {
     canonical: verter_type_expr::OwnedStr,
@@ -194,12 +192,10 @@ struct AugmentationContributorRoot {
 
 /// Result of a cross-file declaration-augmentation stitch
 /// ([`ProjectSemanticDispatch::stitch_module_augmentations`]): the folded
-/// [`SemanticNodeData::MergedDecl`] node plus the per-augmenter
-/// [`AugmentationContributorRoot`]s whose `(canonical, whole_hash)` version
-/// roots must enter the cached value's `self_root_canonicals`.
+/// [`SemanticNodeData::MergedDecl`] node and source-observation status.
+/// The recorded population fact carries its contributor content evidence.
 struct AugmentationStitch {
     merged: SemanticNodeId,
-    contributor_roots: Vec<AugmentationContributorRoot>,
     /// `true` when a contributor's coherent source-env identity could not
     /// be observed (a torn / unhealable augmenter entry): the parent result
     /// is served but never warm-admitted.
@@ -266,6 +262,7 @@ pub(crate) struct PlannedContributorBody {
 /// dispatch transaction (see [`ProjectSemanticDispatch::collect_augmentation_contributions`]).
 pub(crate) struct AugmentationPlan {
     bodies: Vec<PlannedContributorBody>,
+    population_evidence: Arc<population_reads::PopulationEvidence>,
     contributor_roots: Vec<AugmentationContributorRoot>,
     source_env_unobservable: bool,
     base_position: Option<usize>,
@@ -299,7 +296,7 @@ enum FoldedAugmentation {
     /// contributors' retained declarations alone, never by the declaration's
     /// arguments or projection context, so it answers every instantiation of
     /// the declaration alike.
-    Absent,
+    Absent(Option<Arc<population_reads::PopulationEvidence>>),
 }
 
 impl FoldedAugmentation {
@@ -309,7 +306,7 @@ impl FoldedAugmentation {
                 Some(TransactionFold::Contributions(contributions))
             }
             Self::Plan(plan) => Some(TransactionFold::Plan(Arc::new(plan))),
-            Self::Absent => None,
+            Self::Absent(_) => None,
         }
     }
 }
@@ -6810,7 +6807,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Performed while `(decl_canonical, decl_name)` is still on the
         // instantiate-active stack so a self-referential augmenter body
         // terminates at the recursive-ref back-edge instead of recursing.
-        let mut augmenter_contributor_roots: Vec<AugmentationContributorRoot> = Vec::new();
         let mut augmentation_source_env_unobservable = false;
         // An enum's member union already holds every block's members, an
         // augmenting block's included: it is no type body to merge.
@@ -6819,7 +6815,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.stitch_module_augmentations(decl_canonical, decl_name, result, scope, context)
             {
                 result = stitch.merged;
-                augmenter_contributor_roots = stitch.contributor_roots;
                 augmentation_source_env_unobservable = stitch.source_env_unobservable;
             }
             // A GLOBAL interface's other declarations — every other
@@ -6841,7 +6836,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     context,
                 ) {
                     result = stitch.merged;
-                    augmenter_contributor_roots.extend(stitch.contributor_roots);
                     augmentation_source_env_unobservable |= stitch.source_env_unobservable;
                 }
             }
@@ -6917,20 +6911,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 observed_self_roots.push(arg_root);
             }
         }
-        // Cross-file augmentation self-roots: each contributor root's
-        // `(canonical, whole_hash)` (`self_root_canonicals = {base} ∪
-        // {augmenters}`), so a content edit to ANY augmenter misses the warm
-        // read. Every root entering here already carried its artifact key
-        // through the fold, so its `FileSourceEnv` observation is on this
-        // build's read-set by construction.
-        let mut seen_roots: rustc_hash::FxHashSet<_> =
-            observed_self_roots.iter().cloned().collect();
-        for aug_root in augmenter_contributor_roots {
-            let root = (aug_root.canonical, aug_root.whole_hash);
-            if seen_roots.insert(root.clone()) {
-                observed_self_roots.push(root);
-            }
-        }
+        // The stitch's population content fact roots its contributors.
+        // Declaring-file and argument self-roots remain strict above.
         let unresolved_owner_debt = authored_resolution_debt
             .as_ref()
             .is_some_and(|debt| debt.finish());
@@ -6991,10 +6973,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///
     /// Returns `None` when there are no contributing augmenters (the caller
     /// keeps `base_result` unchanged). On a hit it returns the merged node and
-    /// the per-augmenter `FileWholeHash` self-roots, and observes the
-    /// `ModuleAugmentationIndexShape` (augmenter-set) fact plus each augmenter's
-    /// `FileWholeHash` onto the active fact tracer so the cached value
-    /// invalidates on an augmenter add/remove OR an augmenter content edit.
+    /// source-observation status. The recorded fold/projection observes the
+    /// population's content identity beside its membership and order facts,
+    /// so contributor edits, additions, removals and source-env moves reject
+    /// the cached value.
     /// This is the production augmentation-stitch fact rail.
     fn stitch_module_augmentations(
         &self,
@@ -7110,7 +7092,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> AugmentationStitch {
         let AugmentationContributions {
             contributor_nodes,
-            contributor_roots,
+            contributor_roots: _,
             source_env_unobservable,
             base_position,
             signature_groups: _,
@@ -7125,7 +7107,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if contributor_nodes.is_empty() {
             return AugmentationStitch {
                 merged: base_result,
-                contributor_roots: Vec::new(),
                 source_env_unobservable,
             };
         }
@@ -7160,7 +7141,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         AugmentationStitch {
             merged,
-            contributor_roots,
             source_env_unobservable,
         }
     }
@@ -7328,11 +7308,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let evidence_epoch = self.canonical_evidence_epoch.get();
         let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
         let refusals = crate::fact_tracing::RefusalObservationScope::enter();
-        let (folded, reads) =
-            crate::resolver_core::resolver_context::record_fact_reads(policy, fold);
+        let (folded, mut reads) = population_reads::record(policy, fold);
+        let mut observed = frame.finish();
+        let evidence = match &folded {
+            Some(FoldedAugmentation::Plan(plan)) if !plan.source_env_unobservable => {
+                Some(&plan.population_evidence)
+            }
+            Some(FoldedAugmentation::Absent(evidence)) => evidence.as_ref(),
+            _ => None,
+        };
+        if let Some(evidence) = evidence {
+            evidence.substitute(&mut reads, &mut observed, policy);
+        }
+        reads.replay();
         let refused = refusals.observed();
         drop(refusals);
-        let observed = frame.finish();
         let folded_partial =
             crate::request_context::current_cold_compute_completeness().is_partial();
         if let Some(scope) = private_completeness {
@@ -7350,7 +7340,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let complete_read = !observed.result_is_partial && !folded_partial;
         let folded = match folded? {
-            FoldedAugmentation::Absent => {
+            FoldedAugmentation::Absent(_) => {
                 let reuse =
                     verter_session_query::facts::reuse::classify_reuse(refusal, complete_read);
                 self.dispatch_txn
@@ -7405,25 +7395,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         type_arguments: &[SemanticNodeId],
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> AugmentationContributions {
-        let mut contributor_nodes = Vec::with_capacity(plan.bodies.len());
-        for body in &plan.bodies {
-            let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-            let (env, _) = self.bind_declared_type_arguments(
-                &body.prepared,
-                type_arguments,
-                &DeclarationBindingScope {
-                    scope: &body.scope,
-                    scope_payload: body.scope_payload.as_ref(),
-                    shadowing: &body.shadowing,
-                    authored_resolution_debt: None,
-                    augmentation: body.augmentation.as_ref(),
-                },
-                &mut substitutions,
-                context,
-                |_, _| None,
-            );
-            let env = &env;
-            let mut lowering = match body.shape {
+        let project = || {
+            let mut contributor_nodes = Vec::with_capacity(plan.bodies.len());
+            for body in &plan.bodies {
+                let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+                let (env, _) = self.bind_declared_type_arguments(
+                    &body.prepared,
+                    type_arguments,
+                    &DeclarationBindingScope {
+                        scope: &body.scope,
+                        scope_payload: body.scope_payload.as_ref(),
+                        shadowing: &body.shadowing,
+                        authored_resolution_debt: None,
+                        augmentation: body.augmentation.as_ref(),
+                    },
+                    &mut substitutions,
+                    context,
+                    |_, _| None,
+                );
+                let env = &env;
+                let mut lowering = match body.shape {
                 Some(shape) => self.begin_shape_lowering(
                     shape,
                     &body.owner_symbol,
@@ -7440,39 +7431,59 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ),
                 None => BodyLowering::Ready(self.opaque(QueryError::Miss)),
             };
-            let inputs = crate::project_semantic_dispatch::locator_view::LocatorViewInputs {
-                env,
-                scope: &body.scope,
-                name_resolution: &body.prepared.name_resolution,
-                scope_payload: body.scope_payload.as_ref(),
-                shadowing: &body.shadowing,
-                authored_resolution_debt: None,
-                self_value: None,
-            };
-            match self.drain_located_body_lowering(&mut lowering, &inputs, &mut substitutions, None)
-            {
-                BodyPoll::Done(node, _) => contributor_nodes.push(node),
-                BodyPoll::Need(_) => {
-                    unreachable!("an inline body lowering evaluates the instantiations it reaches")
+                let inputs = crate::project_semantic_dispatch::locator_view::LocatorViewInputs {
+                    env,
+                    scope: &body.scope,
+                    name_resolution: &body.prepared.name_resolution,
+                    scope_payload: body.scope_payload.as_ref(),
+                    shadowing: &body.shadowing,
+                    authored_resolution_debt: None,
+                    self_value: None,
+                };
+                match self.drain_located_body_lowering(
+                    &mut lowering,
+                    &inputs,
+                    &mut substitutions,
+                    None,
+                ) {
+                    BodyPoll::Done(node, _) => contributor_nodes.push(node),
+                    BodyPoll::Need(_) => {
+                        unreachable!(
+                            "an inline body lowering evaluates the instantiations it reaches"
+                        )
+                    }
                 }
             }
+            if let Some((target, fingerprint)) = &plan.stitched {
+                emit_module_augmentation_stitched_event::<C::Observe>(
+                    crate::resolver_core::resolver_context::capture_targets(self.ctx),
+                    target,
+                    plan.contributor_roots.len() as u32,
+                    *fingerprint,
+                );
+            }
+            AugmentationContributions {
+                contributor_nodes,
+                contributor_roots: plan.contributor_roots.clone(),
+                source_env_unobservable: plan.source_env_unobservable,
+                base_position: plan.base_position,
+                signature_groups: Vec::new(),
+                enum_blocks: Vec::new(),
+            }
+        };
+        let Some(policy) = crate::resolver_core::resolver_context::installed_fact_policy() else {
+            return project();
+        };
+        let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let (contributions, mut reads) = population_reads::record(policy, project);
+        let mut observed = frame.finish();
+        if !plan.source_env_unobservable {
+            plan.population_evidence
+                .substitute(&mut reads, &mut observed, policy);
         }
-        if let Some((target, fingerprint)) = &plan.stitched {
-            emit_module_augmentation_stitched_event::<C::Observe>(
-                crate::resolver_core::resolver_context::capture_targets(self.ctx),
-                target,
-                plan.contributor_roots.len() as u32,
-                *fingerprint,
-            );
-        }
-        AugmentationContributions {
-            contributor_nodes,
-            contributor_roots: plan.contributor_roots.clone(),
-            source_env_unobservable: plan.source_env_unobservable,
-            base_position: plan.base_position,
-            signature_groups: Vec::new(),
-            enum_blocks: Vec::new(),
-        }
+        reads.replay();
+        self.fold_observed_frame_into_top(&observed);
+        contributions
     }
 
     /// Shared augmenter-contribution folder — the ONE cross-file
@@ -7483,19 +7494,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Scans the overlay-aware augmentation index for `target`, lowers each
     /// contributing augmenter's RETAINED `decl_name` body in the augmenter's own
     /// file context (typed-IR `augmentation_scopes` inventory — never a source
-    /// scan), and returns the ordered contributor nodes plus their per-augmenter
-    /// `FileWholeHash` self-roots. Augmenter order is the stable
+    /// scan), and returns the ordered contributor nodes plus their exact
+    /// served source identities. Augmenter order is the stable
     /// `canonical` key (`AugmenterSet.entries` is pre-sorted
     /// that way — deterministic, discovery-order-independent).
     ///
-    /// Observes the augmenter-set fingerprint (`ModuleAugmentationIndexShape`)
-    /// plus each augmenter's `FileWholeHash` onto the active fact tracer
-    /// so the cached value invalidates on an augmenter
-    /// add/remove/reorder OR an augmenter content edit.
-    /// These two facts are the sole cache-validity rail for the merged value:
-    /// a member-body edit that leaves the augmenter skeleton (hence the
-    /// set fingerprint) intact still moves the augmenter's `FileWholeHash`, so
-    /// the per-augmenter whole-hash fact is what catches it.
+    /// Type-body consumers observe the published population's content identity
+    /// beside its membership and order facts. The recorded fold/projection
+    /// boundaries substitute only matching population source observations;
+    /// nested caches and dependencies outside the population keep their facts.
+    /// Enum/function folds retain their ordinary per-source observations.
     ///
     /// Type bodies retain their prepared declarations for projection. Each
     /// contributor then binds the application's arguments positionally,
@@ -7611,6 +7619,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.ctx
                 .contributor_answer(request_canonical, &target, decl_name, space);
         let population_hit = population_answer.contributors;
+        let population_evidence = (contribution == AugmentationContribution::TypeBody).then(|| {
+            Arc::new(population_reads::PopulationEvidence::new(
+                &target,
+                decl_name,
+                Arc::clone(&shape_attribution),
+                Arc::clone(&augmenter_set),
+                population_hit.clone(),
+                population_answer.population_content_fingerprint,
+            ))
+        });
+        if let Some(evidence) = &population_evidence {
+            crate::resolver_core::resolver_context::observe_fan_out(evidence.fact.clone());
+        }
         crate::resolver_core::resolver_context::observe_fan_out(
             verter_session_query::facts::fact_cache::FactVersionRef::RouteSurface(
                 verter_session_query::facts::fact_cache::RouteSurfaceFactRef {
@@ -7640,7 +7661,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         });
         if augmenter_set.entries.is_empty() && !has_file_scope {
-            return Some(FoldedAugmentation::Absent);
+            return Some(FoldedAugmentation::Absent(population_evidence));
         }
 
         // An empty, nongeneric interface adds neither a member nor a
@@ -7661,11 +7682,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut context_free = true;
         let mut signature_groups: Vec<Vec<SemanticNodeId>> = Vec::new();
         let mut enum_blocks: Vec<EnumContribution> = Vec::new();
-        // One root per contributing augmenter: the version self-root AND the
-        // EXACT artifact key the contributor `LowerLocator` served from,
-        // inseparable in one carrier — recorded below as paired
-        // `FileWholeHash` + `FileSourceEnv` observations on the parent
-        // read-set.
+        // One exact served identity per contributor. A type-body population
+        // must cover it coherently before its observations can be substituted.
         let mut contributor_roots: Vec<AugmentationContributorRoot> = Vec::new();
         let mut source_env_unobservable = false;
         // Stale-key self-heals discovered below are written back into the
@@ -8408,31 +8426,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                 ));
             }
-            return Some(FoldedAugmentation::Absent);
+            return Some(FoldedAugmentation::Absent(population_evidence));
         }
 
-        // Fact rail, part 2 — each contributing augmenter's whole-hash
-        // (invalidates on augmenter content edit). The augmenter-set shape
-        // fact that pairs with these was observed above, before the early
-        // returns, so the negative outcomes carry it too.
-        //
-        // Parent transitive contributor rule, emitted from the ONE carrier in
-        // ONE step per contributor: the content-version fact
-        // (`FileWholeHash`) AND the typed SOURCE-ENV observation
-        // (`FileSourceEnv`) — its parser-version/file-language identity taken
-        // from the EXACT artifact key the contributor `LowerLocator` served
-        // from (never re-derived from canonical/path at this site, never a
-        // stale index entry), its parse-env dimension the contributor
-        // canonical's LIVE per-canonical parse env (the SAME dimension the
-        // contributor `LowerLocator` key folds; the base key's own slot is
-        // the zero sentinel, not an env identity). A warm parent hit
-        // revalidates the source-env identity against the live view — a
-        // contributor parse-env / parser-version / file-language move with
-        // UNCHANGED content misses the warm read and recomputes through the
-        // contributor's new `LowerLocator`. Because both facts come from the
-        // same element, a contributor that is version-rooted on the parent is
-        // source-env-observed by construction.
+        // Fact rail, part 2: verify that the published type-body population
+        // covers every served contributor, including its live source env.
+        // Other fold kinds keep the paired per-source facts on their rail.
         for root in &contributor_roots {
+            if let Some(evidence) = &population_evidence {
+                let environment = self.ctx.source_environment(&root.artifact_key);
+                source_env_unobservable |=
+                    !evidence.covers_source(&root.artifact_key, &environment);
+                continue;
+            }
             crate::resolver_core::resolver_context::observe_fan_out(
                 verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                     canonical_id: Arc::from(root.canonical.as_str()),
@@ -8452,6 +8458,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if contribution == AugmentationContribution::TypeBody {
             return Some(FoldedAugmentation::Plan(AugmentationPlan {
                 bodies: planned_bodies,
+                population_evidence: population_evidence
+                    .expect("a type-body fold records its population"),
                 contributor_roots,
                 source_env_unobservable,
                 base_position,
@@ -9012,9 +9020,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Peer-merge carrier from the augmenter contributions ONLY (no base
         // body): every `declare module "<spec>"` block is a peer. The carrier is
         // interned in the importing file's scope so its surface projects in the
-        // caller's context; the per-augmenter `FileWholeHash` facts the folder
-        // observed onto the active tracer are the cache-validity rail (each
-        // contributor's `MergedDecl` reduction validates on those facts).
+        // caller's context; the population content fact the folder
+        // observed onto the active tracer is the cache-validity rail (each
+        // contributor's `MergedDecl` reduction validates on that fact).
         let merged = self.graph().intern_node_with_scope(
             SemanticNodeData::MergedDecl {
                 contributors: crate::semantic_query::PayloadArray::from(

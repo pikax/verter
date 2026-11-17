@@ -484,39 +484,24 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
     );
 }
 
-/// Warm-parent contributor source-env discriminator: a parent augmented
-/// `Instantiate` records ONE `FileSourceEnv` observation per folded
-/// contributor, taken from the EXACT artifact key the contributor's
-/// locator-backed body read served from — and the strict source-env
-/// validation branch REJECTS the recorded read-set once the contributor's
-/// source-env identity moves (parse env P0 → P1) with UNCHANGED content /
-/// whole hash, even though the contributor `FileWholeHash` fact still
-/// validates. The whole-hash + augmenter-set facts alone cannot catch a
-/// parse-env-only contributor move; the source-env fact is the rail that
-/// forces the warm parent to miss and recompute the contributor body under
-/// its new source env.
+/// The strict source-env primitive rejects an unchanged-content identity move
+/// for an actual augmentation contributor. Population validation uses this rule.
 #[test]
-fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
+fn contributor_source_env_validator_rejects_identity_move_with_unchanged_content() {
     use rustc_hash::FxHashMap;
 
+    use crate::file_artifact_store::FileArtifactKeySource;
     use crate::resolver_store::HostStoreView;
+    use verter_session_query::facts::fact_cache::FactVersionRef;
     use verter_session_query::facts::fact_cache::ParseEnvHash;
     use verter_session_query::facts::store_view::StoreView;
-    use verter_session_query::facts::{
-        fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
-    };
     use verter_session_query::source::artifact_key::FileArtifactKey;
     use verter_session_query::source::env_identity::SourceEnvIdentity;
 
     let host = make_host();
     upsert_augmentation_fixture(&host);
 
-    // Cold resolve of the augmented base decl under a fact tracer: the
-    // parent fold must record the contributor source-env observation.
-    let (resolved, read_set) = host.with_fact_tracer(
-        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
-        || host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded)),
-    );
+    let resolved = host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded));
     let node = resolved.expect("augmented Foo must resolve");
     match node_data(&host, node.id()).as_ref() {
         SemanticNodeData::MergedDecl { contributors } => {
@@ -524,22 +509,21 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
         }
         other => panic!("augmented Foo must be a MergedDecl carrier, got {other:?}"),
     }
-    let FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
-        panic!("the traced resolve must seal a fact signature (no overflow)");
+    let indexed = host
+        .ensure_indexed_ready("/aug.ts")
+        .expect("contributor indexed");
+    let key = FileArtifactKey::for_indexed(
+        Arc::from("/aug.ts"),
+        &indexed,
+        verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
+    );
+    let identity = crate::resolver_store::live_source_env_identity(&host, &key);
+    let source_env_fact = FactVersionRef::FileSourceEnv {
+        canonical_id: Arc::from("/aug.ts"),
+        parse_env_hash: identity.parse_env_hash,
+        parse_key: identity.parse_key,
+        file_language_id: identity.file_language_id,
     };
-    let source_env_fact = signature
-        .iter()
-        .find(|fact| {
-            matches!(
-                fact,
-                FactVersionRef::FileSourceEnv { canonical_id, .. } if &**canonical_id == "/aug.ts"
-            )
-        })
-        .expect(
-            "the augmentation fold must record one FileSourceEnv observation for the \
-             folded contributor /aug.ts",
-        )
-        .clone();
     let FactVersionRef::FileSourceEnv {
         canonical_id,
         parse_env_hash,
@@ -627,7 +611,7 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
 /// A warm augmented parent rejects a contributor language change with
 /// unchanged content. The host publishes the change and captures a new token;
 /// the parent demand keeps exactly the same query key. The traced production
-/// resolve must record the contributor's `FileSourceEnv`, its strict check
+/// resolve must record the population content identity, its strict check
 /// must reject the changed language, and the warm parent must recompute.
 /// The store-view sibling above pins that validation branch in isolation.
 #[test]
@@ -645,8 +629,8 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
     let host = make_host();
     upsert_augmentation_fixture(&host);
 
-    // Recording half: the cold production resolve records ONE
-    // FileSourceEnv observation for the folded contributor.
+    // The production resolve records the folded population's content and
+    // source-environment identity on the existing fact rail.
     let (resolved, read_set) = host.with_fact_tracer(
         verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
         || host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded)),
@@ -655,26 +639,16 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
     let FactReadSetFinalise::Ok(signature) = read_set.finalise() else {
         panic!("the traced resolve must seal a fact signature (no overflow)");
     };
-    let (recorded_parse_env, recorded_parse_key, recorded_language) = signature
+    let recorded_population = signature
         .iter()
-        .find_map(|fact| match fact {
-            FactVersionRef::FileSourceEnv {
-                canonical_id,
-                parse_env_hash,
-                parse_key,
-                file_language_id,
-            } if &**canonical_id == "/aug.ts" => Some((
-                parse_env_hash.to_owned(),
-                parse_key.clone(),
-                file_language_id.clone(),
-            )),
-            _ => None,
-        })
-        .expect(
-            "the parent fold must record one FileSourceEnv observation for the folded \
-             contributor /aug.ts",
-        );
-
+        .find(|fact| matches!(fact,
+            FactVersionRef::RouteSurface(route)
+                if matches!(&route.key, verter_session_query::facts::FactKey::AugmentationPopulationContent {
+                    decl_name, resolved_relative_canonical, ..
+                } if decl_name.as_ref() == "Foo" && resolved_relative_canonical.as_deref() == Some("/types.ts"))
+        ))
+        .cloned()
+        .expect("the parent fold records its population content identity");
     // Drive the parent directly and retain the key so a contributor language
     // change must invalidate the same memo candidate.
     let graph = host.project_type_store().semantic_graph();
@@ -743,12 +717,7 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
     );
     let moved_view = host.resolver_store_view_read().into_owned_view();
     assert_ne!(view.validation_token(), moved_view.validation_token());
-    assert!(!moved_view.validates_file_source_env(
-        "/aug.ts",
-        recorded_parse_env,
-        &recorded_parse_key,
-        &recorded_language,
-    ));
+    assert!(!moved_view.validates(&recorded_population));
     let (_, moved_key) = demand(&moved_view);
     assert_eq!(
         moved_key, original_key,
@@ -758,31 +727,19 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
         graph.stats_snapshot().instantiate_count,
         builds_after_first + 1,
         "a contributor source-env identity move with unchanged content must REJECT \
-         the warm parent through the memo's strict FileSourceEnv validation and \
+         the warm parent through the population's strict source-env validation and \
          cold-recompute — a flat build count means the recorded observation was \
          not validated on the live warm-read path"
     );
 }
 
-/// Contributor version-root ⇒ source-env coupling: EVERY augmentation
-/// contributor the stitch version-roots on the parent (its `FileWholeHash`
-/// self-root fact) ALSO records its `FileSourceEnv` identity on the parent
-/// read-set, taken from the contributor's own exact artifact key. A
-/// contributor that is version-rooted WITHOUT its source-env observation is
-/// the torn state this test rejects: the warm parent would survive a
-/// contributor parse-env/parser-version/file-language move with unchanged
-/// content and serve a stale fold.
-///
-/// TWO augmenter files fold into the same base so the coupling is asserted
-/// per contributor — a break that skips the source-env observation for any
-/// one folded contributor (not just "all of them") loses that contributor's
-/// `FileSourceEnv` fact here and fails.
+/// The merged surface retains both contributors while its consuming read
+/// observes one published content identity for their complete population.
 #[test]
-fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
+fn merged_augmentation_surface_observes_one_population_content_identity() {
     use verter_session_query::facts::{
         fact_cache::FactVersionRef, fact_read_set::FactReadSetFinalise,
     };
-    use verter_session_query::source::artifact_key::FileArtifactKey;
 
     let host = make_host();
     upsert_ts(
@@ -809,8 +766,7 @@ fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
     );
     let node = resolved.expect("the doubly-augmented Foo must resolve");
 
-    // Both augmenters genuinely CONTRIBUTED (so both were version-rooted by
-    // the stitch): the merged carrier folds base + 2 augmenter bodies, and
+    // Both augmenters contributed: the carrier folds base + two bodies, and
     // the projected surface carries each contributor's member.
     match node_data(&host, node.id()).as_ref() {
         SemanticNodeData::MergedDecl { contributors } => assert_eq!(
@@ -838,54 +794,19 @@ fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
         panic!("the traced resolve must seal a fact signature (no overflow)");
     };
 
-    for augmenter in ["/east.ts", "/west.ts"] {
-        // Version-root rail: the contributor's whole-hash fact is on the
-        // parent read-set at the LIVE content version it was folded from.
-        let live_hash = host
-            .current_or_read_whole_hash(augmenter)
-            .unwrap_or_else(|| panic!("live whole hash for {augmenter}"));
-        assert!(
-            signature.iter().any(|fact| matches!(
-                fact,
-                FactVersionRef::FileWholeHash { canonical_id, hash }
-                    if &**canonical_id == augmenter && *hash == live_hash
-            )),
-            "the folded contributor {augmenter} must be version-rooted on the parent \
-             read-set (FileWholeHash at its live content version)"
-        );
-
-        // The COUPLING under test: the same contributor also records its
-        // source-env identity, from its own artifact key (the language
-        // column equals the contributor's registry row).
-        let source_env = signature
-            .iter()
-            .find(|fact| {
-                matches!(
-                    fact,
-                    FactVersionRef::FileSourceEnv { canonical_id, .. } if &**canonical_id == augmenter
-                )
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "the version-rooted contributor {augmenter} must ALSO record its \
-                     FileSourceEnv identity on the parent read-set — a rooted contributor \
-                     without the source-env fact survives a contributor parse-env move \
-                     with unchanged content and serves a stale fold"
-                )
-            });
-        let FactVersionRef::FileSourceEnv {
-            file_language_id, ..
-        } = source_env
-        else {
-            unreachable!("matched FileSourceEnv above");
-        };
-        assert_eq!(
-            *file_language_id,
-            FileArtifactKey::synthetic_file_language_for_test(augmenter),
-            "the {augmenter} source-env identity must be recorded from the contributor's \
-             own artifact key, never re-derived from another canonical"
-        );
-    }
+    assert_eq!(
+        signature.iter().filter(|fact| matches!(fact,
+            FactVersionRef::RouteSurface(route)
+                if matches!(route.key, verter_session_query::facts::FactKey::AugmentationPopulationContent { .. })
+        )).count(),
+        1,
+        "the complete contributor population has one content observation",
+    );
+    assert!(!signature.iter().any(|fact| matches!(fact,
+        FactVersionRef::FileWholeHash { canonical_id, .. }
+            | FactVersionRef::FileSourceEnv { canonical_id, .. }
+                if matches!(canonical_id.as_ref(), "/east.ts" | "/west.ts")
+    )));
 }
 
 /// END-TO-END LIVE-parse-env rail through the REAL memo warm-read path: warm
@@ -1029,7 +950,7 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
 /// DISCARDS the returned `contributor_roots` (it marks only the
 /// request-materialisation suppress sticky, never `output.cache_suppress`).
 /// The compensating validity rail is that the shared folder ALREADY observes
-/// each folded contributor's `FileWholeHash` (+ `FileSourceEnv`) onto the
+/// the folded population's content and source-environment identity onto the
 /// enclosing `Instantiate` read-set — so an external augmenter content edit,
 /// with the CONSUMER file untouched (host upsert never reverse-evicts the
 /// `/use.ts::U` memo), MUST reject the warm parent and cold-recompute the
@@ -1037,7 +958,7 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
 ///
 /// Adjudication: a discarded `contributor_roots` / materialisation-only
 /// suppress could warm-publish a torn external `MergedDecl`; that concern is
-/// answered because the per-contributor fact rail rejects on warm read. This is the
+/// answered because the population fact rail rejects on warm read. This is the
 /// end-to-end proof of that rail for the external path. The residual
 /// torn-contributor skip (`source_env_unobservable`) is unreachable on a
 /// cold external fold: augmenter IndexedReady is published at artifact
@@ -1806,6 +1727,7 @@ fn no_augmenter_resolve_still_records_the_augmenter_set_shape_fact() {
     // fingerprint a one-augmenter set would produce, so the assertion above is
     // not satisfied by an all-zero / constant hash.
     let one_augmenter = [AugmenterEntry {
+        source_parse_env_hash: [0; 16],
         population_hash: [0; 16],
         artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [0u8; 16]),
         parse_stable_hash: [7u8; 16],
