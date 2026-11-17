@@ -1295,7 +1295,12 @@ and the membership index a seal built for its widest base is reused by every
 sibling seal extending the same shared run. Both are keyed by storage
 address with weak liveness validation, capped like the subset memo, and
 drained — and closed to new entries — when the thread's last tracer pops,
-so a finished demand pins no fact storage. A prepared-declaration read that
+so a finished demand pins no fact storage. A stack emptied by
+`without_fact_observers` is a suspended demand, not a finished one: tracers
+installed and popped inside the suspension (an isolated recording, say)
+neither begin nor end a demand, so the memos keep serving it when it resumes
+(`demand_lifecycle_tests` in `fact_tracing/tracing.rs`; the recursive-path
+fact-work canary measures the cost of losing them). A prepared-declaration read that
 uses several authored imports replays the union of exactly those segments
 as one combined run, cached per used-import set on the bundle and charged
 with its retention.

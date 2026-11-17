@@ -72,6 +72,17 @@ thread_local! {
     /// guard pops it on drop, unwinding included.
     static ACTIVE_RECORDERS: RefCell<SmallVec<[*const FactReadRecorder; 4]>> =
         RefCell::new(SmallVec::new());
+
+    /// How many live demands [`without_fact_observers`] holds suspended on
+    /// this thread. While one is, an empty tracer stack is that demand's
+    /// suspension, not its end: tracers installed and popped inside it
+    /// neither begin nor end a demand.
+    static SUSPENDED_DEMANDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether a demand is suspended on this thread.
+fn demand_suspended() -> bool {
+    SUSPENDED_DEMANDS.with(std::cell::Cell::get) > 0
 }
 
 /// One installed tracer: its cell, and whether its owner delivers its
@@ -342,7 +353,7 @@ fn push_tracer(cell: &FactReadSetCell, delivers: bool) {
         });
         first
     });
-    if demand_started {
+    if demand_started && !demand_suspended() {
         verter_session_query::facts::fact_read_set::begin_demand_fact_memos();
     }
 }
@@ -350,13 +361,14 @@ fn push_tracer(cell: &FactReadSetCell, delivers: bool) {
 /// Pop the top-of-stack entry. Called on the installer's `Drop`. Popping
 /// the LAST tracer ends this thread's demand: the per-demand proof memos
 /// in the query crate pin fact storage nothing can consult again, so they
-/// stop accepting entries and drain here.
+/// stop accepting entries and drain here. A stack emptied only because its
+/// demand is suspended ([`without_fact_observers`]) has not ended it.
 pub(crate) fn clear() {
     let stack_now_empty = ACTIVE_TRACERS.with(|slot| {
         slot.borrow_mut().pop();
         slot.borrow().is_empty()
     });
-    if stack_now_empty {
+    if stack_now_empty && !demand_suspended() {
         verter_session_query::facts::fact_read_set::end_demand_fact_memos();
     }
 }
@@ -366,24 +378,42 @@ pub(crate) fn clear() {
 /// For work that serves the cache's own validation rather than the enclosing
 /// computation: whatever it reads is not a dependency of the answer being
 /// computed, so it must reach no enclosing read set.
+///
+/// Suspending a live demand's observers does not end the demand: its
+/// per-demand proof memos stay live through `f`, including any tracer
+/// `f` installs and pops, and keep serving the demand once it resumes.
 pub(crate) fn without_fact_observers<R>(f: impl FnOnce() -> R) -> R {
     type Suspended = (
         SmallVec<[ActiveTracer; 8]>,
         SmallVec<[*const FactReadRecorder; 4]>,
     );
-    struct Restore(Option<Suspended>);
+    struct Restore {
+        suspended: Option<Suspended>,
+        demand_live: bool,
+    }
     impl Drop for Restore {
         fn drop(&mut self) {
-            if let Some((tracers, recorders)) = self.0.take() {
+            if let Some((tracers, recorders)) = self.suspended.take() {
                 ACTIVE_TRACERS.with(|slot| *slot.borrow_mut() = tracers);
                 ACTIVE_RECORDERS.with(|slot| *slot.borrow_mut() = recorders);
             }
+            if self.demand_live {
+                SUSPENDED_DEMANDS.with(|count| count.set(count.get() - 1));
+            }
         }
     }
-    let _restore = Restore(Some((
-        ACTIVE_TRACERS.with(|slot| std::mem::take(&mut *slot.borrow_mut())),
-        ACTIVE_RECORDERS.with(|slot| std::mem::take(&mut *slot.borrow_mut())),
-    )));
+    let tracers = ACTIVE_TRACERS.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+    let demand_live = !tracers.is_empty();
+    if demand_live {
+        SUSPENDED_DEMANDS.with(|count| count.set(count.get() + 1));
+    }
+    let _restore = Restore {
+        suspended: Some((
+            tracers,
+            ACTIVE_RECORDERS.with(|slot| std::mem::take(&mut *slot.borrow_mut())),
+        )),
+        demand_live,
+    };
     f()
 }
 
@@ -887,5 +917,53 @@ mod fan_out_tests {
             canonical_id: "/none.ts".into(),
             hash: [9u8; 16],
         });
+    }
+}
+
+#[cfg(test)]
+mod demand_lifecycle_tests {
+    use super::*;
+    use verter_session_query::facts::fact_read_set::demand_fact_memos_active_for_tests as memos_active;
+
+    fn cell() -> FactReadSetCell {
+        FactReadSetCell::new(verter_session_query::facts::policy::FactPolicy::production())
+    }
+
+    /// A computation run with the demand's observers suspended, which
+    /// installs and pops tracers of its own, leaves the demand's proof memos
+    /// live: the demand resumes with them, and only its own last tracer
+    /// ends it.
+    #[test]
+    fn suspending_a_live_demand_keeps_its_proof_memos() {
+        let demand = cell();
+        install(&demand);
+        assert!(memos_active(), "a demand's first tracer starts its memos");
+        without_fact_observers(|| {
+            let isolated = cell();
+            install_delivering(&isolated);
+            let nested = cell();
+            install(&nested);
+            clear();
+            clear();
+            assert!(memos_active(), "the suspended demand is still running");
+        });
+        assert!(memos_active(), "the demand resumes with its memos");
+        clear();
+        assert!(!memos_active(), "the demand's last tracer ends it");
+    }
+
+    /// With no demand to suspend, tracers installed inside the suspension
+    /// are a demand of their own, which begins and ends with them.
+    #[test]
+    fn tracers_inside_a_suspension_without_a_demand_form_their_own() {
+        assert!(!memos_active());
+        without_fact_observers(|| {
+            let own = cell();
+            install(&own);
+            assert!(memos_active(), "the first tracer starts its own demand");
+            clear();
+            assert!(!memos_active(), "its last tracer ends that demand");
+        });
+        assert!(!memos_active());
     }
 }
