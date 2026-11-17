@@ -58,6 +58,7 @@ pub struct GlobalContributionFact {
 #[derive(Debug, Clone)]
 pub struct FileContributionRecord {
     pub artifact_key: FileArtifactKey,
+    pub source_parse_env_hash: Hash16,
     pub module_kind: FileModuleKind,
     pub is_automatic_lib: bool,
     pub parse_stable_hash: Hash16,
@@ -241,6 +242,29 @@ impl GlobalContributorPopulation {
         decl_name: &str,
         overlay_discriminator: Option<Hash16>,
     ) -> Hash16 {
+        self.observation_contributors(target, decl_name, overlay_discriminator)
+            .fingerprint
+    }
+
+    /// Content identity of the same immutable all-space population that
+    /// supplies the membership observation.
+    #[must_use]
+    pub fn observation_content_fingerprint(
+        &self,
+        target: &AugmentationTargetKind,
+        decl_name: &str,
+        overlay_discriminator: Option<Hash16>,
+    ) -> Hash16 {
+        self.observation_contributors(target, decl_name, overlay_discriminator)
+            .content_fingerprint
+    }
+
+    pub(crate) fn observation_contributors(
+        &self,
+        target: &AugmentationTargetKind,
+        decl_name: &str,
+        overlay_discriminator: Option<Hash16>,
+    ) -> SymbolContributors {
         self.lookup_spaces(
             target,
             decl_name,
@@ -252,7 +276,6 @@ impl GlobalContributorPopulation {
                 SymbolSpace::Value,
             ],
         )
-        .fingerprint
     }
 
     /// Contributors in one symbol space.
@@ -333,10 +356,7 @@ impl GlobalContributorPopulation {
             self.views
                 .materialized_view_entries
                 .fetch_add(entries.len() as u64, Ordering::Relaxed);
-            SymbolContributors {
-                entries: entries.into(),
-                fingerprint: contributors.fingerprint,
-            }
+            SymbolContributors::new(entries.into(), contributors.fingerprint)
         });
         (view, order)
     }
@@ -548,10 +568,7 @@ impl GlobalContributorPopulation {
         };
         if let [population] = populations {
             if population.iter().all(keep) {
-                return SymbolContributors {
-                    entries: Arc::clone(population),
-                    fingerprint: fingerprint_of(population),
-                };
+                return SymbolContributors::new(Arc::clone(population), fingerprint_of(population));
             }
         }
         let mut matched: Vec<ContributorEntry> = populations
@@ -569,10 +586,7 @@ impl GlobalContributorPopulation {
             .fetch_add(matched.len() as u64, Ordering::Relaxed);
         sort_contributor_entries(&mut matched);
         let fingerprint = fingerprint_of(&matched);
-        SymbolContributors {
-            entries: Arc::from(matched.into_boxed_slice()),
-            fingerprint,
-        }
+        SymbolContributors::new(Arc::from(matched.into_boxed_slice()), fingerprint)
     }
 }
 
@@ -1115,6 +1129,7 @@ fn add_record_to_grouped(grouped: &mut GroupedState, record: &FileContributionRe
         let entries = grouped.by_symbol.entry(symbol_key).or_default();
         let entry = ContributorEntry {
             artifact_key: record.artifact_key.clone(),
+            source_parse_env_hash: record.source_parse_env_hash,
             parse_stable_hash: record.parse_stable_hash,
             owner: fact.owner,
             origin: fact.origin,
@@ -1249,6 +1264,7 @@ fn collect_from_indexed(
 
     FileContributionRecord {
         artifact_key: key.clone(),
+        source_parse_env_hash: indexed.parse_env_hash,
         module_kind,
         is_automatic_lib,
         parse_stable_hash,

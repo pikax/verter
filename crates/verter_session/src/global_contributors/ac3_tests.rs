@@ -933,10 +933,7 @@ fn every_base_borrows_one_augmentation_collection_order() {
         population: AugmentationPopulation::Base,
         target: AugmentationTargetKind::GlobalAugmentation,
     };
-    let augmenters = AugmenterSet {
-        entries: Default::default(),
-        fingerprint: [0; 16],
-    };
+    let augmenters = AugmenterSet::new(Default::default(), [0; 16]);
     for size in [128usize, 512, 2048] {
         let store = FileArtifactStore::new();
         let names: Vec<String> = (0..size).map(|i| format!("/decl{i:04}.d.ts")).collect();

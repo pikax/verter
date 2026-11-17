@@ -490,8 +490,7 @@ pub enum FactKey {
     // Route-surface domain (RouteDb-owned; resolve_env_hash +
     // lib_env_hash keyed). The route-surface producer populates these.
     // ────────────────────────────────────────────────────────────────
-    /// Augmenter-set membership fingerprint per augmentation target —
-    /// the sole `RouteSurface` fact (R29).
+    /// Augmenter-set membership fingerprint per augmentation target (R29).
     ModuleAugmentationIndexShape {
         target_kind_tag: AugmentationTargetKindTag,
         external_specifier: Option<InternedSpecifier>,
@@ -516,6 +515,17 @@ pub enum FactKey {
     /// snapshot's headers without requiring an indexed artifact. A separate
     /// local export specifier cannot establish this proof.
     DirectDeclarationExport { name: InternedName },
+
+    /// Content and source-environment identity of an augmentation stitch's
+    /// published contributor population. Membership and program order retain
+    /// their independent facts.
+    AugmentationPopulationContent {
+        target_kind_tag: AugmentationTargetKindTag,
+        external_specifier: Option<InternedSpecifier>,
+        resolved_relative_canonical: Option<Arc<str>>,
+        wildcard_pattern: Option<InternedGlobPattern>,
+        decl_name: InternedName,
+    },
 }
 
 /// Tag-only representation of
@@ -647,9 +657,9 @@ impl FactKey {
                 FactDomain::ResolveImports
             }
 
-            Self::ModuleAugmentationIndexShape { .. } | Self::ProgramFileOrder { .. } => {
-                FactDomain::RouteSurface
-            }
+            Self::ModuleAugmentationIndexShape { .. }
+            | Self::AugmentationPopulationContent { .. }
+            | Self::ProgramFileOrder { .. } => FactDomain::RouteSurface,
         }
     }
 }
@@ -968,6 +978,13 @@ mod registry_tests {
         }
 
         let route_surface_keys = [
+            FactKey::AugmentationPopulationContent {
+                target_kind_tag: AugmentationTargetKindTag::GlobalAugmentation,
+                external_specifier: None,
+                resolved_relative_canonical: None,
+                wildcard_pattern: None,
+                decl_name: InternedName::from("Shared"),
+            },
             FactKey::ModuleAugmentationIndexShape {
                 target_kind_tag: AugmentationTargetKindTag::ExternalSpecifier,
                 external_specifier: Some(InternedSpecifier::from("vue")),

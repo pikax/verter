@@ -1274,7 +1274,12 @@ fn nonneutral_augmentation_suffixes_keep_content_and_diagnostics() {
         };
         let host = make();
         let cold = read_flow_return(&host, "f");
-        assert!(cold.facts.iter().any(|fact| matches!(fact, FactVersionRef::FileWholeHash { canonical_id, .. } if canonical_id.as_ref() == aug)), "the later body must still be consumed: {body}");
+        assert!(cold.facts.iter().any(|fact| matches!(fact,
+            FactVersionRef::RouteSurface(route)
+                if matches!(&route.key, verter_session_query::facts::FactKey::AugmentationPopulationContent {
+                    resolved_relative_canonical, decl_name, ..
+                } if resolved_relative_canonical.as_deref() == Some(CLASS) && decl_name.as_ref() == "B")
+        )), "the later body must still be covered by its population: {body}");
         assert!(
             !cold.facts.iter().any(|fact| is_member_fact(fact, "B", "a")),
             "unproved suffix cannot certify a precise own-member read: {body}"

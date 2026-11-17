@@ -1717,12 +1717,61 @@ impl<L> RequestBoundAdapter<L> {
         verter_type_engine::resolver_core::resolver_context::without_fact_observers(|| {
             let mut walk = verter_session_query::facts::fact_cache::ReceiptWalk::default();
             let population_ready = std::cell::Cell::new(false);
+            let prepared_augmenters = std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+            let prepare_augmenters =
+                |target: &crate::file_artifact_store::AugmentationTargetKind| {
+                    if let Some(prepared) = prepared_augmenters.borrow().get(target).cloned() {
+                        return Some(prepared);
+                    }
+                    let (key, current, _) = verter_type_engine::resolver_core::request_ports::OwnedLowering::augmentation_index_with_resolutions(self, target.clone());
+                    if !self
+                        .0
+                        .host()
+                        .project_type_store()
+                        .indexed()
+                        .get_augmenter_set(&key)
+                        .is_some_and(|published| std::sync::Arc::ptr_eq(&published, &current))
+                    {
+                        return None;
+                    }
+                    let prepared = (key, current);
+                    prepared_augmenters
+                        .borrow_mut()
+                        .insert(target.clone(), prepared.clone());
+                    Some(prepared)
+                };
             facts.iter().enumerate().try_for_each(|(index, fact)| {
             let valid = verter_session_query::facts::fact_cache::validates_through_receipts(
                 fact,
                 &mut walk,
                 |leaf| {
                     if let FactVersionRef::RouteSurface(fact) = leaf {
+                        if let verter_session_query::facts::FactKey::AugmentationPopulationContent {
+                            target_kind_tag, external_specifier, resolved_relative_canonical, wildcard_pattern, decl_name,
+                        } = &fact.key {
+                            if !population_ready.replace(true) {
+                                self.0.host().ingest_program_ambient_roots();
+                            }
+                            let Some(target) = crate::resolver_store::augmentation_target_kind_from_shape(
+                                *target_kind_tag, external_specifier.as_ref().map(|s| s.as_ref()),
+                                resolved_relative_canonical.as_deref(), wildcard_pattern.as_ref().map(|s| s.as_ref())) else {
+                                return false;
+                            };
+                            let Some((key, current)) = prepare_augmenters(&target) else { return false; };
+                            let overlay = match key.population {
+                                crate::file_artifact_store::AugmentationPopulation::Base => None,
+                                crate::file_artifact_store::AugmentationPopulation::Session(fingerprint) => Some(
+                                    crate::session_view::overlay_artifact_discriminator_for_fingerprint(fingerprint)),
+                            };
+                            let Some(population) = self.0.host().project_type_store().indexed().global_contributor_index()
+                                .population_for_validation(&target, decl_name.as_ref()) else { return false; };
+                            if verter_session_query::source::augmentation_keys::join_augmentation_population_content(
+                                current.content_fingerprint,
+                                population.observation_content_fingerprint(&target, decl_name.as_ref(), overlay),
+                            ) != fact.expected_hash {
+                                return false;
+                            }
+                        }
                         if let verter_session_query::facts::FactKey::ModuleAugmentationIndexShape {
                             target_kind_tag, external_specifier, resolved_relative_canonical, wildcard_pattern,
                         } = &fact.key {
@@ -1741,10 +1790,8 @@ impl<L> RequestBoundAdapter<L> {
                                 // cold evaluation. The captured root may still name a
                                 // formerly empty set; both current and captured proofs
                                 // must agree before that receipt can be reused.
-                                let (key, current, _) = verter_type_engine::resolver_core::request_ports::OwnedLowering::augmentation_index_with_resolutions(self, target);
-                                if current.fingerprint != fact.expected_hash
-                                    || !self.0.host().project_type_store().indexed()
-                                        .get_augmenter_set(&key).is_some_and(|published| std::sync::Arc::ptr_eq(&published, &current)) {
+                                let Some((_, current)) = prepare_augmenters(&target) else { return false; };
+                                if current.fingerprint != fact.expected_hash {
                                     return false;
                                 }
                             }

@@ -316,6 +316,24 @@ impl<'m, M: FactMeter> FactMeasure<'m, M> {
                         .as_ref()
                         .map_or(0, |pattern| m.leaf_name(&pattern.0))
             }
+            FactKey::AugmentationPopulationContent {
+                external_specifier,
+                resolved_relative_canonical,
+                wildcard_pattern,
+                decl_name,
+                ..
+            } => {
+                m.leaf_name(&decl_name.0)
+                    + external_specifier
+                        .as_ref()
+                        .map_or(0, |specifier| m.leaf_name(&specifier.0))
+                    + resolved_relative_canonical
+                        .as_ref()
+                        .map_or(0, |canonical| m.leaf_name(canonical))
+                    + wildcard_pattern
+                        .as_ref()
+                        .map_or(0, |pattern| m.leaf_name(&pattern.0))
+            }
             FactKey::ProgramFileOrder { program } => m.leaf_name(program),
             FactKey::SyntacticExportSet
             | FactKey::SyntacticRouteInterface

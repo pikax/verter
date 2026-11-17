@@ -3499,8 +3499,8 @@ impl FileArtifactStore {
     /// * first-time materialisation (`prev == None`) is the index
     ///   learning a row the artifact corpus already implied — a cache
     ///   population, not a change to the augmentation world;
-    /// * a same-fingerprint republish (the stale-key self-heal) leaves
-    ///   every recorded shape fact valid by construction, and an older
+    /// * a republish with identical shape and content leaves
+    ///   every recorded population fact valid, and an older
     ///   captured root still resolves the retired version through the
     ///   version chain, so birth-epoch movement alone is not a validity
     ///   flip.
@@ -3511,18 +3511,22 @@ impl FileArtifactStore {
         scan_root: Option<&FileArtifactRoot>,
     ) -> Option<Option<Arc<AugmenterSet>>> {
         let new_fingerprint = set.fingerprint;
+        let new_content_fingerprint = set.content_fingerprint;
         let prev = self.route_surface_generation.mutate(|| {
             let prev = self.install_augmenter_set_if(key, set, scan_root, |_| true);
             let changed = prev
                 .as_ref()
                 .and_then(Option::as_ref)
-                .is_some_and(|previous| previous.fingerprint != new_fingerprint);
+                .is_some_and(|previous| {
+                    previous.fingerprint != new_fingerprint
+                        || previous.content_fingerprint != new_content_fingerprint
+                });
             (prev, changed)
         })?;
-        if prev
-            .as_ref()
-            .is_none_or(|previous| previous.fingerprint != new_fingerprint)
-        {
+        if prev.as_ref().is_none_or(|previous| {
+            previous.fingerprint != new_fingerprint
+                || previous.content_fingerprint != new_content_fingerprint
+        }) {
             self.bump_artifact_generation();
         }
         Some(prev)
@@ -3550,7 +3554,7 @@ impl FileArtifactStore {
 
     /// Re-key the entries of the set `key` holds: `observed`, with each
     /// `(index, artifact_key)` of `refreshed` healed to its current exact
-    /// key, under the same fingerprint. Returns whether it was written.
+    /// key, preserving shape and recomputing content. Returns whether written.
     ///
     /// A refresh re-keys a set the index holds; it never installs one. A set
     /// the index does not hold under `observed`'s fingerprint was served to
@@ -3564,30 +3568,39 @@ impl FileArtifactStore {
         refreshed: Vec<(usize, FileArtifactKey)>,
     ) -> bool {
         let holds_observed = |held: Option<&AugmenterSet>| {
-            held.is_some_and(|held| held.fingerprint == observed.fingerprint)
+            held.is_some_and(|held| {
+                held.fingerprint == observed.fingerprint
+                    && held.content_fingerprint == observed.content_fingerprint
+            })
         };
         if refreshed.is_empty() || !holds_observed(self.get_augmenter_set(key).as_deref()) {
             return false;
         }
         let mut entries = observed.entries.clone();
         for (index, artifact_key) in refreshed {
+            let Some(artifact) = self.get_artifacts(&artifact_key) else {
+                return false;
+            };
+            entries[index].source_parse_env_hash = artifact.indexed.parse_env_hash;
             entries[index].artifact_key = artifact_key;
         }
-        let set = Arc::new(AugmenterSet {
-            entries,
-            fingerprint: observed.fingerprint,
-        });
+        let set = Arc::new(AugmenterSet::new(entries, observed.fingerprint));
+        let content_changed = set.content_fingerprint != observed.content_fingerprint;
         // The held-set check repeats under the install's entry guard: an
         // invalidation or a differently-fingerprinted publish that lands
         // after the check above must not be overwritten by the observed set.
-        // A same-fingerprint re-key changes no recorded shape fact, so it
-        // moves neither the route-surface generation nor the artifact one.
-        self.route_surface_generation.mutate(|| {
+        // Content movement changes the population fact even if shape stays
+        // identical; both validation clocks must describe that publication.
+        let installed = self.route_surface_generation.mutate(|| {
             let installed = self
                 .install_augmenter_set_if(key.clone(), set, None, holds_observed)
                 .is_some();
-            (installed, false)
-        })
+            (installed, installed && content_changed)
+        });
+        if installed && content_changed {
+            self.bump_artifact_generation();
+        }
+        installed
     }
 
     /// Discover live candidate identities without retaining storage guards.
@@ -4091,6 +4104,7 @@ pub(crate) fn fact_key_kind_tag_for(key: &fact_registry::FactKey) -> verter_audi
         FactKey::ResolvedImportClause { .. }
         | FactKey::ResolvedReexportBinding { .. }
         | FactKey::ModuleAugmentationIndexShape { .. }
+        | FactKey::AugmentationPopulationContent { .. }
         | FactKey::ProgramFileOrder { .. } => FactKeyKindTag::SyntacticExportSet,
     }
 }
