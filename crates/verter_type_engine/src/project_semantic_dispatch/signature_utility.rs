@@ -137,46 +137,55 @@ enum UtilityInference {
     Incomplete,
 }
 
-impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
-    /// The subject's candidates of `kind`, read from `SignaturesOfType`,
-    /// each as the authored signature node this subject carries it at — a
-    /// composite candidate (a union or mixin synthesis) has representatives,
-    /// not an authored node of its own, and reads `None`. The outer `None`
-    /// is an incomplete read — never an empty set.
-    fn authored_candidates_of(
-        &self,
-        subject: SemanticNodeId,
-        kind: SignatureKind,
-    ) -> Option<Vec<Option<SemanticNodeId>>> {
-        match self
-            .execute_via_cold_build_helper(SemanticQueryKey::SignaturesOfType {
-                subject,
-                kind,
-                context: SemanticContextId::production(),
-            })
-            .value
-        {
-            QueryResult::Value(SemanticQueryValue::SignatureSet(value)) => {
-                Some(value.nodes.iter().map(|nodes| nodes.authored).collect())
-            }
-            _ => None,
-        }
+/// The one read [`ProjectSemanticDispatch::authored_signatures_of`] makes:
+/// the subject's `SignaturesOfType` list of `kind`, under the production
+/// context. A caller that steps its reads demands this key itself and hands
+/// the answer to [`authored_signatures_from`].
+pub(super) fn authored_signatures_key(
+    subject: SemanticNodeId,
+    kind: SignatureKind,
+) -> SemanticQueryKey {
+    SemanticQueryKey::SignaturesOfType {
+        subject,
+        kind,
+        context: SemanticContextId::production(),
     }
+}
 
-    /// The subject's authored signatures of `kind`, in candidate order.
+/// The authored signatures an [`authored_signatures_key`] read answered, in
+/// candidate order. Each candidate reads as the authored signature node the
+/// subject carries it at; a composite candidate (a union or mixin synthesis)
+/// has representatives, not an authored node of its own, so the whole list
+/// is [`AuthoredSignatures::Undecided`], as is an incomplete read — never an
+/// empty set.
+pub(super) fn authored_signatures_from(
+    read: &QueryResult<SemanticQueryValue>,
+) -> AuthoredSignatures {
+    match read {
+        QueryResult::Value(SemanticQueryValue::SignatureSet(value)) => value
+            .nodes
+            .iter()
+            .map(|nodes| nodes.authored)
+            .collect::<Option<Vec<_>>>()
+            .map_or(AuthoredSignatures::Undecided, AuthoredSignatures::Nodes),
+        _ => AuthoredSignatures::Undecided,
+    }
+}
+
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// The subject's authored signatures of `kind`, in candidate order: the
+    /// [`authored_signatures_key`] read made in place, answered by
+    /// [`authored_signatures_from`].
     pub(super) fn authored_signatures_of(
         &self,
         subject: SemanticNodeId,
         kind: SignatureKind,
     ) -> AuthoredSignatures {
-        match self.authored_candidates_of(subject, kind) {
-            Some(candidates) => candidates
-                .iter()
-                .copied()
-                .collect::<Option<Vec<_>>>()
-                .map_or(AuthoredSignatures::Undecided, AuthoredSignatures::Nodes),
-            None => AuthoredSignatures::Undecided,
-        }
+        authored_signatures_from(
+            &self
+                .execute_via_cold_build_helper(authored_signatures_key(subject, kind))
+                .value,
+        )
     }
 
     /// Whether conditional inference reads a signature off `subject` at all:

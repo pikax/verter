@@ -20438,16 +20438,54 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         target: SemanticNodeId,
         canonical: &str,
     ) -> Option<Vec<Arc<str>>> {
-        let target = match self.unwrap_identity_carrier_for_relation(target) {
-            IdentityCarrierUnwrap::Concrete(concrete) => concrete,
-            IdentityCarrierUnwrap::Unresolvable => return None,
-        };
+        match self.unwrap_identity_carrier_for_relation(target) {
+            IdentityCarrierUnwrap::Concrete(concrete) => {
+                self.assignability_refuting_keys_of(concrete, canonical)
+            }
+            IdentityCarrierUnwrap::Unresolvable => None,
+        }
+    }
+
+    /// [`Self::assignability_refuting_keys`] for a `concrete` target the
+    /// caller has already unwrapped from its identity carriers.
+    ///
+    /// The global `Object` interface is read IN PLACE here, through
+    /// [`Self::global_wrapper_surface`], once `concrete` is known to be an
+    /// object surface: that wrapper read has no key and finish of its own
+    /// yet, so a caller that steps its reads cannot demand it as a request
+    /// and this function still waits on it inside the call. Once the
+    /// interface is in hand the answer is [`Self::refuting_keys_from`].
+    pub(super) fn assignability_refuting_keys_of(
+        &self,
+        concrete: SemanticNodeId,
+        canonical: &str,
+    ) -> Option<Vec<Arc<str>>> {
+        if !matches!(
+            self.graph().node_data(concrete).as_deref(),
+            Some(SemanticNodeData::Object(_))
+        ) {
+            return None;
+        }
+        let apparent = self.global_wrapper_surface("Object", &[], canonical);
+        self.refuting_keys_from(concrete, apparent)
+    }
+
+    /// The refuting keys of the object surface `concrete`, given the global
+    /// `Object` interface its project declares: every required string-keyed
+    /// property that interface does not declare. Reads only the graph.
+    /// `None` when `concrete` is no object surface or the interface did not
+    /// settle.
+    pub(super) fn refuting_keys_from(
+        &self,
+        concrete: SemanticNodeId,
+        apparent: super::apparent_type::GlobalWrapper,
+    ) -> Option<Vec<Arc<str>>> {
         let graph = self.graph();
-        let data = graph.node_data(target)?;
+        let data = graph.node_data(concrete)?;
         let SemanticNodeData::Object(surface) = data.as_ref() else {
             return None;
         };
-        let apparent = match self.global_wrapper_surface("Object", &[], canonical) {
+        let apparent = match apparent {
             super::apparent_type::GlobalWrapper::Surface(node) => Some(graph.node_data(node)?),
             super::apparent_type::GlobalWrapper::Absent => None,
             super::apparent_type::GlobalWrapper::Unsettled => return None,
@@ -20493,11 +20531,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         source: SemanticNodeId,
     ) -> Option<Vec<Arc<str>>> {
-        let source = match self.unwrap_identity_carrier_for_relation(source) {
-            IdentityCarrierUnwrap::Concrete(concrete) => concrete,
-            IdentityCarrierUnwrap::Unresolvable => return None,
-        };
-        let data = self.graph().node_data(source)?;
+        match self.unwrap_identity_carrier_for_relation(source) {
+            IdentityCarrierUnwrap::Concrete(concrete) => self.closed_object_keys_of(concrete),
+            IdentityCarrierUnwrap::Unresolvable => None,
+        }
+    }
+
+    /// [`Self::closed_object_own_string_keys`] for a `concrete` source the
+    /// caller has already unwrapped from its identity carriers. Reads only
+    /// the graph.
+    pub(super) fn closed_object_keys_of(&self, concrete: SemanticNodeId) -> Option<Vec<Arc<str>>> {
+        let data = self.graph().node_data(concrete)?;
         let SemanticNodeData::Object(surface) = data.as_ref() else {
             return None;
         };
