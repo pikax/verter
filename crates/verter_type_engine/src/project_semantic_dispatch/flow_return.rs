@@ -1945,7 +1945,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         root: &verter_type_expr::IndexedValueExpression,
         run: &mut IndexedValueRun,
         suspend: bool,
-        delivery: Option<super::query_frames::FrameDelivery>,
+        delivery: Option<IndexedValueDelivery<'_>>,
     ) -> IndexedValuePoll {
         let _site = self.checking_site_scope(
             crate::semantic_query::checker_policy::TupleSplicePosition::Expression,
@@ -1977,27 +1977,58 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 (hold, as_callee) = (entered_hold, entered_as_callee);
                 Phase::Enter
             }
-            IndexedNext::AwaitReference => Phase::Deliver(Some(IndexedValue {
-                node: self
-                    .consume_frame_delivery(
-                        delivery.expect("a run waiting on a value resumes with it"),
-                    )
-                    .node,
-                fresh: false,
-            })),
-            IndexedNext::AwaitCall => Phase::CheckCall(self.indexed_call_delivered(
-                delivery.expect("a run waiting on a call resumes with its resolution"),
-            )),
+            IndexedNext::AwaitReference => {
+                let node = match delivery.expect("a run waiting on a value resumes with it") {
+                    IndexedValueDelivery::Frame(delivery) => {
+                        self.consume_frame_delivery(
+                            delivery
+                                .take()
+                                .expect("the runtime delivers the requested reference"),
+                        )
+                        .node
+                    }
+                    IndexedValueDelivery::Read(delivery) => delivery
+                        .node()
+                        .unwrap_or_else(|| self.opaque(QueryError::Miss)),
+                    IndexedValueDelivery::Call(_) => unreachable!("a reference receives a node"),
+                };
+                Phase::Deliver(Some(IndexedValue { node, fresh: false }))
+            }
+            IndexedNext::AwaitCall => Phase::CheckCall(
+                match delivery.expect("a run waiting on a call resumes with its resolution") {
+                    IndexedValueDelivery::Frame(delivery) => self.indexed_call_delivered(
+                        delivery
+                            .take()
+                            .expect("the runtime delivers the requested call"),
+                    ),
+                    IndexedValueDelivery::Call(value) => value,
+                    IndexedValueDelivery::Read(_) => unreachable!("a call receives its resolution"),
+                },
+            ),
             IndexedNext::AwaitReturn { mut original } => {
-                let read = self.read_frame_delivery(
-                    delivery.expect("a checked return resumes with its demand"),
-                );
-                if let QueryResult::Value(crate::semantic_query::SemanticQueryValue::TypeNode(
-                    node,
-                )) = read.value
-                {
-                    if self.declared_return_is_recovery(read.partial_reasons(), node) {
-                        original.node = node;
+                let read = match delivery.expect("a checked return resumes with its demand") {
+                    IndexedValueDelivery::Frame(delivery) => Some(
+                        self.read_frame_delivery(
+                            delivery
+                                .take()
+                                .expect("the runtime delivers the requested return"),
+                        ),
+                    ),
+                    // Not checked where the call is evaluated: the lazy carrier stands.
+                    IndexedValueDelivery::Read(ReadDelivery::None) => None,
+                    IndexedValueDelivery::Read(delivery) => Some(delivery.into_value()),
+                    IndexedValueDelivery::Call(_) => {
+                        unreachable!("a checked return receives its whole read")
+                    }
+                };
+                if let Some(read) = read {
+                    if let QueryResult::Value(
+                        crate::semantic_query::SemanticQueryValue::TypeNode(node),
+                    ) = read.value
+                    {
+                        if self.declared_return_is_recovery(read.partial_reasons(), node) {
+                            original.node = node;
+                        }
                     }
                 }
                 Phase::Deliver(Some(original))
@@ -2260,15 +2291,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: crate::semantic_query::SemanticQueryKey,
     ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>> {
+        self.declared_call_return_checks_here()
+            .then(|| self.execute_read(key))
+    }
+
+    /// Whether a lazy declared return's demand is read here (see
+    /// [`Self::read_declared_call_return`]). Where it is not, the
+    /// evaluation keeps its unchecked carrier and its build is never
+    /// admitted.
+    fn declared_call_return_checks_here(&self) -> bool {
         if crate::semantic_execution::drive_running() && !self.flow_seam_reads_here() {
             self.fold_into_top_build_local_taint_with(
                 false,
                 true,
                 crate::semantic_query::PartialReasonSet::empty(),
             );
-            return None;
+            return false;
         }
-        Some(self.execute_read(key))
+        true
     }
 
     /// A call's value once its lazy declared return (`key`) is checked in
@@ -2576,7 +2616,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         expression,
                         indexed,
                         true,
-                        delivered.take(),
+                        Some(IndexedValueDelivery::Frame(&mut delivered)),
                     ) {
                         IndexedValuePoll::Need(key) => {
                             run.observed = Some(scope.finish(()));
@@ -10035,6 +10075,15 @@ pub(super) enum IndexedValuePoll {
     Need(crate::semantic_query::SemanticQueryKey),
 }
 
+/// The runtime delivers an unconsumed frame envelope. The flow reader
+/// delivers an already consumed node or whole read, or a call resolved by
+/// the existing call machinery. Only the frame envelope replays its rails.
+pub(super) enum IndexedValueDelivery<'d> {
+    Frame(&'d mut Option<super::query_frames::FrameDelivery>),
+    Read(ReadDelivery),
+    Call(Option<IndexedValue>),
+}
+
 /// What an indexed run does when it is next drained.
 enum IndexedNext {
     /// Evaluate the expression at its position: a call's result held on
@@ -10968,6 +11017,15 @@ fn finish_awaited_normalize_for_flow(
 pub(super) trait FlowReadDriver {
     /// Request a read under the current checking site.
     fn request(&self, key: SemanticQueryKey, shape: ReadShape, origin: ReadOrigin) -> ReadWait;
+    /// Advance the retained indexed walk to its next requested read.
+    fn advance_indexed_value(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expression: &verter_type_expr::IndexedValueExpression,
+        run: &mut IndexedValueRun,
+        delivery: Option<ReadDelivery>,
+    ) -> ReadStep<Option<IndexedValue>>;
     /// Request the whole read that normalizes an awaited operand.
     fn request_awaited_normalize(&self, node: SemanticNodeId) -> ReadWait;
     /// The value a body type's lowered carrier `node` denotes when it is a
@@ -11189,13 +11247,6 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
         node: SemanticNodeId,
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> SemanticNodeId;
-    fn evaluate_indexed_value(
-        &self,
-        canonical: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        expression: &verter_type_expr::IndexedValueExpression,
-        hold_flow_result: bool,
-    ) -> Option<IndexedValue>;
     fn execute_flow_return(&self, key: FlowReturnKey) -> FlowReturnStep;
     fn execute_function_return_source(
         &self,
@@ -11595,6 +11646,73 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowReadDriver
             lexical: false,
             #[cfg(any(test, feature = "test-support"))]
             origin,
+        }
+    }
+    fn advance_indexed_value(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expression: &verter_type_expr::IndexedValueExpression,
+        run: &mut IndexedValueRun,
+        delivery: Option<ReadDelivery>,
+    ) -> ReadStep<Option<IndexedValue>> {
+        let mut poll = self.drain_indexed_value(
+            canonical,
+            owner,
+            expression,
+            run,
+            true,
+            delivery.map(IndexedValueDelivery::Read),
+        );
+        loop {
+            match poll {
+                IndexedValuePoll::Done(value) => return ReadStep::Ready(value),
+                IndexedValuePoll::Need(SemanticQueryKey::ResolveCall(key)) => {
+                    poll = settle_now(
+                        ReadStep::Wait(key),
+                        |key| {
+                            #[cfg(any(test, feature = "test-support"))]
+                            let _stage = body_reads::enter_in_place();
+                            #[cfg(any(test, feature = "test-support"))]
+                            let _site = body_reads::enter_site(ReadOrigin::IndexedValue.name());
+                            self.resolve_indexed_call_key(*key, false)
+                        },
+                        |value| {
+                            ReadStep::Ready(self.drain_indexed_value(
+                                canonical,
+                                owner,
+                                expression,
+                                run,
+                                true,
+                                Some(IndexedValueDelivery::Call(value)),
+                            ))
+                        },
+                    );
+                }
+                IndexedValuePoll::Need(SemanticQueryKey::Instantiate(_))
+                    if !self.declared_call_return_checks_here() =>
+                {
+                    // Unchecked here: the call keeps its lazy carrier.
+                    poll = self.drain_indexed_value(
+                        canonical,
+                        owner,
+                        expression,
+                        run,
+                        true,
+                        Some(IndexedValueDelivery::Read(ReadDelivery::None)),
+                    );
+                }
+                IndexedValuePoll::Need(key) => {
+                    let shape = match key {
+                        SemanticQueryKey::TypeOf { .. } => ReadShape::Node,
+                        SemanticQueryKey::Instantiate(_) => ReadShape::Whole,
+                        _ => unreachable!(
+                            "an indexed read requests a reference or a declared return"
+                        ),
+                    };
+                    return ReadStep::Wait(self.request(key, shape, ReadOrigin::IndexedValue));
+                }
+            }
         }
     }
     fn request_awaited_normalize(&self, node: SemanticNodeId) -> ReadWait {
@@ -12002,22 +12120,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     ) -> SemanticNodeId {
         body_read_site!("erase_nullable_members");
         ProjectSemanticDispatch::erase_nullable_members(self, node, nullability)
-    }
-    fn evaluate_indexed_value(
-        &self,
-        canonical: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        expression: &verter_type_expr::IndexedValueExpression,
-        hold_flow_result: bool,
-    ) -> Option<IndexedValue> {
-        body_read_site!("evaluate_indexed_value");
-        ProjectSemanticDispatch::evaluate_indexed_value(
-            self,
-            canonical,
-            owner,
-            expression,
-            hold_flow_result,
-        )
     }
     fn execute_flow_return(&self, key: FlowReturnKey) -> FlowReturnStep {
         body_read_site!("execute_flow_return");
@@ -12784,6 +12886,17 @@ impl<D: FlowDemandDriver> FlowReadDriver for FlowCx<'_, D> {
     fn request(&self, key: SemanticQueryKey, shape: ReadShape, origin: ReadOrigin) -> ReadWait {
         self.driver.request(key, shape, origin)
     }
+    fn advance_indexed_value(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        expression: &verter_type_expr::IndexedValueExpression,
+        run: &mut IndexedValueRun,
+        delivery: Option<ReadDelivery>,
+    ) -> ReadStep<Option<IndexedValue>> {
+        self.driver
+            .advance_indexed_value(canonical, owner, expression, run, delivery)
+    }
     fn request_awaited_normalize(&self, node: SemanticNodeId) -> ReadWait {
         self.driver.request_awaited_normalize(node)
     }
@@ -13078,16 +13191,6 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> SemanticNodeId {
         self.driver.erase_nullable_members(node, nullability)
-    }
-    fn evaluate_indexed_value(
-        &self,
-        canonical: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        expression: &verter_type_expr::IndexedValueExpression,
-        hold_flow_result: bool,
-    ) -> Option<IndexedValue> {
-        self.driver
-            .evaluate_indexed_value(canonical, owner, expression, hold_flow_result)
     }
     fn execute_flow_return(&self, key: FlowReturnKey) -> FlowReturnStep {
         self.driver.execute_flow_return(key)
@@ -30555,6 +30658,18 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         loop {
             match step {
                 CallStep::Done(done) => return ResumedCall::Value(done),
+                CallStep::Indexed(flight, argument) => {
+                    if suspend && body_requests_reads() {
+                        return self.helper_step_on_run(
+                            run,
+                            Box::new(HelperWait::indexed_argument(flight, argument)),
+                            None,
+                            suspend,
+                        );
+                    }
+                    let progress = self.settle_indexed_call_argument(argument);
+                    step = self.continue_call_route(flight, progress);
+                }
                 CallStep::Operand(flight, operand) => {
                     run.waiting.push(Waiting::CallOperand(flight));
                     run.waiting.push(Waiting::Erase);
@@ -31448,21 +31563,49 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         expression: &verter_type_expr::IndexedValueExpression,
         binding: &FlowIndexedArgumentBinding,
     ) -> Option<IndexedValue> {
+        if let Some(value) = self.indexed_call_argument_binding(binding) {
+            return value;
+        }
+        let mut run = IndexedValueRun::new(false);
+        let first = self.dispatch.advance_indexed_value(
+            self.st.canonical,
+            self.st.owner,
+            expression,
+            &mut run,
+            None,
+        );
+        self.settle_now(first, |this, delivery| {
+            this.dispatch.advance_indexed_value(
+                this.st.canonical,
+                this.st.owner,
+                expression,
+                &mut run,
+                Some(delivery),
+            )
+        })
+    }
+
+    /// An enclosing frame answers its own binding reads; other expressions
+    /// are evaluated by the indexed walk in owner scope.
+    fn indexed_call_argument_binding(
+        &mut self,
+        binding: &FlowIndexedArgumentBinding,
+    ) -> Option<Option<IndexedValue>> {
         if matches!(
             binding,
             FlowIndexedArgumentBinding::Missing | FlowIndexedArgumentBinding::UnmodeledLocal
         ) {
-            return None;
+            return Some(None);
         }
         if let FlowIndexedArgumentBinding::ValueRead(binding)
         | FlowIndexedArgumentBinding::SourceTypeQuery(binding) = binding
         {
-            return self
-                .frame_binding_read(binding)
-                .map(|node| IndexedValue { node, fresh: false });
+            return Some(
+                self.frame_binding_read(binding)
+                    .map(|node| IndexedValue { node, fresh: false }),
+            );
         }
-        self.dispatch
-            .evaluate_indexed_value(self.st.canonical, self.st.owner, expression, false)
+        None
     }
 
     /// The direct-call target's callee VALUE TYPE through the same
@@ -31760,6 +31903,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let mut progress = self.start_resolve_call(callee, site, arguments);
         loop {
             match progress {
+                call_stack::ResolveCallProgress::Indexed(argument) => {
+                    progress = self.settle_indexed_call_argument(argument);
+                }
                 call_stack::ResolveCallProgress::List(list) => {
                     let (mut read, wait) = self
                         .dispatch

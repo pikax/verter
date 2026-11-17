@@ -1410,7 +1410,7 @@ fn a_union_rebuilt_around_a_reduced_operator_keeps_the_nullability_algebra() {
 
 /// Overloads whose first candidate relates through a method parameter, and
 /// arguments inferred against a union parameter's fixed members.
-const OVERLOADS_AND_UNION_MEMBERS: &str = r##"
+pub(super) const OVERLOADS_AND_UNION_MEMBERS: &str = r##"
 declare function pick(v: { m(x: string | number): void }): "wide";
 declare function pick(v: {}): "fallback";
 declare function pickP(v: { m: (x: string | number) => void }): "wide";

@@ -78,6 +78,7 @@ pub(in crate::project_semantic_dispatch) enum ReadOrigin {
     SignatureList,
     Awaited,
     MemberPath,
+    IndexedValue,
 }
 
 impl ReadOrigin {
@@ -88,6 +89,7 @@ impl ReadOrigin {
             Self::SignatureList => "signature_list",
             Self::Awaited => "awaited_normalize",
             Self::MemberPath => "member_path",
+            Self::IndexedValue => "indexed_value",
         }
     }
 }
@@ -132,12 +134,14 @@ static_assertions::const_assert!(
 );
 
 /// A reading operation's result: its value, or the read it waits on.
+/// Ordinary reads wait on `ReadWait`; an in-place call need retains its
+/// call key without entering the ordinary read protocol.
 #[must_use = "a read that waits is requested by its caller"]
-pub(in crate::project_semantic_dispatch) enum ReadStep<T> {
+pub(in crate::project_semantic_dispatch) enum ReadStep<T, W = ReadWait> {
     /// The value, read without a request.
     Ready(T),
     /// The read the value waits on.
-    Wait(ReadWait),
+    Wait(W),
 }
 
 /// Where a flow read stands after an advancement.
