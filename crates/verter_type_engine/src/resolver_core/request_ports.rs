@@ -783,6 +783,8 @@ pub type AugmenterResolutions = rustc_hash::FxHashMap<Arc<str>, Vec<(Arc<str>, O
 /// fingerprint travels beside the filtered answer, including an empty answer.
 pub struct ContributorAnswer {
     pub population_fingerprint: verter_session_query::analysis::types::Hash16,
+    /// Content identity from the same all-space population publication.
+    pub population_content_fingerprint: verter_session_query::analysis::types::Hash16,
     pub contributors: verter_session_query::inputs::contributors::SymbolContributors,
 }
 

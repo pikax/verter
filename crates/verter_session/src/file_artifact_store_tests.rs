@@ -94,10 +94,10 @@ fn rejected_guarded_augmenter_install_flushes_contributors_completed_meanwhile()
     ));
     let installed = store.install_augmenter_set_if(
         key,
-        Arc::new(verter_session_query::resolution::AugmenterSet {
-            entries: smallvec::smallvec![],
-            fingerprint: [4u8; 16],
-        }),
+        Arc::new(verter_session_query::resolution::AugmenterSet::new(
+            smallvec::smallvec![],
+            [4u8; 16],
+        )),
         None,
         |_| {
             // The guarded install's epoch is in flight here.
@@ -590,14 +590,15 @@ fn augmentation_index_round_trip() {
         population: crate::file_artifact_store::AugmentationPopulation::Base,
         target: AugmentationTargetKind::ExternalSpecifier(super::InternedSpecifier::from("vue")),
     };
-    let set = Arc::new(AugmenterSet {
-        entries: smallvec![AugmenterEntry {
+    let set = Arc::new(AugmenterSet::new(
+        smallvec![AugmenterEntry {
+            source_parse_env_hash: [0; 16],
             population_hash: [0; 16],
             artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [9u8; 16]),
             parse_stable_hash: [3u8; 16],
         }],
-        fingerprint: [4u8; 16],
-    });
+        [4u8; 16],
+    ));
     store.populate_augmenter_set(key.clone(), Arc::clone(&set));
     let got = store.get_augmenter_set(&key).expect("MUST round-trip");
     assert!(Arc::ptr_eq(&got, &set));
@@ -1122,14 +1123,15 @@ fn populate_augmenter_set_is_bump_iff_fingerprint_changed() {
         target: AugmentationTargetKind::GlobalAugmentation,
     };
     let make_set = |fingerprint: Hash16| {
-        Arc::new(AugmenterSet {
-            entries: smallvec![AugmenterEntry {
+        Arc::new(AugmenterSet::new(
+            smallvec![AugmenterEntry {
+                source_parse_env_hash: [0; 16],
                 population_hash: [0; 16],
                 artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [9u8; 16]),
                 parse_stable_hash: [3u8; 16],
             }],
             fingerprint,
-        })
+        ))
     };
     // Fresh populate (absent → present) bumps.
     let before = store.artifact_generation();
@@ -1173,6 +1175,7 @@ fn augmenter_key_refresh_rekeys_only_the_set_the_index_holds() {
     use verter_session_query::resolution::AugmenterSet;
 
     let store = FileArtifactStore::new();
+    store.insert(Arc::from("/aug.ts"), synth_indexed(8));
     let key = AugmentationTargetKey {
         project_identity: ProjectIdentity([7u8; 16]),
         resolve_env_hash: [1u8; 16],
@@ -1180,13 +1183,16 @@ fn augmenter_key_refresh_rekeys_only_the_set_the_index_holds() {
         population: crate::file_artifact_store::AugmentationPopulation::Base,
         target: AugmentationTargetKind::GlobalAugmentation,
     };
-    let set = |content_hash: Hash16, fingerprint: Hash16| AugmenterSet {
-        entries: smallvec![AugmenterEntry {
-            population_hash: [0; 16],
-            artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), content_hash),
-            parse_stable_hash: [3u8; 16],
-        }],
-        fingerprint,
+    let set = |content_hash: Hash16, fingerprint: Hash16| {
+        AugmenterSet::new(
+            smallvec![AugmenterEntry {
+                source_parse_env_hash: [0; 16],
+                population_hash: [0; 16],
+                artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), content_hash),
+                parse_stable_hash: [3u8; 16],
+            }],
+            fingerprint,
+        )
     };
     let healed = || {
         vec![(
@@ -1743,8 +1749,9 @@ fn bare_dot_dot_fact_conservatively_invalidates_relative_target_entries() {
     let key = relative_dep_target_key();
     store.populate_augmenter_set(
         key.clone(),
-        Arc::new(AugmenterSet {
-            entries: smallvec![AugmenterEntry {
+        Arc::new(AugmenterSet::new(
+            smallvec![AugmenterEntry {
+                source_parse_env_hash: [0; 16],
                 population_hash: [0; 16],
                 artifact_key: FileArtifactKey::base_for_test(
                     Arc::from("/src/pkg/aug.ts"),
@@ -1752,8 +1759,8 @@ fn bare_dot_dot_fact_conservatively_invalidates_relative_target_entries() {
                 ),
                 parse_stable_hash: [3u8; 16],
             }],
-            fingerprint: [4u8; 16],
-        }),
+            [4u8; 16],
+        )),
     );
 
     let fact = ModuleAugmentationFact {
@@ -2047,6 +2054,7 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
     use verter_session_query::source::augmentation::augmentation_population_hash;
     let fingerprint = |art: &FileArtifacts| {
         super::compute_augmenter_set_fingerprint(&[AugmenterEntry {
+            source_parse_env_hash: [0; 16],
             artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [9; 16]),
             population_hash: augmentation_population_hash(art.augmentations.iter()),
             parse_stable_hash: art.parse_stable_hash,
@@ -2094,6 +2102,7 @@ fn augmentation_contribution_equivalence_tracks_fingerprint_inputs() {
 fn augmentation_population_ignores_contributor_body_and_skeleton_content() {
     use verter_session_query::resolution::AugmenterEntry;
     let entry = |canonical: &str, content: u8| AugmenterEntry {
+        source_parse_env_hash: [0; 16],
         population_hash: [0; 16],
         artifact_key: FileArtifactKey::base_for_test(Arc::from(canonical), [content; 16]),
         parse_stable_hash: [content; 16],
@@ -2984,14 +2993,15 @@ fn captured_root_still_reaches_a_retired_augmenter_set() {
 
     let store = FileArtifactStore::new();
     let target = relative_dep_target_key();
-    let set = Arc::new(AugmenterSet {
-        entries: smallvec![AugmenterEntry {
+    let set = Arc::new(AugmenterSet::new(
+        smallvec![AugmenterEntry {
+            source_parse_env_hash: [0; 16],
             population_hash: [0; 16],
             artifact_key: FileArtifactKey::base_for_test(Arc::from("/src/aug.ts"), [9u8; 16]),
             parse_stable_hash: [3u8; 16],
         }] as SmallVec<[AugmenterEntry; 2]>,
-        fingerprint: [0xaa; 16],
-    });
+        [0xaa; 16],
+    ));
     store.populate_augmenter_set(target.clone(), Arc::clone(&set));
 
     let root = store.capture_root();
@@ -3044,14 +3054,15 @@ fn removing_one_canonical_keeps_unrelated_augmenter_sets() {
     let target = relative_dep_target_key();
     store.populate_augmenter_set(
         target.clone(),
-        Arc::new(AugmenterSet {
-            entries: smallvec![AugmenterEntry {
+        Arc::new(AugmenterSet::new(
+            smallvec![AugmenterEntry {
+                source_parse_env_hash: [0; 16],
                 artifact_key: FileArtifactKey::base_for_test(Arc::from("/src/aug.ts"), [9u8; 16]),
                 population_hash: [0; 16],
                 parse_stable_hash: [3u8; 16],
             }] as SmallVec<[AugmenterEntry; 2]>,
-            fingerprint: [0xaa; 16],
-        }),
+            [0xaa; 16],
+        )),
     );
     store.insert(Arc::from("/unrelated.ts"), synth_indexed(0x55));
     assert_eq!(store.remove_canonical("/unrelated.ts"), 1);

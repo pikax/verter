@@ -1083,6 +1083,15 @@ impl StoreViewRoots {
         target: crate::file_artifact_store::AugmentationTargetKind,
         population: crate::file_artifact_store::AugmentationPopulation,
     ) -> Option<Hash16> {
+        self.augmentation_set(target, population)
+            .map(|set| set.fingerprint)
+    }
+
+    fn augmentation_set(
+        &self,
+        target: crate::file_artifact_store::AugmentationTargetKind,
+        population: crate::file_artifact_store::AugmentationPopulation,
+    ) -> Option<Arc<verter_session_query::resolution::AugmenterSet>> {
         note_owner_visit();
         let reader = self.artifact_reader.as_ref()?;
         let root = self.artifact_root()?;
@@ -1093,10 +1102,31 @@ impl StoreViewRoots {
             population,
             target,
         };
-        reader
+        reader.indexed().augmenter_set_observed_at_root(root, &key)
+    }
+
+    /// The two immutable publications described by a stitch's content fact.
+    /// Pending classifications or dirty named populations cannot vouch for it.
+    pub(crate) fn augmentation_content_population(
+        &self,
+        target: crate::file_artifact_store::AugmentationTargetKind,
+        decl_name: &str,
+        population: crate::file_artifact_store::AugmentationPopulation,
+        overlay_discriminator: Option<Hash16>,
+    ) -> Option<(
+        Arc<verter_session_query::resolution::AugmenterSet>,
+        verter_session_query::inputs::contributors::SymbolContributors,
+    )> {
+        let augmenters = self.augmentation_set(target.clone(), population)?;
+        let index = self
+            .artifact_reader
+            .as_ref()?
             .indexed()
-            .augmenter_set_observed_at_root(root, &key)
-            .map(|set| set.fingerprint)
+            .global_contributor_index();
+        let contributors = index
+            .population_for_validation(&target, decl_name)?
+            .observation_contributors(&target, decl_name, overlay_discriminator);
+        Some((augmenters, contributors))
     }
 
     /// The published file-order fingerprint of `program`, while the live

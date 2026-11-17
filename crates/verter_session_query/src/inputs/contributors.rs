@@ -47,6 +47,8 @@ pub enum ContributorOrigin {
 #[derive(Debug, Clone)]
 pub struct ContributorEntry {
     pub artifact_key: FileArtifactKey,
+    /// Actual environment of the source publication, not the artifact slot.
+    pub source_parse_env_hash: Hash16,
     pub parse_stable_hash: Hash16,
     pub owner: TopLevelOwnerId,
     pub origin: ContributorOrigin,
@@ -63,6 +65,8 @@ pub struct ContributorEntry {
 pub struct SymbolContributors {
     pub entries: Arc<[ContributorEntry]>,
     pub fingerprint: Hash16,
+    /// Content and exact source environments of this immutable population.
+    pub content_fingerprint: Hash16,
 }
 
 /// Which file-scope declarations of a global name an augmentation
@@ -88,11 +92,25 @@ pub enum AugmentationCandidate {
 }
 
 impl SymbolContributors {
-    pub fn empty() -> Self {
+    pub fn new(entries: Arc<[ContributorEntry]>, fingerprint: Hash16) -> Self {
+        let content_fingerprint =
+            crate::source::augmentation_keys::augmentation_population_content_fingerprint(
+                entries
+                    .iter()
+                    .map(|entry| (&entry.artifact_key, entry.source_parse_env_hash)),
+            );
         Self {
-            entries: Arc::from(Vec::new().into_boxed_slice()),
-            fingerprint: fingerprint_of(&[]),
+            entries,
+            fingerprint,
+            content_fingerprint,
         }
+    }
+
+    pub fn empty() -> Self {
+        Self::new(
+            Arc::from(Vec::new().into_boxed_slice()),
+            fingerprint_of(&[]),
+        )
     }
 }
 

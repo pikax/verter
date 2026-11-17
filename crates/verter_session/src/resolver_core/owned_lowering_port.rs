@@ -876,6 +876,9 @@ macro_rules! owned_lowering_from_source_inputs {
                     verter_type_engine::resolver_core::resolver_context::observe_program_file_order(&order);
                 }
                 verter_type_engine::resolver_core::request_ports::ContributorAnswer {
+                    population_content_fingerprint: population.observation_content_fingerprint(
+                        &crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
+                        name, discriminator),
                     population_fingerprint: population.observation_fingerprint(
                         &crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
                         name, discriminator),
@@ -919,6 +922,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 let population_fingerprint =
                     population.observation_fingerprint(target, name, discriminator);
                 verter_type_engine::resolver_core::request_ports::ContributorAnswer {
+                    population_content_fingerprint: population.observation_content_fingerprint(target, name, discriminator),
                     population_fingerprint,
                     contributors,
                 }
