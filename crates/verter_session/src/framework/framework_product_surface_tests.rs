@@ -888,7 +888,8 @@ fn rendered_constructor_props(code: &str) -> BTreeMap<String, bool> {
         }
     }
     let allocator = oxc_allocator::Allocator::default();
-    let parsed = oxc_parser::Parser::new(&allocator, code, oxc_span::SourceType::ts()).parse();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, code, oxc_span::SourceType::ts()).parse();
     assert!(
         parsed.diagnostics.is_empty(),
         "public declaration must parse: {:?}",
