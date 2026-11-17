@@ -64,6 +64,13 @@ of tracing configuration.
 
 ### Projection delivery and approximation
 
+Structural-fact demands adopt a delivered read's completeness through
+`structural_fact_read_value` before consuming its payload. Canonical intersection
+and template-literal reduction reads use that same handoff: keeping the authored
+fallback cannot discard a required read's partial causes. Deferred outcome
+delivery also joins completeness before a printed argument's node is retained.
+A residual negative lookup that the demand declines remains outside this fold.
+
 Memo settlement adopts the producer's `FactResult` before broadcasting to
 the owner or singleflight followers. `CacheRead.fact_status` and public query
 provenance preserve that disposition; `result_is_partial()` and cause summaries

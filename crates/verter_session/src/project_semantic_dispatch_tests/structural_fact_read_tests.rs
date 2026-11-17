@@ -157,6 +157,16 @@ fn structural_fact_reads_preserve_outcomes_order_and_observations() {
 }
 
 #[test]
+fn structural_fact_read_preserves_non_budget_reduction_partiality() {
+    let host = host();
+    upsert_ts(&host, "/facts.ts", SOURCE);
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let _construction = dispatch.enter_construction_scope();
+    let node = subject(&dispatch, "intersection");
+    dispatch.assert_structural_fact_reduction_partial_for_tests(node);
+}
+
+#[test]
 fn structural_fact_read_abandon_releases_its_recordings_and_observations() {
     for (case, at_reduction) in [
         ("declaration", false),

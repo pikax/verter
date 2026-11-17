@@ -840,6 +840,17 @@ pub enum StructuralFactDemandOutcome {
     Partial(PartialReasonSet),
 }
 
+/// Borrow an adopted read's value only after joining its completeness into
+/// the demand. Keeping an authored fallback still consumes the read's causes.
+fn structural_fact_read_value<'a, T>(
+    read: &'a CacheRead<T>,
+    completeness: &mut ResultCompleteness,
+) -> &'a T {
+    *completeness =
+        completeness.or_partial_if(read.result_is_partial(), read.partial_reason_classes());
+    &read.value
+}
+
 /// One structural-fact demand's retained resolution state. No scope borrows
 /// the dispatcher: connected-demand entries belong to individual advances.
 struct SettledDemand {
@@ -1912,16 +1923,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(key)
             }
             DeferredStep::Done(outcome) => {
+                chain.settled.completeness = chain.settled.completeness.merge(outcome.completeness);
                 match then {
                     FactDeferredThen::Initial => {
-                        chain.settled.completeness = outcome.completeness;
                         chain.settled.availability = outcome.availability;
                         chain.settled.n = outcome.node;
                         chain.stage = FactChainStage::Carrier;
                     }
                     FactDeferredThen::Resolved => {
-                        chain.settled.completeness =
-                            chain.settled.completeness.merge(outcome.completeness);
                         chain.settled.availability =
                             chain.settled.availability.join(outcome.availability);
                         if outcome.node == chain.settled.n {
@@ -2037,14 +2046,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         self,
                         &read.dep_signature,
                     );
-                    chain.settled.completeness = chain
-                        .settled
-                        .completeness
-                        .or_partial_if(read.result_is_partial(), read.partial_reason_classes());
                     chain.settled.availability = chain.settled.availability.join(read.fact_status);
-                    match read.value {
+                    match structural_fact_read_value(&read, &mut chain.settled.completeness) {
                         QueryResult::Value(resolved) => {
-                            if let Some(key) = self.fact_resolved_body(chain, resolved) {
+                            if let Some(key) = self.fact_resolved_body(chain, *resolved) {
                                 return Some(key);
                             }
                         }
@@ -2052,7 +2057,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             self.fact_chain_stop(chain, Some(PartialReasonSet::SAME_PATH_RECURSION))
                         }
                         QueryResult::Error(err) => {
-                            self.fact_chain_stop(chain, demand_read_fault_reasons(&err))
+                            self.fact_chain_stop(chain, demand_read_fault_reasons(err))
                         }
                     }
                 }
@@ -2066,11 +2071,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         self,
                         &read.dep_signature,
                     );
-                    chain.settled.completeness = chain
-                        .settled
-                        .completeness
-                        .or_partial_if(read.result_is_partial(), read.partial_reason_classes());
-                    if let QueryResult::Value(target) = read.value {
+                    if let QueryResult::Value(target) =
+                        structural_fact_read_value(&read, &mut chain.settled.completeness)
+                    {
+                        let target = *target;
                         if target != n {
                             if !chain.visited.insert(n) {
                                 self.fact_chain_stop(
@@ -4952,7 +4956,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> CompositeStep {
         if std::mem::take(&mut reduction.awaiting_reduction) {
             let read = delivery.expect("a reduced intersection consumes its standing read")();
-            let reduced = self.intersection_of_reduction(&reduction.views, &read.value);
+            let value = structural_fact_read_value(&read, &mut reduction.completeness);
+            let reduced = self.intersection_of_reduction(&reduction.views, value);
             return self.end_composite(reduction, (reduced != reduction.node).then_some(reduced));
         }
         if let Some(outcome) = delivered {
@@ -5106,7 +5111,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// names its surviving type set can still keep as its printed origin.
     fn reduce_union_over_resolved_arms(
         &self,
-        reduction: &CompositeReduction,
+        reduction: &mut CompositeReduction,
     ) -> Option<SemanticNodeId> {
         let graph = self.graph();
         let node = reduction.node;
@@ -5142,8 +5147,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         args: Arc::clone(expressions.as_arc()),
                         context: self.template_literal_reduce_context(),
                     });
-                    match read.value {
-                        QueryResult::Value(built) if !read.result_is_partial() => built,
+                    match structural_fact_read_value(&read, &mut reduction.completeness) {
+                        QueryResult::Value(built) if !read.result_is_partial() => *built,
                         _ => *view,
                     }
                 }
@@ -5645,6 +5650,42 @@ pub struct StructuralFactTraceForTests {
 
 #[cfg(any(test, feature = "test-support"))]
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    pub fn assert_structural_fact_reduction_partial_for_tests(&self, node: SemanticNodeId) {
+        let (_connected, _) = self.enter_connected_demand(false);
+        let context =
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+        let reasons = PartialReasonSet::MISSING_DEPENDENCY;
+        let mut delivered = 0;
+        let outcome = self.drive_structural_fact_demands(
+            StructuralFactRead::new(self.fact_demand_frame(node, context, true, true, None)),
+            &mut |key, carrier| {
+                let reduction = matches!(&key, SemanticQueryKey::ReduceIntersection { .. });
+                let mut read = if carrier {
+                    self.carrier_read_in_place(key)
+                } else {
+                    self.execute_read(key)
+                };
+                if reduction {
+                    delivered += 1;
+                    // A required reduction can fail independently of the
+                    // operation allowance. Keep its typed failure in delivery.
+                    read.fact_status = crate::semantic_query::FactStatus::unavailable(reasons);
+                    read.value =
+                        QueryResult::Error(QueryError::IncompleteSemanticOperand { reasons });
+                }
+                read
+            },
+        );
+        assert_eq!(
+            delivered, 1,
+            "the demand must consume its canonical reduction"
+        );
+        let FactProgress::Done(outcome) = outcome else {
+            panic!("a structural demand finishes with its completeness");
+        };
+        assert_eq!(outcome, StructuralFactDemandOutcome::Partial(reasons));
+    }
+
     pub fn trace_structural_fact_read_for_tests(
         &self,
         node: SemanticNodeId,
