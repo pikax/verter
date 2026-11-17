@@ -226,6 +226,9 @@ fn schema_absence_to_ffi(
         verter_type_expr::facts::SchemaAbsence::BranchDivergent => {
             FfiTypePublicationAbsence::BranchDivergent
         }
+        verter_type_expr::facts::SchemaAbsence::UnclassifiedConstructor => {
+            FfiTypePublicationAbsence::UnclassifiedConstructor
+        }
     }
 }
 

@@ -377,7 +377,7 @@ impl RuntimeConstructorIdentity {
 
     /// The closed primitive fact this identity folds to, for the identities
     /// that HAVE one. `None` means "no closed primitive fact exists for this
-    /// identity" — the caller keeps its existing display-text-only route.
+    /// identity". It is not evidence of an unannotated position.
     /// Exhaustive over the enum: adding an arm is a compile error here.
     #[must_use]
     pub const fn primitive(&self) -> Option<PrimitiveName> {
@@ -4481,6 +4481,9 @@ pub enum SchemaAbsence {
     /// the merged row has no single representable source, proven by the
     /// branch fold itself.
     BranchDivergent,
+    /// A runtime constructor annotation exists, but its instance type is
+    /// outside the producer's closed primitive classification.
+    UnclassifiedConstructor,
 }
 
 /// A typed source-construction failure at a REQUIRED source position. The

@@ -116,9 +116,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
         callee: SemanticNodeId,
         site: SliceCallSite,
     ) -> Option<bool> {
-        let Ok((calls, _)) = self.dispatch.shared_signature_buckets(callee) else {
-            return None;
-        };
+        let (calls, _) =
+            super::signature_buckets_in_place(self.dispatch, self.st.canonical, callee)?;
         let effects: Vec<(SignatureEffect, bool)> = calls
             .iter()
             .map(|signature| self.signature_effect(*signature))

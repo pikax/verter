@@ -72,6 +72,18 @@ function buildAuditHost(): InstanceType<typeof native.VerterHost> {
 }
 
 describe("typed audit entry-points are declared on every build", () => {
+  it("audit-disabled entry-points never expose a stored record", () => {
+    const host = new native.VerterHost({ auditEnabled: false });
+    host.upsert({
+      canonicalId: "/widget.vue",
+      inputId: "/widget.vue",
+      source: Buffer.from(SFC_SOURCE),
+    });
+    expect(host.compileWithAudit("/widget.vue", "IDE")).toBeNull();
+    expect(host.analyzeWithAudit("/widget.vue")).toBeNull();
+    if (captured) expect(decodeRecordList(host.getAuditRecords({}))).toEqual([]);
+    host.close();
+  });
   it("captureAvailability names one of the two capture states", () => {
     expect(["Available", "Unavailable"]).toContain(native.captureAvailability());
   });

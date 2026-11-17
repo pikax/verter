@@ -419,6 +419,26 @@ fn type_publication_wire_keeps_outcome_and_terminal_display_separate() {
     ));
     assert_eq!(absent_display.text, None);
 
+    let constructor = host::meta_resolve::MaterializedTypePublication::for_test(
+        verter_type_expr::PublicationResult::Absent {
+            absence: verter_type_expr::facts::SchemaAbsence::UnclassifiedConstructor,
+            provenance: verter_type_expr::ResolutionProvenance::SemanticEvaluator,
+        },
+        Some(TypeExpr::Unknown(
+            verter_type_expr::UnknownValue::missing_output(),
+        )),
+        None,
+    );
+    let (constructor_type, constructor_outcome, _) = materialized_publication_to_ffi(constructor);
+    assert!(matches!(constructor_type, Some(TypeExpr::Unknown(_))));
+    assert!(matches!(
+        constructor_outcome,
+        FfiTypePublication::Absent {
+            absence: FfiTypePublicationAbsence::UnclassifiedConstructor,
+            provenance: FfiResolutionProvenance::SemanticEvaluator,
+        }
+    ));
+
     let failed = host::meta_resolve::MaterializedTypePublication::for_test(
         verter_type_expr::PublicationResult::Failed {
             failure: verter_type_expr::TypedResolutionFailure::SourceConstruction(

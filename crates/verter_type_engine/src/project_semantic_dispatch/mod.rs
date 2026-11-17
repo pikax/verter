@@ -5036,7 +5036,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // resolved subject BEFORE cooperative-memo admission, so singleflight /
         // dedup keys on the real semantic subject (not the unresolved carrier).
         // The eager `Ref` / `ImportType` lowering arm reaches the SAME
-        // `resolve_bare_ref_head` / `resolve_import_type_head` — one resolver,
+        // `resolve_bare_ref_head` / `plan_import_type_head_steps` — one resolver,
         // two entrances. A non-carrier subject is returned verbatim (cheap
         // node-data shape check). Nested carriers inside Intersection / Union /
         // heritage surfaces re-enter this normalization through the

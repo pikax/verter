@@ -222,18 +222,41 @@ async function readFileSafe(absPath: string, ws: CheckerWorkspace): Promise<stri
 }
 
 /**
- * An unannotated member is `any` in TypeScript. Complete absence proves that
- * no type was authored; an unavailable fact cannot be projected into Volar.
+ * Only the wire's Unannotated absence proves no type was authored and permits
+ * compat `any`. Supplied descriptors pass through; unavailable facts stay omitted.
  */
 function unannotatedTypeAsAny(
   type: TypeDescriptor | undefined,
   typeFact: FactResult<TypeDescriptor | undefined>,
 ): TypeDescriptor | undefined {
   if (typeFact?.kind === "unavailable") return undefined;
-  if (type === undefined && typeFact?.kind === "complete") {
+  if (type === undefined && typeFact?.kind === "complete" && typeFact.absence === "unannotated") {
     return { kind: "primitive", name: "any" };
   }
   return type;
+}
+
+/**
+ * Unannotated event payloads are variadic `any[]`, unlike scalar member types.
+ * Only Unannotated absence proves no payload annotation; unavailable facts stay omitted.
+ */
+function unannotatedEventPayloadAsAnyArray(
+  payload: TypeDescriptor | undefined,
+  typeFact: FactResult<TypeDescriptor | undefined>,
+): TypeDescriptor | undefined {
+  if (typeFact?.kind === "unavailable") return undefined;
+  if (
+    payload === undefined &&
+    typeFact?.kind === "complete" &&
+    typeFact.absence === "unannotated"
+  ) {
+    return {
+      kind: "tuple",
+      elements: [{ kind: "array", element: { kind: "primitive", name: "any" } }],
+      modifiers: [{ rest: true }],
+    };
+  }
+  return payload;
 }
 
 function hasType<T extends { type?: TypeDescriptor }>(row: T): row is T & { type: TypeDescriptor } {
@@ -1709,7 +1732,7 @@ function wrapOptionalEmptySlotSchema(type: string, schema: PropertyMetaSchema): 
 
 type CompatEventPayloadClassification =
   | { kind: "empty" }
-  | { kind: "tuple"; elements: readonly TypeDescriptor[] }
+  | { kind: "arguments"; payload: TypeDescriptor; elements: readonly TypeDescriptor[] }
   | { kind: "function"; payload: FunctionDescriptor }
   | { kind: "single"; payload: TypeDescriptor }
   | { kind: "unsupported"; payload: TypeDescriptor };
@@ -1722,7 +1745,15 @@ function classifyCompatEventPayload(payload: TypeDescriptor): CompatEventPayload
     return { kind: "empty" };
   }
   if (payload.kind === "tuple") {
-    return { kind: "tuple", elements: payload.elements };
+    // A sole rest-array tuple is the array itself as an argument list.
+    const rest =
+      payload.elements.length === 1 && payload.modifiers?.[0]?.rest
+        ? payload.elements[0]
+        : undefined;
+    if (rest?.kind === "array" && !payload.readonly) {
+      return { kind: "arguments", payload: rest, elements: [rest] };
+    }
+    return { kind: "arguments", payload, elements: payload.elements };
   }
   if (payload.kind === "function") {
     return { kind: "function", payload };
@@ -1742,7 +1773,7 @@ function buildEventPayloadSchema(
   switch (classification.kind) {
     case "empty":
       return [];
-    case "tuple":
+    case "arguments":
       return classification.elements.map((element) =>
         typeDescriptorToSchema(element, options, typeRegistry),
       );
@@ -1763,8 +1794,10 @@ function buildEventPayloadType(
   switch (classification.kind) {
     case "empty":
       return "[]";
-    case "tuple":
-      return normalizeTypeString(typeDescriptorToCompatDisplay(event.payload, typeRegistry));
+    case "arguments":
+      return normalizeTypeString(
+        typeDescriptorToCompatDisplay(classification.payload, typeRegistry),
+      );
     case "function":
       return renderEventFunctionTupleType(classification.payload, typeRegistry);
     case "single":
@@ -1810,7 +1843,7 @@ export function mapEventMeta(
   options?: MetaCheckerOptions,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMeta {
-  const payload = unannotatedTypeAsAny(event.payload, event.typeFact);
+  const payload = unannotatedEventPayloadAsAnyArray(event.payload, event.typeFact);
   if (payload === undefined)
     throw new Error(`component-meta compat cannot project ${event.name} without a payload`);
   return {
@@ -1948,7 +1981,9 @@ export function mapComponentMeta(
       )
       .map((p) => mapPropMeta(p, options, typeRegistry)),
     events: (meta.events ?? [])
-      .filter((event) => unannotatedTypeAsAny(event.payload, event.typeFact) !== undefined)
+      .filter(
+        (event) => unannotatedEventPayloadAsAnyArray(event.payload, event.typeFact) !== undefined,
+      )
       .map((e) => mapEventMeta(e, options, typeRegistry)),
     slots: (meta.slots ?? [])
       .filter((s) => isCompatVisibleSlot(s))

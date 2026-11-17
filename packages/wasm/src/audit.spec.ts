@@ -50,6 +50,20 @@ const captured = captureAvailability() === "Available";
 const CAPTURE_UNAVAILABLE = /audit capture is unavailable/;
 
 describe("@verter/wasm audit bindings", () => {
+  it("audit-disabled type resolution returns no stored record", () => {
+    const host = new VerterHost({ auditEnabled: false });
+    try {
+      host.upsert({
+        canonicalId: "/types.ts",
+        inputId: "/types.ts",
+        source: "export type Flag = boolean;",
+        fileKind: "non_sfc",
+      });
+      expect(host.resolveTypeWithAudit("/types.ts", "Flag")).toBeNull();
+    } finally {
+      host.free();
+    }
+  });
   it("captureAvailability names one of the two capture states", () => {
     expect(["Available", "Unavailable"]).toContain(captureAvailability());
   });
@@ -120,9 +134,8 @@ describe("@verter/wasm audit bindings", () => {
     expect(typeof raw).toBe("string");
 
     const bundle = decodeAuditBundle(raw)!;
-    expect(bundle).toHaveProperty("analysis");
-    expect(bundle).toHaveProperty("resolution");
-    expect(bundle).toHaveProperty("record");
+    expect(Object.keys(bundle).sort()).toEqual(["analysis", "record"]);
+    expect(bundle.analysis).toHaveProperty("resolution");
     expect(bundle.record).toHaveProperty("request_id");
     expect(bundle.record).toHaveProperty("canonical_id");
     expect(bundle.record).toHaveProperty("timings");

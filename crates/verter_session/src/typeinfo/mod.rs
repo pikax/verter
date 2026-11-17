@@ -62,7 +62,9 @@ pub mod surface;
 pub(crate) mod surface_resolution;
 pub mod symbol_inventory;
 pub mod types;
+pub use verter_macro_dto::{OrderedRuntimeConstructors, RuntimeConstructor};
 pub(crate) mod vue_macro_codegen;
+pub use vue_macro_codegen::PropRuntimeFacts;
 
 // The output-sink capabilities for this subtree are defined PER-SINK in the
 // exact output-SINK modules that project — NOT subtree-wide:

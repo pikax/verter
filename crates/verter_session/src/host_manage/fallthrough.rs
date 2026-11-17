@@ -487,6 +487,9 @@ impl VerterHost {
                 dispatch,
             )?
         };
+        // Resolve measures its own scope and returns the claim explicitly.
+        // Adopt it before the surface walk and this attempt's admission gate.
+        verter_type_engine::request_context::fold_result_completeness(resolved.completeness);
         self.compute_fallthrough_surface_from_resolved_state(
             canonical_id,
             &resolved,
@@ -526,6 +529,7 @@ impl VerterHost {
     ) -> FallthroughComputeOutcome {
         let _completeness_scope =
             verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+        verter_type_engine::request_context::fold_result_completeness(resolved.completeness);
         let resolution = self.compute_fallthrough_surface_from_resolved_state(
             canonical_id,
             resolved,

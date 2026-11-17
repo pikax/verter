@@ -789,7 +789,8 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
     /// The return type of a member's lone, non-generic call signature
     /// (`SignaturesOfType`).
     fn lone_call_return(&mut self, callee: SemanticNodeId) -> Option<SemanticNodeId> {
-        let (calls, _) = self.dispatch.shared_signature_buckets(callee).ok()?;
+        let (calls, _) =
+            super::signature_buckets_in_place(self.dispatch, self.st.canonical, callee)?;
         let [signature] = calls.as_slice() else {
             return None;
         };

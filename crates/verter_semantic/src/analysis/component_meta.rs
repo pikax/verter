@@ -1423,16 +1423,17 @@ fn resolve_prop_type(
 /// either path applies the runtime-constructor closed-fact fold or resolves
 /// a local shadow.
 ///
-/// Returns `None` when there is no runtime-constructor position at all
-/// (`bindings` empty) or when every entry resolved `Global` to a
-/// non-primitive spelling — that case keeps the EXISTING display-text-only
-/// route unchanged (the caller's own `raw_type`/`type_annotation` already
-/// carries the display text; no closed fact exists for it).
+/// Returns `None` only when there is no runtime-constructor position at all
+/// (`bindings` empty). An unclassified constructor is still an annotation:
+/// its distinct absence reason preserves the unknown output without claiming
+/// that the author supplied no type.
 fn constructor_binding_source_position(
     bindings: &[verter_type_expr::ConstructorBindingEntry],
     evaluated: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
 ) -> Option<SourcePosition> {
-    use verter_type_expr::facts::{ClosedTypeFact, LeafTypeFact, SemanticSourceFailure};
+    use verter_type_expr::facts::{
+        ClosedTypeFact, LeafTypeFact, SchemaAbsence, SemanticSourceFailure,
+    };
     use verter_type_expr::{ConstructorBindingOutcome, PrimitiveName};
 
     if bindings.is_empty() {
@@ -1515,15 +1516,9 @@ fn constructor_binding_source_position(
                 let verter_type_expr::TypedResolutionFailure::SourceConstruction(failure) = failure;
                 SourcePosition::Failed(*failure)
             }
-            // A PROVEN `Local` binding whose evaluated authority came back
-            // `Absent` is NOT "no closed-fact position, defer to the
-            // caller's own route" — that route (the display-text-only
-            // fallback) would treat the ORIGINAL spelling (e.g. `"String"`)
-            // as if it might still be the global runtime constructor,
-            // exactly the false-global fold this whole gate exists to
-            // prevent. Fail closed like every other branch in this
-            // function rather than returning `None` (which the caller
-            // reads as "fall back to the unannotated/display-text route").
+            // A proven Local binding whose evaluated authority is Absent
+            // failed preparation. It is never an annotation-less position
+            // and must not fall through to the caller's Unannotated source.
             ResolvedTypeOutcome::Absent { .. } => {
                 SourcePosition::Failed(SemanticSourceFailure::UnrepresentableRequiredMemberValue)
             }
@@ -1534,25 +1529,28 @@ fn constructor_binding_source_position(
     // `RuntimeConstructorIdentity` to its closed primitive fact (a union of
     // primitives for a multi-element constructor array). The identity owns
     // that mapping exhaustively — this seam never reads a spelling. An
-    // identity with no primitive fact keeps its existing display-text-only
-    // route.
+    // identity with no primitive fact retains its constructor annotation as
+    // a distinct absence reason, rather than falling through to Unannotated.
     let primitives: Option<Vec<PrimitiveName>> = bindings
         .iter()
         .map(|entry| entry.identity.primitive())
         .collect();
-    primitives.map(|primitives| {
-        let fact = if let [only] = primitives.as_slice() {
-            ClosedTypeFact::Leaf(LeafTypeFact::Primitive(*only))
-        } else {
-            ClosedTypeFact::LeafUnion(
-                primitives
-                    .into_iter()
-                    .map(LeafTypeFact::Primitive)
-                    .collect(),
-            )
-        };
-        SourcePosition::Present(SemanticTypeSource::Closed(fact))
-    })
+    Some(primitives.map_or(
+        SourcePosition::Absent(SchemaAbsence::UnclassifiedConstructor),
+        |primitives| {
+            let fact = if let [only] = primitives.as_slice() {
+                ClosedTypeFact::Leaf(LeafTypeFact::Primitive(*only))
+            } else {
+                ClosedTypeFact::LeafUnion(
+                    primitives
+                        .into_iter()
+                        .map(LeafTypeFact::Primitive)
+                        .collect(),
+                )
+            };
+            SourcePosition::Present(SemanticTypeSource::Closed(fact))
+        },
+    ))
 }
 
 // ── Events ─────────────────────────────────────────────────────────────────
@@ -2652,9 +2650,8 @@ fn extract_props_from_options(
         // else the binding-index-gated runtime-constructor fold (closed
         // primitive fact for `Global` String/Number/Boolean, a resolved
         // local reference for `Local`, a typed failure for `Indeterminate`);
-        // else the PROVEN unannotated absence (a non-primitive `Global`
-        // spelling keeps its display-text-only route via `raw_type`, and a
-        // genuinely annotation-less prop has no source at all).
+        // an unclassified `Global` constructor keeps its distinct absence
+        // reason; only a genuinely annotation-less prop is Unannotated.
         let position = authored_payload_source(prop.payload.as_ref())
             .map(SourcePosition::Present)
             .or_else(|| constructor_binding_source_position(&prop.constructor_bindings, evaluated))

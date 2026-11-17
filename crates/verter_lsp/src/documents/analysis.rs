@@ -12,27 +12,13 @@ use super::*;
 pub(crate) const SEMANTIC_ANALYSIS_QUIET_WINDOW: std::time::Duration =
     std::time::Duration::from_millis(750);
 
-pub(crate) fn type_expr_contains_boolean(expression: &verter_type_expr::TypeExpr) -> bool {
-    use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
-
-    let mut pending = vec![expression];
-    while let Some(expression) = pending.pop() {
-        match expression {
-            TypeExpr::Primitive(PrimitiveName::Boolean)
-            | TypeExpr::Literal(LiteralValue::Boolean(_)) => return true,
-            TypeExpr::Union(members) | TypeExpr::Intersection(members) => {
-                pending.extend(members.iter());
-            }
-            TypeExpr::Parenthesized(inner) | TypeExpr::Rest(inner) => pending.push(inner),
-            _ => {}
-        }
-    }
-    false
-}
-
 fn merge_semantic_prop_definitions(
     native: &mut Vec<verter_session_query::analysis::template::AnalyzedPropDefinition>,
     semantic: Vec<verter_session_query::analysis::template::AnalyzedPropDefinition>,
+    runtime: &std::collections::BTreeMap<
+        String,
+        verter_session::typeinfo::OrderedRuntimeConstructors,
+    >,
 ) {
     let mut semantic = semantic
         .into_iter()
@@ -49,7 +35,11 @@ fn merge_semantic_prop_definitions(
         native_prop.callable_role = enrichment.callable_role;
         native_prop.has_default = enrichment.has_default;
         native_prop.is_required = enrichment.is_required;
-        native_prop.is_boolean = enrichment.is_boolean;
+        if let Some(constructors) = runtime.get(&native_prop.name) {
+            native_prop.is_boolean = constructors
+                .as_slice()
+                .contains(&verter_session::typeinfo::RuntimeConstructor::Boolean);
+        }
         // Authored span and usage facts remain native-analysis authority.
     }
 
@@ -57,7 +47,61 @@ fn merge_semantic_prop_definitions(
     // Append them without disturbing native source order or fabricating one.
     let mut remaining = semantic.into_values().collect::<Vec<_>>();
     remaining.sort_unstable_by(|left, right| left.name.cmp(&right.name));
-    native.extend(remaining);
+    for mut prop in remaining {
+        if let Some(constructors) = runtime.get(&prop.name) {
+            prop.is_boolean = constructors
+                .as_slice()
+                .contains(&verter_session::typeinfo::RuntimeConstructor::Boolean);
+        }
+        native.push(prop);
+    }
+}
+
+fn enrich_prop_definitions<E: std::fmt::Debug>(
+    host: &VerterHost,
+    canonical: &str,
+    analysis: &mut verter_session_query::analysis::file_analysis::FileAnalysisSnapshot,
+    read: impl FnOnce() -> Result<Option<verter_session::meta_resolve::ComponentMetaOutput>, E>,
+) {
+    let output = match read() {
+        Ok(Some(output)) => output,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::debug!(?error, canonical, "component prop enrichment unavailable");
+            return;
+        }
+    };
+    let runtime = host
+        .prop_runtime_constructors(canonical)
+        .unwrap_or_default();
+    let (component_meta, _resolution, types) = output.into_parts();
+    let semantic = component_meta
+        .props
+        .into_iter()
+        .zip(types.into_lanes().props)
+        .map(|(prop, publication)| {
+            verter_session_query::analysis::template::AnalyzedPropDefinition {
+                name: prop.name,
+                callable_role: prop.callable_role,
+                type_annotation: publication.terminal_display().text().map(str::to_string),
+                has_default: prop.has_default,
+                is_required: prop.required,
+                is_boolean: false,
+                used_in_template: false,
+                used_in_script: false,
+                span: verter_span::Span::new(0, 0),
+            }
+        })
+        .collect();
+    let mut template = analysis.template.as_deref().cloned().unwrap_or_default();
+    merge_semantic_prop_definitions(
+        &mut template.prop_definitions,
+        semantic,
+        &runtime.constructors,
+    );
+    analysis.template = Some(verter_session_query::retention::heap_size::OwnedValue::new(
+        template,
+    ));
 }
 
 #[derive(Clone)]
@@ -275,87 +319,9 @@ impl DocumentRegistry {
                 .ok()?;
                 let mut analysis = host.get_analysis(&work_canonical)?;
                 if is_framework_carrier {
-                    let mut semantic_props = host
-                        .get_component_meta_output(&work_canonical)
-                        .ok()
-                        .flatten()
-                        .map(|output| {
-                            let (component_meta, _resolution, types) = output.into_parts();
-                            component_meta
-                                .props
-                                .into_iter()
-                                .zip(types.into_lanes().props)
-                                .map(|(prop, publication)| {
-                                    let is_boolean = publication
-                                        .materialized_type()
-                                        .is_some_and(type_expr_contains_boolean);
-                                    let type_annotation =
-                                        publication.terminal_display().text().map(str::to_string);
-                                    verter_session_query::analysis::template::AnalyzedPropDefinition {
-                                        name: prop.name,
-                                        callable_role: prop.callable_role,
-                                        type_annotation,
-                                        has_default: prop.has_default,
-                                        is_required: prop.required,
-                                        is_boolean,
-                                        used_in_template: false,
-                                        used_in_script: false,
-                                        span: verter_span::Span::new(0, 0),
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    if semantic_props.is_empty() {
-                        semantic_props = host
-                            .get_public_api_projection(&work_canonical)
-                            .ok()
-                            .flatten()
-                            .and_then(|projection| match projection.contract {
-                                verter_session::framework::ComponentContractAvailability::Supported(
-                                    contract,
-                                ) => Some(contract),
-                                verter_session::framework::ComponentContractAvailability::Unsupported(
-                                    _,
-                                ) => None,
-                            })
-                            .map(|contract| {
-                                contract
-                                    .props
-                                    .iter()
-                                    .map(|prop| {
-                                        let materialized = prop.ty.publication.materialized_type();
-                                        verter_session_query::analysis::template::AnalyzedPropDefinition {
-                                            name: prop.name.to_string(),
-                                            callable_role:
-                                                verter_type_expr::PropCallableRole::default(),
-                                            type_annotation: materialized.and_then(|expression| {
-                                                verter_type_expr::render_type_expr_display(expression)
-                                                    .ok()
-                                                    .map(|rendered| rendered.text)
-                                            }),
-                                            has_default: prop.has_default,
-                                            is_required: !prop.optional,
-                                            is_boolean: materialized
-                                                .is_some_and(type_expr_contains_boolean),
-                                            used_in_template: false,
-                                            used_in_script: false,
-                                            span: verter_span::Span::new(0, 0),
-                                        }
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                    }
-                    if !semantic_props.is_empty() {
-                        let mut template =
-                            analysis.template.as_deref().cloned().unwrap_or_default();
-                        merge_semantic_prop_definitions(
-                            &mut template.prop_definitions,
-                            semantic_props,
-                        );
-                        analysis.template = Some(verter_session_query::retention::heap_size::OwnedValue::new(template));
-                    }
+                    enrich_prop_definitions(host, &work_canonical, &mut analysis, || {
+                        host.get_component_meta_output(&work_canonical)
+                    });
                 }
                 let semantic_structure = is_framework_carrier
                     .then(|| host.registered_file_structure_snapshot(&work_canonical))
@@ -943,6 +909,39 @@ mod tests {
     use super::*;
     use verter_session_query::analysis::template::AnalyzedPropDefinition;
 
+    #[tokio::test(start_paused = true)]
+    async fn semantic_prop_enrichment_resolves_alias_boolean() {
+        let registry = Arc::new(DocumentRegistry::new(Arc::new(VerterHost::new_standalone(
+            verter_session::HostConfig::default(),
+        ))));
+        registry.set_semantic_analysis_enabled(true);
+        let uri: Uri = "file:///workspace/Flag.vue".parse().unwrap();
+        let _ = registry.did_open(&TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "vue".into(),
+            version: 1,
+            text: "<script setup lang=\"ts\">type Flag = boolean; defineProps<{ on: Flag }>()</script><template><div /></template>".into(),
+        });
+        registry
+            .schedule_semantic_analysis_for_test(&uri)
+            .unwrap()
+            .await
+            .unwrap();
+        let analysis = registry.get_analysis(&uri).unwrap();
+        let prop = analysis
+            .template
+            .as_ref()
+            .unwrap()
+            .prop_definitions
+            .iter()
+            .find(|prop| prop.name == "on")
+            .unwrap();
+        assert!(
+            prop.is_boolean,
+            "alias boolean must use the runtime constructor fact"
+        );
+    }
+
     fn prop(name: &str, span: verter_span::Span) -> AnalyzedPropDefinition {
         AnalyzedPropDefinition {
             name: name.to_string(),
@@ -986,7 +985,16 @@ mod tests {
             span: verter_span::Span::new(0, 0),
         }];
 
-        merge_semantic_prop_definitions(&mut native, semantic);
+        merge_semantic_prop_definitions(
+            &mut native,
+            semantic,
+            &std::collections::BTreeMap::from([(
+                "enabled".into(),
+                verter_session::typeinfo::OrderedRuntimeConstructors::from_ordered([
+                    verter_session::typeinfo::RuntimeConstructor::Boolean,
+                ]),
+            )]),
+        );
 
         assert_eq!(native.len(), 2, "native-only declarations stay published");
         assert_eq!(native[0].span, authored_span);
@@ -995,6 +1003,53 @@ mod tests {
         assert_eq!(native[0].callable_role, role);
         assert_eq!(native[1].name, "nativeOnly");
         assert_eq!(native[1].span, untouched_span);
+    }
+
+    #[test]
+    fn semantic_prop_enrichment_unavailable_classification_preserves_parser_boolean() {
+        for is_boolean in [false, true] {
+            let mut native_prop = prop("on", verter_span::Span::new(3, 5));
+            native_prop.is_boolean = is_boolean;
+            let mut native = vec![native_prop];
+            let mut semantic = prop("on", verter_span::Span::new(0, 0));
+            semantic.is_boolean = !is_boolean;
+            merge_semantic_prop_definitions(&mut native, vec![semantic], &Default::default());
+            assert_eq!(native[0].is_boolean, is_boolean);
+        }
+    }
+
+    #[test]
+    fn semantic_prop_enrichment_failed_component_read_keeps_parser_definitions() {
+        let host = VerterHost::new_standalone(verter_session::HostConfig::default());
+        let canonical = "/workspace/Defaults.vue";
+        let _ = host.upsert(UpsertRequest {
+            canonical_id: Some(canonical.into()),
+            input_id: canonical.into(),
+            source: Arc::from("<script setup lang=\"ts\">withDefaults(defineProps<{ on: boolean }>(), { on: true })</script>"),
+            file_language: FileLanguage::vue(),
+            aliases: vec![],
+        }).unwrap();
+        assert!(host.get_public_api_projection(canonical).unwrap().is_some());
+        let mut analysis = host.get_analysis(canonical).unwrap();
+        let mut template = analysis.template.as_deref().cloned().unwrap_or_default();
+        let mut parser_prop = prop("on", verter_span::Span::new(10, 12));
+        parser_prop.is_required = true;
+        parser_prop.is_boolean = true;
+        template.prop_definitions = vec![parser_prop];
+        analysis.template = Some(verter_session_query::retention::heap_size::OwnedValue::new(
+            template,
+        ));
+        let before = analysis.template.as_ref().unwrap().prop_definitions.clone();
+        for missing in [false, true] {
+            enrich_prop_definitions(&host, canonical, &mut analysis, || {
+                if missing {
+                    Ok(None)
+                } else {
+                    Err("component output refused")
+                }
+            });
+            assert_eq!(analysis.template.as_ref().unwrap().prop_definitions, before);
+        }
     }
 
     /// The negotiated-encoding walker converts `expressionDiagnostics` spans:

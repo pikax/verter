@@ -840,12 +840,9 @@ pub enum StructuralFactDemandOutcome {
     Partial(PartialReasonSet),
 }
 
-/// One structural-fact demand after its resolution loop: the node it
-/// settled on and everything its finish reads, held while the composite
-/// reduction of that node runs. The connected-demand guard lives as long
-/// as the demand does, as it would across a native call.
-struct SettledDemand<'g> {
-    _connected_guard: super::connected_demand::ConnectedDemandGuard<'g>,
+/// One structural-fact demand's retained resolution state. No scope borrows
+/// the dispatcher: connected-demand entries belong to individual advances.
+struct SettledDemand {
     context: ProjectionReductionContext,
     resolve_declaration_refs: bool,
     completeness: ResultCompleteness,
@@ -853,37 +850,98 @@ struct SettledDemand<'g> {
     n: SemanticNodeId,
     exit_reasons: Option<PartialReasonSet>,
     named_alias_application: Option<(SemanticNodeId, Option<Vec<SemanticNodeId>>)>,
-    /// The dispatcher's operation-budget epoch when the demand began.
     budget_epoch: u64,
 }
 
-/// A demand's first half: finished outright (a trip on entry), or settled.
-enum BegunDemand<'g> {
-    Finished(StructuralFactDemandOutcome),
-    Settled(SettledDemand<'g>),
+struct FactChain {
+    settled: SettledDemand,
+    instantiate_instantiation_refs: bool,
+    visited: rustc_hash::FxHashSet<SemanticNodeId>,
+    stage: FactChainStage,
+    printed_arguments: Option<PrintedFactArguments>,
 }
 
-/// A suspended frame of `ProjectSemanticDispatch::drive_structural_fact_demands`.
-enum DemandFrame<'g> {
-    /// A settled demand; `composite` is its reduction once started.
+struct PrintedFactArguments {
+    identity: crate::semantic_query::DeclIdentity,
+    args: Option<Arc<[SemanticNodeId]>>,
+    next: usize,
+    values: Vec<SemanticNodeId>,
+    is_residual: bool,
+}
+
+enum FactChainStage {
+    Begin,
+    Carrier,
+    Residual(bool),
+    PrintedArguments,
+    AwaitAliasThrough(bool),
+    AwaitResidual(super::flow_return_fact::ObservedRead<()>),
+    AwaitDeferred(Box<DeferredRead>, FactDeferredThen),
+    Settled,
+    Finished(StructuralFactDemandOutcome),
+}
+
+#[derive(Clone, Copy)]
+enum FactDeferredThen {
+    Initial,
+    Resolved,
+    PrintedArgument,
+}
+
+/// A structural demand, or a composite reduction, between its reads. The
+/// current frame stays inline; the parent stack allocates only on descent.
+pub(super) struct StructuralFactRead {
+    current: Option<DemandFrame>,
+    parents: Vec<DemandFrame>,
+    delivered: Option<StructuralFactDemandOutcome>,
+    completed: rustc_hash::FxHashMap<SemanticNodeId, StructuralFactDemandOutcome>,
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+pub(super) enum FactStep {
+    Done(StructuralFactDemandOutcome),
+    Composite(Option<SemanticNodeId>),
+    Read(SemanticQueryKey, Box<StructuralFactRead>),
+}
+
+enum FactProgress {
+    Done(StructuralFactDemandOutcome),
+    Composite(Option<SemanticNodeId>),
+    Read(SemanticQueryKey),
+}
+
+static_assertions::assert_impl_all!(StructuralFactRead: Send);
+static_assertions::assert_not_impl_any!(StructuralFactRead: Clone, Copy);
+
+impl StructuralFactRead {
+    fn new(current: DemandFrame) -> Self {
+        Self {
+            current: Some(current),
+            parents: Vec::new(),
+            delivered: None,
+            completed: rustc_hash::FxHashMap::default(),
+        }
+    }
+
+    /// Only the embedded deferred evaluator's carrier reads count a carrier
+    /// intent. Residual declaration and instantiation probes use execute_read.
+    pub(super) fn reads_for_carrier(&self) -> bool {
+        matches!(self.current.as_ref(), Some(DemandFrame::Demand { chain: FactChain { stage: FactChainStage::AwaitDeferred(read, _), .. }, .. }) if read.reads_for_carrier())
+    }
+}
+
+#[allow(
+    clippy::large_enum_variant,
+    reason = "in-place demands keep their current frame inline without an unconditional heap allocation"
+)]
+enum DemandFrame {
     Demand {
-        settled: SettledDemand<'g>,
+        chain: FactChain,
         composite: Option<CompositeReduction>,
-        /// The name a reduction asked this demand for; `None` for the root.
         name: Option<SemanticNodeId>,
-        /// Whether the demand met a composite already being reduced
-        /// further down (a re-entry left it as written): its outcome
-        /// depends on where it ran, so it is not reused.
         reentered: bool,
     },
-    /// A composite reduction asked for on its own (only ever the root).
     Composite(CompositeReduction),
-}
-
-/// What the driver's root frame finished with.
-enum DrivenRoot {
-    Demand(StructuralFactDemandOutcome),
-    Composite(Option<SemanticNodeId>),
 }
 
 /// The composite reduction of one union or intersection, reading its arms
@@ -915,6 +973,7 @@ struct CompositeReduction {
     /// their reads in this run, and the composite stays as written: no
     /// reduction is built over a name it could not read.
     read_past_gap: bool,
+    awaiting_reduction: bool,
 }
 
 /// The unions one operation proved its composite reduction leaves as
@@ -956,6 +1015,7 @@ enum ArmWait {
 
 /// What a composite reduction asks for next.
 enum CompositeStep {
+    Read(SemanticQueryKey),
     /// The demand of this name, at structural transit.
     Demand(SemanticNodeId),
     /// The reduced node, or `None` when the composite stays as written,
@@ -1681,388 +1741,556 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         instantiate_instantiation_refs: bool,
         resolve_declaration_refs: bool,
     ) -> StructuralFactDemandOutcome {
-        match self.begin_structural_fact_demand(
+        let (_connected, _) = self.enter_connected_demand(false);
+        let read = StructuralFactRead::new(self.fact_demand_frame(
             node,
             context,
             instantiate_instantiation_refs,
             resolve_declaration_refs,
-        ) {
-            BegunDemand::Finished(outcome) => outcome,
-            BegunDemand::Settled(settled) => {
-                match self.drive_structural_fact_demands(DemandFrame::Demand {
-                    settled,
-                    composite: None,
-                    name: None,
-                    reentered: false,
-                }) {
-                    DrivenRoot::Demand(outcome) => outcome,
-                    DrivenRoot::Composite(_) => {
-                        unreachable!("a demand root finishes as a demand")
+            None,
+        ));
+        match self.drive_structural_fact_demands(read, &mut |key, carrier| {
+            if carrier {
+                self.carrier_read_in_place(key)
+            } else {
+                self.execute_read(key)
+            }
+        }) {
+            FactProgress::Done(outcome) => outcome,
+            _ => unreachable!("a demand root finishes as a demand"),
+        }
+    }
+
+    fn fact_demand_frame(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        instantiate: bool,
+        resolve: bool,
+        name: Option<SemanticNodeId>,
+    ) -> DemandFrame {
+        DemandFrame::Demand {
+            chain: FactChain {
+                settled: SettledDemand {
+                    context,
+                    resolve_declaration_refs: resolve,
+                    completeness: ResultCompleteness::Complete,
+                    availability: crate::semantic_query::FactStatus::Complete,
+                    n: node,
+                    exit_reasons: None,
+                    named_alias_application: None,
+                    budget_epoch: self.operation_budget_epoch.get(),
+                },
+                instantiate_instantiation_refs: instantiate,
+                visited: rustc_hash::FxHashSet::default(),
+                stage: FactChainStage::Begin,
+                printed_arguments: None,
+            },
+            composite: None,
+            name,
+            reentered: false,
+        }
+    }
+
+    /// Begin the same walk the in-place structural-fact entry drives. Its
+    /// consumer holds the connected demand across a yielded read.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    pub(super) fn begin_structural_fact_read(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        instantiate: bool,
+        resolve: bool,
+    ) -> FactStep {
+        let (guard, _) = self.enter_connected_demand(false);
+        let mut read = StructuralFactRead::new(self.fact_demand_frame(
+            node,
+            context,
+            instantiate,
+            resolve,
+            None,
+        ));
+        let progress = self.advance_structural_fact_read(&mut read, None);
+        Self::leave_fact_stage(guard, &progress);
+        match progress {
+            FactProgress::Done(outcome) => FactStep::Done(outcome),
+            FactProgress::Composite(node) => FactStep::Composite(node),
+            FactProgress::Read(key) => FactStep::Read(key, Box::new(read)),
+        }
+    }
+
+    /// Consume the delivery inside the operation and observation that named
+    /// it, retaining the carrier chain and every completed composite arm.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    pub(super) fn resume_structural_fact_read(
+        &self,
+        mut read: Box<StructuralFactRead>,
+        deliver: &mut dyn FnMut() -> CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> FactStep {
+        let (guard, _) = self.enter_connected_demand(false);
+        let progress = self.advance_structural_fact_read(&mut read, Some(deliver));
+        Self::leave_fact_stage(guard, &progress);
+        match progress {
+            FactProgress::Done(outcome) => FactStep::Done(outcome),
+            FactProgress::Composite(node) => FactStep::Composite(node),
+            FactProgress::Read(key) => FactStep::Read(key, read),
+        }
+    }
+
+    /// Begin a standalone composite reduction through the same owned walk.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    pub(super) fn begin_structural_composite_read(&self, node: SemanticNodeId) -> FactStep {
+        let (guard, _) = self.enter_connected_demand(false);
+        let Some(reduction) = self.begin_composite(node, false) else {
+            return FactStep::Composite(None);
+        };
+        let mut read = StructuralFactRead::new(DemandFrame::Composite(reduction));
+        let progress = self.advance_structural_fact_read(&mut read, None);
+        Self::leave_fact_stage(guard, &progress);
+        match progress {
+            FactProgress::Done(outcome) => FactStep::Done(outcome),
+            FactProgress::Composite(node) => FactStep::Composite(node),
+            FactProgress::Read(key) => FactStep::Read(key, Box::new(read)),
+        }
+    }
+
+    fn leave_fact_stage(
+        guard: super::connected_demand::ConnectedDemandGuard<'_>,
+        progress: &FactProgress,
+    ) {
+        let root = guard.is_root();
+        drop(guard);
+        verter_debug_assert!(
+            !(root && matches!(progress, FactProgress::Read(_))),
+            "a structural-fact read suspends inside its consumer's connected demand"
+        );
+    }
+
+    /// Release retained evaluations and composite normalization records, from
+    /// the innermost frame out. A held probe has no installed observation.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    pub(super) fn abandon_structural_fact_read(&self, mut read: StructuralFactRead) {
+        let frames = read
+            .current
+            .take()
+            .into_iter()
+            .chain(read.parents.into_iter().rev());
+        for frame in frames {
+            match frame {
+                DemandFrame::Demand {
+                    chain, composite, ..
+                } => {
+                    match chain.stage {
+                        FactChainStage::AwaitDeferred(deferred, _) => {
+                            self.abandon_deferred_read(*deferred)
+                        }
+                        FactChainStage::AwaitResidual(observed) => {
+                            let _ = observed.discard();
+                        }
+                        _ => {}
                     }
+                    if let Some(reduction) = composite {
+                        self.end_composite(&reduction, None);
+                    }
+                }
+                DemandFrame::Composite(reduction) => {
+                    self.end_composite(&reduction, None);
                 }
             }
         }
     }
 
-    /// The first half of one structural-fact demand: enter the connected
-    /// demand, evaluate deferred shells and resolve residual carriers until
-    /// the chain settles. What remains — the composite reduction of the
-    /// settled node, then [`Self::finish_structural_fact_demand`] — is run
-    /// by [`Self::drive_structural_fact_demands`].
-    fn begin_structural_fact_demand(
+    fn fact_deferred_step(
         &self,
-        node: SemanticNodeId,
-        context: ProjectionReductionContext,
-        instantiate_instantiation_refs: bool,
-        resolve_declaration_refs: bool,
-    ) -> BegunDemand<'_> {
-        if let Some(abort) = crate::request_context::current_execution_abort() {
-            return BegunDemand::Finished(StructuralFactDemandOutcome::Partial(
-                abort.reason_class(),
-            ));
-        }
-        let (connected_guard, initial_trip) = self.enter_connected_demand(false);
-        if let Some(reasons) = initial_trip {
-            self.fold_local_partial_completeness(reasons);
-            return BegunDemand::Finished(StructuralFactDemandOutcome::Partial(reasons));
-        }
-        let budget_epoch = self.operation_budget_epoch.get();
-        // Step 1: evaluate deferred shells (Alias / KeyOf / IndexedAccess /
-        // Mapped / Conditional / TemplateLiteral / DeclPlaceholder / bare-import),
-        // merging the evaluation's typed completeness into the demand outcome.
-        // The declaration-keeping mode prints an indexed access that reads
-        // a named declaration by that name, as the checker does (`W['d']`
-        // over `d: Decl` is `Decl`, a class constructor's `prototype` its
-        // class): the read stops at the reference its terminal holds.
-        let first = match (!resolve_declaration_refs)
-            .then(|| self.named_indexed_access(node, context))
-            .flatten()
-        {
-            Some(named) => named,
-            None => self.evaluate_deferred_outcome(node, context),
-        };
-        let mut completeness = first.completeness;
-        let mut availability = first.availability;
-        let mut n = first.node;
-        // Step 2: resolve residual DeclRef / InstantiationRef carriers the
-        // deferred evaluator deliberately leaves shaped, then re-evaluate the
-        // materialised body. Bounded, and every exit is TYPED: a stable stop
-        // (terminal body / honest miss / no-progress / the peel's deliberate
-        // `InstantiationRef` stop) contributes `Complete`; an operational
-        // truncation or fault contributes the matching `PartialReasonSet` bit.
-        //
-        // Each residual-carrier `execute_read` below pairs
-        // `observe_component_meta_read_suppress` + `emit_dispatch_dep_signature_facts`,
-        // exactly as the canonical resolver does at its own `ResolveDecl` /
-        // `Instantiate` sites — so a partial / suppressed sub-resolution taints
-        // the caller's request / cold-compute warm gate identically. On TOP of
-        // that request-scoped propagation, the read's `result_is_partial` bool
-        // folds into THIS demand's typed outcome (the boolean bridge lifts as
-        // `PROPAGATED`), so the completeness survives even with NO
-        // `RequestContext` installed.
-        let mut visited = rustc_hash::FxHashSet::default();
-        // The declaration-keeping mode's OUTERMOST alias application the
-        // checker names, recorded as the chain resolves through it and
-        // printed when the chain settles on a type that alias names.
-        // An intersection-bodied alias also keeps its application's
-        // arguments: an argument the construction returns as it is was not
-        // constructed by the alias.
-        let mut named_alias_application: Option<(SemanticNodeId, Option<Vec<SemanticNodeId>>)> =
-            None;
-        // The loop's own exit classification: `None` = a stable (Complete)
-        // stop; `Some(reasons)` = an operational truncation/fault.
-        let exit_reasons: Option<PartialReasonSet> = loop {
-            let Some(data) = self.graph().node_data(n) else {
-                // Missing arena data: the demand cannot classify what it
-                // cannot read.
-                break Some(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA);
-            };
-            // The declaration-keeping mode prints a named declaration the
-            // way the checker does: an interface or class by its name, an
-            // alias application by its alias when the alias names the type
-            // it resolves to — each with its omitted defaulted arguments
-            // filled — and every other alias by what it resolves to.
-            let printed = if resolve_declaration_refs {
-                None
-            } else {
-                match data.as_ref() {
-                    SemanticNodeData::DeclRef { identity } => Some((identity.clone(), None)),
-                    SemanticNodeData::InstantiationRef { base, args } => {
-                        Some((base.clone(), Some(Arc::clone(args.as_arc()))))
+        chain: &mut FactChain,
+        step: DeferredStep,
+        then: FactDeferredThen,
+    ) -> Option<SemanticQueryKey> {
+        match step {
+            DeferredStep::Read(key, read) => {
+                chain.stage = FactChainStage::AwaitDeferred(read, then);
+                Some(key)
+            }
+            DeferredStep::Done(outcome) => {
+                match then {
+                    FactDeferredThen::Initial => {
+                        chain.settled.completeness = outcome.completeness;
+                        chain.settled.availability = outcome.availability;
+                        chain.settled.n = outcome.node;
+                        chain.stage = FactChainStage::Carrier;
                     }
-                    _ => None,
+                    FactDeferredThen::Resolved => {
+                        chain.settled.completeness =
+                            chain.settled.completeness.merge(outcome.completeness);
+                        chain.settled.availability =
+                            chain.settled.availability.join(outcome.availability);
+                        if outcome.node == chain.settled.n {
+                            chain.stage = FactChainStage::Settled;
+                        } else {
+                            chain.settled.n = outcome.node;
+                            chain.stage = FactChainStage::Carrier;
+                        }
+                    }
+                    FactDeferredThen::PrintedArgument => {
+                        chain
+                            .printed_arguments
+                            .as_mut()
+                            .expect("the argument's application is retained")
+                            .values
+                            .push(outcome.node);
+                        chain.stage = FactChainStage::PrintedArguments;
+                    }
                 }
-            };
-            let printed = printed.map(|(identity, args)| {
-                let kind = if is_builtin(&identity) {
-                    self.printed_builtin_application(
-                        &identity,
-                        args.as_deref().unwrap_or_default(),
-                        context,
-                    )
-                } else {
-                    self.printed_declaration(&identity)
-                };
-                (identity, args, kind)
-            });
-            // TERMINAL-BEFORE-FUSE: classify whether `n` is a residual
-            // resolvable carrier BEFORE consulting the fuse, so a result that
-            // reached its terminal structural body on exactly the last
-            // permitted step is a stable stop, never a false partial. The
-            // non-residual break also covers the peel's deliberate
-            // un-instantiated `InstantiationRef` stop, and the
-            // declaration-keeping mode's stop at a declaration printed by
-            // its name or at a class-expression instance.
-            let is_residual = match (data.as_ref(), &printed) {
-                (_, Some((_, _, Some(PrintedDeclaration::Named)))) => false,
-                (_, Some((_, _, Some(_)))) => true,
-                (
-                    SemanticNodeData::DeclRef { .. }
-                    | SemanticNodeData::ClassExpressionInstance { .. },
-                    _,
-                ) => resolve_declaration_refs,
-                (SemanticNodeData::InstantiationRef { .. }, _) => instantiate_instantiation_refs,
-                _ => false,
-            };
-            drop(data);
-            if let Some((identity, args, Some(kind))) = &printed {
-                let args = args.as_deref().unwrap_or_default();
-                match kind {
-                    // A builtin application is its own printed name.
-                    PrintedDeclaration::Named if is_builtin(identity) => {}
-                    PrintedDeclaration::Named => {
-                        n = self.declared_application(n, identity, args, context);
-                    }
-                    PrintedDeclaration::AliasNamed | PrintedDeclaration::AliasNamedIntersection
-                        if named_alias_application.is_none() =>
-                    {
-                        let intersection_arguments =
-                            (*kind == PrintedDeclaration::AliasNamedIntersection).then(|| {
-                                args.iter()
-                                    .flat_map(|arg| {
-                                        [*arg, self.evaluate_deferred_outcome(*arg, context).node]
-                                    })
-                                    .collect()
-                            });
-                        named_alias_application = Some((
-                            self.declared_application(n, identity, args, context),
-                            intersection_arguments,
-                        ));
-                    }
-                    // The application the alias's body writes, substituted
-                    // and still unreduced — classified in turn.
-                    PrintedDeclaration::AliasThrough => {
-                        let read = self.execute_read(SemanticQueryKey::Instantiate(
-                            crate::semantic_query::InstantiateKey::new(
-                                self.type_slot_for(
-                                    identity.canonical_id.clone(),
-                                    identity.owner,
-                                    identity.decl_name.clone(),
-                                ),
-                                Arc::from(args.to_vec().into_boxed_slice()),
-                                self.instantiate_context_for(
-                                    &identity.canonical_id,
-                                    ProjectionReductionContext::structural_transit_with_mode(
-                                        ProjectionMode::Navigate,
-                                    ),
-                                ),
-                            ),
-                        ));
-                        crate::request_context::observe_component_meta_read_suppress(&read);
-                        crate::meta_resolve::emit_dispatch_dep_signature_facts(
-                            self,
-                            &read.dep_signature,
+                None
+            }
+        }
+    }
+
+    fn fact_chain_stop(&self, chain: &mut FactChain, reasons: Option<PartialReasonSet>) {
+        chain.settled.exit_reasons = reasons;
+        chain.stage = FactChainStage::Settled;
+    }
+
+    fn fact_resolved_body(
+        &self,
+        chain: &mut FactChain,
+        node: SemanticNodeId,
+    ) -> Option<SemanticQueryKey> {
+        let step =
+            self.begin_deferred_read(node, chain.settled.context, DeferredEvaluationDemand::Shell);
+        self.fact_deferred_step(chain, step, FactDeferredThen::Resolved)
+    }
+
+    fn advance_fact_chain(
+        &self,
+        chain: &mut FactChain,
+        mut delivery: Option<&mut dyn FnMut() -> CacheRead<QueryResult<SemanticNodeId>>>,
+    ) -> Option<SemanticQueryKey> {
+        loop {
+            let stage = std::mem::replace(&mut chain.stage, FactChainStage::Settled);
+            let n = chain.settled.n;
+            let context = chain.settled.context;
+            match stage {
+                FactChainStage::Begin => {
+                    if let Some(abort) = crate::request_context::current_execution_abort() {
+                        chain.stage = FactChainStage::Finished(
+                            StructuralFactDemandOutcome::Partial(abort.reason_class()),
                         );
-                        completeness = completeness
-                            .or_partial_if(read.result_is_partial(), read.partial_reason_classes());
-                        if let QueryResult::Value(target) = read.value {
-                            if target != n {
-                                if !visited.insert(n) {
-                                    break Some(PartialReasonSet::SAME_PATH_RECURSION);
-                                }
-                                if let Err(reasons) = self.charge_connected_work() {
-                                    break Some(reasons);
-                                }
-                                n = target;
-                                continue;
+                        return None;
+                    }
+                    if let Some(reasons) = self.connected_demand.active_trip() {
+                        self.fold_local_partial_completeness(reasons);
+                        chain.stage =
+                            FactChainStage::Finished(StructuralFactDemandOutcome::Partial(reasons));
+                        return None;
+                    }
+                    let step = match (!chain.settled.resolve_declaration_refs)
+                        .then(|| self.named_indexed_access(n, context))
+                        .flatten()
+                    {
+                        Some(named) => DeferredStep::Done(named),
+                        None => {
+                            self.begin_deferred_read(n, context, DeferredEvaluationDemand::Shell)
+                        }
+                    };
+                    if let Some(key) =
+                        self.fact_deferred_step(chain, step, FactDeferredThen::Initial)
+                    {
+                        return Some(key);
+                    }
+                }
+                FactChainStage::AwaitDeferred(read, then) => {
+                    let step = self.resume_deferred_read(
+                        read,
+                        delivery
+                            .take()
+                            .expect("a deferred step consumes its standing read"),
+                    );
+                    if let Some(key) = self.fact_deferred_step(chain, step, then) {
+                        return Some(key);
+                    }
+                }
+                FactChainStage::AwaitResidual(observation) => {
+                    let scope = observation.resume(self);
+                    let read = delivery
+                        .take()
+                        .expect("a residual probe consumes its standing read")(
+                    );
+                    let probe = scope.finish(read);
+                    if matches!(
+                        &probe.value().value,
+                        QueryResult::Error(QueryError::Miss | QueryError::RaiseMiss)
+                    ) {
+                        let reasons = probe.discard().err().map(|abort| abort.reason_class());
+                        self.fact_chain_stop(chain, reasons);
+                        continue;
+                    }
+                    let read = match probe.adopt(self) {
+                        Ok(read) => read,
+                        Err(abort) => {
+                            self.fact_chain_stop(chain, Some(abort.reason_class()));
+                            continue;
+                        }
+                    };
+                    crate::request_context::observe_component_meta_read_suppress(&read);
+                    crate::meta_resolve::emit_dispatch_dep_signature_facts(
+                        self,
+                        &read.dep_signature,
+                    );
+                    chain.settled.completeness = chain
+                        .settled
+                        .completeness
+                        .or_partial_if(read.result_is_partial(), read.partial_reason_classes());
+                    chain.settled.availability = chain.settled.availability.join(read.fact_status);
+                    match read.value {
+                        QueryResult::Value(resolved) => {
+                            if let Some(key) = self.fact_resolved_body(chain, resolved) {
+                                return Some(key);
                             }
                         }
+                        QueryResult::Recursive(_) => {
+                            self.fact_chain_stop(chain, Some(PartialReasonSet::SAME_PATH_RECURSION))
+                        }
+                        QueryResult::Error(err) => {
+                            self.fact_chain_stop(chain, demand_read_fault_reasons(&err))
+                        }
                     }
-                    PrintedDeclaration::AliasNamed
-                    | PrintedDeclaration::AliasNamedIntersection
-                    | PrintedDeclaration::AliasTransparent => {}
                 }
-            }
-            if !is_residual {
-                break None;
-            }
-            let Some(data) = self.graph().node_data(n) else {
-                break Some(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA);
-            };
-            if !visited.insert(n) {
-                // Residual-carrier cycle (`type MutA = MutB; type MutB = MutA`):
-                // the chain can never settle.
-                break Some(PartialReasonSet::SAME_PATH_RECURSION);
-            }
-            if let Err(reasons) = self.charge_connected_work() {
-                // Identity continued to change until the connected demand's
-                // total work envelope was exhausted. Exact cycles are checked
-                // first above and retain their distinct sentinel semantics.
-                break Some(reasons);
-            }
-            let resolved = match data.as_ref() {
-                // A class expression's instance resolves to the instance surface
-                // it carries — the body a `DeclRef` resolves to, already in hand.
-                SemanticNodeData::ClassExpressionInstance { surface, .. } => {
-                    let surface = *surface;
-                    drop(data);
-                    self.class_expression_read_surface(n).unwrap_or(surface)
+                FactChainStage::AwaitAliasThrough(is_residual) => {
+                    let read = delivery
+                        .take()
+                        .expect("an alias application consumes its standing read")(
+                    );
+                    crate::request_context::observe_component_meta_read_suppress(&read);
+                    crate::meta_resolve::emit_dispatch_dep_signature_facts(
+                        self,
+                        &read.dep_signature,
+                    );
+                    chain.settled.completeness = chain
+                        .settled
+                        .completeness
+                        .or_partial_if(read.result_is_partial(), read.partial_reason_classes());
+                    if let QueryResult::Value(target) = read.value {
+                        if target != n {
+                            if !chain.visited.insert(n) {
+                                self.fact_chain_stop(
+                                    chain,
+                                    Some(PartialReasonSet::SAME_PATH_RECURSION),
+                                );
+                                continue;
+                            }
+                            if let Err(reasons) = self.charge_connected_work() {
+                                self.fact_chain_stop(chain, Some(reasons));
+                                continue;
+                            }
+                            chain.settled.n = target;
+                            chain.stage = FactChainStage::Carrier;
+                            continue;
+                        }
+                    }
+                    chain.stage = FactChainStage::Residual(is_residual);
                 }
-                // Residual DeclRef → the canonical shallow `ResolveDecl` query
-                // (the `ScopeId { canonical_id, local_scope: None }` shape the
-                // canonical resolver issues).
-                SemanticNodeData::DeclRef { identity } => {
-                    let identity = identity.clone();
+                FactChainStage::PrintedArguments => {
+                    let args = chain
+                        .printed_arguments
+                        .as_mut()
+                        .expect("an alias retains its argument cursor");
+                    if let Some(&arg) = args.args.as_deref().unwrap_or_default().get(args.next) {
+                        args.next += 1;
+                        args.values.push(arg);
+                        let step =
+                            self.begin_deferred_read(arg, context, DeferredEvaluationDemand::Shell);
+                        if let Some(key) =
+                            self.fact_deferred_step(chain, step, FactDeferredThen::PrintedArgument)
+                        {
+                            return Some(key);
+                        }
+                    } else {
+                        let args = chain
+                            .printed_arguments
+                            .take()
+                            .expect("the argument walk is finished");
+                        let application = self.declared_application(
+                            n,
+                            &args.identity,
+                            args.args.as_deref().unwrap_or_default(),
+                            context,
+                        );
+                        chain.settled.named_alias_application =
+                            Some((application, Some(args.values)));
+                        chain.stage = FactChainStage::Residual(args.is_residual);
+                    }
+                }
+                FactChainStage::Carrier => {
+                    let Some(data) = self.graph().node_data(n) else {
+                        self.fact_chain_stop(
+                            chain,
+                            Some(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA),
+                        );
+                        continue;
+                    };
+                    let printed = if chain.settled.resolve_declaration_refs {
+                        None
+                    } else {
+                        match data.as_ref() {
+                            SemanticNodeData::DeclRef { identity } => {
+                                Some((identity.clone(), None))
+                            }
+                            SemanticNodeData::InstantiationRef { base, args } => {
+                                Some((base.clone(), Some(Arc::clone(args.as_arc()))))
+                            }
+                            _ => None,
+                        }
+                    };
+                    let printed = printed.map(|(identity, args)| {
+                        let kind = if is_builtin(&identity) {
+                            self.printed_builtin_application(
+                                &identity,
+                                args.as_deref().unwrap_or_default(),
+                                context,
+                            )
+                        } else {
+                            self.printed_declaration(&identity)
+                        };
+                        (identity, args, kind)
+                    });
+                    // Classify a terminal before charging the residual step.
+                    let is_residual = match (data.as_ref(), &printed) {
+                        (_, Some((_, _, Some(PrintedDeclaration::Named)))) => false,
+                        (_, Some((_, _, Some(_)))) => true,
+                        (
+                            SemanticNodeData::DeclRef { .. }
+                            | SemanticNodeData::ClassExpressionInstance { .. },
+                            _,
+                        ) => chain.settled.resolve_declaration_refs,
+                        (SemanticNodeData::InstantiationRef { .. }, _) => {
+                            chain.instantiate_instantiation_refs
+                        }
+                        _ => false,
+                    };
                     drop(data);
-                    let probe = self.observe_read(|| {
-                        self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                            scope: ScopeId {
-                                canonical_id: identity.canonical_id.clone(),
-                                owner: identity.owner,
-                                local_scope: None,
-                                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
-                                    identity.owner,
+                    chain.stage = FactChainStage::Residual(is_residual);
+                    if let Some((identity, args, Some(kind))) = printed {
+                        let arg_slice = args.as_deref().unwrap_or_default();
+                        match kind {
+                            PrintedDeclaration::Named if is_builtin(&identity) => {}
+                            PrintedDeclaration::Named => {
+                                chain.settled.n =
+                                    self.declared_application(n, &identity, arg_slice, context);
+                            }
+                            PrintedDeclaration::AliasNamed
+                            | PrintedDeclaration::AliasNamedIntersection
+                                if chain.settled.named_alias_application.is_none() =>
+                            {
+                                if kind == PrintedDeclaration::AliasNamedIntersection {
+                                    chain.printed_arguments = Some(PrintedFactArguments {
+                                        identity,
+                                        args,
+                                        next: 0,
+                                        values: Vec::new(),
+                                        is_residual,
+                                    });
+                                    chain.stage = FactChainStage::PrintedArguments;
+                                } else {
+                                    chain.settled.named_alias_application = Some((
+                                        self.declared_application(n, &identity, arg_slice, context),
+                                        None,
+                                    ));
+                                }
+                            }
+                            PrintedDeclaration::AliasThrough => {
+                                chain.stage = FactChainStage::AwaitAliasThrough(is_residual);
+                                return Some(SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                                    self.type_slot_for(identity.canonical_id.clone(), identity.owner, identity.decl_name.clone()),
+                                    Arc::from(arg_slice.to_vec().into_boxed_slice()),
+                                    self.instantiate_context_for(&identity.canonical_id, ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate)),
+                                )));
+                            }
+                            PrintedDeclaration::AliasNamed
+                            | PrintedDeclaration::AliasNamedIntersection
+                            | PrintedDeclaration::AliasTransparent => {}
+                        }
+                    }
+                }
+                FactChainStage::Residual(is_residual) => {
+                    if !is_residual {
+                        chain.stage = FactChainStage::Settled;
+                        return None;
+                    }
+                    let Some(data) = self.graph().node_data(n) else {
+                        self.fact_chain_stop(
+                            chain,
+                            Some(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA),
+                        );
+                        continue;
+                    };
+                    if !chain.visited.insert(n) {
+                        self.fact_chain_stop(chain, Some(PartialReasonSet::SAME_PATH_RECURSION));
+                        continue;
+                    }
+                    if let Err(reasons) = self.charge_connected_work() {
+                        self.fact_chain_stop(chain, Some(reasons));
+                        continue;
+                    }
+                    let key = match data.as_ref() {
+                        SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                            let surface = *surface;
+                            drop(data);
+                            let resolved = self.class_expression_read_surface(n).unwrap_or(surface);
+                            if let Some(key) = self.fact_resolved_body(chain, resolved) {
+                                return Some(key);
+                            }
+                            continue;
+                        }
+                        SemanticNodeData::DeclRef { identity } => {
+                            SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                                scope: ScopeId {
+                                    canonical_id: identity.canonical_id.clone(),
+                                    owner: identity.owner,
+                                    local_scope: None,
+                                    binder_scope_id:
+                                        crate::semantic_query::BinderScopeId::file_scope(
+                                            identity.owner,
+                                        ),
+                                },
+                                name: identity.decl_name.clone(),
+                            })
+                        }
+                        SemanticNodeData::InstantiationRef { base, args } => {
+                            let slot = self.type_slot_for(
+                                base.canonical_id.clone(),
+                                base.owner,
+                                base.decl_name.clone(),
+                            );
+                            let arguments = self.evaluate_carrier_arguments(base, args, context);
+                            chain.settled.completeness =
+                                chain.settled.completeness.merge(arguments.completeness);
+                            chain.settled.availability =
+                                chain.settled.availability.join(arguments.availability);
+                            self.fold_into_top_build_local_taint(false, arguments.cache_suppress);
+                            SemanticQueryKey::Instantiate(
+                                crate::semantic_query::InstantiateKey::new(
+                                    slot,
+                                    arguments.arguments,
+                                    self.instantiate_context_for(&base.canonical_id, context),
                                 ),
-                            },
-                            name: identity.decl_name.clone(),
-                        }))
-                    });
-                    // A negative lookup does not replace this authored carrier.
-                    // Its unavailable value is declined; operationally
-                    // incomplete misses have a distinct typed error.
-                    if matches!(
-                        &probe.value().value,
-                        QueryResult::Error(QueryError::Miss | QueryError::RaiseMiss)
-                    ) {
-                        break match probe.discard() {
-                            Ok(_) => None,
-                            Err(abort) => Some(abort.reason_class()),
-                        };
-                    }
-                    let read = match probe.adopt(self) {
-                        Ok(read) => read,
-                        Err(abort) => break Some(abort.reason_class()),
-                    };
-                    crate::request_context::observe_component_meta_read_suppress(&read);
-                    crate::meta_resolve::emit_dispatch_dep_signature_facts(
-                        self,
-                        &read.dep_signature,
-                    );
-                    completeness = completeness
-                        .or_partial_if(read.result_is_partial(), read.partial_reason_classes());
-                    availability = availability.join(read.fact_status);
-                    match read.value {
-                        QueryResult::Value(id) => id,
-                        QueryResult::Recursive(_) => {
-                            break Some(PartialReasonSet::SAME_PATH_RECURSION)
+                            )
                         }
-                        QueryResult::Error(err) => break demand_read_fault_reasons(&err),
-                    }
-                }
-                // Residual InstantiationRef → the shared `Instantiate` query
-                // with the authored argument carriers intact. The body owns
-                // argument demand: evaluating all arguments here would force
-                // unused mapped values and losing conditional branches. The
-                // slot is the base decl's type slot, and the instantiate
-                // context derives from the caller's context.
-                //
-                // The carrier-preserving peel (`instantiate_instantiation_refs
-                // == false`) never reaches this arm — `is_residual` classified
-                // the un-instantiated `InstantiationRef` as its deliberate
-                // stable stop above.
-                SemanticNodeData::InstantiationRef { base, args } => {
-                    let slot = self.type_slot_for(
-                        base.canonical_id.clone(),
-                        base.owner,
-                        base.decl_name.clone(),
-                    );
-                    let owner_canonical = base.canonical_id.clone();
-                    let arguments = self.evaluate_carrier_arguments(base, args, context);
-                    completeness = completeness.merge(arguments.completeness);
-                    availability = availability.join(arguments.availability);
-                    // A standalone typed demand has no enclosing memo to
-                    // suppress; a build-enclosed demand retains that rail.
-                    self.fold_into_top_build_local_taint(false, arguments.cache_suppress);
-                    let args = arguments.arguments;
+                        _ => unreachable!("a residual step reads only classified carriers"),
+                    };
                     drop(data);
-                    let probe = self.observe_read(|| {
-                        self.execute_read(SemanticQueryKey::Instantiate(
-                            crate::semantic_query::InstantiateKey::new(
-                                slot,
-                                args,
-                                self.instantiate_context_for(&owner_canonical, context),
-                            ),
-                        ))
-                    });
-                    // A negative lookup does not replace this authored carrier.
-                    // Its unavailable value is declined; operationally
-                    // incomplete misses have a distinct typed error.
-                    if matches!(
-                        &probe.value().value,
-                        QueryResult::Error(QueryError::Miss | QueryError::RaiseMiss)
-                    ) {
-                        break match probe.discard() {
-                            Ok(_) => None,
-                            Err(abort) => Some(abort.reason_class()),
-                        };
-                    }
-                    let read = match probe.adopt(self) {
-                        Ok(read) => read,
-                        Err(abort) => break Some(abort.reason_class()),
-                    };
-                    crate::request_context::observe_component_meta_read_suppress(&read);
-                    crate::meta_resolve::emit_dispatch_dep_signature_facts(
-                        self,
-                        &read.dep_signature,
-                    );
-                    completeness = completeness
-                        .or_partial_if(read.result_is_partial(), read.partial_reason_classes());
-                    availability = availability.join(read.fact_status);
-                    match read.value {
-                        QueryResult::Value(id) => id,
-                        QueryResult::Recursive(_) => {
-                            break Some(PartialReasonSet::SAME_PATH_RECURSION)
-                        }
-                        QueryResult::Error(err) => break demand_read_fault_reasons(&err),
-                    }
+                    // The probe's rails are held as data, never installed while
+                    // the consumer computes the dependency or polls elsewhere.
+                    chain.stage =
+                        FactChainStage::AwaitResidual(self.begin_read_observation().finish(()));
+                    return Some(key);
                 }
-                // `is_residual` above already classified every other shape as
-                // a stable stop.
-                _ => unreachable!("non-residual shapes break before the resolve step"),
-            };
-            // Re-evaluate the materialised body (it may itself be a deferred
-            // shell or chain into a further residual carrier), merging its
-            // typed completeness.
-            let next = self.evaluate_deferred_outcome(resolved, context);
-            completeness = completeness.merge(next.completeness);
-            availability = availability.join(next.availability);
-            if next.node == n {
-                // No progress — a stable fix-point carrier-stop.
-                break None;
+                FactChainStage::Settled | FactChainStage::Finished(_) => {
+                    chain.stage = stage;
+                    return None;
+                }
             }
-            n = next.node;
-        };
-        BegunDemand::Settled(SettledDemand {
-            _connected_guard: connected_guard,
-            context,
-            resolve_declaration_refs,
-            completeness,
-            availability,
-            n,
-            exit_reasons,
-            named_alias_application,
-            budget_epoch,
-        })
+        }
     }
 
     /// The second half of one structural-fact demand, once the composite
@@ -2071,12 +2299,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// reading, the alias naming, and the typed outcome.
     fn finish_structural_fact_demand(
         &self,
-        settled: SettledDemand<'_>,
+        settled: SettledDemand,
         composite: Option<SemanticNodeId>,
         composite_completeness: ResultCompleteness,
     ) -> StructuralFactDemandOutcome {
         let SettledDemand {
-            _connected_guard,
             context,
             resolve_declaration_refs,
             mut completeness,
@@ -4403,56 +4630,90 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
     ) -> Option<SemanticNodeId> {
         let reduction = self.begin_composite(node, false)?;
-        match self.drive_structural_fact_demands(DemandFrame::Composite(reduction)) {
-            DrivenRoot::Composite(reduced) => reduced,
-            DrivenRoot::Demand(_) => unreachable!("a composite root finishes as a composite"),
+        let (_connected, _) = self.enter_connected_demand(false);
+        match self.drive_structural_fact_demands(
+            StructuralFactRead::new(DemandFrame::Composite(reduction)),
+            &mut |key, carrier| {
+                if carrier {
+                    self.carrier_read_in_place(key)
+                } else {
+                    self.execute_read(key)
+                }
+            },
+        ) {
+            FactProgress::Composite(reduced) => reduced,
+            _ => unreachable!("a composite root finishes as a composite"),
         }
     }
 
-    /// Run `root`, and every structural-fact demand it suspends on, from
-    /// one explicit stack of frames. A composite reduction that needs a
-    /// name's demand suspends; the demand is begun, and when it settles on
-    /// a composite of its own, that reduction runs above it; a finished
-    /// demand's outcome resumes the reduction below. The frames run in
-    /// exactly the order the nested calls would, with the same connected
-    /// demand held open and the same `carrier_normalizing` record, so a
-    /// chain of names of any length spends no native stack per name.
-    ///
-    /// A name's completed demand is read once per run. A reduction reads
-    /// the demand of every name its arms write, and the walk over a named
-    /// union's members reads the names that union writes — the same names
-    /// the arm's own demand already read — so without reuse a chain of
-    /// union aliases demanded every link once per link above it, and the
-    /// work doubled per link (18 links exhausted the connected budget).
-    /// A completed outcome is reused only when its demand met no composite
-    /// already being reduced below it: such a re-entry leaves that composite
-    /// as written, which is where the demand ran, not what it names. The
-    /// reuse record lives for this run only.
-    fn drive_structural_fact_demands<'s>(&'s self, root: DemandFrame<'s>) -> DrivenRoot {
+    /// The synchronous driver advances the very same owned state, keeping it
+    /// on the stack and consuming each read inside the stage that named it.
+    fn drive_structural_fact_demands(
+        &self,
+        mut read: StructuralFactRead,
+        answer: &mut dyn FnMut(SemanticQueryKey, bool) -> CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> FactProgress {
+        let mut standing: Option<(SemanticQueryKey, bool)> = None;
+        loop {
+            let (guard, _) = self.enter_connected_demand(false);
+            let progress = if let Some((key, carrier)) = standing.take() {
+                let mut key = Some(key);
+                self.advance_structural_fact_read(
+                    &mut read,
+                    Some(&mut || {
+                        answer(
+                            key.take().expect("a standing read is consumed once"),
+                            carrier,
+                        )
+                    }),
+                )
+            } else {
+                self.advance_structural_fact_read(&mut read, None)
+            };
+            Self::leave_fact_stage(guard, &progress);
+            match progress {
+                FactProgress::Read(key) => standing = Some((key, read.reads_for_carrier())),
+                done => return done,
+            }
+        }
+    }
+
+    /// One walk of carrier chains and composite arms. Every frame keeps its
+    /// current position and completed work until its parent consumes it.
+    fn advance_structural_fact_read(
+        &self,
+        read: &mut StructuralFactRead,
+        mut delivery: Option<&mut dyn FnMut() -> CacheRead<QueryResult<SemanticNodeId>>>,
+    ) -> FactProgress {
         let transit =
             ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
-        let mut stack = vec![root];
-        let mut delivered: Option<StructuralFactDemandOutcome> = None;
-        let mut completed: rustc_hash::FxHashMap<SemanticNodeId, StructuralFactDemandOutcome> =
-            rustc_hash::FxHashMap::default();
         loop {
-            let top = stack
-                .last_mut()
-                .expect("the driver runs while a frame is open");
-            let reduction = match top {
+            let mut frame = read
+                .current
+                .take()
+                .expect("the walk retains its current frame");
+            let reduction = match &mut frame {
                 DemandFrame::Composite(reduction) => reduction,
                 DemandFrame::Demand {
-                    settled,
+                    chain,
                     composite,
                     reentered,
                     ..
                 } => {
                     if composite.is_none() {
-                        // A chain that did not settle is not reduced.
-                        let started = if settled.exit_reasons.is_none() {
-                            let started =
-                                self.begin_composite(settled.n, !settled.resolve_declaration_refs);
-                            if started.is_none() && self.carrier_normalizing_holds(settled.n) {
+                        if let Some(key) = self.advance_fact_chain(chain, delivery.take()) {
+                            read.current = Some(frame);
+                            return FactProgress::Read(key);
+                        }
+                        let started = if chain.settled.exit_reasons.is_none()
+                            && !matches!(chain.stage, FactChainStage::Finished(_))
+                        {
+                            let started = self.begin_composite(
+                                chain.settled.n,
+                                !chain.settled.resolve_declaration_refs,
+                            );
+                            if started.is_none() && self.carrier_normalizing_holds(chain.settled.n)
+                            {
                                 *reentered = true;
                             }
                             started
@@ -4462,90 +4723,89 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         match started {
                             Some(reduction) => *composite = Some(reduction),
                             None => {
-                                let finished = stack.pop();
-                                delivered = Some(self.finish_demand_frame(
-                                    finished,
+                                let outcome = self.finish_fact_frame(
+                                    frame,
                                     None,
                                     ResultCompleteness::Complete,
-                                    &mut stack,
-                                    &mut completed,
-                                ));
-                                if stack.is_empty() {
-                                    return DrivenRoot::Demand(
-                                        delivered.take().expect("the root's outcome"),
-                                    );
+                                    &mut read.parents,
+                                    &mut read.completed,
+                                );
+                                if let Some(parent) = read.parents.pop() {
+                                    read.current = Some(parent);
+                                    read.delivered = Some(outcome);
+                                    continue;
                                 }
-                                continue;
+                                return FactProgress::Done(outcome);
                             }
                         }
                     }
                     composite.as_mut().expect("the reduction is started")
                 }
             };
-            match self.step_composite(reduction, delivered.take()) {
+            match self.step_composite(reduction, read.delivered.take(), delivery.take()) {
+                CompositeStep::Read(key) => {
+                    read.current = Some(frame);
+                    return FactProgress::Read(key);
+                }
                 CompositeStep::Demand(name) => {
-                    if let Some(outcome) = completed.get(&name) {
-                        delivered = Some(*outcome);
-                        continue;
-                    }
-                    match self.begin_structural_fact_demand(name, transit, true, true) {
-                        BegunDemand::Finished(outcome) => delivered = Some(outcome),
-                        BegunDemand::Settled(settled) => stack.push(DemandFrame::Demand {
-                            settled,
-                            composite: None,
-                            name: Some(name),
-                            reentered: false,
-                        }),
+                    if let Some(outcome) = read.completed.get(&name) {
+                        read.delivered = Some(*outcome);
+                        read.current = Some(frame);
+                    } else {
+                        read.parents.push(frame);
+                        read.current =
+                            Some(self.fact_demand_frame(name, transit, true, true, Some(name)));
                     }
                 }
                 CompositeStep::Done(reduced, completeness) => {
-                    let finished = stack.pop();
-                    if let Some(DemandFrame::Composite(_)) = finished {
-                        // A composite asked for on its own answers its node;
-                        // the demands it read folded their partials where
-                        // they finished.
-                        return DrivenRoot::Composite(reduced);
+                    if matches!(frame, DemandFrame::Composite(_)) {
+                        return FactProgress::Composite(reduced);
                     }
-                    delivered = Some(self.finish_demand_frame(
-                        finished,
+                    let outcome = self.finish_fact_frame(
+                        frame,
                         reduced,
                         completeness,
-                        &mut stack,
-                        &mut completed,
-                    ));
-                    if stack.is_empty() {
-                        return DrivenRoot::Demand(delivered.take().expect("the root's outcome"));
+                        &mut read.parents,
+                        &mut read.completed,
+                    );
+                    if let Some(parent) = read.parents.pop() {
+                        read.current = Some(parent);
+                        read.delivered = Some(outcome);
+                    } else {
+                        return FactProgress::Done(outcome);
                     }
                 }
             }
         }
     }
 
-    /// Finish the demand frame just popped, record its outcome for reuse when
-    /// it completed with no re-entry, and hand a re-entry down to the frame
-    /// below, whose outcome is built from this one.
-    fn finish_demand_frame<'s>(
-        &'s self,
-        finished: Option<DemandFrame<'s>>,
+    /// Reuse only a complete demand that met no composite already being
+    /// reduced beneath it; re-entry depends on the current walk's position.
+    fn finish_fact_frame(
+        &self,
+        frame: DemandFrame,
         reduced: Option<SemanticNodeId>,
         completeness: ResultCompleteness,
-        stack: &mut [DemandFrame<'s>],
+        parents: &mut [DemandFrame],
         completed: &mut rustc_hash::FxHashMap<SemanticNodeId, StructuralFactDemandOutcome>,
     ) -> StructuralFactDemandOutcome {
-        let Some(DemandFrame::Demand {
-            settled,
+        let DemandFrame::Demand {
+            chain,
             name,
             reentered,
             ..
-        }) = finished
+        } = frame
         else {
             unreachable!("a demand frame finishes as a demand")
         };
-        let outcome = self.finish_structural_fact_demand(settled, reduced, completeness);
+        let outcome = match chain.stage {
+            FactChainStage::Finished(outcome) => outcome,
+            _ => self.finish_structural_fact_demand(chain.settled, reduced, completeness),
+        };
         if reentered {
             if let Some(DemandFrame::Demand {
                 reentered: below, ..
-            }) = stack.last_mut()
+            }) = parents.last_mut()
             {
                 *below = true;
             }
@@ -4663,6 +4923,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             waiting: None,
             completeness: ResultCompleteness::Complete,
             read_past_gap: false,
+            awaiting_reduction: false,
         })
     }
 
@@ -4687,7 +4948,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         reduction: &mut CompositeReduction,
         delivered: Option<StructuralFactDemandOutcome>,
+        delivery: Option<&mut dyn FnMut() -> CacheRead<QueryResult<SemanticNodeId>>>,
     ) -> CompositeStep {
+        if std::mem::take(&mut reduction.awaiting_reduction) {
+            let read = delivery.expect("a reduced intersection consumes its standing read")();
+            let reduced = self.intersection_of_reduction(&reduction.views, &read.value);
+            return self.end_composite(reduction, (reduced != reduction.node).then_some(reduced));
+        }
         if let Some(outcome) = delivered {
             let (arm, members) = match reduction.waiting.take() {
                 Some(ArmWait::Resolved(arm)) => {
@@ -4801,41 +5068,58 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if reduction.read_past_gap {
             return self.end_composite(reduction, None);
         }
-        let reduced = self.reduce_over_resolved_arms(reduction);
-        self.end_composite(reduction, reduced)
+        self.reduce_over_resolved_arms(reduction)
     }
 
-    /// The composite once every arm is read: the reduced node, or `None`
-    /// when it stays as written.
-    fn reduce_over_resolved_arms(&self, reduction: &CompositeReduction) -> Option<SemanticNodeId> {
+    /// Finish the arms already read, stopping at the canonical intersection
+    /// query when distribution cannot construct the result directly.
+    fn reduce_over_resolved_arms(&self, reduction: &mut CompositeReduction) -> CompositeStep {
+        if reduction.is_union {
+            let reduced = self.reduce_union_over_resolved_arms(reduction);
+            return self.end_composite(reduction, reduced);
+        }
+        if let Some(recovery) = self.named_intersection_too_complex(reduction) {
+            return self.end_composite(reduction, Some(recovery));
+        }
+        if reduction.views.as_slice() == reduction.arms.as_ref() {
+            return self.end_composite(reduction, None);
+        }
+        if let Some(marker) = reduction.views.iter().copied().find(|view| {
+            matches!(
+                self.graph().node_data(*view).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            )
+        }) {
+            return self.end_composite(reduction, Some(marker));
+        }
+        if let Some(reduced) = self.distributed_intersection(&reduction.views) {
+            return self.end_composite(reduction, (reduced != reduction.node).then_some(reduced));
+        }
+        reduction.awaiting_reduction = true;
+        CompositeStep::Read(SemanticQueryKey::reduce_intersection_operands(
+            self.graph().store(),
+            Arc::from(reduction.views.to_vec().into_boxed_slice()),
+        ))
+    }
+
+    /// The union once every arm is read: its canonical type and the written
+    /// names its surviving type set can still keep as its printed origin.
+    fn reduce_union_over_resolved_arms(
+        &self,
+        reduction: &CompositeReduction,
+    ) -> Option<SemanticNodeId> {
         let graph = self.graph();
         let node = reduction.node;
         let arms: &[SemanticNodeId] = &reduction.arms;
         let views = &reduction.views;
         let named_unions = &reduction.named_unions;
-        if !reduction.is_union {
-            if let Some(recovery) = self.named_intersection_too_complex(reduction) {
-                return Some(recovery);
-            }
-        }
-        if !reduction.is_union && views.as_slice() == arms {
-            return None;
-        }
         let is_opaque = |view: SemanticNodeId| {
             matches!(
                 graph.node_data(view).as_deref(),
                 Some(SemanticNodeData::Opaque(_))
             )
         };
-        if !reduction.is_union {
-            if let Some(marker) = views.iter().copied().find(|view| is_opaque(*view)) {
-                return Some(marker);
-            }
-            let reduced = self
-                .distributed_intersection(views)
-                .unwrap_or_else(|| self.intern_normalized_union_or_intersection(views, false));
-            return (reduced != node).then_some(reduced);
-        }
+
         // An arm this demand could not type leaves the union's member set
         // unknown: it stays as written.
         if views.iter().any(|view| is_opaque(*view)) {
@@ -5343,5 +5627,221 @@ fn indexed_read_mode(context: ProjectionReductionContext) -> ProjectionMode {
             ProjectionMode::Navigate
         }
         (_, mode) => mode,
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, PartialEq, Eq)]
+pub struct StructuralFactTraceForTests {
+    pub outcome: StructuralFactDemandOutcome,
+    pub requested: Vec<SemanticQueryKey>,
+    pub observations_complete: bool,
+    pub cache_suppress: bool,
+    pub partial_reasons: PartialReasonSet,
+    pub observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    pub deferred_starts: usize,
+    pub composite_arm_reads: usize,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    pub fn trace_structural_fact_read_for_tests(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        stepped: bool,
+        composite_only: bool,
+    ) -> StructuralFactTraceForTests {
+        let (_connected, _) = self.enter_connected_demand(false);
+        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let starts = deferred_evaluation_frame_starts_for_tests();
+        let arms = Self::composite_arm_reads_for_tests();
+        let mut requested = Vec::new();
+        let mut answer = |key: SemanticQueryKey, carrier: bool| {
+            requested.push(key.clone());
+            assert!(
+                requested.len() <= 32,
+                "a finite structural demand must not replay its standing frame"
+            );
+            if carrier {
+                self.carrier_read_in_place(key)
+            } else {
+                self.execute_read(key)
+            }
+        };
+        let outcome = if stepped {
+            let mut step = if composite_only {
+                self.begin_structural_composite_read(node)
+            } else {
+                self.begin_structural_fact_read(node, context, true, true)
+            };
+            loop {
+                match step {
+                    FactStep::Done(outcome) if !composite_only => break outcome,
+                    FactStep::Done(_) => {
+                        unreachable!("a standalone composite has an optional reduction")
+                    }
+                    FactStep::Composite(reduced) if composite_only => {
+                        break StructuralFactDemandOutcome::Complete(reduced.unwrap_or(node))
+                    }
+                    FactStep::Composite(_) => unreachable!("a demand has a demand outcome"),
+                    FactStep::Read(key, read) => {
+                        let carrier = read.reads_for_carrier();
+                        let mut key = Some(key);
+                        step = self.resume_structural_fact_read(read, &mut || {
+                            answer(key.take().expect("one answer per read"), carrier)
+                        });
+                    }
+                }
+            }
+        } else {
+            let progress = if composite_only {
+                match self.begin_composite(node, false) {
+                    Some(reduction) => self.drive_structural_fact_demands(
+                        StructuralFactRead::new(DemandFrame::Composite(reduction)),
+                        &mut answer,
+                    ),
+                    None => FactProgress::Composite(None),
+                }
+            } else {
+                self.drive_structural_fact_demands(
+                    StructuralFactRead::new(
+                        self.fact_demand_frame(node, context, true, true, None),
+                    ),
+                    &mut answer,
+                )
+            };
+            match progress {
+                FactProgress::Done(outcome) if !composite_only => outcome,
+                FactProgress::Composite(reduced) if composite_only => {
+                    StructuralFactDemandOutcome::Complete(reduced.unwrap_or(node))
+                }
+                _ => unreachable!("the in-place demand finishes as a demand"),
+            }
+        };
+        let completeness = crate::request_context::current_cold_compute_completeness();
+        let frame = frame.finish();
+        scope.discard();
+        let trace = StructuralFactTraceForTests {
+            outcome,
+            requested,
+            observations_complete: !completeness.is_partial() && !frame.result_is_partial,
+            cache_suppress: frame.cache_suppress,
+            partial_reasons: frame.partial_reasons,
+            observed_self_roots: frame.observed_self_roots,
+            deferred_starts: deferred_evaluation_frame_starts_for_tests() - starts,
+            composite_arm_reads: Self::composite_arm_reads_for_tests() - arms,
+        };
+        if !stepped {
+            let expected = if composite_only {
+                StructuralFactDemandOutcome::Complete(
+                    self.composite_over_resolved_arms(node).unwrap_or(node),
+                )
+            } else {
+                self.resolve_structural_fact_demand(node, context, true, true)
+            };
+            assert_eq!(
+                trace.outcome, expected,
+                "the in-place entry uses the traced driver"
+            );
+        }
+        trace
+    }
+
+    pub fn assert_structural_fact_read_abandon_for_tests(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        at_reduction: bool,
+    ) {
+        {
+            let (_connected, _) = self.enter_connected_demand(false);
+            let recordings = self.connected_demand.recording_depth();
+            let taint_frames = self.build_local_taint.borrow().len();
+            let normalizing = self.carrier_normalizing.borrow().len();
+            let mut step = if at_reduction {
+                self.begin_structural_composite_read(node)
+            } else {
+                self.begin_structural_fact_read(node, context, true, true)
+            };
+            let mut answered = 0;
+            let read = loop {
+                let FactStep::Read(key, read) = step else {
+                    panic!("the fixture must suspend at its requested read");
+                };
+                if !at_reduction || matches!(&key, SemanticQueryKey::ReduceIntersection { .. }) {
+                    break read;
+                }
+                answered += 1;
+                assert!(
+                    answered <= 32,
+                    "the composite must reach its canonical reduction"
+                );
+                let carrier = read.reads_for_carrier();
+                let mut key = Some(key);
+                step = self.resume_structural_fact_read(read, &mut || {
+                    let key = key.take().expect("one answer per read");
+                    if carrier {
+                        self.carrier_read_in_place(key)
+                    } else {
+                        self.execute_read(key)
+                    }
+                });
+            };
+            assert_eq!(
+                self.build_local_taint.borrow().len(),
+                taint_frames,
+                "a suspended probe installs no observation"
+            );
+            self.abandon_structural_fact_read(*read);
+            assert_eq!(self.connected_demand.recording_depth(), recordings);
+            assert_eq!(self.build_local_taint.borrow().len(), taint_frames);
+            assert_eq!(self.carrier_normalizing.borrow().len(), normalizing);
+        }
+        let (fresh, _) = self.enter_connected_demand(false);
+        assert!(
+            fresh.is_root(),
+            "abandon must leave no connected-demand entry open"
+        );
+    }
+
+    pub fn assert_structural_fact_probe_delivery_for_tests(&self, node: SemanticNodeId) {
+        let (_connected, _) = self.enter_connected_demand(false);
+        let scope = crate::request_context::ColdComputeCompletenessScope::enter();
+        let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
+        let context =
+            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+        let FactStep::Read(key, read) = self.begin_structural_fact_read(node, context, true, true)
+        else {
+            panic!("a missing residual declaration must name its lookup");
+        };
+        assert!(matches!(&key, SemanticQueryKey::ResolveDecl(_)));
+        let mut key = Some(key);
+        let mut delivered = false;
+        let step = self.resume_structural_fact_read(read, &mut || {
+            assert!(!std::mem::replace(&mut delivered, true));
+            let read = self.execute_read(key.take().expect("one declaration lookup"));
+            assert!(matches!(
+                &read.value,
+                QueryResult::Error(QueryError::Miss | QueryError::RaiseMiss)
+            ));
+            // Model an incomplete negative lookup whose value the authored
+            // carrier declines. The actual query still runs inside delivery.
+            self.fold_local_partial_completeness(PartialReasonSet::MISSING_DEPENDENCY);
+            read
+        });
+        assert!(delivered);
+        assert!(
+            matches!(step, FactStep::Done(StructuralFactDemandOutcome::Complete(kept)) if kept == node)
+        );
+        assert!(
+            !crate::request_context::current_cold_compute_completeness().is_partial(),
+            "a declined probe cannot taint its consumer"
+        );
+        let frame = frame.finish();
+        assert!(!frame.result_is_partial);
+        assert!(!frame.cache_suppress);
+        scope.discard();
     }
 }

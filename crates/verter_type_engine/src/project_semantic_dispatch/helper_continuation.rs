@@ -42,7 +42,8 @@
 //! callbacks with its consumer. On a frame, the round a callback's typed
 //! arguments begin continues the call's executor walk over the plan it
 //! retained, and a contextual candidate's preparation suspends at the
-//! signature lists its mapping reads. A list a walk reads is a request
+//! signature lists its mapping reads and at the operand instantiations of
+//! its typed callback's relation. A list a walk reads is a request
 //! under the demand scope it was asked in, whatever scope lies beneath the
 //! walk's call site; a list whose entry admits its subject is admitted in
 //! the call's frame, its admission's reads the frame's needs, and the
@@ -501,7 +502,8 @@ enum CallState {
     /// The call named the argument at `position` for its consumer to type.
     /// `walk` is the executor walk a round on a frame kept between its
     /// candidates, which the typed arguments continue; `None` for a round
-    /// run in place or through the machinery root.
+    /// run in place or through the machinery root. A frame round without
+    /// a kept walk refuses instead of executing the call again.
     Callback {
         key: ResolveCallKey,
         position: usize,
@@ -940,12 +942,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         });
                         (key, step)
                     }
-                    // In place, the round resumes the candidate's collector
+                    // Only the synchronous driver resumes the collector in
+                    // place. The round resumes the candidate's collector
                     // and executes the call again over the typed arguments;
                     // a kept walk is plain data and is dropped. The resumed
                     // round settles the continuation itself when it answers
                     // the call again.
-                    _ => {
+                    (_, HelperDrive::InPlace) => {
                         let answer = self.resume_contextual_call(
                             &mut key,
                             &args,
@@ -953,6 +956,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             &mut read.contextual,
                         );
                         (key, CallStep::Resumed(answer))
+                    }
+                    (None, HelperDrive::Frame { .. }) => {
+                        verter_debug_assert!(
+                            false,
+                            "a call advanced on a frame keeps its walk across a callback round"
+                        );
+                        self.release_contextual_collector(&mut read.contextual);
+                        read.contextual.settle();
+                        return HelperStep::Done((
+                            ResolveCallStep::Degraded(ResolveCallFailure::Undecidable),
+                            None,
+                        ));
                     }
                 }
             }

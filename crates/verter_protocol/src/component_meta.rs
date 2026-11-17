@@ -457,6 +457,9 @@ fn type_publication_to_proto(publication: &FfiTypePublication) -> ProtoTypePubli
                 FfiTypePublicationAbsence::BranchDivergent => {
                     TypePublicationAbsence::BranchDivergent
                 }
+                FfiTypePublicationAbsence::UnclassifiedConstructor => {
+                    TypePublicationAbsence::UnclassifiedConstructor
+                }
             } as i32;
             output.provenance = resolution_provenance_to_proto(*provenance) as i32;
         }
@@ -3988,6 +3991,10 @@ mod tests {
                     FfiAuthoredProvenance::DeclarationBody,
                 ),
             },
+            FfiTypePublication::Absent {
+                absence: FfiTypePublicationAbsence::UnclassifiedConstructor,
+                provenance: FfiResolutionProvenance::SemanticEvaluator,
+            },
         ];
 
         let decoded = cases.map(|case| {
@@ -4013,6 +4020,11 @@ mod tests {
         assert_eq!(
             decoded[2].symbolic_proof(),
             proto::SymbolicEquivalenceKind::ImportedIndexedAccess
+        );
+        assert_eq!(decoded[3].kind(), proto::TypePublicationKind::Absent);
+        assert_eq!(
+            decoded[3].absence(),
+            proto::TypePublicationAbsence::UnclassifiedConstructor
         );
     }
 

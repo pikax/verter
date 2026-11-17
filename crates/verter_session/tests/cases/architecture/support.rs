@@ -3397,7 +3397,6 @@ pub(super) fn macro_hot_mirror_impurity_hits(body: &str) -> Vec<String> {
         "resolve_value_export_target",
         // carrier-head / bare-name resolution (a producer must NOT resolve)
         "resolve_bare_ref_head",
-        "resolve_import_type_head",
         "resolve_carrier_subject_node",
         "resolve_bare_name_in_scope",
     ];

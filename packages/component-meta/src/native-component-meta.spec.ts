@@ -3,42 +3,26 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { withNativeTypeFacts } from "./type-graph.test-utils.js";
 import {
   nativeComponentMetaToComponentMeta as mapNativeComponentMeta,
   nativeTypeRegistryToMap,
 } from "./native-component-meta.js";
 
 function nativeComponentMetaToComponentMeta(meta: any) {
-  // Unit fixtures explicitly supply the same value facts as the protobuf decoder.
-  const rows = [
-    ...(meta.props ?? []),
-    ...(meta.events ?? []),
-    ...(meta.models ?? []),
-    ...(meta.exposed ?? []),
-    ...(meta.acceptedProps ?? []),
-    ...(meta.acceptedEvents ?? []),
-    ...(meta.publicInstance?.members ?? []),
-    ...(meta.typeRegistry ?? []),
-    ...(meta.slots ?? []).flatMap((slot: any) => slot.bindings),
-    ...(meta.fallthroughSurface?.branches ?? []).flatMap((branch: any) => [
-      ...branch.props,
-      ...branch.events,
-    ]),
-  ];
   for (const row of [...(meta.props ?? []), ...(meta.slots ?? [])])
     row.declaredInMacroTypeArg ??= false;
-  for (const row of rows) {
-    row.typeFact ??= { kind: "complete", value: row.type ?? row.payload };
-  }
-  return mapNativeComponentMeta({
-    orderedSfcStructure: {
-      schemaVersion: 1,
-      artifactToken: "a".repeat(43),
-      blocks: [],
-      markupNodes: [],
-    },
-    ...meta,
-  });
+  return mapNativeComponentMeta(
+    withNativeTypeFacts({
+      orderedSfcStructure: {
+        schemaVersion: 1,
+        artifactToken: "a".repeat(43),
+        blocks: [],
+        markupNodes: [],
+      },
+      ...meta,
+    }),
+  );
 }
 
 /** Default fallthrough surface fields for test payloads. */

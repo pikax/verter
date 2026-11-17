@@ -354,6 +354,35 @@ defineProps<ButtonProps>()
     expectStructuredSchema(slot?.schema);
   });
 
+  it.each([
+    ["script setup", `<script setup lang="ts">defineEmits(['change', 'update:flag'])</script>`],
+    [
+      "Options API",
+      `<script lang="ts">export default { emits: ['change', 'update:flag'] }</script>`,
+    ],
+  ])("renders runtime array emits as variadic any[] in %s", async (_kind, script) => {
+    const checker = await createRuntimeChecker("native-eval-array-emits");
+    checker.updateFile("Emitter.vue", `${script}<template><div /></template>`);
+
+    const meta = await checker.getComponentMeta("Emitter.vue");
+
+    expect(meta.events).toHaveLength(2);
+    for (const name of ["change", "update:flag"]) {
+      expect(meta.events.find((event) => event.name === name)).toMatchObject({
+        type: "any[]",
+        schema: [{ kind: "array", type: "any[]", schema: ["any"] }],
+      });
+      const nativeEvent = meta._verter!.events.find((event) => event.name === name);
+      expect(nativeEvent).toBeDefined();
+      expect(nativeEvent!.typeFact).toEqual({
+        kind: "complete",
+        value: undefined,
+        absence: "unannotated",
+      });
+      expect(nativeEvent).not.toHaveProperty("payload");
+    }
+  });
+
   it("evaluates emit types", async () => {
     const checker = await createRuntimeChecker("native-eval-emits");
 
@@ -633,7 +662,10 @@ const flag = defineModel('flag', { default: false })
     expect(meta.events.find((e) => e.name === "update:required")).toBeDefined();
     expect(meta.events.find((e) => e.name === "update:defaulted")).toBeDefined();
     expect(meta.events.find((e) => e.name === "update:flag")).toBeDefined();
-    expect(meta.events.find((e) => e.name === "update:flag")!.type).toBe("[any]");
+    expect(meta.events.find((e) => e.name === "update:flag")).toMatchObject({
+      type: "any[]",
+      schema: [{ kind: "array", type: "any[]", schema: ["any"] }],
+    });
 
     // ── Native structured surface (`_verter.props`): the descriptors stay
     //    BARE `T` (never a synthesized `T | undefined` union) plus the typed
@@ -665,7 +697,11 @@ const flag = defineModel('flag', { default: false })
 
     const nativeFlag = nativeProps.find((p) => p.name === "flag");
     expect(nativeFlag).toBeDefined();
-    expect(nativeFlag!.typeFact).toEqual({ kind: "complete", value: undefined });
+    expect(nativeFlag!.typeFact).toEqual({
+      kind: "complete",
+      value: undefined,
+      absence: "unannotated",
+    });
     expect(nativeFlag).not.toHaveProperty("type");
     expect(nativeFlag!.required).toBe(false);
     expect(nativeFlag!.hasDefault).toBe(true);
@@ -673,7 +709,11 @@ const flag = defineModel('flag', { default: false })
 
     const nativeFlagUpdate = meta._verter!.events.find((event) => event.name === "update:flag");
     expect(nativeFlagUpdate).toBeDefined();
-    expect(nativeFlagUpdate!.typeFact).toEqual({ kind: "complete", value: undefined });
+    expect(nativeFlagUpdate!.typeFact).toEqual({
+      kind: "complete",
+      value: undefined,
+      absence: "unannotated",
+    });
     expect(nativeFlagUpdate).not.toHaveProperty("payload");
 
     // Negative: no native descriptor carries a decorated undefined arm.

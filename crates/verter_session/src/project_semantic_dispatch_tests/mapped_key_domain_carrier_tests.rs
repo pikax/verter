@@ -187,7 +187,7 @@ fn alias_node(
 /// arguments are the pre-interned `arg_nodes` (so a non-primitive arg — an outer
 /// `TypeParam` — can be supplied, unlike the sibling `import_type_carrier` which
 /// only takes primitive args). Interned UNDER `owner_scope` so
-/// `resolve_import_type_head` can recover the owner canonical from the node
+/// `plan_import_type_head_steps` can recover the owner canonical from the node
 /// scope and resolve the relative specifier.
 fn import_type_generic_carrier(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,

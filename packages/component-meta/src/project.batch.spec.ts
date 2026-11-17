@@ -1,3 +1,4 @@
+import { withNativeTypeFacts } from "./type-graph.test-utils.js";
 /**
  * @ai-generated
  *
@@ -30,7 +31,7 @@ function resolvedTypeRow(display: string) {
 }
 
 function nativeMetaPayload(filePath: string, propName: string) {
-  return {
+  return withNativeTypeFacts({
     filePath,
     optionsApi: false,
     props: [
@@ -74,7 +75,7 @@ function nativeMetaPayload(filePath: string, propName: string) {
       blocks: [],
       markupNodes: [],
     },
-  };
+  });
 }
 
 describe("ComponentMetaSession.getComponentMetaBatch", () => {

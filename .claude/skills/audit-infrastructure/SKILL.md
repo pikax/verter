@@ -224,7 +224,7 @@ Every public audited entry-point follows the same lifecycle: stamp a request id,
 
 ### Component-Meta
 
-`VerterHost::get_component_meta_with_resolution(canonical_id, mode)` returns `(Option<ComponentMetaAnalysis>, Option<ResolvedComponentMetaState>)`. The audit record is published into the host's bounded `AuditRecordsStore` and drained via `HostAuditRuntime::take_record(request_id)`.
+`VerterHost::get_component_meta_with_resolution(canonical_id)` returns `Option<(ComponentMetaAnalysis, ResolvedComponentMetaState)>`. The audit record is published into the host's bounded `AuditRecordsStore`. `VerterHost::get_component_meta_with_audit(canonical_id)` calls that same entry and returns `(Option<ComponentMetaAnalysis>, Option<RequestAuditRecord>)`, draining the matching record inside the audited entry. Hover consumes this returned pair.
 
 `AuditedRequest` builder (`crates/verter_session/src/audited_request.rs`) wraps one call in a request-scoped audit harness, resets per-thread counters, validates exactly one request was created, and returns `(ComponentMetaAnalysis, ResolvedComponentMetaState, RequestAuditRecord)` as a triple. `AuditedRequestBuilder::resolve_component_meta` is the test-facing convenience; `AuditedRequestBuilder::run_custom` lets a closure issue arbitrary single-request audited work.
 
@@ -300,7 +300,7 @@ Session-side `RequestContext` provides full implementations; `NoOpObserver` leav
 | `allow_only([KindBit::…, …])` | Allow only the listed kinds |
 | `.allow(KindBit::…)` / `.deny(KindBit::…)` | Toggle a single bit (chainable) |
 
-Filter is read ONCE at registration time inside `AuditRequestRegistration::new` and CANNOT change for that request's lifetime. The current `AuditConfig` snapshot is mirrored from `HostConfig` flags in `host_construction.rs` (today only `audit_timing_capture` is wired; consumer filter defaults to allow-all). Tests that need a non-default filter swap the runtime's `AuditConfig` via a test-only helper without bypassing `active_requests` privacy.
+The host audit-enabled gate and filter are read ONCE at registration time inside `AuditRequestRegistration::new` and CANNOT change for that request's lifetime. The current `AuditConfig` snapshot is mirrored from `HostConfig` flags in `host_construction.rs` (today only `audit_timing_capture` is wired; consumer filter defaults to allow-all). Tests that need a non-default filter swap the runtime's `AuditConfig` via a test-only helper without bypassing `active_requests` privacy.
 
 ## `HostAuditRuntime` & Sampler Thread
 
@@ -421,3 +421,5 @@ The `wave_3_entry_points_propagate_tls` guard pins the `(entry_point_symbol, pai
 | `crates/verter_napi/src/audit.rs` + `crates/verter_napi/src/lib.rs` | NAPI typed entry-points |
 | `crates/verter_wasm/src/audit.rs` + `crates/verter_wasm/src/lib.rs` | WASM typed entry-points |
 | `packages/types/audit.generated.ts` | TS bindings (regenerated via `ts-rs`) |
+
+Component audit bundles carry exactly `analysis` and `record`; the single resolution is `analysis.resolution`. Native and WASM use the shared FFI record encoders and stored-capture gate. Hover provenance consumes the record paired by `VerterHost::get_component_meta_with_audit`, rather than looking up an id retained by the hover consumer.

@@ -286,7 +286,8 @@ nothing, so the key a carrier gets is the key it keeps.
 
 **Convergence.** Two spellings of one module — `./a` and `../x/a` written in
 `/x/b.ts` — are two carriers with two keys. They converge once demand-time
-resolution (`resolve_import_type_head`) turns each into the declaration or
+resolution through the shared import-head planner and carrier continuation turns
+each into the declaration or
 namespace node it names, whose key is the declaration's own identity. The
 desired pre-resolution convergence is pinned by the ignored
 `stable_key_tests::two_spellings_of_one_module_key_alike`.

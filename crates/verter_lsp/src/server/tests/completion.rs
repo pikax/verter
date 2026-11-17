@@ -1,5 +1,58 @@
 use super::*;
 
+#[tokio::test(flavor = "multi_thread")]
+async fn child_alias_boolean_completion_inserts_bare_attribute() {
+    const CHILD: &str = "<script setup lang=\"ts\">type Flag = boolean; defineProps<{ on: Flag; label: string }>()</script>";
+    const DIRECT: &str = "<script setup lang=\"ts\">import Flag from './Flag.vue'</script><template><Flag o /></template>";
+    const BARREL: &str = "<script setup lang=\"ts\">import { Flag } from './components'</script><template><Flag o /></template>";
+    let (_temp, service, drain_handle, _provider, workspace_id) =
+        make_definition_test_server_with_config(
+            &[
+                ("src/Flag.vue", "vue", CHILD),
+                (
+                    "src/components.ts",
+                    "typescript",
+                    "export { default as Flag } from './Flag.vue'",
+                ),
+                ("src/Direct.vue", "vue", DIRECT),
+                ("src/Barrel.vue", "vue", BARREL),
+            ],
+            crate::TypeProviderKind::None,
+            HostConfig {
+                analysis_scope: Some(verter_semantic::analysis::AnalysisScope::BUILD),
+                ..Default::default()
+            },
+            false,
+        )
+        .await;
+    let server = service.inner();
+    for path in ["src/Direct.vue", "src/Barrel.vue"] {
+        let uri = workspace_uri(&workspace_id, path);
+        server.publish_import_dependencies_settled(&uri).await;
+        let position = find_document_position(server, &uri, "<Flag o", "<Flag o".len());
+        let response = server
+            .completion(completion_params(&uri, position, None))
+            .await
+            .unwrap()
+            .expect("component completions");
+        let items = match response {
+            CompletionResponse::Array(items) => items,
+            CompletionResponse::List(list) => list.items,
+        };
+        let on = items
+            .iter()
+            .find(|item| item.label == "on")
+            .expect("alias boolean prop offered");
+        assert_eq!(on.insert_text.as_deref(), Some("on"), "{path}");
+        let label = items
+            .iter()
+            .find(|item| item.label == "label")
+            .expect("string prop offered");
+        assert_eq!(label.insert_text.as_deref(), Some(":label=\"$1\""));
+    }
+    drain_handle.abort();
+}
+
 #[tokio::test]
 async fn foreground_sampling_observes_and_excludes_snapshot_drains() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
@@ -153,8 +206,11 @@ fn child_contract_completion_adapter_preserves_event_and_slot_order() {
         ]),
     }));
 
-    let analysis = super::super::nav_features::child_contract_completion_analysis(contract)
-        .expect("supported child contract must adapt");
+    let analysis = super::super::nav_features::child_contract_completion_analysis(
+        contract,
+        &Default::default(),
+    )
+    .expect("supported child contract must adapt");
     let template = analysis.template.expect("template projection");
     assert_eq!(
         template

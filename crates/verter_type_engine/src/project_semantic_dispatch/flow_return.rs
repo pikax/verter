@@ -10876,7 +10876,10 @@ mod branches;
 mod call_stack;
 #[path = "flow_return_helper_run.rs"]
 mod helper_run;
-use helper_run::{HelperWait, MemberPathFrame, PendingHelper};
+use helper_run::{
+    settle_now, signature_buckets_in_place, signature_list_in_place, HelperWait, MemberPathFrame,
+    PendingHelper,
+};
 #[path = "flow_return_nested.rs"]
 mod nested;
 #[path = "flow_return_rails.rs"]
@@ -10931,13 +10934,12 @@ use super::call_resolve::*;
 use super::dispatch_txn::RelationStep;
 use super::evaluate::StructuralFactDemandOutcome;
 use super::relation::{ComparabilityVerdict, IdentityCarrierUnwrap};
-use super::signature_discovery::SharedSignatureNodes;
 use super::signature_utility::AuthoredSignatures;
 use crate::resolver_core::bare_name_resolve::DeclarationScopePayload;
 use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
-    EnumLiteralType, IncompleteReason, NodeScopeId, ProjectionReductionContext, ResolveCallKey,
-    SemanticQueryOutput, SignatureKind, SignatureKind as GraphSignatureKind,
+    EnumLiteralType, NodeScopeId, ProjectionReductionContext, ResolveCallKey, SemanticQueryOutput,
+    SignatureKind,
 };
 use rustc_hash::FxHashMap;
 use verter_session_query::type_solver::host::ResolvedRootIdentity;
@@ -11454,15 +11456,6 @@ pub(super) trait FlowDemandDriver: FlowReadDriver {
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         reduction_context: ProjectionReductionContext,
     ) -> SemanticNodeId;
-    fn shared_signature_buckets(
-        &self,
-        subject: SemanticNodeId,
-    ) -> Result<(Vec<SemanticNodeId>, Vec<SemanticNodeId>), IncompleteReason>;
-    fn shared_signature_nodes(
-        &self,
-        subject: SemanticNodeId,
-        kind: GraphSignatureKind,
-    ) -> SharedSignatureNodes;
     fn substitute_semantic_type_param(
         &self,
         node: SemanticNodeId,
@@ -12483,21 +12476,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
             reduction_context,
         )
     }
-    fn shared_signature_buckets(
-        &self,
-        subject: SemanticNodeId,
-    ) -> Result<(Vec<SemanticNodeId>, Vec<SemanticNodeId>), IncompleteReason> {
-        body_read_site!("shared_signature_buckets");
-        ProjectSemanticDispatch::shared_signature_buckets(self, subject)
-    }
-    fn shared_signature_nodes(
-        &self,
-        subject: SemanticNodeId,
-        kind: GraphSignatureKind,
-    ) -> SharedSignatureNodes {
-        body_read_site!("shared_signature_nodes");
-        ProjectSemanticDispatch::shared_signature_nodes(self, subject, kind)
-    }
     fn substitute_semantic_type_param(
         &self,
         node: SemanticNodeId,
@@ -13492,19 +13470,6 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
             substitutions,
             reduction_context,
         )
-    }
-    fn shared_signature_buckets(
-        &self,
-        subject: SemanticNodeId,
-    ) -> Result<(Vec<SemanticNodeId>, Vec<SemanticNodeId>), IncompleteReason> {
-        self.driver.shared_signature_buckets(subject)
-    }
-    fn shared_signature_nodes(
-        &self,
-        subject: SemanticNodeId,
-        kind: GraphSignatureKind,
-    ) -> SharedSignatureNodes {
-        self.driver.shared_signature_nodes(subject, kind)
     }
     fn substitute_semantic_type_param(
         &self,
@@ -26515,13 +26480,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         callee: &verter_session_query::flow::slice::GatedType,
     ) -> Option<Vec<SemanticNodeId>> {
         let node = self.callee_node(callee)?;
-        match self
-            .dispatch
-            .shared_signature_nodes(node, crate::semantic_query::SignatureKind::Call)
-        {
-            super::signature_discovery::SharedSignatureNodes::Nodes(signatures) => Some(signatures),
-            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => None,
-        }
+        signature_list_in_place(self.dispatch, self.st.canonical, node, SignatureKind::Call)
     }
 
     /// `typeof callee` a guard or effect statement names, lowered in owner
@@ -26650,11 +26609,13 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
         let Positional::Value(callee) = self.eval_expr(callee) else {
             return undecided(self);
         };
-        let signature = match self
-            .dispatch
-            .shared_signature_nodes(callee, crate::semantic_query::SignatureKind::Call)
-        {
-            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
+        let signature = match signature_list_in_place(
+            self.dispatch,
+            self.st.canonical,
+            callee,
+            SignatureKind::Call,
+        ) {
+            Some(nodes) => {
                 match nodes.as_slice() {
                     [] => {
                         return (
@@ -26712,9 +26673,7 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                     },
                 }
             }
-            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => {
-                return undecided(self)
-            }
+            None => return undecided(self),
         };
         let (predicate, occurrence) = match self.dispatch.arena().node_data(signature).as_deref() {
             Some(SemanticNodeData::Signature {
@@ -27245,18 +27204,16 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// read it waits on is answered at once.
     fn settle_now<T>(
         &mut self,
-        mut step: ReadStep<T>,
+        step: ReadStep<T>,
         mut resume: impl FnMut(&mut Self, ReadDelivery) -> ReadStep<T>,
     ) -> T {
-        loop {
-            match step {
-                ReadStep::Ready(value) => return value,
-                ReadStep::Wait(wait) => {
-                    let delivery = self.dispatch.read_in_place(wait, self.st.canonical);
-                    step = resume(self, delivery);
-                }
-            }
-        }
+        let dispatch = self.dispatch;
+        let canonical = self.st.canonical;
+        settle_now(
+            step,
+            |wait| dispatch.read_in_place(wait, canonical),
+            |delivery| resume(self, delivery),
+        )
     }
 
     /// [`Self::lower_body_type`]'s carrier: the type lowered, before a
@@ -30201,10 +30158,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 Some(BodyDelivery::Read(delivery)) => match run.waiting.pop() {
                     Some(Waiting::Read(ReadSite::Helper(helper))) => {
                         match self.helper_step_on_run(run, helper, Some(delivery), suspend) {
-                            ReadStep::Ready(value) => value,
-                            ReadStep::Wait(wait) => {
-                                return ExprProgress::Wait(BodyWait::Read(wait))
-                            }
+                            ResumedCall::Value(value) => value,
+                            ResumedCall::Descend => continue,
+                            ResumedCall::Wait(wait) => return ExprProgress::Wait(wait),
                         }
                     }
                     Some(Waiting::Read(ReadSite::Awaited)) => self.finish_awaited_read(delivery),
@@ -30399,10 +30355,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                         if let Positional::Value(object) = value {
                             let helper = Box::new(HelperWait::member_of(object, member, span));
                             match self.helper_step_on_run(run, helper, None, suspend) {
-                                ReadStep::Ready(done) => value = done,
-                                ReadStep::Wait(wait) => {
-                                    return ExprProgress::Wait(BodyWait::Read(wait))
-                                }
+                                ResumedCall::Value(done) => value = done,
+                                ResumedCall::Descend => break,
+                                ResumedCall::Wait(wait) => return ExprProgress::Wait(wait),
                             }
                         }
                     }
@@ -30544,9 +30499,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     }
 
     /// Take a class expression's next step on `run`: its value, a child to
-    /// descend into (pushed as `run`'s current), or a member function to
-    /// suspend at (evaluated in place, and the class stepped on, without
-    /// `suspend`).
+    /// descend into (pushed as `run`'s current), a member function, or its
+    /// heritage's construct list. Reading positions suspend through the
+    /// standing frame; without `suspend` their steps settle in place.
     fn class_step_on_run<'e>(
         &mut self,
         run: &mut ExprRun<'e>,
@@ -30570,6 +30525,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 class_expression::ClassStep::Nested(demand) => {
                     let signature = self.eval_nested_demand(demand);
                     step = self.class_eval_step(&mut frame, Some(Positional::Value(signature)));
+                }
+                class_expression::ClassStep::Base(base) => {
+                    let helper = Box::new(HelperWait::class_base(Box::new(frame), *base));
+                    return self.helper_step_on_run(run, helper, None, suspend);
                 }
             }
         }

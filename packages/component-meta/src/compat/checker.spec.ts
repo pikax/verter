@@ -1,3 +1,8 @@
+import { withNativeTypeFacts } from "../type-graph.test-utils.js";
+import { create, toBinary } from "@bufbuild/protobuf";
+import { ComponentMetaPayloadSchema, createTestComponentMetaPayload } from "@verter/proto";
+import { decodeTypedComponentMetaPayload } from "../type-graph-proto-decode.js";
+import { nativeComponentMetaToComponentMeta } from "../native-component-meta.js";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -50,7 +55,7 @@ async function settleNativeProject(): Promise<void> {
 }
 
 function nativeMetaPayload(filePath: string) {
-  return {
+  return withNativeTypeFacts({
     filePath,
     optionsApi: false,
     props: [
@@ -101,7 +106,7 @@ function nativeMetaPayload(filePath: string) {
       blocks: [],
       markupNodes: [],
     },
-  };
+  });
 }
 
 // ── Mapper unit tests ───────────────────────────────────────────────
@@ -1254,10 +1259,60 @@ describe("mapExposedMeta", () => {
 });
 
 describe("mapComponentMeta", () => {
+  it.each([
+    { kind: "complete", value: undefined, absence: "branchDivergent" },
+    { kind: "complete", value: undefined },
+    { kind: "approximate", value: undefined, causes: [103] },
+  ] as const)("does not infer an annotation from absence %j", (typeFact) => {
+    const meta: ComponentMeta = {
+      ...nativeMetaPayload("Input.vue"),
+      componentName: "Input",
+      props: [{ name: "absent", typeFact, required: false, hasDefault: false }],
+      events: [{ name: "absent", typeFact }],
+      slots: [{ name: "default", isScoped: true, bindings: [{ name: "absent", typeFact }] }],
+      exposed: [{ name: "absent", typeFact }],
+    };
+    const result = mapComponentMeta(meta);
+    expect(result.props).toEqual([]);
+    expect(result.events).toEqual([]);
+    expect(result.exposed).toEqual([]);
+    expect(result.slots[0].type).toBe("{}");
+    expect(result.slots[0].schema).not.toHaveProperty("schema.absent");
+  });
+
+  it.each(["complete", "approximate"] as const)(
+    "passes through a %s unknown descriptor",
+    (kind) => {
+      const type = primitive("unknown");
+      const typeFact: FactResult<TypeDescriptor | undefined> =
+        kind === "complete" ? { kind, value: type } : { kind, value: type, causes: [103] };
+      const result = mapPropMeta({
+        name: "unresolved",
+        type,
+        typeFact,
+        required: false,
+        hasDefault: false,
+      });
+      expect(result.type).toBe("unknown | undefined");
+      expect(result.schema).toMatchObject({ kind: "enum", type: "unknown | undefined" });
+    },
+  );
+
   it("omits unavailable types but keeps unannotated members as any", () => {
+    const fixture = createTestComponentMetaPayload();
+    const wireProp = fixture.body!.facts!.props!.value!.entries![0]!;
+    wireProp.publication = { kind: 2, absence: 1, provenance: 1 };
+    fixture.typeGraph!.nodes![Number(wireProp.typeNodeId) - 1] = {
+      kind: { case: "unknown", value: { rawId: 0 } },
+    };
+    const decodedProp = nativeComponentMetaToComponentMeta(
+      decodeTypedComponentMetaPayload(
+        toBinary(ComponentMetaPayloadSchema, create(ComponentMetaPayloadSchema, fixture)),
+      ),
+    ).props![0]!;
     const members: Array<{ name: string; typeFact: FactResult<TypeDescriptor | undefined> }> = [
       { name: "unavailable", typeFact: { kind: "unavailable", causes: [102] } },
-      { name: "flag", typeFact: { kind: "complete", value: undefined } },
+      { ...decodedProp, name: "flag" },
     ];
     const meta: ComponentMeta = {
       ...nativeMetaPayload("Input.vue"),
@@ -1274,7 +1329,13 @@ describe("mapComponentMeta", () => {
         hasDefault: true,
         default: "false",
       })),
-      events: members.map((member) => ({ ...member, name: `update:${member.name}` })),
+      events: [
+        ...members.map((member) => ({ ...member, name: `update:${member.name}` })),
+        {
+          name: "change",
+          typeFact: { kind: "complete", value: undefined, absence: "unannotated" },
+        },
+      ],
       slots: [{ name: "default", isScoped: true, bindings: members }],
       exposed: members,
     };
@@ -1289,11 +1350,16 @@ describe("mapComponentMeta", () => {
       required: false,
       default: "false",
     });
-    expect(result.events).toHaveLength(1);
+    expect(result.events).toHaveLength(2);
     expect(result.events[0]).toMatchObject({
       name: "update:flag",
-      type: "[any]",
-      schema: ["any"],
+      type: "any[]",
+      schema: [{ kind: "array", type: "any[]", schema: ["any"] }],
+    });
+    expect(result.events[1]).toMatchObject({
+      name: "change",
+      type: "any[]",
+      schema: [{ kind: "array", type: "any[]", schema: ["any"] }],
     });
     expect(result.slots[0].type).toBe("{ flag: any; }");
     expect(result.slots[0].schema).toMatchObject({ schema: { flag: { type: "any" } } });
@@ -1302,7 +1368,11 @@ describe("mapComponentMeta", () => {
     expect(result.exposed[0]).toMatchObject({ name: "flag", type: "any", schema: "any" });
 
     expect(result._verter).toBe(meta);
-    expect(meta.props?.[1].typeFact).toEqual({ kind: "complete", value: undefined });
+    expect(meta.props?.[1].typeFact).toEqual({
+      kind: "complete",
+      value: undefined,
+      absence: "unannotated",
+    });
     expect(meta.props?.[1]).not.toHaveProperty("type");
     expect(meta.events?.[1]).not.toHaveProperty("payload");
     expect(meta.slots?.[0].bindings[1]).not.toHaveProperty("type");

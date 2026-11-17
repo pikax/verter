@@ -18,6 +18,8 @@ import {
 } from "../../proto/src/gen/verter/v1/component_meta_pb.js";
 import { DecodedTypeGraph, GRAPH_FORMAT_VERSION } from "./type-graph-core.js";
 import { decodeTypedComponentMetaPayload } from "./type-graph-proto-decode.js";
+import { nativeComponentMetaToComponentMeta } from "./native-component-meta.js";
+import { mapComponentMeta } from "./compat/checker.js";
 
 describe("decodeTypedComponentMetaPayload", () => {
   it("reads the measured wire summary independently of approximate domains", () => {
@@ -220,6 +222,19 @@ describe("decodeTypedComponentMetaPayload", () => {
       hasType: false,
     },
     {
+      label: "BranchDivergent",
+      publication: { kind: 2, absence: 2, provenance: 1 },
+      expected: {
+        kind: "absent",
+        absence: "branchDivergent",
+        provenance: "semanticEvaluator",
+      },
+      typeNodeId: 0,
+      displayId: 0,
+      expectedDisplay: {},
+      hasType: false,
+    },
+    {
       label: "Failed",
       publication: { kind: 1, failure: 1, provenance: 1, factCauses: [102] },
       expected: {
@@ -266,8 +281,49 @@ describe("decodeTypedComponentMetaPayload", () => {
       expect(result.props[0]?.publication).toEqual(expected);
       expect(result.props[0]?.type !== undefined).toBe(hasType);
       expect(result.props[0]?.terminalDisplay).toEqual(expectedDisplay);
+      expect(result.props[0]?.typeFact).toEqual(
+        expected.kind === "absent"
+          ? { kind: "complete", value: undefined, absence: expected.absence }
+          : { kind: "unavailable", causes: [102] },
+      );
     },
   );
+
+  it.each([1, 2, 3])("decodes a supplied unknown node with absence %s", (absence) => {
+    const fixture = factFixture();
+    const prop = fixture.body!.facts!.props!.value!.entries![0]!;
+    prop.publication = { kind: 2, absence, provenance: 1 };
+    prop.requiredFact = { guarantee: { kind: 1, causes: [] }, value: false };
+    fixture.typeGraph!.nodes![Number(prop.typeNodeId) - 1] = {
+      kind: { case: "primitive", value: { primitive: 7 } },
+    };
+    const decoded = decodeTypedComponentMetaPayload(
+      toBinary(FactPayloadSchema, create(FactPayloadSchema, fixture)),
+    );
+    const nativeProp = decoded.props![0]!;
+    const expectedAbsence =
+      absence === 1 ? "unannotated" : absence === 2 ? "branchDivergent" : "unclassifiedConstructor";
+    expect(nativeProp.typeFact).toEqual({
+      kind: "complete",
+      value: nativeProp.type,
+      absence: expectedAbsence,
+    });
+    const meta = nativeComponentMetaToComponentMeta(decoded);
+    if (absence === 1) {
+      expect(nativeProp).not.toHaveProperty("type");
+      expect(meta.props![0]!).not.toHaveProperty("type");
+    } else {
+      expect(meta.props![0]!.type).toEqual({ kind: "primitive", name: "unknown" });
+    }
+    expect(meta.props![0]!.typeFact).toEqual({
+      kind: "complete",
+      value: meta.props![0]!.type,
+      absence: expectedAbsence,
+    });
+    expect(mapComponentMeta(meta).props[0]!.type).toBe(
+      absence === 1 ? "any" : "unknown | undefined",
+    );
+  });
 
   it("decodes the binding return-wrapper role and its typed reason, keeping absence absent", () => {
     const base = createTestComponentMetaPayload();

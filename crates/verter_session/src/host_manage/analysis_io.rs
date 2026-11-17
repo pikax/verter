@@ -992,7 +992,7 @@ impl VerterHost {
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
             view,
         )?;
-        resolved.evaluated_types
+        resolved.into_evaluated_types()
     }
 
     /// Get the current whole_hash for a file.

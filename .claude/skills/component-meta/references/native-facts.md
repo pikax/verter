@@ -1,7 +1,7 @@
 # Native component facts
 
 `verter_ffi::component_meta` owns the materialized-payload byte encoder and
-the shared `AuditBundle` with its JSON byte encoder. NAPI and WASM scalar and
+the shared `AuditBundle` with its JSON byte encoder. The bundle has exactly `analysis` and `record`; resolution appears only at `analysis.resolution`. NAPI and WASM scalar and
 batch component-meta calls use the seeded session payload entries and the same
 encoder: NAPI returns Buffers, WASM returns `Uint8Array | null` slots. WASM's
 audit entry returns the shared bundle's UTF-8 JSON as text; `decodeAuditBundle`
@@ -68,6 +68,24 @@ failure of a published member produces a failed publication with no type value;
 other members still publish. Execution aborts still publish nothing. Terminal
 partiality also refuses encoded-payload success admission.
 
+Resolve and extract each measure completeness in their own
+`ColdComputeCompletenessScope`. Resolve merges its scope's observations with
+the synthesis claim, then discards the scope; extraction likewise carries its
+measured claim with the outcome. The request-wide sticky flag is diagnostic
+accumulation, never an individual component's completeness authority: an
+earlier partial resolution in the same request must not prevent a healthy
+later component from warming.
+Consumers that build a cached product from a resolved state must fold its
+carried completeness into that product's active compute scope. Fallthrough
+does this both after its own owner resolve and inside the fresh scope used
+when extraction supplies an already-resolved state. The surface walk need
+not repeat the resolve-only work that produced a partial claim.
+Field-only evaluated-type consumers use
+`ResolvedComponentMetaState::into_evaluated_types`: it folds the carried claim
+before moving out the types. Both the base `evaluate_types` entry and the
+view-aware `evaluate_types_via_view` entry use this handoff. Wrappers returning
+the full resolved state retain completeness explicitly with the products.
+
 `@verter/component-meta` exposes `FactResult`, `FactCause`, `FactCauses` and
 `NativeComponentFacts`. Native `ComponentMeta` includes the facts. Compatibility
 arrays are derived projections and confer no independent completeness claim.
@@ -75,17 +93,38 @@ Public descriptor arrays retain every known member, including unavailable values
 Each prop, event payload, slot binding, model, exposed/public-instance member,
 accepted member and fallthrough member has a `typeFact` transcribed to descriptors.
 Its `type` or `payload` is absent for an unavailable value. Complete optional
-absence remains a complete fact with an undefined value. Unavailable semantic
+absence remains a complete fact with an undefined value and the wire publication's
+`absence` reason (`unannotated`, `branchDivergent` or `unclassifiedConstructor`).
+An Absent/Unannotated publication decodes with no value even when the wire
+attaches a graph node: that node is the output sink's missing-output placeholder,
+not a type descriptor. Other absence reasons preserve a supplied descriptor.
+Runtime constructor annotations outside the closed primitive classification
+publish `UnclassifiedConstructor` (wire absence 3), never `Unannotated`.
+The shared constructor helper applies this to Options API props, runtime
+`defineProps` objects and constructor arrays. Local binding resolution retains
+its existing evaluated source or typed failure; no instance-type resolver is
+inferred from display text. Array-form prop names such as `props: ['x']`
+remain Unannotated.
+Unavailable semantic
 lanes are absent on both decoded native results and public `ComponentMeta`;
 their guarantees and original causes remain on `facts`. Event rows carry no
 `hasValidator` or `isDeclared` flags. Healthy siblings remain usable.
-Compat omits a member only when its type fact is unavailable (props also need
-a known requiredness boolean). An unannotated member's complete fact with no
-value is definite absence of an authored type: TypeScript treats it as `any`.
-`compat/checker.ts::unannotatedTypeAsAny` applies that rule to props, event
-payloads, slot bindings and exposed members. An untyped model's update event
-therefore remains in compat with the single-value payload tuple `[any]`, as
-Vue's model helper emits one value. Native rows keep their complete-absent
+Compat omits members without a usable descriptor or an explicitly unannotated
+type fact (props also need a known requiredness boolean). Only a complete fact
+with no value and `absence: "unannotated"` proves absence of an authored type:
+TypeScript treats it as `any`. Other absence reasons never authorize this mapping;
+descriptors for other publications, including structured `unknown`, pass through
+unchanged. Unclassified constructors therefore keep their existing compat
+`unknown` rendering (with `| undefined` when optional).
+`compat/checker.ts::unannotatedTypeAsAny` applies the scalar rule to props,
+slot bindings and exposed members. `unannotatedEventPayloadAsAnyArray` maps
+unannotated event payloads to variadic `any[]`, including runtime array emits.
+Compat represents this with a rest-array tuple, classified as an argument array
+for the existing display and schema renderers. An untyped model's update event
+also renders `any[]`: the decoded event row carries no typed model-provenance
+fact authorizing a single-value tuple. A producer-owned model-provenance fact
+on the wire would permit that distinction; an `update:` name never proves it.
+Unannotated native rows without a descriptor keep their complete-absent
 `typeFact` and have no `type` or `payload` key; compat never mutates them.
 The JSON serializer uses the same borrowed fact projection as protobuf; it owns
 no parallel member store. Refusal delivery carries its original machine causes

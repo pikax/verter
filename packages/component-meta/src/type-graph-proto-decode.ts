@@ -1331,12 +1331,17 @@ function decodeTypePublication(publication: ProtoRecord): NativeTypePublication 
     }
     case TYPE_PUBLICATION_ABSENT: {
       const absence = Number(publication.absence ?? 0);
-      if (absence !== 1 && absence !== 2) {
+      if (absence !== 1 && absence !== 2 && absence !== 3) {
         throw graphError(`component-meta graph payload has unknown publication absence ${absence}`);
       }
       return {
         kind: "absent",
-        absence: absence === 1 ? "unannotated" : "branchDivergent",
+        absence:
+          absence === 1
+            ? "unannotated"
+            : absence === 2
+              ? "branchDivergent"
+              : "unclassifiedConstructor",
         provenance: decodeResolutionProvenance(Number(publication.provenance ?? 0)),
       };
     }
@@ -1411,7 +1416,14 @@ function decodePublishedTypeFields(
     if (publication.kind === "published" && typeNodeId === 0) {
       throw graphError(`component-meta ${label} Published publication is missing its type`);
     }
-    const type = typeNodeId !== 0 ? createGraphTypeExprRef(graph, typeNodeId) : undefined;
+    // Unannotated publications may carry the output sink's placeholder node.
+    // It is not a descriptor: the complete fact is the absence of an annotation.
+    const type =
+      publication.kind === "absent" && publication.absence === "unannotated"
+        ? undefined
+        : typeNodeId !== 0
+          ? createGraphTypeExprRef(graph, typeNodeId)
+          : undefined;
     const causes = numberList(row.publication?.factCauses);
     if (
       publication.kind === "published" &&
@@ -1420,7 +1432,7 @@ function decodePublishedTypeFields(
       throw graphError("contradictory member fact causes");
     const typeFact: FactResult<typeof type> =
       publication.kind === "absent"
-        ? { kind: "complete", value: undefined }
+        ? { kind: "complete", value: type, absence: publication.absence }
         : publication.kind === "published" && publication.exactness === "incomplete"
           ? {
               kind: "approximate",

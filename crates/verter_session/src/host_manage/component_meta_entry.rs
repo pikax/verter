@@ -259,7 +259,7 @@ impl VerterHost {
             canonical_or_alias,
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
         )?;
-        resolved.evaluated_types
+        resolved.into_evaluated_types()
     }
 
     /// Single native component-meta query.

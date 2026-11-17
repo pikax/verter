@@ -1,6 +1,34 @@
 import { create, toBinary } from "@bufbuild/protobuf";
 import { ComponentMetaPayloadSchema, type ComponentMetaPayloadInit } from "@verter/proto";
 
+/** Build decoded member facts for handwritten native fixtures, before conversion. */
+export function withNativeTypeFacts<T>(meta: T): T {
+  const fixture = meta as Record<string, any>;
+  const rows = [
+    ...(fixture.props ?? []),
+    ...(fixture.events ?? []),
+    ...(fixture.models ?? []),
+    ...(fixture.exposed ?? []),
+    ...(fixture.acceptedProps ?? []),
+    ...(fixture.acceptedEvents ?? []),
+    ...(fixture.publicInstance?.members ?? []),
+    ...(fixture.typeRegistry ?? []),
+    ...(fixture.slots ?? []).flatMap((slot: any) => slot.bindings),
+    ...(fixture.fallthroughSurface?.branches ?? []).flatMap((branch: any) => [
+      ...branch.props,
+      ...branch.events,
+    ]),
+  ];
+  for (const row of rows) {
+    row.typeFact ??= {
+      kind: "complete",
+      value: row.type ?? row.payload,
+      ...(row.publication?.kind === "absent" ? { absence: row.publication.absence } : {}),
+    };
+  }
+  return meta;
+}
+
 type TestPrimitiveName =
   | "string"
   | "number"

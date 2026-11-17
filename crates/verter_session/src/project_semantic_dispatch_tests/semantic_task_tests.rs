@@ -1857,7 +1857,12 @@ const CALLBACK_ROUNDS: &str = "type Box<T> = { v: T };\n\
      declare function echo<T>(seed: T, f: (x: T) => T): T;\n\
      declare function typedEcho(x: number): number;\n\
      declare function each<T>(seed: T, fs: ((x: T) => string)[]): T;\n\
-     declare const typedFs: ((x: number) => string)[];\n";
+     declare const typedFs: ((x: number) => string)[];\n\
+     interface TypedCallback { (x: number): Box<3> }\n\
+     declare const viaInterface: TypedCallback;\n\
+     interface TypedSecond { (y: Box<3>): string }\n\
+     declare const viaSecond: TypedSecond;\n\
+     declare function one<T, U>(seed: T, f: (x: T) => U): [T, U];\n";
 
 fn callback_rounds_host() -> Arc<crate::VerterHost> {
     callback_rounds_host_of(CALLBACK_ROUNDS)
@@ -1892,7 +1897,10 @@ fn round_call_host(case: RoundCall) -> Arc<crate::VerterHost> {
         RoundCall::CallbackArray => {
             callback_rounds_host_of(&format!("{CALLBACK_ROUNDS}{ARRAY_GLOBAL}"))
         }
-        RoundCall::TwoCallbacks | RoundCall::CallbackBesideSpread => callback_rounds_host(),
+        RoundCall::TwoCallbacks
+        | RoundCall::CallbackBesideSpread
+        | RoundCall::TypedByDeclaration
+        | RoundCall::SecondTypedByDeclaration => callback_rounds_host(),
     }
 }
 
@@ -1920,6 +1928,10 @@ fn callback_round_value(
 /// Which call a consumer types the callbacks of.
 #[derive(Clone, Copy)]
 enum RoundCall {
+    /// The first typed callback is a declaration carrier.
+    TypedByDeclaration,
+    /// The second typed callback is a declaration carrier.
+    SecondTypedByDeclaration,
     /// `both(number, f, g)`, `f` typed by `typedF` and `g` by `typedG`: the
     /// candidate's collector holds `T` and `U` when `g`'s parameter type
     /// is mapped.
@@ -1950,6 +1962,31 @@ fn round_call(
     use verter_type_engine::semantic_query::{
         ArgumentLiteralMode, CallArgKey, CallKind, PayloadArray, SemanticNodeId, TupleElement,
     };
+    if matches!(
+        case,
+        RoundCall::TypedByDeclaration | RoundCall::SecondTypedByDeclaration
+    ) {
+        use verter_type_expr::locators::{
+            AuthoredAnchor, AuthoredBodyLocator, LocatorSymbolSpace, TypeBodySlot,
+        };
+        // Populate authored body lowering independently of the semantic
+        // instantiations the member relation must still demand itself.
+        for name in ["TypedCallback", "TypedSecond", "Box"] {
+            let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
+                anchor: AuthoredAnchor {
+                    canonical_id: CALLBACK_ROUNDS_FILE.into(),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    symbol: name.into(),
+                    space: LocatorSymbolSpace::Type,
+                },
+                path: Default::default(),
+            });
+            assert!(matches!(
+                dispatch.lower_locator(locator),
+                QueryResult::Value(_)
+            ));
+        }
+    }
     let argument = |ty: SemanticNodeId, spread: bool, context_sensitive: bool| CallArgKey::Eager {
         first_pass: None,
         ty,
@@ -1963,9 +2000,23 @@ fn round_call(
         .graph_arc()
         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let (callee, args, typed) = match case {
-        RoundCall::TwoCallbacks => {
+        RoundCall::TypedByDeclaration => {
+            let f = callback_round_value(dispatch, "viaInterface");
+            (
+                callback_round_value(dispatch, "one"),
+                vec![eager(number), argument(f, false, true)],
+                vec![eager(number), eager(f)],
+            )
+        }
+        RoundCall::TwoCallbacks | RoundCall::SecondTypedByDeclaration => {
             let f = callback_round_value(dispatch, "typedF");
-            let g = callback_round_value(dispatch, "typedG");
+            let g = callback_round_value(
+                dispatch,
+                match case {
+                    RoundCall::SecondTypedByDeclaration => "viaSecond",
+                    _ => "typedG",
+                },
+            );
             (
                 callback_round_value(dispatch, "both"),
                 vec![
@@ -2147,6 +2198,96 @@ fn instantiations_held_and_noted(key: &SemanticQueryKey) -> bool {
 /// thread since the last call, which forgets them.
 fn take_held_instantiations() -> Vec<SemanticQueryKey> {
     HELD_INSTANTIATIONS.with(|held| std::mem::take(&mut *held.borrow_mut()))
+}
+
+fn typed_declaration_after_callback(key: &SemanticQueryKey, name: &str, round: usize) -> bool {
+    let selected = matches!(key, SemanticQueryKey::Instantiate(key)
+        if key.base().merged_symbol_name.as_ref() == name)
+        && verter_type_engine::project_semantic_dispatch::call_callbacks_typed_here_for_tests()
+            >= round;
+    if selected {
+        HELD_INSTANTIATIONS.with(|held| {
+            let mut held = held.borrow_mut();
+            if !held.contains(key) {
+                held.push(key.clone());
+            }
+        });
+    }
+    selected
+}
+
+fn typed_callback_instantiation(key: &SemanticQueryKey) -> bool {
+    typed_declaration_after_callback(key, "TypedCallback", 1)
+}
+
+fn typed_second_instantiation(key: &SemanticQueryKey) -> bool {
+    typed_declaration_after_callback(key, "TypedSecond", 2)
+}
+
+fn assert_typed_callback_wait(
+    case: RoundCall,
+    filter: fn(&SemanticQueryKey) -> bool,
+    round: usize,
+    name: &str,
+) {
+    let (synchronous, synchronous_work) = synchronous_round_call(case);
+    assert_eq!(synchronous_work[0], 2);
+    assert_eq!(synchronous_work[1], 1);
+    if round == 1 {
+        assert_eq!(synchronous_work, [2, 1, 2]);
+    }
+    let _ = take_held_instantiations();
+    let run = poll_round_call(case, Some(filter));
+    let held = take_held_instantiations();
+    assert!(
+        run.yielded,
+        "the call yields at the typed callback's operand instantiation"
+    );
+    assert_eq!(
+        held.len(),
+        1,
+        "premise: the typed callback instantiation is still cold at its member relation"
+    );
+    let last = run
+        .suspensions
+        .last()
+        .expect("the collector is held at the operand read");
+    assert_eq!(last.needs, held);
+    assert!(
+        matches!(last.needs.as_slice(), [SemanticQueryKey::Instantiate(key)]
+        if key.base().merged_symbol_name.as_ref() == name)
+    );
+    assert_eq!(last.collected_candidates, round);
+    assert_eq!(run.typed_at_hold, round);
+    assert_eq!(run.at_hold, [1, 0, 0]);
+    assert!(run.repolled_pending);
+    assert_eq!(run.pending_elsewhere, Some(true));
+    assert_eq!(run.repoll_work, [0; 3]);
+    assert_eq!(run.held, 1);
+    assert!(run.woken);
+    assert_eq!(run.work, [1, synchronous_work[1], synchronous_work[2]]);
+    assert_eq!(run.answer, synchronous);
+}
+
+#[test]
+fn a_contextual_call_waiting_on_its_typed_callbacks_operand_keeps_its_collector_and_does_not_walk_again(
+) {
+    assert_typed_callback_wait(
+        RoundCall::TypedByDeclaration,
+        typed_callback_instantiation,
+        1,
+        "TypedCallback",
+    );
+}
+
+#[test]
+fn a_later_callback_round_waits_on_its_typed_operand_with_the_earlier_rounds_inference_kept() {
+    assert_typed_callback_wait(
+        RoundCall::SecondTypedByDeclaration,
+        typed_second_instantiation,
+        2,
+        "TypedSecond",
+    );
 }
 
 /// Whether every noted instantiation is one of the `Array` interface: the
@@ -2489,26 +2630,57 @@ fn a_contextual_call_on_a_frame_walks_once_across_its_callback_rounds_to_the_syn
 /// then resolves in place to the synchronous answer.
 #[test]
 fn a_contextual_call_released_while_its_resumed_candidate_waits_leaves_nothing_open() {
+    assert_released_callback_wait(
+        RoundCall::TwoCallbacks,
+        signature_lists_after_a_typed_callback,
+        2,
+        false,
+    );
+}
+
+#[test]
+fn a_contextual_call_released_while_its_typed_callbacks_operand_waits_leaves_nothing_open() {
+    assert_typed_callback_wait(
+        RoundCall::TypedByDeclaration,
+        typed_callback_instantiation,
+        1,
+        "TypedCallback",
+    );
+    assert_released_callback_wait(
+        RoundCall::TypedByDeclaration,
+        typed_callback_instantiation,
+        1,
+        true,
+    );
+}
+
+fn assert_released_callback_wait(
+    case: RoundCall,
+    filter: fn(&SemanticQueryKey) -> bool,
+    collected: usize,
+    typed_operand: bool,
+) {
     use verter_type_engine::project_semantic_dispatch::{
         call_callbacks_typed_here_for_tests, drive_contextual_call_here_for_tests,
         hold_call_needs_here_for_tests, take_call_suspensions_for_tests, ContextualCallProbe,
     };
-    let (synchronous, _) = synchronous_round_call(RoundCall::TwoCallbacks);
+    let (synchronous, _) = synchronous_round_call(case);
     for dropped_elsewhere in [false, true] {
-        let host = callback_rounds_host();
+        let host = round_call_host(case);
         let _request =
             verter_type_engine::request_context::install_test_request_for(CALLBACK_ROUNDS_FILE);
         let dispatch = ProjectSemanticDispatch::new(&*host);
         let _scope = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
-        let (frame, call, typed) = round_call(&dispatch, RoundCall::TwoCallbacks);
+        let (frame, call, typed) = round_call(&dispatch, case);
         let waker = Waker::from(Arc::new(CountingWaker::default()));
         let _ = take_call_suspensions_for_tests();
         drive_contextual_call_here_for_tests(Some(ContextualCallProbe {
             call: call.clone(),
             typed: typed.clone(),
         }));
-        hold_call_needs_here_for_tests(Some(signature_lists_after_a_typed_callback));
+        hold_call_needs_here_for_tests(Some(filter));
+        let before = call_round_work(&host);
         dispatch
             .with_semantic_task_for_tests(
                 SemanticQueryKey::ResolveCall(Box::new(frame.clone())),
@@ -2519,20 +2691,45 @@ fn a_contextual_call_released_while_its_resumed_candidate_waits_leaves_nothing_o
                         task.poll_for_tests(&waker).is_pending()
                     };
                     hold_call_needs_here_for_tests(None);
-                    assert!(pending, "the call yields at the signature list");
+                    assert!(pending, "the call yields at its held read");
                     assert_eq!(call_callbacks_typed_here_for_tests(), 1);
                     let suspensions = take_call_suspensions_for_tests();
                     let last = suspensions
                         .last()
                         .unwrap_or_else(|| panic!("the call suspends with its collector held"));
-                    assert!(
-                        matches!(
+                    if typed_operand {
+                        assert!(
+                            matches!(last.needs.as_slice(), [SemanticQueryKey::Instantiate(key)]
+                            if key.base().merged_symbol_name.as_ref() == "TypedCallback")
+                        );
+                    } else {
+                        assert!(matches!(
                             last.needs.as_slice(),
                             [SemanticQueryKey::SignaturesOfType { .. }]
-                        ),
-                        "it waits on a signature list `g`'s mapping reads: {last:?}"
+                        ));
+                    }
+                    assert_eq!(last.collected_candidates, collected);
+                    assert_eq!(
+                        call_round_work_since(call_round_work(&host), before),
+                        [1, 0, 0]
                     );
-                    assert_eq!(last.collected_candidates, 2);
+                    {
+                        let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                        assert!(task.poll_for_tests(&waker).is_pending());
+                    }
+                    std::thread::scope(|scope| {
+                        scope
+                            .spawn(|| {
+                                let _forbid = verter_execution::blocking::WaitProbe::forbid();
+                                assert!(task.poll_for_tests(&waker).is_pending());
+                            })
+                            .join()
+                            .expect("the call remains pending on another thread");
+                    });
+                    assert_eq!(
+                        call_round_work_since(call_round_work(&host), before),
+                        [1, 0, 0]
+                    );
                     if dropped_elsewhere {
                         let task = slot.take().expect("the task is lent");
                         std::thread::scope(|scope| {
@@ -3165,15 +3362,49 @@ fn call_list_read(
         u64,
     )>,
 ) {
+    list_read_on_host(call_value_host(), CALL_VALUE_FILE, name, polled)
+}
+
+fn list_read_on_host(
+    host: Arc<crate::VerterHost>,
+    canonical: &str,
+    name: &str,
+    polled: bool,
+) -> (
+    usize,
+    semantic_poll_contract::JoinedEvidence,
+    Vec<(
+        verter_type_engine::project_semantic_dispatch::flow_return::body_reads::BodyReadSite,
+        u64,
+    )>,
+) {
+    list_read_key_on_host(host, polled, |dispatch| {
+        root_return_key(dispatch, canonical, name)
+    })
+}
+
+fn list_read_key_on_host(
+    host: Arc<crate::VerterHost>,
+    polled: bool,
+    make_key: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    ) -> SemanticQueryKey,
+) -> (
+    usize,
+    semantic_poll_contract::JoinedEvidence,
+    Vec<(
+        verter_type_engine::project_semantic_dispatch::flow_return::body_reads::BodyReadSite,
+        u64,
+    )>,
+) {
     use verter_type_engine::project_semantic_dispatch::flow_return::{
         body_reads, flow_read_requests_for_tests, with_list_delivery_limit_for_tests,
     };
     // Far more deliveries than any root here can need: a list that asks
     // again for a read it was answered fails at the bound, not at a deadline.
     const LIST_DELIVERY_LIMIT: usize = 64;
-    let host = call_value_host();
     let mut dispatch = ProjectSemanticDispatch::new(&*host);
-    let key = root_return_key(&dispatch, CALL_VALUE_FILE, name);
+    let key = make_key(&dispatch);
     let _ = body_reads::take();
     let requests = flow_read_requests_for_tests();
     let read = with_list_delivery_limit_for_tests(LIST_DELIVERY_LIMIT, || {
@@ -3270,11 +3501,21 @@ fn a_call_asked_where_nothing_suspends_reads_its_lists_in_place() {
         count("read_in_place") > 0,
         "the predicate route reads its parameter list in place: {rows:?}"
     );
-    // Guard narrowing reads its callee once for each branch edge.
+    // Guard narrowing requests its callee once for each branch edge, with
+    // each request answered in place at this native guard position.
     assert_eq!(
         count("shared_signature_nodes"),
-        2,
-        "the routes add no direct signature-node read: {rows:?}"
+        0,
+        "the guard uses the owned list reader: {rows:?}"
+    );
+    assert!(
+        rows.iter().any(|((stage, site, family), count)| {
+            *stage == Some("read_in_place")
+                && *site == "signature_list"
+                && *family == SemanticQueryKeyTag::SignaturesOfType
+                && *count >= 2
+        }),
+        "both guard edges attribute their list requests: {rows:?}"
     );
 }
 
@@ -3385,6 +3626,397 @@ fn a_requested_list_reads_as_the_list_read_in_place() {
             assert_eq!(requested.0, in_place.0, "{name} (polled: {polled}) preserves value, facts, diagnostics and receipt footprint");
         }
     }
+}
+
+const SIGNATURE_CONSUMERS_FILE: &str = "/ws/signature-consumers.ts";
+// Iterator keys are resolved from the project's registered global library.
+const SIGNATURE_CONSUMERS_LIB: &str = r#"
+interface SymbolConstructor { readonly iterator: unique symbol; }
+declare var Symbol: SymbolConstructor;
+"#;
+// An annotated callable variable reaches the statement's signature-list reader;
+// a same-file assertion function lowers directly to an assertion fact.
+const SIGNATURE_CONSUMERS: &str = r#"
+declare const assertNumber: (value: unknown) => asserts value is number;
+export function statement(value: unknown) { assertNumber(value); return value; }
+// A named callable type leaves its effects to signature discovery; the
+// directly written () => never annotation ends the path during lowering.
+type Stop = () => never;
+export function effect(stop: Stop) { stop(); return 1; }
+export function unionEffect(stop: (() => 1) | (() => 2)) { stop(); return 3; }
+// The base needs an object surface for inherited statics; a bare constructor
+// signature is rejected by class composition after its construct list is read.
+export function heritage(Base: { new (): { value: number } }) { return class X extends Base {}; }
+export function heritageUnion(Base: (new () => { value: number }) | (new () => { value: string })) { return class extends Base {}; }
+export function contextual(): (value: number) => number { return value => value; }
+export function methods() {
+    return {
+        method() { return this.value; }
+    } satisfies { method(this: { value: number }): number };
+}
+export function iterator(source: { [Symbol.iterator](): { next(): { done: false; value: number } } }) {
+    for (const value of source) { return value; }
+    return 0;
+}
+function identity<T>(value: T) { return value; }
+export function scheduled<T>(value: T) { return identity(value); }
+export function scheduledUse<T>(value: T) { return scheduled(value); }
+"#;
+
+fn signature_consumers_host() -> Arc<crate::VerterHost> {
+    let host = crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::make_audit_host_with_lib(
+        "/ws",
+        SIGNATURE_CONSUMERS_LIB,
+    );
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        SIGNATURE_CONSUMERS_FILE,
+        &crate::u6_flow_shape_corpus_tests::module_script(SIGNATURE_CONSUMERS),
+        crate::FileLanguage::script_ts(),
+    );
+    host
+}
+
+#[test]
+fn signature_consumers_request_their_lists_at_their_retained_positions() {
+    use super::signature_epoch_tests::signature_work;
+    use verter_type_engine::project_semantic_dispatch::flow_return::with_body_reads_in_place_for_tests;
+    use verter_type_engine::semantic_query::SemanticQueryKeyTag;
+    for name in [
+        "statement",
+        "effect",
+        "unionEffect",
+        "heritage",
+        "heritageUnion",
+        "contextual",
+        "methods",
+        "iterator",
+        "scheduledUse",
+    ] {
+        let read = |polled| {
+            let host = signature_consumers_host();
+            if name == "scheduledUse" {
+                // Warm the uninstantiated return in a separate request so
+                // this request has no logged instantiations to replay.
+                let (_, warm, _) =
+                    list_read_on_host(Arc::clone(&host), SIGNATURE_CONSUMERS_FILE, name, false);
+                assert_eq!(
+                    warm.0 .0, "T",
+                    "the generic return is available to the schedule"
+                );
+            }
+            let before = signature_work(&host);
+            let result = list_read_key_on_host(Arc::clone(&host), polled, |dispatch| {
+                let mut key = root_return_key(dispatch, SIGNATURE_CONSUMERS_FILE, name);
+                if name == "scheduledUse" {
+                    // Demand the instantiated body as the machinery root:
+                    // an ordinary call can transfer its warm return without
+                    // entering the schedule's callable-signature reader.
+                    let SemanticQueryKey::FlowReturn(flow) = &mut key else {
+                        unreachable!("a consumer is a flow-return root")
+                    };
+                    let number = dispatch
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+                    flow.normalized_type_args =
+                        verter_type_expr::OwnedSlice::from(vec![number].into_boxed_slice());
+                }
+                key
+            });
+            (result, signature_work(&host).since(before))
+        };
+        let ((requests, synchronous, rows), synchronous_work) = read(false);
+        let ((polled_requests, polled, _), polled_work) = read(true);
+        assert!(
+            synchronous.1.is_some(),
+            "{name}: the synchronous read must carry a receipt: {synchronous:?}"
+        );
+        assert!(
+            polled.1.is_some(),
+            "{name}: the polled read must carry a receipt: {polled:?}"
+        );
+        semantic_poll_contract::assert_joined_matches(polled.clone(), &synchronous);
+        assert!(
+            rows.iter().all(|((_, site, family), _)| {
+                *family != SemanticQueryKeyTag::SignaturesOfType
+                    || !matches!(*site, "shared_signature_nodes" | "shared_signature_buckets")
+            }),
+            "{name} uses the owned list continuation: {rows:?}"
+        );
+        for (polled, requested, requested_work) in [
+            (false, &synchronous, synchronous_work),
+            (true, &polled, polled_work),
+        ] {
+            let ((in_place_requests, in_place, in_place_rows), in_place_work) =
+                with_body_reads_in_place_for_tests(|| read(polled));
+            assert!(
+                in_place.1.is_some(),
+                "{name} (polled: {polled}): the in-place read must carry a receipt: {in_place:?}"
+            );
+            assert_eq!(
+                in_place_requests, 0,
+                "{name}: forced in-place reads do not reach the root"
+            );
+            assert_eq!(
+                requested.0, in_place.0,
+                "{name}: values, facts, diagnostics and receipt footprint"
+            );
+            assert_eq!(
+                requested_work, in_place_work,
+                "{name}: requesting a list changes no stable-epoch signature work"
+            );
+            assert!(
+                in_place_rows.iter().any(|((stage, site, family), count)| {
+                    *stage == Some("read_in_place")
+                        && *site == "signature_list"
+                        && *family == SemanticQueryKeyTag::SignaturesOfType
+                        && *count > 0
+                }),
+                "{name} attributes its in-place list reads: {in_place_rows:?}"
+            );
+        }
+        if matches!(name, "heritage" | "heritageUnion") {
+            let expected = if name == "heritage" { 1 } else { 2 };
+            assert_eq!((requests, polled_requests), (expected, expected), "the class stack requests its construct list and each composite result once: {rows:?}");
+            assert!(
+                rows.iter().all(|((stage, site, _), _)| {
+                    !(*stage == Some("read_in_place") && *site == "signature_list")
+                }),
+                "the heritage list suspends at its retained class frame: {rows:?}"
+            );
+        }
+        if name == "unionEffect" {
+            assert_eq!(synchronous.0 .0, "number");
+            assert!(
+                rows.iter().any(|((stage, site, family), count)| {
+                    *stage == Some("read_in_place")
+                        && *site == "signature_list"
+                        && *family == SemanticQueryKeyTag::ReadSignatureResult
+                        && *count > 0
+                }),
+                "the native effects reader requests its composite result: {rows:?}"
+            );
+        }
+        if matches!(name, "statement" | "iterator" | "scheduledUse") {
+            assert_eq!(
+                synchronous.0 .0, "number",
+                "{name} preserves its return value"
+            );
+        }
+    }
+    let (_, _, rows) = call_list_read("guarded", false);
+    assert!(
+        rows.iter().all(|((_, site, _), _)| !matches!(
+            *site,
+            "shared_signature_nodes" | "shared_signature_buckets"
+        )),
+        "guard lists use the same continuation: {rows:?}"
+    );
+}
+
+#[test]
+fn an_effects_list_retries_a_result_named_in_a_retired_epoch() {
+    use super::signature_epoch_tests::signature_work;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    };
+    use verter_type_engine::signature_kernel::StoreError;
+
+    let control_host = signature_consumers_host();
+    let before = signature_work(&control_host);
+    let (_, control, _) = list_read_on_host(
+        Arc::clone(&control_host),
+        SIGNATURE_CONSUMERS_FILE,
+        "unionEffect",
+        false,
+    );
+    let control_work = signature_work(&control_host).since(before);
+
+    let host = signature_consumers_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let graph = Arc::clone(dispatch.graph_arc());
+    let weak_graph = Arc::downgrade(&graph);
+    let retired = Arc::new(AtomicBool::new(false));
+    let named = Arc::new(Mutex::new(Vec::new()));
+    let (replaced, keys) = (Arc::clone(&retired), Arc::clone(&named));
+    graph.set_produce_hook_for_tests(Some(Arc::new(move |query, _| {
+        let SemanticQueryKey::ReadSignatureResult(key) = query else {
+            return;
+        };
+        keys.lock().unwrap().push(query.clone());
+        let graph = weak_graph.upgrade().expect("the host owns the graph");
+        let store = graph.signature_store();
+        if !replaced.swap(true, Ordering::SeqCst) {
+            assert_eq!(
+                key.descriptor.epoch(),
+                store.epoch(),
+                "the result was named before retirement"
+            );
+            store.replace_epoch().expect("replace the signature epoch");
+            assert!(
+                matches!(
+                    store.bind_epoch(key.descriptor.epoch()),
+                    Err(StoreError::StaleHandle)
+                ),
+                "the pending result's producer must refuse its retired handle"
+            );
+        } else {
+            assert_eq!(
+                key.descriptor.epoch(),
+                store.epoch(),
+                "the retried result is named in the current epoch"
+            );
+        }
+    })));
+    struct ClearHook<'a>(&'a verter_type_engine::semantic_query_memo::SemanticGraphStore);
+    impl Drop for ClearHook<'_> {
+        fn drop(&mut self) {
+            self.0.set_produce_hook_for_tests(None);
+        }
+    }
+    let hook = ClearHook(&graph);
+    let before = signature_work(&host);
+    let (_, result, rows) = list_read_on_host(
+        Arc::clone(&host),
+        SIGNATURE_CONSUMERS_FILE,
+        "unionEffect",
+        false,
+    );
+    drop(hook);
+    let work = signature_work(&host).since(before);
+    let keys = named.lock().unwrap();
+    assert!(
+        retired.load(Ordering::SeqCst),
+        "the converted consumer requested a composite result"
+    );
+    assert_eq!(
+        keys.len(),
+        2,
+        "the retired result is refused, then its current-epoch replacement is read: {keys:?}"
+    );
+    assert_ne!(
+        keys[0], keys[1],
+        "the retry never reuses the retired result key"
+    );
+    let current = dispatch.execute_via_cold_build_helper(keys[1].clone());
+    assert!(
+        matches!(current.value(), QueryResult::Value(SemanticQueryValue::SignatureResult(value))
+        if value.result.epoch() == graph.signature_store().epoch()),
+        "the retried result was published in the current epoch"
+    );
+    let refused = dispatch.execute_via_cold_build_helper(keys[0].clone());
+    assert!(
+        refused.result_is_partial()
+            && matches!(
+                refused.value(),
+                QueryResult::Error(verter_type_engine::semantic_query::QueryError::Miss)
+            ),
+        "the retired result key remains a typed refusal, never a retired-epoch value"
+    );
+    assert_eq!(result.0 .0, "number");
+    assert_eq!(
+        result.0 .0, control.0 .0,
+        "only a settled current-epoch result reaches the effects answer"
+    );
+    assert_eq!(
+        (work.discovery, work.positions, work.forced),
+        (
+            control_work.discovery,
+            control_work.positions,
+            control_work.forced
+        ),
+        "retirement repeats no discovery, matching or result forcing"
+    );
+    assert_eq!(
+        (work.rebinds, work.descriptors),
+        (1, 3),
+        "one copy names the composite and its two constituents in the current epoch"
+    );
+    assert!(
+        rows.iter().any(|((stage, site, family), count)| {
+            *stage == Some("read_in_place")
+                && *site == "signature_list"
+                && *family
+                    == verter_type_engine::semantic_query::SemanticQueryKeyTag::ReadSignatureResult
+                && *count == 2
+        }),
+        "the converted consumer receives the refusal and the retried result: {rows:?}"
+    );
+}
+
+#[test]
+fn an_unsettled_call_bucket_skips_an_inhabited_construct_bucket() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::with_list_delivery_limit_for_tests;
+    use verter_type_engine::semantic_query::{QueryError, SemanticContextId, SignatureKind};
+    let host = signature_consumers_host();
+    let dispatch = ProjectSemanticDispatch::new(&*host);
+    let _scope = dispatch.enter_construction_scope();
+    let graph = dispatch.graph();
+    let result = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let construct = super::call_resolve_tests::signature(
+        &dispatch,
+        "constructor",
+        0,
+        SignatureKind::Construct,
+        vec![],
+        vec![],
+        result,
+    );
+    let unsettled = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    let subject = graph.intern_node(SemanticNodeData::Object(
+        verter_type_engine::test_surface_view! {
+            members: Arc::from([]),
+            call_signatures: Arc::from([unsettled]),
+            construct_signatures: Arc::from([construct]),
+            index_signatures: Arc::from([]),
+            keyspace: None,
+            has_index_signature: false,
+        },
+    ));
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = Arc::clone(&observed);
+    graph.set_produce_hook_for_tests(Some(Arc::new(move |key, _| {
+        if let SemanticQueryKey::SignaturesOfType {
+            subject: read_subject,
+            kind,
+            ..
+        } = key
+        {
+            if *read_subject == subject {
+                seen.lock().unwrap().push(*kind);
+            }
+        }
+    })));
+    let buckets = with_list_delivery_limit_for_tests(4, || {
+        dispatch.flow_signature_buckets_for_tests(SIGNATURE_CONSUMERS_FILE, subject)
+    });
+    graph.set_produce_hook_for_tests(None);
+    assert!(
+        buckets.is_none(),
+        "an unsettled call list is never an empty bucket"
+    );
+    assert_eq!(
+        *observed.lock().unwrap(),
+        [SignatureKind::Call],
+        "the native bucket reader stops before requesting constructors"
+    );
+    let constructs = dispatch.execute_via_cold_build_helper(SemanticQueryKey::SignaturesOfType {
+        subject,
+        kind: SignatureKind::Construct,
+        context: SemanticContextId::production(),
+    });
+    assert!(
+        matches!(
+            constructs.value(),
+            QueryResult::Value(SemanticQueryValue::SignatureSet(_))
+        ),
+        "the skipped construct bucket is readable"
+    );
+    assert!(
+        matches!(dispatch.shared_signature_nodes(subject, SignatureKind::Construct), verter_type_engine::project_semantic_dispatch::signature_discovery::SharedSignatureNodes::Nodes(nodes) if nodes == [construct]),
+        "the skipped construct list is inhabited"
+    );
 }
 
 /// A contextual call whose executor names a callback this evaluator does not

@@ -31795,13 +31795,13 @@ fn evaluate_deferred_memo_refuses_complete_with_cache_suppress() {
 /// arm must OR every nested carrier-subject read's `cache_suppress` into
 /// `EvaluateDeferredOutcome.cache_suppress`. The arm delegates to
 /// `resolve_carrier_subject_node`, which for a QUALIFIED import type performs a
-/// nested `ProjectPath` read (`resolve_import_type_head`, carrier.rs); pre-fix
+/// nested `ProjectPath` read (`plan_import_type_head_steps`, carrier.rs); pre-fix
 /// that read's `cache_suppress` was DROPPED (the helper returned only a node),
 /// so a suppressed nested read produced `outcome.cache_suppress = false` and
 /// would slip past LB1's publish gate — the coupled no-poison hole.
 ///
 /// DISCRIMINATING: `import("./dep").Ns.Member` drives the ImportType arm through
-/// `resolve_import_type_head`'s qualified-path `ProjectPath` nested read; the
+/// `plan_import_type_head_steps`'s qualified-path `ProjectPath` nested read; the
 /// build-scoped forced-fenced-serve hook makes THAT read's own build observe a
 /// fenced serve (`cache_suppress = true`). Pre-fix the arm dropped it
 /// (`outcome.cache_suppress == false`); post-fix the capturing variant's
@@ -31833,7 +31833,7 @@ fn import_type_arm_threads_nested_read_cache_suppress_into_outcome() {
     };
     // `import("./dep").Ns.Member` — a QUALIFIED (multi-segment) import-type
     // carrier: the head `Ns` resolves to `/dep.ts` and the tail `.Member`
-    // projects via the nested `ProjectPath` read at `resolve_import_type_head`.
+    // projects via the nested `ProjectPath` read at `plan_import_type_head_steps`.
     let import_type = graph.intern_node_with_scope(
         SemanticNodeData::new_import_type(
             Arc::from("./dep"),
