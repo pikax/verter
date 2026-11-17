@@ -834,8 +834,10 @@ enum FieldAddress {
     /// The analyzer recorded an authored payload, but no node of the
     /// field's family sits at the recorded span.
     Unlocated,
-    /// A `defineModel` field: the payload is the macro's type argument.
+    /// The `defineModel` value field replays the first type argument.
     ModelTypeArgument,
+    /// Vue's modifiers record, derived from the model's second type argument.
+    ModelModifiersType,
     /// The `member`-th signature of the table's `list`-th member list,
     /// whose family span is `span`.
     Member {
@@ -1121,13 +1123,18 @@ impl<'a> AddressBuilder<'a, '_> {
         let fields = authored
             .iter()
             .zip(&spans)
-            .map(|(authored, span)| {
+            .enumerate()
+            .map(|(field_index, (authored, span))| {
                 self.work.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if !authored {
                     return FieldAddress::Unauthored;
                 }
                 let Some(family) = family else {
-                    return FieldAddress::ModelTypeArgument;
+                    return if field_index == 1 {
+                        FieldAddress::ModelModifiersType
+                    } else {
+                        FieldAddress::ModelTypeArgument
+                    };
                 };
                 if let Some(&(list, member)) = members.get(span) {
                     return FieldAddress::Member {
@@ -1449,7 +1456,9 @@ fn runtime_props_object<'a>(call: &'a CallExpression<'a>) -> Option<&'a ObjectEx
 ///   alias body the analyzer resolved through its local registry) or on the
 ///   runtime object argument's authored `as PropType<T>` / function-type
 ///   assertion;
-/// - a `defineModel` field's span IS the macro type-argument span;
+/// - `defineModel` Field(0) replays the value type argument; Field(1) derives
+///   the modifiers record from the retained call's second type argument,
+///   or Vue's default key type when absent;
 /// - an EMIT property-signature field's payload is the member value type; a
 ///   call-signature field's payload is the tuple synthesised from the
 ///   parameters after the event name (the same shape the analyzer displays);
@@ -1511,6 +1520,14 @@ pub fn lower_macro_field_payload_at_with_owners(
                 Some(ts_type) => MacroFieldPayloadLowering::Payload(
                     verter_type_expr_oxc::lower_ts_type(ts_type, source),
                 ),
+                None => MacroFieldPayloadLowering::NoField,
+            }
+        }
+        FieldAddress::ModelModifiersType => {
+            match MacroFieldAddressTable::macro_call(mac, program, work) {
+                Some(call) => {
+                    MacroFieldPayloadLowering::Payload(lower_model_modifiers_type(call, source))
+                }
                 None => MacroFieldPayloadLowering::NoField,
             }
         }
@@ -3168,7 +3185,17 @@ fn try_extract_macro(
                         // presence; the payload locator is stamped at the
                         // macro's final index. The host-side closure demands
                         // the typed body through the shared dispatch.
-                        (true, collect_type_references(first), true)
+                        let mut references = collect_type_references(first);
+                        if kind == AnalyzedMacroKind::DefineModel {
+                            if let Some(modifiers) = type_args.params.get(1) {
+                                for name in collect_type_references(modifiers) {
+                                    if !references.contains(&name) {
+                                        references.push(name);
+                                    }
+                                }
+                            }
+                        }
+                        (true, references, true)
                     } else {
                         (true, Vec::new(), false)
                     }
@@ -3308,42 +3335,99 @@ fn extract_define_model_type(
     source: &str,
     model_name: &Option<String>,
 ) -> Vec<AnalyzedPropField> {
-    let Some(ref type_args) = call.type_arguments else {
-        return Vec::new();
-    };
-    let Some(first) = type_args.params.first() else {
-        return Vec::new();
-    };
-    let start = first.span().start as usize;
-    let end = first.span().end as usize;
-    if end > source.len() {
-        return Vec::new();
-    }
-    let type_text = source[start..end].trim();
-    if type_text.is_empty() {
+    let first = call
+        .type_arguments
+        .as_ref()
+        .and_then(|args| args.params.first());
+    let type_text = first.and_then(|ty| {
+        source
+            .get(ty.span().start as usize..ty.span().end as usize)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    });
+    if first.is_some() && type_text.is_none() {
         return Vec::new();
     }
     let name = model_name.as_deref().unwrap_or("modelValue").to_string();
     let is_optional = !define_model_is_required(call);
-    // Authored `defineModel<T>()` annotation: the scope pairing records
-    // presence; the payload position is stamped at the macro's final index.
-    let type_expr_scope = Some(verter_type_expr::TypeExprScope::new(""));
-    vec![AnalyzedPropField {
-        name,
-        is_optional,
-        span: verter_span::Span::new(first.span().start, first.span().end),
-        type_annotation: Some(type_text.to_string()),
-        description: None,
-        tags: Vec::new(),
-        resolution_source: TypeResolutionSource::Rust,
-        resolution_error: None,
-        payload: None,
-        type_expr_scope,
-        // `defineModel<T>()` declares the model prop name explicitly at the
-        // macro site.
-        declared_in_macro_type_arg: true,
-        constructor_bindings: Vec::new(),
-    }]
+    let modifiers_name = verter_macro_dto::model_modifiers_prop_name(&name);
+    let value_span = first.map(|ty| ty.span()).unwrap_or(call.span);
+    let modifiers_span = call
+        .type_arguments
+        .as_ref()
+        .and_then(|args| args.params.get(1))
+        .map(|ty| ty.span())
+        .unwrap_or(call.span);
+    // Both rows are indexed without lowering a type body. Field(0) replays
+    // the authored value annotation when present; Field(1) derives Vue's
+    // modifier record on demand from the retained call.
+    vec![
+        AnalyzedPropField {
+            name,
+            is_optional,
+            span: verter_span::Span::new(value_span.start, value_span.end),
+            type_annotation: type_text.map(str::to_owned),
+            description: None,
+            tags: Vec::new(),
+            resolution_source: TypeResolutionSource::Rust,
+            resolution_error: None,
+            payload: None,
+            type_expr_scope: first.map(|_| verter_type_expr::TypeExprScope::new("")),
+            // `defineModel<T>()` declares the model prop name explicitly at the
+            // macro site.
+            declared_in_macro_type_arg: true,
+            constructor_bindings: Vec::new(),
+        },
+        AnalyzedPropField {
+            name: modifiers_name,
+            is_optional: true,
+            span: verter_span::Span::new(modifiers_span.start, modifiers_span.end),
+            // The record wrapper is framework-derived, not authored type text.
+            type_annotation: None,
+            description: None,
+            tags: Vec::new(),
+            resolution_source: TypeResolutionSource::Rust,
+            resolution_error: None,
+            payload: None,
+            type_expr_scope: Some(verter_type_expr::TypeExprScope::new("")),
+            declared_in_macro_type_arg: false,
+            constructor_bindings: Vec::new(),
+        },
+    ]
+}
+
+/// The single typed derivation of Vue's model modifiers prop. Consumers
+/// replay this field through the shared retained-payload lowering route.
+fn lower_model_modifiers_type(call: &CallExpression<'_>, source: &str) -> TypeExpr {
+    use verter_type_expr::PrimitiveName;
+
+    let explicit_keys = call
+        .type_arguments
+        .as_ref()
+        .and_then(|args| args.params.get(1));
+    if let Some(keys) = explicit_keys {
+        TypeExpr::named_with_args(
+            "Partial",
+            vec![TypeExpr::named_with_args(
+                "Record",
+                vec![
+                    verter_type_expr_oxc::lower_ts_type(keys, source),
+                    TypeExpr::boolean_literal(true),
+                ],
+            )],
+        )
+    } else {
+        TypeExpr::named_with_args(
+            "Record",
+            vec![
+                TypeExpr::Primitive(PrimitiveName::String),
+                TypeExpr::union(vec![
+                    TypeExpr::boolean_literal(true),
+                    TypeExpr::Primitive(PrimitiveName::Undefined),
+                ]),
+            ],
+        )
+    }
 }
 
 /// Check if a `defineModel()` call has a `default` key in its options object.

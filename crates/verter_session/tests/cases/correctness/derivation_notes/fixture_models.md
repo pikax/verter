@@ -1,77 +1,31 @@
-Verter rule `./.claude/skills/component-meta` (Verter macros §model) — `defineModel<T>()` typed model lowering
+Verter rule `./.claude/skills/component-meta` (Vue model props) — value and modifiers membership
 
-`./.claude/skills/component-meta` documents the Verter rule for the
-`defineModel<T>()` macro:
+The pinned Vue 3.6.0-rc.5 compiler's `genModelProps` emits a value prop and an
+optional modifiers prop for every `defineModel` call. The names are
+`modelValue` / `modelModifiers` by default, or `<name>` / `<name>Modifiers`.
+The pinned declaration generator uses `Partial<Record<M, true>>` for an explicit
+second type argument; absent M, the record is `Record<string, true | undefined>`.
+See `.claude/skills/component-meta/references/native-facts.md` and the pinned
+runtime oracle in `tests/fixtures/vue_macro_runtime_oracle.json`.
 
-> defineModel<T>() exposes a model entry per call, with name from the
-> optional first string argument (or 'modelValue' default) and type
-> from the type parameter T.
+The source fixture calls `defineModel<string>()` and
+`defineModel<number>('count')`. Neither call supplies M, `required`, or a default.
+Its independently authored expected surface therefore has:
 
-Vue 3's documented `defineModel<T>()` contract additionally:
+- Four optional props with no defaults: `count: number`,
+  `countModifiers: Record<string, true | undefined>`,
+  `modelModifiers: Record<string, true | undefined>`, and `modelValue: string`.
+- Two value-only models: `count: number` and `modelValue: string`.
+- Two events: `update:count` with `[value: number | undefined]`, and
+  `update:modelValue` with `[value: string | undefined]`.
+- No slots, exposed bindings, or fallthrough surface.
 
-- emits a corresponding `<model_name>` prop whose type is `T |
-  undefined` when the model is optional (default — no `{ required:
-  true }` option) and not defaulted; `required: false`,
-  `has_default: false`.
-- emits an `update:<model_name>` event whose payload tuple is
-  `[value: T | undefined]` for the same reason.
+Native value prop sources remain bare T. Optionality is a separate required flag;
+compat applies the optional read projection. `SnapshotView` sorts rows by name,
+which gives the order above. Union member order follows the shared semantic
+canonical order and does not change the Vue record's accepted values.
 
-Source SFC fixture (`/c.vue`):
-
-```vue
-<script setup lang="ts">
-defineModel<string>();
-defineModel<number>('count');
-</script>
-<template><div /></template>
-```
-
-Resolution semantics:
-
-1. First call `defineModel<string>()` — no string argument, so the
-   model name defaults to `modelValue`. `T = string`. The model
-   entry is `{ name: "modelValue", type_expr: string }`.
-2. Second call `defineModel<number>('count')` — the first string
-   argument `'count'` becomes the model name. `T = number`. The
-   model entry is `{ name: "count", type_expr: number }`.
-3. Each model emits a synthesised prop with the same name. Per
-   Vue's optional-by-default contract, the prop's type is
-   `T | undefined`, with `required: false` and `has_default: false`
-   (no `{ default: ... }` option present).
-4. Each model emits a synthesised `update:<name>` event whose
-   payload tuple is `[value: T | undefined]`.
-5. The `SnapshotView` projection sorts every collection
-   alphabetically by name. The fixture's surfaces are therefore
-   ordered:
-   - props: `[count: "number | undefined", modelValue: "string |
-     undefined"]`.
-   - models: `[count: "number", modelValue: "string"]`.
-   - events: `[update:count: "[value: number | undefined]",
-     update:modelValue: "[value: string | undefined]"]`.
-
-Component-meta surface: two props, two events, zero slots, two
-models, zero exposed bindings, no fallthrough surface.
-
-Discriminating-test linkage (§0p.A.5):
-- `MutationKind::ModelDropped` — surfacing only one of `count` /
-  `modelValue` (or neither) would mean the macro extractor missed a
-  call. Detected.
-- Implicit prop / event mutations — flipping `required` to `true`
-  or removing `update:<name>` events would mean the macro's
-  synthesised prop / event surfaces drifted. Detected via the
-  fixture's prop / event signatures.
-
-Phase linkage:
-- `phase-00b-tier1-mismatches.md` row 2 documented the deferred
-  rule-correct expected (models with concrete types, props with
-  `T | undefined` shape, matching update events). Re-homed from
-  Phase 5k to Phase 5j per parent §5.13 r15 table because
-  `defineModel` shares the same `ResolveMacroPayload` /
-  field-projection codepath as `defineSlots`.
-- Phase 5j §5.12 closes the gap via the
-  `compute_evaluated_types*` `expand_field_expr` closure in
-  `crates/verter_session/src/host_manage.rs` (adds a `DefineModel`
-  branch that lower+raises `parsed_type_argument` directly,
-  bypassing the path-projection arm — the macro's `T` IS the
-  field's type, not a parent shell with member-named children).
-  The fixture is authored as a regression guard for that branch.
+The Class A JSON snapshot is generated from `expected::fixture_models()` through
+`generate_class_a_snapshots_from_expected`, rather than captured from Verter.
+The correctness comparison and its mutations detect omitted props, changed
+required flags, missing events, and missing model bindings.

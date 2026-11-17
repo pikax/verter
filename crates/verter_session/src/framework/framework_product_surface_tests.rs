@@ -767,6 +767,7 @@ fn public_declaration_members(host: &VerterHost, canonical: &str) -> PublicMembe
         .get_public_api_projection(canonical)
         .unwrap_or_else(|error| panic!("{canonical}: public declaration failed: {error:?}"))
         .unwrap_or_else(|| panic!("{canonical}: no public declaration rendered"));
+    let rendered_props = rendered_constructor_props(projection.response.ts_labeled_code());
     let crate::framework::public_contract::ComponentContractAvailability::Supported(contract) =
         &projection.contract
     else {
@@ -809,7 +810,21 @@ fn public_declaration_members(host: &VerterHost, canonical: &str) -> PublicMembe
                 events.extend(projection.events.iter().map(|row| row.name.clone()));
             }
             MacroTscOutcome::Complete(MacroTscProjection::Model(model)) => {
+                assert_eq!(
+                    rendered_props.get(&model.name),
+                    Some(&model.optional),
+                    "{canonical}: model value prop must occur in the rendered constructor"
+                );
                 props.push((model.name.clone(), !model.optional));
+                assert_eq!(
+                    rendered_props.get(&model.modifiers_prop.name),
+                    Some(&model.modifiers_prop.optional),
+                    "{canonical}: model modifiers prop must occur in the rendered constructor"
+                );
+                props.push((
+                    model.modifiers_prop.name.clone(),
+                    !model.modifiers_prop.optional,
+                ));
                 models.push((model.name.clone(), !model.optional));
             }
             MacroTscOutcome::Complete(MacroTscProjection::Expose(_)) => {}
@@ -828,6 +843,61 @@ fn public_declaration_members(host: &VerterHost, canonical: &str) -> PublicMembe
         events,
         models: unique_by_name(canonical, "declaration", models),
     }
+}
+
+/// Read properties from the real public constructor parameter, including its
+/// intersection arms. Runtime component options cannot satisfy this check.
+fn rendered_constructor_props(code: &str) -> BTreeMap<String, bool> {
+    use oxc_ast::ast::{TSConstructSignatureDeclaration, TSSignature, TSType};
+    use oxc_ast_visit::Visit;
+
+    fn collect(ty: &TSType<'_>, props: &mut BTreeMap<String, bool>) {
+        match ty {
+            TSType::TSIntersectionType(intersection) => {
+                for arm in &intersection.types {
+                    collect(arm, props);
+                }
+            }
+            TSType::TSTypeLiteral(literal) => {
+                for member in &literal.members {
+                    if let TSSignature::TSPropertySignature(property) = member {
+                        if let Some(name) = property.key.static_name() {
+                            props.insert(name.to_string(), property.optional);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    #[derive(Default)]
+    struct Constructors(BTreeMap<String, bool>);
+    impl<'a> Visit<'a> for Constructors {
+        fn visit_ts_construct_signature_declaration(
+            &mut self,
+            signature: &TSConstructSignatureDeclaration<'a>,
+        ) {
+            if let Some(annotation) = signature
+                .params
+                .items
+                .first()
+                .and_then(|p| p.type_annotation.as_ref())
+            {
+                collect(&annotation.type_annotation, &mut self.0);
+            }
+        }
+    }
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, code, oxc_span::SourceType::ts()).parse();
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "public declaration must parse: {:?}",
+        parsed.diagnostics
+    );
+    let mut visitor = Constructors::default();
+    visitor.visit_program(&parsed.program);
+    visitor.0
 }
 
 /// The public declaration and the component's framework surface are two
@@ -883,10 +953,19 @@ fn the_vue_public_declaration_names_the_members_the_component_surface_names() {
             &[
                 ("id", true, false),
                 ("modelValue", false, false),
+                ("modelModifiers", false, false),
                 ("count", true, false),
+                ("countModifiers", false, false),
             ],
             &[],
             &[("modelValue", false), ("count", true)],
+        ),
+        (
+            "typed model modifiers",
+            "<script setup lang=\"ts\">const model = defineModel<string, 'trim' | 'lazy'>()</script>",
+            &[("modelValue", false, false), ("modelModifiers", false, false)],
+            &[],
+            &[("modelValue", false)],
         ),
         (
             "duplicate emit names",

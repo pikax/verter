@@ -9008,7 +9008,7 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
             .collect()
     };
 
-    // Base-view read (no overlay): only the base model prop `old`.
+    // Base-view read: the base model value and its modifiers prop.
     let base_dtos = host
         .vue_macro_dtos(&request_for(
             host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
@@ -9016,8 +9016,8 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
         .expect("the Vue adapter is admitted");
     assert_eq!(
         prop_names(&base_dtos),
-        vec!["old".to_string()],
-        "base-view defineModel surface must be exactly [old]"
+        vec!["old".to_string(), "oldModifiers".to_string()],
+        "base-view defineModel surface includes both synthesized props"
     );
 
     // Overlay session: overlay the SFC rewriting the model name + type.
@@ -9056,8 +9056,9 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
     .expect("the Vue adapter is admitted")
     .dtos;
     let overlay_props = prop_names(&overlay_dtos);
-    assert!(
-        overlay_props.contains(&"fresh".to_string()),
+    assert_eq!(
+        overlay_props,
+        vec!["fresh".to_string(), "freshModifiers".to_string()],
         "overlay defineModel surface MUST reflect the overlay's \
          `defineModel<number>('fresh')` model prop — `model_prop_fields` must fetch \
          the owner SFC IndexedReady through the active overlay ctx, not the base \
@@ -9069,7 +9070,7 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
          model prop: {overlay_props:?}"
     );
 
-    // No leak: a fresh base-view read still sees only `[old]`.
+    // No leak: a fresh base-view read still sees only the base pair.
     let base_dtos_after = host
         .vue_macro_dtos(&request_for(
             host.current_or_read_whole_hash(SFC).unwrap_or([0u8; 16]),
@@ -9077,7 +9078,7 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
         .expect("the Vue adapter is admitted");
     assert_eq!(
         prop_names(&base_dtos_after),
-        vec!["old".to_string()],
+        vec!["old".to_string(), "oldModifiers".to_string()],
         "the overlay session's `fresh` model prop must NOT leak into the base-view \
          defineModel surface: {:?}",
         prop_names(&base_dtos_after)

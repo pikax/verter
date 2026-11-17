@@ -1017,15 +1017,13 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
                             ..MacroSurfaceDtos::default()
                         },
                         AnalyzedMacroKind::DefineModel => {
-                            // `defineModel` synthesizes a prop (the model's value type),
-                            // surfaced in BOTH slots: the `props` slot keeps the
-                            // component-meta contract (the model contributes a prop), and
-                            // the `model` slot carries the binding(s) the MODEL framework
-                            // surface reads. `model_prop_fields` is the shared synthesis
-                            // source for both, so the two slots stay in lock-step.
+                            // Both synthesized rows belong to props. Only the value
+                            // row is a model binding; modifiers do not emit updates.
                             let prop_fields = props_from_typeinfo_surface(ctx, dispatch, &resolved);
+                            let model_name = mac.model_name.as_deref().unwrap_or("modelValue");
                             let bindings = prop_fields
                                 .iter()
+                                .filter(|row| row.analysis.name == model_name)
                                 .map(|row| {
                                     crate::typeinfo::framework_surface::results::ModelBinding {
                                         name: row.analysis.name.clone(),

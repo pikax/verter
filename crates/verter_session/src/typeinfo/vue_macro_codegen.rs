@@ -1917,6 +1917,17 @@ impl VerterHost {
                         Ok(text) => text,
                         Err(failure) => return failure.tsc(),
                     };
+                let modifiers_prop = match project_tsc_model_modifiers(
+                    dispatch,
+                    rails,
+                    owner_canonical,
+                    mac,
+                    effective_index,
+                    counters,
+                ) {
+                    Ok(row) => row,
+                    Err(failure) => return failure.tsc(),
+                };
                 let name = mac.model_name.as_deref().unwrap_or("modelValue").to_owned();
                 let optional = mac
                     .prop_fields
@@ -1927,13 +1938,15 @@ impl VerterHost {
                         Ok(scope) => scope,
                         Err(failure) => return failure.tsc(),
                     };
-                // The synthesized model row is its own demand. Emitting it is
-                // that demand's fact; it is not the ambient TSC lane status.
+                // Each synthesized prop row records its own derivation fact,
+                // independently of the ambient TSC lane status.
+                published.push(row_derivation_fact().status());
                 published.push(row_derivation_fact().status());
                 MacroTscOutcome::Complete(MacroTscProjection::Model(TscModelProjection {
                     name,
                     optional,
                     value_type,
+                    modifiers_prop,
                     anchor: MacroAnchor::Synthesized {
                         macro_index: macro_index(effective_index),
                         row: SynthesizedRowKind::ModelProp,

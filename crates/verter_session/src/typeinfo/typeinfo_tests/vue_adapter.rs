@@ -783,7 +783,24 @@ fn define_model_normalizer_produces_synthesized_model_prop_from_analyzer_facts()
         &fixture_dispatch_8,
         &resolved_vue_surface_for_test(surface.clone()),
     );
-    assert_eq!(props.len(), 1, "defineModel synthesizes exactly one prop");
+    assert_eq!(
+        props.len(),
+        2,
+        "defineModel synthesizes value and modifiers props"
+    );
+    let modifiers = &props[1];
+    assert_eq!(modifiers.analysis.name, "titleModifiers");
+    assert!(modifiers.analysis.is_optional);
+    assert!(modifiers.analysis.payload.is_some());
+    assert!(modifiers.analysis.type_annotation.is_none());
+    assert_eq!(
+        modifiers
+            .analysis
+            .type_expr_scope
+            .as_ref()
+            .map(|scope| scope.as_str()),
+        Some(FILE)
+    );
     let model = &props[0];
     assert_eq!(
         model.analysis.name, "title",

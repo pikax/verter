@@ -10,6 +10,22 @@
       "doc": null
     },
     {
+      "name": "countModifiers",
+      "type_signature": "Record<string, true | undefined>",
+      "required": false,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    },
+    {
+      "name": "modelModifiers",
+      "type_signature": "Record<string, true | undefined>",
+      "required": false,
+      "has_default": false,
+      "default_signature": null,
+      "doc": null
+    },
+    {
       "name": "modelValue",
       "type_signature": "string",
       "required": false,

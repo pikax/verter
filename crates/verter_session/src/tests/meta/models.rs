@@ -172,14 +172,17 @@ fn imported_model_type_publishes_from_the_framework_surface_props_read() {
 
     let project = make_project();
     project
-        .upsert_base("/choice.ts", "export interface Choice { id: number }\n")
+        .upsert_base(
+            "/choice.ts",
+            "export interface Choice { id: number }\nexport type Modifiers = 'trim' | 'lazy'\n",
+        )
         .unwrap();
     project
         .upsert_base(
             "/App.vue",
             r#"<script setup lang="ts">
-import type { Choice } from './choice'
-const choice = defineModel<Choice>("choice")
+import type { Choice, Modifiers } from './choice'
+const choice = defineModel<Choice, Modifiers>("choice")
 </script>
 <template><div /></template>"#,
         )
@@ -243,4 +246,38 @@ const choice = defineModel<Choice>("choice")
         TypeExpr::Ref { name, .. } if name.as_ref() == "Choice" => {}
         other => panic!("the demanded model type resolves the imported `Choice`, got {other:?}"),
     }
+
+    let modifiers = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "choiceModifiers")
+        .expect("the optional modifiers prop publishes");
+    assert!(!modifiers.required);
+    assert!(
+        modifiers.publication.evidence().is_none(),
+        "derived wrappers are not authored text"
+    );
+    assert_eq!(
+        modifiers.publication.authority().provenance(),
+        verter_type_expr::ResolutionProvenance::FrameworkSurface
+    );
+    assert_eq!(
+        shallow_published_type(
+            project.host(),
+            "/App.vue",
+            modifiers.publication.authority().source(),
+            "model modifiers"
+        ),
+        TypeExpr::named_with_args(
+            "Partial",
+            vec![TypeExpr::named_with_args(
+                "Record",
+                vec![
+                    TypeExpr::named("Modifiers"),
+                    TypeExpr::boolean_literal(true)
+                ]
+            )]
+        ),
+        "metadata retains the same modifier record and imported key alias as the declaration"
+    );
 }

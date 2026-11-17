@@ -5327,7 +5327,11 @@ fn assert_public_instance_domain_enumeration(declarations: &[(&str, bool)], temp
 #[test]
 fn public_instance_models_requires_full_enumeration() {
     use verter_session_query::analysis::component_meta::PublicInstanceCompleteness;
-    for model in ["defineModel<string>()", "defineModel('title')"] {
+    for (model, modifiers_name) in [
+        ("defineModel()", "modelModifiers"),
+        ("defineModel('count')", "countModifiers"),
+        ("defineModel<string, 'trim'>()", "modelModifiers"),
+    ] {
         let session = completeness_host();
         let canonical = "/Model.vue";
         let _ = session.upsert(host::UpsertRequest {
@@ -5342,20 +5346,28 @@ fn public_instance_models_requires_full_enumeration() {
             sidecar_less_wire_payload(&session, canonical),
         ] {
             let facts = ffi.facts();
-            assert_eq!(facts.public_instance.kind(), 2, "{model}");
-            assert!(facts.public_instance.open(), "{model}");
-            assert_eq!(facts.public_instance.causes(), vec![103], "{model}");
+            assert_eq!(facts.public_instance.kind(), 1, "{model}");
+            assert!(!facts.public_instance.open(), "{model}");
+            assert!(facts.public_instance.causes().is_empty(), "{model}");
             let instance = ffi.public_instance.as_ref().unwrap();
             assert_eq!(
                 instance.completeness,
-                PublicInstanceCompleteness::Partial,
+                PublicInstanceCompleteness::Exact,
                 "{model}"
             );
-            assert!(!instance
+            assert!(instance
                 .members
                 .iter()
-                .any(|member| member.name.ends_with("Modifiers")));
+                .any(|member| member.name == modifiers_name));
+            let json = serde_json::to_value(&ffi).unwrap();
+            let props = json["facts"]["props"]["value"].as_array().unwrap();
+            let modifiers = props
+                .iter()
+                .find(|prop| prop["name"] == modifiers_name)
+                .expect("wire modifiers prop");
+            assert_eq!(modifiers["required"], false, "{model}");
+            assert_eq!(modifiers["hasDefault"], false, "{model}");
         }
-        assert!(!analysis.domain_guarantees.enumeration.models, "{model}");
+        assert!(analysis.domain_guarantees.enumeration.models, "{model}");
     }
 }

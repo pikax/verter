@@ -2116,6 +2116,34 @@ fn synthesize_model_prop_and_event(
         });
     }
 
+    let modifiers_name = verter_macro_dto::model_modifiers_prop_name(&name);
+    if let Some(row) = prop_fields
+        .iter()
+        .find(|row| row.field.name == modifiers_name)
+    {
+        let modifiers = PropAnalysis {
+            name: modifiers_name,
+            callable_role: verter_type_expr::PropCallableRole::Other,
+            publication: TypePublication::new(
+                row.authority.clone(),
+                row.authored_evidence.clone(),
+                &PublicationPolicy::exact_only(),
+            ),
+            type_expansion: None,
+            required: false,
+            has_default: false,
+            default_value: None,
+            description: row.field.description.clone(),
+            tags: row.field.tags.clone(),
+            declared_in_macro_type_arg: row.field.declared_in_macro_type_arg,
+        };
+        if let Some(existing) = props.iter_mut().find(|prop| prop.name == modifiers.name) {
+            *existing = modifiers;
+        } else {
+            props.push(modifiers);
+        }
+    }
+
     let event_name = format!("update:{name}");
     let evaluated_event =
         evaluated.and_then(|eval| eval.emits.iter().find(|field| field.name == event_name));
@@ -3039,10 +3067,6 @@ fn component_domain_guarantees(
             .enumerate()
             .filter(|(_, mac)| mac.kind == kind)
         {
-            // Model value names are known, but modifiers props are not listed.
-            if kind == AnalyzedMacroKind::DefineModel {
-                *fully_enumerated = false;
-            }
             let mut joined = None;
             for row in resolved.iter().filter(|row| row.macro_index == index) {
                 MetadataFactGuarantee::absorb_option(&mut joined, claim(row).cloned());
