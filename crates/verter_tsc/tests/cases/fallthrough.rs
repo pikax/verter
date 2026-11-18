@@ -454,10 +454,24 @@ const MATRIX: &[(&str, bool, &str)] = &[
 /// `Reject*` file keeps erroring.
 #[test]
 fn fallthrough_attrs_accepted_only_where_they_reach_the_dom() {
+    run_fallthrough_matrix(false);
+}
+
+#[cfg(feature = "projection-route-qualification")]
+#[test]
+fn fallthrough_projection_attrs_accepted_only_where_they_reach_the_dom() {
+    run_fallthrough_matrix(true);
+}
+
+fn run_fallthrough_matrix(projection: bool) {
     let (temp_dir, temp_path) = setup_temp_project();
 
     let bin = verter_test_support::cargo_test_binary_path!("verter-tsc");
-    let output = Command::new(bin)
+    let mut command = Command::new(bin);
+    if projection {
+        command.arg("--projection-route");
+    }
+    let output = command
         .arg("--noEmit")
         .arg("-p")
         .arg(temp_path.join("tsconfig.json"))
@@ -467,6 +481,12 @@ fn fallthrough_attrs_accepted_only_where_they_reach_the_dom() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let failing = error_files(&stdout);
+    if projection {
+        assert!(
+            !stdout.contains("VTER1009") && !stderr.contains("VTER1009"),
+            "every fallthrough fixture must be fully checked\n{stdout}\n{stderr}"
+        );
+    }
 
     // The CHILD's exit status is evidence, not decoration. `verter-tsc` exits
     // 0 when the project checks clean, 1 when it reported type errors, and 2

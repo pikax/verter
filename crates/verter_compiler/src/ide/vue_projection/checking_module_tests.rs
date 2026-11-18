@@ -1328,7 +1328,7 @@ fn expose_binds_the_value_the_setup_scope_returns() {
     offset_of(&text, "declare function __VerterExposed<T>(exposed: T): T;");
     offset_of(
         &text,
-        "ShallowUnwrapRef<ReturnType<typeof __VerterSetupScope>>",
+        "ShallowUnwrapRef<Exclude<ReturnType<typeof __VerterSetupScope>, { readonly __verterRootArm: unknown }>>",
     );
     assert!(
         !text.contains("defineExpose("),
@@ -2885,9 +2885,18 @@ defineProps<{ value: number }>();
         .unwrap();
     assert!(props.contains("({ value: number })"), "{props}");
     assert!(props.contains("__VerterFallthrough"), "{props}");
-    assert!(props.contains("Extract<ReturnType<typeof __VerterSetupScope>"), "{props}");
-    assert!(text.contains("if (__VerterRootProbe) return __VerterRootArm"), "{text}");
-    assert!(text.contains("readonly $attrs: Record<string, unknown>"), "{text}");
+    assert!(
+        props.contains("Extract<ReturnType<typeof __VerterSetupScope>"),
+        "{props}"
+    );
+    assert!(
+        text.contains("if (__VerterRootProbe) return __VerterRootArm"),
+        "{text}"
+    );
+    assert!(
+        text.contains("readonly $attrs: Record<string, unknown>"),
+        "{text}"
+    );
     assert!(
         !text.contains("format: (value: unknown) => string"),
         "{text}"
@@ -3409,4 +3418,36 @@ fn an_asserted_model_target_maps_its_parentheses_to_the_authored_target() {
         let region = mapping.projected_at(at).expect("mapped");
         assert_eq!(region.carrier.map(|c| c.start), Some(authored), "{output}");
     }
+}
+
+#[test]
+fn fallthrough_component_root_attrs_and_expose_do_not_read_the_bridge() {
+    let module = composed(
+        r#"<script setup lang="ts" generic="T">
+import Child from './Child.vue';
+import { useAttrs } from 'vue';
+const attrs = useAttrs();
+const props = defineProps<{ value: T }>();
+defineExpose({ value: props.value });
+</script><template><Child :value="value" v-bind="$attrs"/></template>"#,
+    );
+    let text = module.checking_text();
+    assert!(
+        !module
+            .withheld
+            .iter()
+            .any(|p| p.family == ObligationFamily::Fallthrough),
+        "{text}"
+    );
+    assert!(text.contains("readonly $attrs: Record<string, unknown>"), "{text}");
+    assert!(text.contains("Exclude<ReturnType<typeof __VerterSetupScope<T>>, { readonly __verterRootArm: unknown }>"), "{text}");
+    assert!(text.contains("if (__VerterRootProbe) return __VerterRootArm"), "{text}");
+    let allocator = oxc_allocator::Allocator::default();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&allocator, text, oxc_span::SourceType::ts()).parse();
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "{:?}\n{text}",
+        parsed.diagnostics
+    );
 }

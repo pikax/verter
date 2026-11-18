@@ -569,6 +569,8 @@ fn fallthrough_public_contracts_accept_only_the_fixture_root_surfaces() {
     let reader = r#"
 import BoundChildRoot from './BoundChildRoot.vue';
 import NumericWrapper from './NumericWrapper.vue';
+import AttrsWrapper from './AttrsWrapper.vue';
+import AsyncWrapper from './AsyncWrapper.vue';
 import UnionProps from './UnionProps.vue';
 import Div from './ChildDiv.vue';
 import Anchor from './ChildAnchorRoot.vue';
@@ -592,6 +594,13 @@ new Numeric({ title: 42 });
 new Wrapper({});
 new Wrapper({ realProp: 42 });
 new NumericWrapper({ value: 42 });
+const exposed = new AttrsWrapper<number>({ value: 42, format: n => n.toFixed() });
+exposed.value.toFixed();
+// @ts-expect-error Root probe metadata stays private.
+exposed.__verterRootArm;
+// @ts-expect-error Exposed values retain the selected generic argument.
+exposed.value.toUpperCase();
+new AsyncWrapper({ value: 42, format: n => n.toFixed() });
 // @ts-expect-error Authored numeric props retain their declared type.
 new NumericWrapper({ value: 'wrong' });
 new NumericWrapper({ value: 42, format: (value: number) => value.toFixed() });
@@ -633,10 +642,10 @@ export {};
     inputs.push(Input::Carrier("BoundChildRoot.vue", r#"<script setup lang="ts">import Child from './ChildTyped.vue';</script><template><Child :real-prop="42"/></template>"#));
     inputs.push(Input::Carrier("GenericChild.vue", r#"<script setup lang="ts" generic="T">defineProps<{ value: T; format?: (value: T) => string }>();</script><template><div/></template>"#));
     inputs.push(Input::Carrier("NumericWrapper.vue", r#"<script setup lang="ts">import Child from './GenericChild.vue'; defineProps<{ value: number }>();</script><template><Child :value="value"/></template>"#));
+    inputs.push(Input::Carrier("AttrsWrapper.vue", r#"<script setup lang="ts" generic="T">import Child from './GenericChild.vue'; import { useAttrs } from 'vue'; const attrs = useAttrs(); void attrs; const props = defineProps<{ value: T }>(); defineExpose({ value: props.value });</script><template><Child :value="value" v-bind="$attrs"/></template>"#));
+    inputs.push(Input::Carrier("AsyncWrapper.vue", r#"<script setup lang="ts">import Child from './GenericChild.vue'; defineProps<{ value: number }>(); await Promise.resolve();</script><template><Child :value="value"/></template>"#));
     inputs.push(Input::Module("fallthroughReader.ts", reader));
-    let Some(found) = check(&inputs) else {
-        return;
-    };
+    let found = check(&inputs).expect("fallthrough requires the real engine and pinned Vue");
     assert_eq!(found, Vec::new());
 }
 
