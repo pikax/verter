@@ -1135,14 +1135,20 @@ existing consumer relations, including model value, update and modifier writes;
 it never recalculates runtime keys from authored operations. It publishes native
 contract references, with a union for conditional alternatives. A component
 among several roots (a fragment) is no fallthrough arm: the fragment's contract
-is published and never names the child. A component that is a root arm (the
-single root, or a conditional alternative) makes the product incomplete and
-withholds declaration extras: imported-child
-generic status is not available, and the specialized witness is scoped inside
-the template block. Publishing component-root extras requires both an
-authoritative generic-status fact and access to that same specialized witness;
-the bare public signature must not substitute for it. TypeScript performs the
-type operations. The product
+is published and never names the child. A component root arm publishes the
+existing specialized instance through a guarded `__VerterRootArm` return from
+its template block. Its type argument retains the witness's `$props` after
+that arm's consumed keys are dropped with `__VerterUseDrop`; this keeps key
+subtraction local before conditional arms union. The public declaration reads
+`Extract<ReturnType<typeof __VerterSetupScope<B>>, { readonly __verterRootArm: unknown }>["__verterRootArm"]["$props"]`
+(with `Awaited` for async setup). Native alternatives retain their existing
+contract references in the union. No generic-status lookup or second renderer
+is needed, and a bare child signature never substitutes for the witness.
+The expose provider excludes root-arm returns from the same inferred return
+type. For a component root, `$attrs` and `useAttrs()` keep Vue's
+`Record<string, unknown>`: reading the bridge there would make wrappers using
+`v-bind="$attrs"` circular. Native roots retain their existing attrs type.
+TypeScript performs the type operations. The product
 uses the constructor owner's `declared_props_type` to subtract declared props,
 models, emits and augmented public props before intersection. The composer carries
 complete `PublicDeclarationExtras` alongside the template scope into

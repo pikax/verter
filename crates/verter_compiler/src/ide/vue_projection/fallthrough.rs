@@ -11,7 +11,8 @@ use crate::framework_common::projection_plan::{
 use crate::ide::vue_projection::branches::TemplateBranchProjection;
 use crate::ide::vue_projection::builtins::BuiltinProjection;
 use crate::ide::vue_projection::checking_fragment::{
-    PlacedStatement, PreludeDeclaration, TemplateBlockId, UseHost,
+    CheckingFragment, ObligationFamily, PlacedStatement, PreludeDeclaration, StatementAnchor,
+    StatementPhase, TemplateBlockId, UseHost,
 };
 use crate::ide::vue_projection::component_resolution::ComponentResolutionProjection;
 use crate::ide::vue_projection::public_constructor::{
@@ -25,6 +26,8 @@ use rustc_hash::FxHashMap;
 pub const FALLTHROUGH_PRELUDE: PreludeDeclaration = PreludeDeclaration {
     key: "50-fallthrough",
     text: concat!(
+        "declare const __VerterRootProbe: boolean;\n",
+        "declare function __VerterRootArm<W>(w: W): { readonly __verterRootArm: W };\n",
         "type __VerterFallthroughKeys<D> = D extends unknown ? keyof D : never;\n",
         "type __VerterFallthrough<R, D> = R extends unknown ? Partial<Omit<R, Exclude<__VerterFallthroughKeys<D>, 'class' | 'style'>>> : never;\n",
     ),
@@ -71,6 +74,7 @@ pub struct FallthroughProjection {
     pub roots: RootContractSummary,
     pub fallthrough: TypedFallthroughContract,
     pub attrs: AttrsReadContract,
+    root_statements: Vec<PlacedStatement>,
 }
 
 impl FallthroughProjection {
@@ -88,6 +92,7 @@ impl FallthroughProjection {
                 inherit_attrs: None,
             },
             fallthrough: TypedFallthroughContract { props_type: None },
+            root_statements: Vec::new(),
             attrs: AttrsReadContract {
                 attrs_type: String::new(),
             },
@@ -103,7 +108,11 @@ impl FallthroughProjection {
     }
     #[must_use]
     pub fn statements(&self) -> Vec<PlacedStatement> {
-        Vec::new()
+        if self.pending || !self.complete {
+            Vec::new()
+        } else {
+            self.root_statements.clone()
+        }
     }
     #[must_use]
     pub fn declaration_extras(&self) -> PublicDeclarationExtras {
@@ -296,8 +305,8 @@ fn root_type(
             }
             (
                 format!(
-                    "__VerterUseComponentProps<__VerterUseContract<typeof {}>>",
-                    observation.expression
+                    "typeof {}[\"$props\"]",
+                    observation.witness.binding
                 ),
                 keys,
             )
@@ -349,25 +358,56 @@ pub fn project_fallthrough(
             projection.complete = false;
         }
     }
-    // Child generic status is unavailable here, and its specialized witness
-    // lives inside the template block. Never publish the bare child signature
-    // as a substitute for that witness. Only a root arm's surface falls
-    // through: a component among several roots (a fragment) contributes no
-    // arm, so it never withholds the fragment's contract.
-    if roots
+    // Component root arms return their existing specialized witness through
+    // the setup scope. No imported generic-status fact or bare constructor
+    // signature is needed. Fragments contribute no component arm.
+    let has_component_root = roots
         .arms
         .iter()
         .flatten()
-        .any(|&index| nodes[index].kind == VueTemplateNodeKind::Component)
-    {
-        projection.complete = false;
+        .any(|&index| nodes[index].kind == VueTemplateNodeKind::Component);
+    let mut returned = format!(
+        "ReturnType<typeof __VerterSetupScope{}>",
+        public.binder_args()
+    );
+    if public.setup_is_async() {
+        returned = format!("Awaited<{returned}>");
     }
+    let bridge = format!(
+        "Extract<{returned}, {{ readonly __verterRootArm: unknown }}>[\"__verterRootArm\"][\"$props\"]"
+    );
     let declared = public.declared_props_type();
     let mut arms = Vec::new();
     let mut has_surface = false;
     for index in roots.arms {
-        let raw = index
+        let mut raw = index
             .and_then(|index| root_type(plan, &nodes[index], resolution, builtins, attributes));
+        if let Some(index) = index {
+            if let Some(UseHost::Component(id)) = &nodes[index].host {
+                if let Some(props) = &raw {
+                    if let (Some(observation), Some((block, item))) = (
+                        resolution.observations.iter().find(|o| o.use_id == *id),
+                        branches.place_of(&TemplateItem::Component(id.clone())),
+                    ) {
+                        // Subtract this arm's consumed keys while its witness
+                        // is in scope, before TypeScript unions the returns.
+                        projection.root_statements.push(PlacedStatement {
+                            anchor: StatementAnchor::Item { block, item },
+                            phase: StatementPhase::After,
+                            family: ObligationFamily::Fallthrough,
+                            host: Some(UseHost::Component(id.clone())),
+                            fragment: CheckingFragment::synth(format!(
+                                "if (__VerterRootProbe) return __VerterRootArm<{{ readonly $props: {props} }}>({});\n",
+                                observation.witness.binding
+                            )),
+                        });
+                        raw = Some(bridge.clone());
+                    } else {
+                        raw = None;
+                    }
+                }
+            }
+        }
         if raw.is_none()
             && (projection.roots.shape == RootShape::Conditional
                 || index.is_some_and(|index| {
@@ -389,7 +429,13 @@ pub fn project_fallthrough(
     }
     let raw = arms.join(" | ");
     let attrs = format!("__VerterFallthrough<({raw}), ({declared})>");
-    projection.attrs.attrs_type = attrs.clone();
+    // Reading the bridge from $attrs would feed the inferred setup return
+    // back into its own input (for example a v-bind="$attrs" wrapper).
+    projection.attrs.attrs_type = if has_component_root {
+        "Record<string, unknown>".to_string()
+    } else {
+        attrs.clone()
+    };
     if public.options.inherit_attrs != Some(false)
         && matches!(
             projection.roots.shape,
