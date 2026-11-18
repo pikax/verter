@@ -177,7 +177,7 @@ fn fallthrough_subtracts_declared_props_events_and_consumed_root_keys() {
 }
 
 #[test]
-fn fallthrough_component_roots_withhold_unspecialized_declaration_extras() {
+fn fallthrough_component_roots_publish_specialized_declaration_extras() {
     for (setup, template) in [
         ("import Child from './Child.vue';", "<Child/>"),
         (
@@ -190,12 +190,11 @@ fn fallthrough_component_roots_withhold_unspecialized_declaration_extras() {
         ),
     ] {
         let product = Inputs::new(setup, template).project();
-        assert!(!product.complete, "{product:?}");
-        assert_eq!(
-            product.declaration_extras(),
-            PublicDeclarationExtras::default()
-        );
-        assert!(product.preludes().is_empty());
+        assert!(product.complete, "{product:?}");
+        assert!(product.declaration_extras().props_intersection.is_some());
+        assert_eq!(product.attrs.attrs_type, "Record<string, unknown>");
+        assert_eq!(product.statements().len(), 1);
+        assert!(!product.preludes().is_empty());
     }
 }
 

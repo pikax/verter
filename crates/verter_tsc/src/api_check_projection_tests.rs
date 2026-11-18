@@ -590,21 +590,19 @@ new Div({ title: 'native', 'data-test': 1 });
 new Anchor({ href: '/target' });
 new Numeric({ title: 42 });
 new Wrapper({});
-// @ts-expect-error Component-root extras await an authoritative child contract.
 new Wrapper({ realProp: 42 });
 new NumericWrapper({ value: 42 });
 // @ts-expect-error Authored numeric props retain their declared type.
 new NumericWrapper({ value: 'wrong' });
-// @ts-expect-error The generic child's unspecialized formatter is withheld.
-new NumericWrapper({ value: 42, format: (value: unknown) => String(value) });
+new NumericWrapper({ value: 42, format: (value: number) => value.toFixed() });
+// @ts-expect-error The specialized formatter takes a number.
+new NumericWrapper({ value: 42, format: (value: string) => value });
 new Options({ href: '/options', declaredProp: 42 });
 // @ts-expect-error The original Options constructor must not bypass prop types.
 new Options({ declaredProp: 'wrong' });
 new Scriptless({ href: '/scriptless' });
 new Mixed({ pick: true });
-// @ts-expect-error A component arm withholds the whole conditional widening.
 new Mixed({ pick: true, title: 42 });
-// @ts-expect-error The native alternative cannot publish a partial widening.
 new Mixed({ pick: false, title: 'native' });
 new Conditional({ asInput: true, placeholder: 'input branch' });
 new Fragment({ class: 'always merged', style: { color: 'red' } });
@@ -619,7 +617,7 @@ new Fragment({ title: 'no root' });
 new Disabled({ title: 'disabled' });
 // @ts-expect-error Declared numeric title takes precedence over HTML title.
 new Numeric({ title: 'wrong' });
-// @ts-expect-error Component-root extras remain withheld.
+// @ts-expect-error The child prop remains numeric.
 new Wrapper({ realProp: 'wrong' });
 // @ts-expect-error The Options default also has a finite root contract.
 new Options({ invented: true });
