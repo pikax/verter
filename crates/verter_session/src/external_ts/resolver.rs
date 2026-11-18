@@ -22,10 +22,11 @@ use verter_session_query::resolution::ProjectId;
 use verter_session_query::resolution::{
     normalize_canonical_id, path_is_carrier, strip_carrier_extension,
 };
-use verter_workspace::traits::WorkspaceRead;
+use verter_workspace::traits::{WorkspaceAccess, WorkspaceRead};
 use verter_workspace::workspace_snapshot::{
     ConfiguredOwnerResolution, ProjectPayload, SnapshotGeneration, WorkspaceSnapshot,
 };
+use verter_workspace::PublishedRoot;
 
 use crate::framework::descriptor::{carrier_companion_identities_for_source, CarrierCompanion};
 
@@ -310,22 +311,92 @@ pub trait ExternalTsProjectResolver {
     ) -> CarrierOwnershipResolution;
 }
 
-/// Supplies the R21 [`EnvDims`] for a resolved project. The host implements this
-/// over its env-hash reader (`host_view_env_hashes_for` /
-/// `host_view_project_identity_for`); tests supply explicit dims. The resolver
-/// NEVER fabricates env identity itself (no default/zero env hashes in
-/// production source — that is the per-project-aliasing hazard the
-/// `no_default_env_hashes_in_production` guard bans), so env dims are an injected
-/// host responsibility carried through the binding.
-///
-/// The reader is keyed on a MEMBER canonical of the resolved project (the resolved
-/// carrier source), NOT the tsconfig path — env hashes are uniform across a
-/// project's members, and a tsconfig path is normally outside the membership set,
-/// so keying on it reads back the workspace-default fallback.
+/// Supplies the real environment dimensions of a resolved project. Hosts can
+/// read through a source member; host-free consumers use [`PublishedEnvDims`]
+/// to select a project explicitly, including when multiple projects claim it.
 pub trait ProjectEnvDimsSource {
     /// The orthogonal env dimensions for the configured project that owns
     /// `project_member_canonical` (a resolved source member of the project).
     fn env_dims_for(&self, project_member_canonical: &str) -> EnvDims;
+
+    /// Explicit project dimensions without a source member. Member-only host
+    /// readers cannot supply these and must refuse rather than read defaults.
+    fn env_dims_without_member(&self, _project: ProjectId) -> Option<EnvDims> {
+        None
+    }
+
+    /// Dimensions of the configured `project`. The default reads through a
+    /// member, preserving the host-backed reader's behavior.
+    fn env_dims_for_project(&self, project: ProjectId, member_canonical: &str) -> Option<EnvDims> {
+        let _ = project;
+        Some(self.env_dims_for(member_canonical))
+    }
+}
+
+/// Environment dimensions read from the per-project tables published atomically
+/// with a workspace snapshot. No host or recomposition is needed.
+pub struct PublishedEnvDims<'a> {
+    published: &'a PublishedRoot,
+    workspace: &'a dyn WorkspaceAccess,
+}
+
+impl<'a> PublishedEnvDims<'a> {
+    /// Read project rows from this publication and unowned-file defaults from
+    /// its workspace. Keep the publication pinned for the resolver's lifetime.
+    #[must_use]
+    pub fn new(published: &'a PublishedRoot, workspace: &'a dyn WorkspaceAccess) -> Self {
+        Self {
+            published,
+            workspace,
+        }
+    }
+
+    fn dims(
+        hashes: verter_workspace::ProjectEnvHashArray,
+        identity: verter_session_query::analysis::types::Hash16,
+    ) -> EnvDims {
+        let hashes = crate::host_construction::env_hashes_from_array(hashes);
+        EnvDims {
+            parse_env_hash: hashes.parse_env_hash,
+            resolve_env_hash: hashes.resolve_env_hash,
+            lib_env_hash: hashes.lib_env_hash,
+            project_identity: crate::file_artifact_store::ProjectIdentity(identity),
+        }
+    }
+}
+
+impl ProjectEnvDimsSource for PublishedEnvDims<'_> {
+    fn env_dims_for(&self, member_canonical: &str) -> EnvDims {
+        let owner = self
+            .published
+            .snapshot
+            .owners_for_file(member_canonical)
+            .into_iter()
+            .find(|&id| {
+                matches!(
+                    self.published.snapshot.project(id).payload,
+                    ProjectPayload::Configured { .. }
+                )
+            });
+        owner
+            .and_then(|id| self.env_dims_for_project(id, member_canonical))
+            .unwrap_or_else(|| {
+                Self::dims(
+                    self.workspace.workspace_default_env_hash_array(),
+                    self.workspace.workspace_default_project_identity_hash(),
+                )
+            })
+    }
+
+    fn env_dims_for_project(&self, project: ProjectId, _member_canonical: &str) -> Option<EnvDims> {
+        self.env_dims_without_member(project)
+    }
+
+    fn env_dims_without_member(&self, project: ProjectId) -> Option<EnvDims> {
+        let hashes = *self.published.env_hashes_by_project.get(&project)?;
+        let identity = *self.published.project_identity_hashes.get(&project)?;
+        Some(Self::dims(hashes, identity))
+    }
 }
 
 impl<F> ProjectEnvDimsSource for F
@@ -357,9 +428,9 @@ pub struct WorkspaceProjectResolver<'a> {
 
 impl<'a> WorkspaceProjectResolver<'a> {
     /// Build a resolver over a snapshot + workspace read view + an env-dims
-    /// source. The env-dims source is the host's per-project R21 env-hash reader
-    /// (or, in tests, an explicit-value closure); the resolver does not compute
-    /// or default env identity. `ownership_ready` is the snapshot's published
+    /// source. The source reads published project rows or the host's per-member
+    /// environment dimensions; the resolver does not compute or default env
+    /// identity. `ownership_ready` is the snapshot's published
     /// authoritative-vs-bootstrap signal (`PublishedRoot::ownership_ready`).
     pub fn new(
         snapshot: &'a WorkspaceSnapshot,
@@ -377,24 +448,63 @@ impl<'a> WorkspaceProjectResolver<'a> {
         }
     }
 
+    /// Resolve a source as a member of a particular configured project, for a
+    /// build that checks every project claiming it. Disk-layout conflicts take
+    /// precedence over membership, as in [`ExternalTsProjectResolver::resolve`].
+    pub fn resolve_in_project(
+        &self,
+        project: ProjectId,
+        source_uri: &str,
+    ) -> CarrierOwnershipResolution {
+        if !self.ownership_ready {
+            return CarrierOwnershipResolution::NotReady;
+        }
+        if let Some(cause) = self.carrier_path_conflict(source_uri) {
+            return CarrierOwnershipResolution::Ambiguous {
+                candidates: Vec::new(),
+                cause,
+            };
+        }
+        let Some(owner) = self.snapshot.projects.get(project.0 as usize) else {
+            return CarrierOwnershipResolution::NoProject;
+        };
+        if let ProjectPayload::Configured { membership, .. } = &owner.payload {
+            if membership.contains(&verter_span::CanonicalPath::new(source_uri)) {
+                return self
+                    .binding_for(project, Some(source_uri))
+                    .map(CarrierOwnershipResolution::Bound)
+                    .unwrap_or(CarrierOwnershipResolution::NoProject);
+            }
+        }
+        CarrierOwnershipResolution::NoProject
+    }
+
+    /// Bind a configured project for project-level validation, including an
+    /// empty project. No source membership or carrier identity is fabricated.
+    pub fn resolve_configured_project(&self, project: ProjectId) -> CarrierOwnershipResolution {
+        if !self.ownership_ready {
+            return CarrierOwnershipResolution::NotReady;
+        }
+        if self.snapshot.projects.get(project.0 as usize).is_none() {
+            return CarrierOwnershipResolution::NoProject;
+        }
+        self.binding_for(project, None)
+            .map(CarrierOwnershipResolution::Bound)
+            .unwrap_or(CarrierOwnershipResolution::NoProject)
+    }
+
     /// Build the `ProjectBinding` for a resolved configured project id, reading
     /// its tsconfig / workspace-root / references off the snapshot and its R21
     /// env dims from the injected source. Returns `None` if the id is somehow a
-    /// fallback (it never is for a configured owner, but the match is exhaustive
-    /// and fail-closed).
+    /// fallback or its published environment dimensions are unavailable.
     ///
-    /// `source_uri` is the RESOLVED carrier source — a real member of this
-    /// project — and is the canonical the env-dims source reads the project's R21
-    /// dims from. It is NOT the tsconfig PATH: the tsconfig file is normally
-    /// OUTSIDE the project's `ConfiguredMembership`, so a host env-hash reader
-    /// keyed on it resolves to no owner and falls back to workspace-default dims
-    /// (which would alias every project's cache dimensions to one bundle). An
-    /// owned member canonical resolves to the project and yields its real
-    /// per-project env identity.
+    /// Explicit project readers use `id`; member-based host readers use the
+    /// resolved `source_uri`. A tsconfig path must not replace that member: it
+    /// normally lies outside membership and would read workspace-default dims.
     fn binding_for(
         &self,
         id: verter_session_query::resolution::ProjectId,
-        source_uri: &str,
+        source_uri: Option<&str>,
     ) -> Option<ProjectBinding> {
         let project = self.snapshot.project(id);
         match &project.payload {
@@ -408,11 +518,10 @@ impl<'a> WorkspaceProjectResolver<'a> {
                     .map(|r| Arc::<str>::from(r.as_str()))
                     .collect();
                 let tsconfig_uri = Arc::<str>::from(tsconfig_path.as_str());
-                // Source the R21 env dims from the resolved project via one of its
-                // MEMBER canonicals (this resolved source), NOT the tsconfig PATH —
-                // see the method doc: a tsconfig path is not a membership member and
-                // reads back workspace-default dims.
-                let env_dims = self.env_dims.env_dims_for(source_uri);
+                let env_dims = match source_uri {
+                    Some(member) => self.env_dims.env_dims_for_project(id, member)?,
+                    None => self.env_dims.env_dims_without_member(id)?,
+                };
                 Some(ProjectBinding::new(
                     Arc::<str>::from(project.workspace_root.as_str()),
                     tsconfig_uri,
@@ -558,7 +667,7 @@ impl ExternalTsProjectResolver for WorkspaceProjectResolver<'_> {
             // deterministically via its visited set — never a terminal Ambiguous.
             ConfiguredOwnerResolution::Ambiguous(_ids) => {
                 match self.snapshot.default_configured_owner_for_file(source_uri) {
-                    Some(id) => match self.binding_for(id, source_uri) {
+                    Some(id) => match self.binding_for(id, Some(source_uri)) {
                         Some(binding) => CarrierOwnershipResolution::Bound(binding),
                         None => CarrierOwnershipResolution::NoProject,
                     },
@@ -567,7 +676,7 @@ impl ExternalTsProjectResolver for WorkspaceProjectResolver<'_> {
                     None => CarrierOwnershipResolution::NoProject,
                 }
             }
-            ConfiguredOwnerResolution::Unique(id) => match self.binding_for(id, source_uri) {
+            ConfiguredOwnerResolution::Unique(id) => match self.binding_for(id, Some(source_uri)) {
                 Some(binding) => CarrierOwnershipResolution::Bound(binding),
                 // A configured owner that is somehow not Configured: fail closed
                 // rather than fabricate a binding.

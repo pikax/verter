@@ -535,8 +535,8 @@ fn explicit_request(engine: &std::path::Path) -> ResolutionRequest {
     request
 }
 
-/// Run one `initialize` round-trip on a prepared engine and report whether
-/// the session itself succeeded, alongside the preparation's verdict.
+/// Open a prepared engine's program and request its diagnostics, reporting
+/// whether the session itself succeeded alongside the preparation's verdict.
 fn prepared_session_on(engine: &std::path::Path) -> Option<bool> {
     use verter_tsgo_api::client::PreparedEngine;
     use verter_tsgo_api::snapshot::OverlaySnapshot;
@@ -553,9 +553,27 @@ fn prepared_session_on(engine: &std::path::Path) -> Option<bool> {
             ) else {
                 return false;
             };
-            let initialized = client.initialize().await.is_ok();
+            let checked = async {
+                client.initialize().await.ok()?;
+                let snapshot = client
+                    .create_snapshot(
+                        &verter_tsgo_api::proto::types::SnapshotChanges::single_project(
+                            "/prepared/tsconfig.json",
+                        ),
+                    )
+                    .await
+                    .ok()?;
+                let project = snapshot.projects.first()?;
+                let diagnostics = client
+                    .get_program_diagnostics(&snapshot.snapshot, &project.id)
+                    .await
+                    .ok()?;
+                Some(diagnostics.is_empty())
+            }
+            .await
+            .unwrap_or(false);
             let _ = client.close().await;
-            initialized
+            checked
         },
     )
 }

@@ -60,19 +60,19 @@
 //!   an untyped `defineModel()`, a component without declared events) keep
 //!   Vue's own typing; nothing else is widened.
 //!
-//! A carrier without `<script setup>` exports its authored default, which Vue
-//! already types as a constructor (`defineComponent`); no generated
-//! constructor replaces it.
+//! A carrier without `<script setup>` keeps its authored constructor. A plain
+//! Options object receives the shared `defineComponent` adaptation before its
+//! instance is read; a carrier with no default receives an empty constructor.
 
 #[cfg(test)]
 use std::cell::Cell;
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ArrayExpressionElement, ArrowFunctionExpression, AwaitExpression, BindingPattern,
-    CallExpression, Class, Declaration, ExportDefaultDeclarationKind, Expression, ForOfStatement,
-    Function, IdentifierReference, ObjectExpression, ObjectPropertyKind, Program, PropertyKey,
-    Statement, TSSignature, TSType, TSTypeName, VariableDeclarationKind,
+    ArrayExpressionElement, ArrowFunctionExpression, BindingPattern, CallExpression, Class,
+    Declaration, ExportDefaultDeclarationKind, Expression, Function, IdentifierReference,
+    ObjectExpression, ObjectPropertyKind, Program, PropertyKey, Statement, TSSignature, TSType,
+    TSTypeName, VariableDeclarationKind,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_semantic::SemanticBuilder;
@@ -80,13 +80,98 @@ use oxc_span::GetSpan;
 use oxc_syntax::scope::ScopeFlags;
 use oxc_syntax::symbol::SymbolId;
 use rustc_hash::{FxHashMap, FxHashSet};
+use verter_macro_dto::{model_modifiers_prop_name, model_modifiers_record, TscSpliceText};
 use verter_parser::oxc_parse::Parser;
+use verter_span::{SourceByteOffset, SourceByteRange};
 
+use super::generic_interop::ForeignComponentContractAdapter;
 use super::script_setup::{
-    binder_product_from, grammar_of, macro_positions, range, value_bindings,
+    binder_product_from, grammar_of, macro_positions, project_script_pair, range, value_bindings,
     vue_runtime_macro_imports, MacroContext, ScriptBlockInput, SetupProjectionRefusal, SourceRange,
 };
-use crate::utils::oxc::vue::parse_generic;
+use crate::ide::template::emit::{EmitOp, EmitText};
+use crate::tsc::script::render_model_modifiers_member;
+use crate::utils::oxc::vue::{
+    parse_generic, parse_script, DefaultExportType, ImportSpecifierKind, ScriptItem, ScriptMode,
+};
+use verter_parser::utils::oxc::script::export_parts::NamedExportParts;
+
+/// The shared Options wrapping decision, read from the existing script facts.
+/// Both public surfaces use this decision; neither reclassifies exports.
+pub(crate) struct OptionsApiWrap {
+    pub object_span: Option<crate::common::Span>,
+    pub default_export_start: Option<usize>,
+    pub needs_import: bool,
+}
+
+pub(crate) fn options_api_wrap(program: &Program<'_>, content: &str) -> OptionsApiWrap {
+    let parsed = parse_script(program, ScriptMode::Options, 0, content, &[]);
+    let object_span = parsed.items.iter().find_map(|item| {
+        if let ScriptItem::DefaultExport(default) = item {
+            if default.export_type == DefaultExportType::Object {
+                return default.object_span;
+            }
+        }
+        None
+    });
+    let default_export_start = parsed.items.iter().find_map(|item| {
+        if let ScriptItem::DefaultExport(default) = item {
+            return Some(default.span.start as usize);
+        }
+        None
+    });
+    let needs_import = object_span.is_some()
+        && !parsed.items.iter().any(|item| {
+            if let ScriptItem::Import(import) = item {
+                import.source == "vue"
+                    && import.bindings.iter().any(|binding| {
+                        binding.name == "defineComponent"
+                            && binding.import_kind == Some(ImportSpecifierKind::Named)
+                    })
+            } else {
+                false
+            }
+        });
+    OptionsApiWrap {
+        object_span,
+        default_export_start,
+        needs_import,
+    }
+}
+
+/// Module binding that retains the authored Options constructor's full type.
+const OPTIONS_COMPONENT: &str = "__VerterOptionsComponent";
+const AUTHORED_DEFAULT: &str = "__VerterAuthoredDefault";
+const OPTIONS_CONSTRUCTOR: &str = "__VerterOptionsConstructor";
+const DEFINE_COMPONENT: &str = "__VerterDefineComponent";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalDefaultProjection {
+    prefix: SourceRange,
+    additional_prefixes: Vec<SourceRange>,
+    anonymous_name_sites: Vec<u32>,
+    object: Option<SourceRange>,
+    end: u32,
+    named_declaration: Option<String>,
+    pending_overload: bool,
+    specifier: Option<DefaultSpecifierProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DefaultSpecifierProjection {
+    Local {
+        value: (SourceRange, String),
+    },
+    Reexport {
+        statement_start: u32,
+        imported: (SourceRange, String),
+        source: (SourceRange, String),
+    },
+    Namespace {
+        statement_start: u32,
+        source: (SourceRange, String),
+    },
+}
 
 /// Name of the rendered public component value (the default export).
 pub const PUBLIC_COMPONENT: &str = "__VerterPublicComponent";
@@ -112,6 +197,25 @@ pub const MODEL_REQUIRED: &str = "__VerterModelRequired";
 pub const MODEL_OPTIONS: &str = "__VerterModelOptions";
 /// Props with defaulted keys made omissible for the external argument.
 pub const PROPS_WITH_DEFAULTS: &str = "__VerterPropsWithDefaults";
+/// The emits options of a `defineEmits` type argument.
+pub const TYPE_EMITS_TO_OPTIONS: &str = "__VerterTypeEmitsToOptions";
+
+/// The declarations behind [`TYPE_EMITS_TO_OPTIONS`]: Vue's own conversion of
+/// a type argument (call signatures or named tuples) into emits options, the
+/// one `defineComponent` applies to `__typeEmits`. Vue 3.5 declares that
+/// conversion without exporting it, so the declaration carries its own copy
+/// and hands the result only to exported Vue types (`EmitFn`, `EmitsToProps`).
+/// It names no global utility type: the declaration shares its module scope
+/// with the authored types it captures, which may declare `Parameters`,
+/// `Pick` or `Exclude` themselves.
+pub(crate) const TYPE_EMITS_DECLARATIONS: &str = concat!(
+    "type __VerterTypeEmitsToOptions<T> = { [K in keyof T & string]: T[K] extends [...args: infer A] ? (...args: A) => any : () => any } & (T extends (...args: any[]) => any ? __VerterTypeEmitsFns<__VerterTypeEmitsParameters<__VerterTypeEmitsOverloads<T>>> : {});\n",
+    "type __VerterTypeEmitsFns<T extends any[]> = { [K in T[0]]: K extends string ? (string extends K ? never : (...args: T extends [e: infer E, ...args: infer P] ? K extends E ? P : never : never) => any) : never };\n",
+    "type __VerterTypeEmitsParameters<F> = F extends (...args: infer P) => any ? P : never;\n",
+    "type __VerterTypeEmitsOverloadStep<T, Seen = unknown> = T extends (...args: infer A) => infer R ? Seen extends T ? never : __VerterTypeEmitsOverloadStep<Seen & T, Seen & ((...args: A) => R) & { [K in keyof T]: T[K] }> | ((...args: A) => R) : never;\n",
+    "type __VerterTypeEmitsOverloads<T> = __VerterTypeEmitsWithout<__VerterTypeEmitsOverloadStep<(() => never) & T>, T extends () => never ? never : () => never>;\n",
+    "type __VerterTypeEmitsWithout<U, E> = U extends E ? never : U;\n",
+);
 
 /// Where the public constructor comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,8 +223,7 @@ pub const PROPS_WITH_DEFAULTS: &str = "__VerterPropsWithDefaults";
 pub enum ConstructorSource {
     /// `<script setup>`: the constructor is generated from this contract.
     ScriptSetup,
-    /// No setup block: the authored default export (Vue's `defineComponent`
-    /// type) is already the constructor.
+    /// No setup block: retain the authored default after shared Options wrapping.
     AuthoredDefault,
 }
 
@@ -192,6 +295,9 @@ pub struct PublicModel {
     pub name: String,
     /// Authored value type text; `None` is Vue's open `any`.
     pub value_type: Option<String>,
+    /// The type of Vue's modifiers prop, over the authored modifier key
+    /// type when one is supplied.
+    pub modifiers_type: TscSpliceText,
     /// `required` option: `Required` for a literal `true` (also through
     /// `as const` / `satisfies` / parentheses, on the value or the options
     /// object), `Optional` when absent or literally false, `Undetermined`
@@ -359,6 +465,12 @@ pub struct VuePublicConstructorContract {
     setup_is_async: bool,
     /// The `defineExpose` argument text the provider returns.
     expose_argument: Option<String>,
+    /// The authored `defineExpose` callee in the carrier.
+    expose_callee: Option<SourceRange>,
+    /// Adaptation of the normal script's default, with authored bytes retained.
+    normal_default: Option<NormalDefaultProjection>,
+    /// Runtime values from the normal script's existing scoping pass, sorted.
+    normal_values: Vec<String>,
 }
 
 impl VuePublicConstructorContract {
@@ -378,7 +490,8 @@ impl VuePublicConstructorContract {
         if self.slots.is_none() {
             open_domains.push(PublicSurface::Slots);
         }
-        let generated = self.source == ConstructorSource::ScriptSetup;
+        let generated =
+            self.source == ConstructorSource::ScriptSetup || self.normal_default.is_none();
         ConstructorCompatibilityReceipt {
             construct_signatures: usize::from(generated),
             call_signatures: 0,
@@ -395,40 +508,26 @@ impl VuePublicConstructorContract {
     /// is the constructor.
     #[must_use]
     pub fn declaration(&self) -> Option<String> {
-        (self.source == ConstructorSource::ScriptSetup).then(|| self.render())
+        (self.source == ConstructorSource::ScriptSetup || self.normal_default.is_none()).then(
+            || {
+                self.render(
+                    ExposeProvider::Rendered,
+                    &PublicDeclarationExtras::default(),
+                )
+            },
+        )
     }
 
-    fn render(&self) -> String {
-        let alias_binder = self.binder_list(BinderSite::Alias);
-        let construct_binder = self.binder_list(BinderSite::Construct);
-        let args = self.binder_args();
-        let mut out = String::new();
-        for declaration in &self.hoisted_consts {
-            out.push_str(declaration);
-            out.push('\n');
-        }
-        for value in &self.hoisted {
-            if value.generic {
-                out.push_str(&format!(
-                    "const {} = {}() => ({});\n",
-                    value.name,
-                    self.binder_list(BinderSite::Arrow),
-                    value.text
-                ));
-            } else {
-                out.push_str(&format!("const {} = ({});\n", value.name, value.text));
-            }
-        }
-        let provider = self.render_expose_provider(&mut out);
-        if self.defaults_apply() {
-            // Key-remapped mapped types over `keyof P` keep each member's
-            // authored modifiers; a defaulted key only gains `?`.
-            out.push_str(&format!(
-                "type {PROPS_WITH_DEFAULTS}<P, K extends PropertyKey> = {{ [Q in keyof P as Q extends K ? never : Q]: P[Q] }} & {{ [Q in keyof P as Q extends K ? Q : never]?: P[Q] }};\n"
+    /// The declared caller surface, shared with products that subtract consumed
+    /// prop/event keys. It excludes every template-derived contribution.
+    pub(crate) fn declared_props_type(&self) -> String {
+        let mut props = vec!["import(\"vue\").PublicProps".to_string()];
+        let inherits_props = self.inherits_normal_props();
+        if self.normal_default.is_some() && inherits_props {
+            props.push(format!(
+                "InstanceType<typeof {OPTIONS_CONSTRUCTOR}>[\"$props\"]"
             ));
         }
-
-        let mut props = vec!["import(\"vue\").PublicProps".to_string()];
         match &self.props {
             DeclaredSurface::None => {}
             DeclaredSurface::TypeArgument { text, .. } => props.push(self.defaulted(text)),
@@ -468,9 +567,9 @@ impl VuePublicConstructorContract {
                         ));
                     }
                 }
-                members.push(format!(
-                    "{}?: Partial<Record<string, true>>",
-                    quote(&format!("{}Modifiers", model_modifiers_base(&model.name)))
+                members.push(render_model_modifiers_member(
+                    &model_modifiers_prop_name(&model.name),
+                    &model.modifiers_type,
                 ));
                 members.push(format!(
                     "{}?: (value: {value}) => void",
@@ -483,12 +582,70 @@ impl VuePublicConstructorContract {
         if let Some(options) = self.emit_options() {
             props.push(format!("import(\"vue\").EmitsToProps<{options}>"));
         }
+        props.join(" & ")
+    }
+
+    fn inherits_normal_props(&self) -> bool {
+        matches!(self.props, DeclaredSurface::None) && self.models.is_empty()
+    }
+
+    fn render(&self, provider: ExposeProvider<'_>, extras: &PublicDeclarationExtras) -> String {
+        let inherits_props = self.inherits_normal_props();
+        let alias_binder = self.binder_list(BinderSite::Alias);
+        let construct_binder = self.binder_list(BinderSite::Construct);
+        let args = self.binder_args();
+        let mut out = String::new();
+        for declaration in &self.hoisted_consts {
+            out.push_str(declaration);
+            out.push('\n');
+        }
+        for value in &self.hoisted {
+            if value.generic {
+                out.push_str(&format!(
+                    "const {} = {}() => ({});\n",
+                    value.name,
+                    self.binder_list(BinderSite::Arrow),
+                    value.text
+                ));
+            } else {
+                out.push_str(&format!("const {} = ({});\n", value.name, value.text));
+            }
+        }
+        let provider = match provider {
+            ExposeProvider::Rendered => self
+                .render_expose_provider(&mut out)
+                .then_some(EXPOSE_PROVIDER),
+            ExposeProvider::Named(name) => self.provides_exposed().then_some(name),
+        };
+        if self.defaults_apply() {
+            // Key-remapped mapped types over `keyof P` keep each member's
+            // authored modifiers; a defaulted key only gains `?`.
+            out.push_str(&format!(
+                "type {PROPS_WITH_DEFAULTS}<P, K extends PropertyKey> = {{ [Q in keyof P as Q extends K ? never : Q]: P[Q] }} & {{ [Q in keyof P as Q extends K ? Q : never]?: P[Q] }};\n"
+            ));
+        }
+        if matches!(self.emits, DeclaredSurface::TypeArgument { .. }) {
+            out.push_str(TYPE_EMITS_DECLARATIONS);
+        }
+
+        let mut props = vec![self.declared_props_type()];
+        if let Some(intersection) = &extras.props_intersection {
+            props.push(format!("({intersection})"));
+        }
         out.push_str(&format!(
             "type {PUBLIC_PROPS}{alias_binder} = {};\n",
             props.join(" & ")
         ));
 
         let mut emit = Vec::new();
+        if self.normal_default.is_some()
+            && matches!(self.emits, DeclaredSurface::None)
+            && self.models.is_empty()
+        {
+            emit.push(format!(
+                "InstanceType<typeof {OPTIONS_CONSTRUCTOR}>[\"$emit\"]"
+            ));
+        }
         if let Some(options) = self.emit_options() {
             emit.push(format!("import(\"vue\").EmitFn<{options}>"));
         }
@@ -502,22 +659,46 @@ impl VuePublicConstructorContract {
         if emit.is_empty() {
             emit.push("import(\"vue\").EmitFn<{}>".to_string());
         }
-        let slots = match &self.slots {
+        let mut slots = match &self.slots {
             Some(text) => format!("Readonly<{text}>"),
             None => "import(\"vue\").Slots".to_string(),
         };
+        if self.normal_default.is_some() && self.slots.is_none() {
+            slots = format!("InstanceType<typeof {OPTIONS_CONSTRUCTOR}>[\"$slots\"]");
+        }
+        let (attrs_key, attrs_member) = match &extras.attrs_type {
+            Some(attrs) => (" | \"$attrs\"", format!("  readonly $attrs: {attrs};\n")),
+            None => ("", String::new()),
+        };
         out.push_str(&format!(
-            "type {PUBLIC_INSTANCE}{alias_binder} = Omit<import(\"vue\").ComponentPublicInstance, \"$props\" | \"$emit\" | \"$slots\"> & {{\n  readonly $props: {PUBLIC_PROPS}{args};\n  $emit: {};\n  readonly $slots: {slots};\n}}",
+            "type {PUBLIC_INSTANCE}{alias_binder} = Omit<import(\"vue\").ComponentPublicInstance, \"$props\" | \"$emit\" | \"$slots\"{attrs_key}> & {{\n  readonly $props: {PUBLIC_PROPS}{args};\n  $emit: {};\n  readonly $slots: {slots};\n{attrs_member}}}",
             emit.join(" & ")
         ));
-        if provider {
-            let exposed = format!("ReturnType<typeof {EXPOSE_PROVIDER}{args}>");
-            let exposed = if self.setup_is_async {
-                format!("Awaited<{exposed}>")
+        let exposed = provider.map(|provider| {
+            let returned = format!("ReturnType<typeof {provider}{args}>");
+            let returned = if self.setup_is_async {
+                format!("Awaited<{returned}>")
             } else {
-                exposed
+                returned
             };
-            out.push_str(&format!(" & import(\"vue\").ShallowUnwrapRef<{exposed}>"));
+            format!("import(\"vue\").ShallowUnwrapRef<{returned}>")
+        });
+        if self.normal_default.is_some() {
+            let mut omitted = format!("\"$props\" | \"$emit\" | \"$slots\"{attrs_key}");
+            if !inherits_props {
+                omitted.push_str(&format!(
+                    " | keyof InstanceType<typeof {OPTIONS_CONSTRUCTOR}>[\"$props\"]"
+                ));
+            }
+            if let Some(exposed) = &exposed {
+                omitted.push_str(&format!(" | keyof {exposed}"));
+            }
+            out.push_str(&format!(
+                " & Omit<InstanceType<typeof {OPTIONS_CONSTRUCTOR}>, {omitted}>"
+            ));
+        }
+        if let Some(exposed) = exposed {
+            out.push_str(&format!(" & {exposed}"));
         }
         out.push_str(";\n");
 
@@ -546,23 +727,44 @@ impl VuePublicConstructorContract {
     /// the exposed members from the authored bindings. Returns whether it was
     /// rendered.
     fn render_expose_provider(&self, out: &mut String) -> bool {
-        let Some(argument) = &self.expose_argument else {
+        self.render_provider(EXPOSE_PROVIDER, &self.setup_statements, out)
+    }
+
+    /// The expose provider without the setup statements: one function over
+    /// the binder returning the `defineExpose` argument, for a module scope
+    /// that already declares the bindings the argument names. `None` when
+    /// nothing is exposed through a provider.
+    #[must_use]
+    pub(crate) fn argument_expose_provider(&self, name: &str) -> Option<String> {
+        let mut out = String::new();
+        self.render_provider(name, &[], &mut out).then_some(out)
+    }
+
+    fn render_provider(&self, name: &str, statements: &[String], out: &mut String) -> bool {
+        let Some(argument) = self
+            .expose_argument
+            .as_ref()
+            .filter(|_| self.provides_exposed())
+        else {
             return false;
         };
-        if !self.expose.open && self.expose.members.is_empty() {
-            return false;
-        }
         let asyncness = if self.setup_is_async { "async " } else { "" };
         out.push_str(&format!(
-            "{asyncness}function {EXPOSE_PROVIDER}{}() {{\n",
+            "{asyncness}function {name}{}() {{\n",
             self.binder_list(BinderSite::Construct)
         ));
-        for statement in &self.setup_statements {
+        for statement in statements {
             out.push_str(statement);
             out.push('\n');
         }
         out.push_str(&format!("return ({argument});\n}}\n"));
         true
+    }
+
+    /// Whether setup exposes members through a provider: a `defineExpose`
+    /// argument with named members or an open member set.
+    fn provides_exposed(&self) -> bool {
+        self.expose_argument.is_some() && (self.expose.open || !self.expose.members.is_empty())
     }
 
     /// The statically named `withDefaults` keys that make props of the
@@ -610,7 +812,7 @@ impl VuePublicConstructorContract {
         match &self.emits {
             DeclaredSurface::None => None,
             DeclaredSurface::TypeArgument { text, .. } => {
-                Some(format!("import(\"vue\").TypeEmitsToOptions<({text})>"))
+                Some(format!("{TYPE_EMITS_TO_OPTIONS}<({text})>"))
             }
             DeclaredSurface::RuntimeNames { names } => {
                 let names: Vec<String> = names.iter().map(|name| quote(name)).collect();
@@ -632,6 +834,217 @@ impl VuePublicConstructorContract {
     fn binder_list(&self, site: BinderSite) -> String {
         render_binder_list(&self.binder, site)
     }
+}
+
+/// Type contributions other products add to the public declaration.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PublicDeclarationExtras {
+    /// Intersected into the props parameter (typed fallthrough).
+    pub props_intersection: Option<String>,
+    /// Replaces the `$attrs` member type.
+    pub attrs_type: Option<String>,
+}
+
+impl VuePublicConstructorContract {
+    /// The public declaration without the expose provider function: hoisted
+    /// values, the props and instance aliases, the constructor and the
+    /// default export. `provider` names the function whose return type is
+    /// the exposed surface; the composer passes its own setup scope.
+    /// `declaration()` stays as is for existing callers.
+    #[must_use]
+    pub fn declaration_over(
+        &self,
+        provider: &str,
+        extras: &PublicDeclarationExtras,
+    ) -> Option<String> {
+        if self.source == ConstructorSource::AuthoredDefault && self.normal_default.is_some() {
+            // Keep the authored constructor, including its statics and overloads.
+            // The aliases only give the checking scope names for its instance.
+            if extras.props_intersection.is_some() || extras.attrs_type.is_some() {
+                let declared = self.declared_props_type();
+                let props = extras
+                    .props_intersection
+                    .as_ref()
+                    .map_or(declared.clone(), |extra| format!("{declared} & ({extra})"));
+                let attrs = extras
+                    .attrs_type
+                    .as_ref()
+                    .map(|attrs| format!(" readonly $attrs: {attrs};"))
+                    .unwrap_or_default();
+                let omit = if extras.attrs_type.is_some() {
+                    "\"$props\" | \"$attrs\""
+                } else {
+                    "\"$props\""
+                };
+                return Some(format!(
+                    "type {PUBLIC_PROPS} = {props};\ntype {PUBLIC_INSTANCE} = Omit<InstanceType<typeof {OPTIONS_CONSTRUCTOR}>, {omit}> & {{ readonly $props: {PUBLIC_PROPS};{attrs} }};\ndeclare const {PUBLIC_COMPONENT}: (typeof {OPTIONS_COMPONENT} extends abstract new (...args: any[]) => unknown ? __VerterUseContract<typeof {OPTIONS_COMPONENT}> : typeof {OPTIONS_COMPONENT}) & {{ new (...args: {{}} extends {PUBLIC_PROPS} ? [props?: {PUBLIC_PROPS}] : [props: {PUBLIC_PROPS}]): {PUBLIC_INSTANCE}; }};\nexport default {PUBLIC_COMPONENT};\n"
+                ));
+            }
+            return Some(format!(
+                "type {PUBLIC_INSTANCE} = InstanceType<typeof {OPTIONS_CONSTRUCTOR}>;\ntype {PUBLIC_PROPS} = {PUBLIC_INSTANCE}[\"$props\"];\nvoid (null! as {PUBLIC_PROPS});\nconst {PUBLIC_COMPONENT} = {OPTIONS_COMPONENT};\nexport default {PUBLIC_COMPONENT};\n"
+            ));
+        }
+        Some(self.render(ExposeProvider::Named(provider), extras))
+    }
+
+    pub(crate) fn uses_foreign_constructor(&self) -> bool {
+        self.normal_default.is_some()
+    }
+
+    pub(crate) fn is_normal_value_binding(&self, name: &str) -> bool {
+        self.normal_values
+            .binary_search_by(|value| value.as_str().cmp(name))
+            .is_ok()
+    }
+
+    /// Edits that bind the authored default once and apply the shared Options
+    /// wrapping decision. All object/member bytes keep their original mapping.
+    #[must_use]
+    pub(crate) fn normal_script_edits(&self) -> Vec<EmitOp<'static>> {
+        let Some(default) = &self.normal_default else {
+            return Vec::new();
+        };
+        let prefix = if default.named_declaration.is_some()
+            || !default.anonymous_name_sites.is_empty()
+            || default.specifier.is_some()
+        {
+            String::new()
+        } else if default.object.is_some() {
+            format!("import {{ defineComponent as {DEFINE_COMPONENT} }} from \"vue\";\nconst {OPTIONS_COMPONENT} = ")
+        } else {
+            format!("const {AUTHORED_DEFAULT} = ")
+        };
+        let mut ops = vec![EmitOp::OverwriteSyntheticBoundary {
+            source: SourceByteRange::new(
+                SourceByteOffset(default.prefix.start),
+                SourceByteOffset(default.prefix.end),
+            ),
+            text: EmitText::Owned(prefix),
+            anchor: None,
+        }];
+        ops.extend(default.additional_prefixes.iter().map(|prefix| {
+            EmitOp::OverwriteSyntheticBoundary {
+                source: SourceByteRange::new(
+                    SourceByteOffset(prefix.start),
+                    SourceByteOffset(prefix.end),
+                ),
+                text: EmitText::Static(""),
+                anchor: None,
+            }
+        }));
+        let binding = default
+            .named_declaration
+            .as_deref()
+            .unwrap_or(AUTHORED_DEFAULT);
+        ops.extend(
+            default
+                .anonymous_name_sites
+                .iter()
+                .map(|at| EmitOp::InsertUnmapped {
+                    at: SourceByteOffset(*at),
+                    text: EmitText::Owned(format!(" {binding}")),
+                }),
+        );
+        if let Some(object) = default.object {
+            ops.push(EmitOp::InsertUnmapped {
+                at: SourceByteOffset(object.start),
+                text: EmitText::Owned(format!("{DEFINE_COMPONENT}(")),
+            });
+            ops.push(EmitOp::InsertUnmapped {
+                at: SourceByteOffset(object.end),
+                text: EmitText::Static(")"),
+            });
+        }
+        let mut tail = String::from(";\n");
+        if let Some(name) = &default.named_declaration {
+            tail.push_str(&format!("const {AUTHORED_DEFAULT} = {name};\n"));
+        }
+        if let Some(specifier) = &default.specifier {
+            let mapped = |at: u32, source: SourceRange, text: String| EmitOp::InsertMapped {
+                at: SourceByteOffset(at),
+                text: EmitText::Owned(text),
+                source_start: SourceByteOffset(source.start),
+                content_offset: verter_span::GeneratedByteLen(0),
+            };
+            let inserted = |at: u32, text: String| EmitOp::InsertUnmapped {
+                at: SourceByteOffset(at),
+                text: EmitText::Owned(text),
+            };
+            let import_source = match specifier {
+                DefaultSpecifierProjection::Local { value } => {
+                    // A named export can precede its declaration. Capture the value
+                    // only after the complete normal script has initialized it.
+                    ops.push(inserted(
+                        default.end,
+                        format!(";\nconst {AUTHORED_DEFAULT} = "),
+                    ));
+                    ops.push(mapped(default.end, value.0, value.1.clone()));
+                    None
+                }
+                DefaultSpecifierProjection::Reexport {
+                    statement_start,
+                    imported,
+                    source,
+                } => {
+                    let at = *statement_start;
+                    ops.push(inserted(at, "import { ".to_string()));
+                    ops.push(mapped(at, imported.0, imported.1.clone()));
+                    ops.push(inserted(at, format!(" as {AUTHORED_DEFAULT} }} from ")));
+                    Some((at, source))
+                }
+                DefaultSpecifierProjection::Namespace {
+                    statement_start,
+                    source,
+                } => {
+                    let at = *statement_start;
+                    ops.push(inserted(
+                        at,
+                        format!("import * as {AUTHORED_DEFAULT} from "),
+                    ));
+                    Some((at, source))
+                }
+            };
+            if let Some((at, (source, text))) = import_source {
+                ops.push(mapped(at, *source, text.clone()));
+                ops.push(inserted(at, ";\n".to_string()));
+            }
+        }
+        if default.object.is_none() {
+            let facade = ForeignComponentContractAdapter.public_default(AUTHORED_DEFAULT);
+            tail.push_str(&format!("const {OPTIONS_COMPONENT} = {facade};\n"));
+        }
+        tail.push_str(&format!(
+            "const {OPTIONS_CONSTRUCTOR} = __VerterUseConstructor({OPTIONS_COMPONENT});\n"
+        ));
+        ops.push(EmitOp::InsertUnmapped {
+            at: SourceByteOffset(default.end),
+            text: EmitText::Owned(tail),
+        });
+        ops
+    }
+
+    /// The authored `defineExpose` call's callee span, when the provider is needed.
+    #[must_use]
+    pub fn expose_callee(&self) -> Option<crate::ide::vue_projection::script_setup::SourceRange> {
+        self.expose_callee.filter(|_| self.provides_exposed())
+    }
+
+    /// True when setup awaits at top level.
+    #[must_use]
+    pub fn setup_is_async(&self) -> bool {
+        self.setup_is_async
+    }
+}
+
+/// Where the exposed surface of a rendered declaration comes from.
+#[derive(Debug, Clone, Copy)]
+enum ExposeProvider<'p> {
+    /// The declaration renders its own provider function over a copy of the
+    /// setup statements.
+    Rendered,
+    /// A function the caller emits elsewhere in the same module returns the
+    /// exposed value.
+    Named(&'p str),
 }
 
 /// The authored binder as a type parameter list for `site`: constraints and
@@ -677,16 +1090,6 @@ pub(super) enum BinderSite {
     Construct,
     /// A hoisted binder-dependent value's arrow function.
     Arrow,
-}
-
-/// Vue names the modifiers prop `modelModifiers` for the default model and
-/// `<name>Modifiers` otherwise.
-fn model_modifiers_base(name: &str) -> &str {
-    if name == "modelValue" {
-        "model"
-    } else {
-        name
-    }
 }
 
 /// A JSON string literal, which is also a valid TypeScript string literal.
@@ -772,6 +1175,24 @@ pub(crate) fn project_public_constructor_in<'a>(
         .map(|block| parse_block(allocator, block, true))
         .transpose()?;
 
+    let normal_bindings = normal_program
+        .map(|program| {
+            value_bindings(
+                verter_parser::oxc_parse::with_program_stack(program, || {
+                    SemanticBuilder::new().build(program)
+                })
+                .semantic
+                .scoping(),
+            )
+        })
+        .unwrap_or_default();
+    let mut normal_values: Vec<String> = normal_bindings.iter().cloned().collect();
+    normal_values.sort_unstable();
+    let (options, normal_default) = normal_program
+        .zip(normal)
+        .map(|(program, block)| normal_default_options(program, block.content_start))
+        .unwrap_or_default();
+
     let mut contract = VuePublicConstructorContract {
         source: ConstructorSource::AuthoredDefault,
         binder,
@@ -781,9 +1202,7 @@ pub(crate) fn project_public_constructor_in<'a>(
         models: Vec::new(),
         slots: None,
         expose: ExposeSurface::default(),
-        options: normal_program
-            .map(normal_default_options)
-            .unwrap_or_default(),
+        options,
         props_requirement: PropsRequirement::Optional,
         instance: PublicInstanceProjection::default(),
         binder_dependent: Vec::new(),
@@ -792,6 +1211,9 @@ pub(crate) fn project_public_constructor_in<'a>(
         setup_statements: Vec::new(),
         setup_is_async: false,
         expose_argument: None,
+        expose_callee: None,
+        normal_default,
+        normal_values,
     };
     let (Some(program), Some(block)) = (setup_program, setup) else {
         return Ok(ParsedPublicConstructor {
@@ -806,17 +1228,6 @@ pub(crate) fn project_public_constructor_in<'a>(
         SemanticBuilder::new().build(program)
     })
     .semantic;
-    let normal_bindings = normal_program
-        .map(|program| {
-            value_bindings(
-                verter_parser::oxc_parse::with_program_stack(program, || {
-                    SemanticBuilder::new().build(program)
-                })
-                .semantic
-                .scoping(),
-            )
-        })
-        .unwrap_or_default();
     let module_bound: FxHashSet<&str> = normal_bindings.iter().map(String::as_str).collect();
     let vue_macro_imports = vue_runtime_macro_imports(program);
     let binder_owned: Vec<String> = contract.binder.iter().map(|p| p.name.clone()).collect();
@@ -849,13 +1260,11 @@ pub(crate) fn project_public_constructor_in<'a>(
         requirement: PropsRequirement::Optional,
         dependent: FxHashSet::default(),
         pending_defaults: None,
-        top_level_await: false,
         literal_consts: &literal_consts,
         used_consts: FxHashSet::default(),
     };
     verter_parser::oxc_parse::with_program_stack(program, || collector.visit_program(program));
     let requirement = collector.requirement;
-    let top_level_await = collector.top_level_await;
     let mut used_consts: Vec<&(u32, String)> = collector
         .used_consts
         .iter()
@@ -865,8 +1274,18 @@ pub(crate) fn project_public_constructor_in<'a>(
     dependent.sort_unstable();
     used_consts.sort_unstable();
     contract.hoisted_consts = used_consts.into_iter().map(|(_, d)| d.clone()).collect();
-    contract.props_requirement = requirement;
-    contract.setup_is_async = top_level_await;
+    contract.props_requirement = if contract.normal_default.is_some() {
+        requirement.join(PropsRequirement::Undetermined)
+    } else {
+        requirement
+    };
+    // Top-level await is a setup-statement fact; its one owner also sees an
+    // await in class heritage or a computed class key.
+    let script = project_script_pair(normal, setup, generic)?;
+    contract.setup_is_async = script
+        .setup
+        .as_ref()
+        .is_some_and(|setup| setup.checking_wrapper_is_async());
     // The expose provider is instantiated with the whole binder, so a
     // generic component's exposed members follow the selected arguments.
     let exposes = !contract.expose.members.is_empty() || contract.expose.open;
@@ -1287,12 +1706,176 @@ fn apply_static_options(object: &ObjectExpression<'_>, options: &mut StaticOptio
 
 /// Literal static options of the normal script's default export
 /// (`export default { ... }` or `export default defineComponent({ ... })`).
-fn normal_default_options(program: &Program<'_>) -> StaticOptions {
+fn normal_default_options(
+    program: &Program<'_>,
+    base: u32,
+) -> (StaticOptions, Option<NormalDefaultProjection>) {
     let mut options = StaticOptions::default();
+    let wrapping = options_api_wrap(program, program.source_text);
+    let mut default: Option<NormalDefaultProjection> = None;
+    let located_text = |span: oxc_span::Span| {
+        (
+            range(span, base),
+            program.source_text[span.start as usize..span.end as usize].to_string(),
+        )
+    };
+    let module_source = |literal: oxc_span::Span, clause: Option<oxc_span::Span>| {
+        located_text(oxc_span::Span::new(
+            literal.start,
+            clause.map_or(literal.end, |clause| clause.end),
+        ))
+    };
+    let anonymous_name_site = |function: &oxc_ast::ast::Function<'_>| {
+        base + function
+            .type_parameters
+            .as_ref()
+            .map_or(function.params.span.start, |parameters| {
+                parameters.span.start
+            })
+    };
     for statement in &program.body {
         let Statement::ExportDefaultDeclaration(export) = statement else {
+            if default.is_none() {
+                if let Statement::ExportAllDeclaration(export) = statement {
+                    if !export.export_kind.is_type()
+                        && export
+                            .exported
+                            .as_ref()
+                            .is_some_and(|name| name.name() == "default")
+                    {
+                        default = Some(NormalDefaultProjection {
+                            prefix: range(export.span, base),
+                            additional_prefixes: Vec::new(),
+                            anonymous_name_sites: Vec::new(),
+                            object: None,
+                            end: base + program.span.end,
+                            named_declaration: None,
+                            pending_overload: false,
+                            specifier: Some(DefaultSpecifierProjection::Namespace {
+                                statement_start: base + export.span.start,
+                                source: module_source(
+                                    export.source.span,
+                                    export.with_clause.as_ref().map(|clause| clause.span),
+                                ),
+                            }),
+                        });
+                        continue;
+                    }
+                }
+                if let Some(export) = NamedExportParts::of_statement(statement)
+                    .filter(|export| !export.export_kind.is_type())
+                {
+                    if let Some((index, specifier)) =
+                        export.specifiers.iter().enumerate().find(|(_, specifier)| {
+                            !specifier.export_kind.is_type()
+                                && specifier.exported.name() == "default"
+                        })
+                    {
+                        // Remove just this specifier and one adjacent comma;
+                        // all sibling type/value exports keep their source bytes.
+                        let removed = if export.specifiers.len() == 1 {
+                            export.span
+                        } else if let Some(next) = export.specifiers.get(index + 1) {
+                            oxc_span::Span::new(specifier.span.start, next.span.start)
+                        } else {
+                            oxc_span::Span::new(
+                                export.specifiers[index - 1].span.end,
+                                specifier.span.end,
+                            )
+                        };
+                        let local = specifier.local.span();
+                        let projection = match export.source {
+                            Some(source) => DefaultSpecifierProjection::Reexport {
+                                statement_start: base + export.span.start,
+                                imported: located_text(local),
+                                source: module_source(
+                                    source.span,
+                                    match statement {
+                                        Statement::ExportFromDeclaration(export) => {
+                                            export.with_clause.as_ref().map(|clause| clause.span)
+                                        }
+                                        _ => None,
+                                    },
+                                ),
+                            },
+                            None => DefaultSpecifierProjection::Local {
+                                value: located_text(local),
+                            },
+                        };
+                        default = Some(NormalDefaultProjection {
+                            prefix: range(removed, base),
+                            additional_prefixes: Vec::new(),
+                            anonymous_name_sites: Vec::new(),
+                            object: None,
+                            end: base + program.span.end,
+                            named_declaration: None,
+                            pending_overload: false,
+                            specifier: Some(projection),
+                        });
+                    }
+                }
+            }
             continue;
         };
+        let prefix = SourceRange {
+            start: base + export.span.start,
+            end: base + export.declaration.span().start,
+        };
+        let function = match &export.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(function) => Some(&**function),
+            _ => None,
+        };
+        if let Some(current) = &mut default {
+            if current.pending_overload {
+                if let Some(function) = function {
+                    let name = function.id.as_ref().map(|id| id.name.as_str());
+                    if name.is_none()
+                        || current.named_declaration.is_none()
+                        || current.named_declaration.as_deref() == name
+                    {
+                        // Keep the signatures and their implementation contiguous;
+                        // only the implementation's end receives the capture.
+                        if let Some(name) = name {
+                            current
+                                .named_declaration
+                                .get_or_insert_with(|| name.to_string());
+                        } else {
+                            current
+                                .anonymous_name_sites
+                                .push(anonymous_name_site(function));
+                        }
+                        current.additional_prefixes.push(prefix);
+                        current.end = base + export.span.end;
+                        current.pending_overload = function.body.is_none();
+                    }
+                }
+            }
+        } else {
+            default = Some(NormalDefaultProjection {
+                prefix,
+                additional_prefixes: Vec::new(),
+                anonymous_name_sites: function
+                    .filter(|function| function.id.is_none() && function.body.is_none())
+                    .map(|function| vec![anonymous_name_site(function)])
+                    .unwrap_or_default(),
+                object: wrapping.object_span.map(|span| SourceRange {
+                    start: base + span.start,
+                    end: base + span.end,
+                }),
+                end: base + export.span.end,
+                named_declaration: match &export.declaration {
+                    ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                        function.id.as_ref().map(|id| id.name.to_string())
+                    }
+                    ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                        class.id.as_ref().map(|id| id.name.to_string())
+                    }
+                    _ => None,
+                },
+                pending_overload: function.is_some_and(|function| function.body.is_none()),
+                specifier: None,
+            });
+        }
         let object = match &export.declaration {
             ExportDefaultDeclarationKind::ObjectExpression(object) => Some(&**object),
             ExportDefaultDeclarationKind::CallExpression(call) => {
@@ -1309,7 +1892,7 @@ fn normal_default_options(program: &Program<'_>) -> StaticOptions {
             apply_static_options(object, &mut options);
         }
     }
-    options
+    (options, default)
 }
 
 /// Setup value bindings not exposed stay private; the instance publishes the
@@ -1407,8 +1990,6 @@ struct PublicCollector<'m, 'c> {
     /// `withDefaults` first-argument span and its defaults, awaiting the
     /// wrapped `defineProps` the walk visits next.
     pending_defaults: Option<(oxc_span::Span, PropsDefaults)>,
-    /// Setup awaits at top level.
-    top_level_await: bool,
     /// Setup literal constants Vue hoists to module scope.
     literal_consts: &'c FxHashMap<SymbolId, (u32, String)>,
     /// Literal constants a hoisted value references.
@@ -1593,18 +2174,22 @@ impl PublicCollector<'_, '_> {
         let required = options.map_or(PropsRequirement::Optional, |options| {
             self.model_required(ordinal, options)
         });
-        let value_type = call
-            .type_arguments
-            .as_ref()
-            .and_then(|a| a.params.first())
-            .map(|ty| {
-                self.note_binder(PublicSurface::Models, ty);
-                self.text(ty.span())
-            });
+        let type_arguments = call.type_arguments.as_ref().map(|a| &a.params);
+        let mut authored_type = |index: usize| {
+            type_arguments
+                .and_then(|params| params.get(index))
+                .map(|ty| {
+                    self.note_binder(PublicSurface::Models, ty);
+                    self.text(ty.span())
+                })
+        };
+        let value_type = authored_type(0);
+        let modifiers_type = model_modifiers_record(authored_type(1).as_deref());
         self.requirement = self.requirement.join(required);
         self.contract.models.push(PublicModel {
             name,
             value_type,
+            modifiers_type,
             required,
             call: range(call.span, self.base),
         });
@@ -1676,6 +2261,7 @@ impl PublicCollector<'_, '_> {
     fn expose(&mut self, call: &CallExpression<'_>) {
         let argument = call.arguments.first().and_then(|a| a.as_expression());
         self.contract.expose_argument = argument.map(|argument| self.text(argument.span()));
+        self.contract.expose_callee = Some(range(call.callee.span(), self.base));
         let expose = &mut self.contract.expose;
         expose.call = Some(range(call.span, self.base));
         let Some(argument) = argument else {
@@ -1750,24 +2336,21 @@ impl<'a> Visit<'a> for PublicCollector<'_, '_> {
         self.depth -= 1;
     }
 
-    fn visit_await_expression(&mut self, it: &AwaitExpression<'a>) {
-        if self.depth == 0 {
-            self.top_level_await = true;
-        }
-        walk::walk_await_expression(self, it);
-    }
-
-    fn visit_for_of_statement(&mut self, it: &ForOfStatement<'a>) {
-        if self.depth == 0 && it.r#await {
-            self.top_level_await = true;
-        }
-        walk::walk_for_of_statement(self, it);
-    }
-
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
         if let Some(name) = self.macros.resolve(it, self.depth) {
             self.capture(it, name);
         }
         walk::walk_call_expression(self, it);
+    }
+}
+
+impl crate::framework_common::vue_projection_backend::VueProjectionProduct
+    for VuePublicConstructorContract
+{
+    fn project(
+        backend: &crate::framework_common::vue_projection_backend::VueProjectionBackend,
+        input: &crate::framework_common::vue_projection_backend::VueProductInput<'_>,
+    ) -> Result<Self, super::script_setup::SetupProjectionRefusal> {
+        backend.public_constructor(input.source, input.artifact)
     }
 }

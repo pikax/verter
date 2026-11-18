@@ -2140,6 +2140,11 @@ fn resolved_id_conversion() {
         exists_in_host: true,
         bundler_id: "Comp.vue?vue&type=style&index=1&lang.css".to_string(),
         lsp_id: "Comp.vue._VERTER_.style.1.css".to_string(),
+        marker: Some(host::RequestMarker::Vue),
+        lang: Some("css".to_string()),
+        scoped: true,
+        raw_path: "./Comp.vue".to_string(),
+        block_type: None,
     };
     let ffi = host_resolved_id_to_ffi(resolved);
     assert_eq!(ffi.canonical_id, "/src/Comp.vue");
@@ -2148,6 +2153,10 @@ fn resolved_id_conversion() {
     assert!(ffi.exists_in_host);
     assert_eq!(ffi.bundler_id, "Comp.vue?vue&type=style&index=1&lang.css");
     assert_eq!(ffi.lsp_id, "Comp.vue._VERTER_.style.1.css");
+    assert_eq!(ffi.marker.as_deref(), Some("vue"));
+    assert_eq!(ffi.lang.as_deref(), Some("css"));
+    assert!(ffi.scoped);
+    assert_eq!(ffi.raw_path, "./Comp.vue");
 }
 
 // ── Output direction: host_remove_to_ffi ─────────────────────────

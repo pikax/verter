@@ -9,7 +9,7 @@
 use super::builder::{build_plan, BuildError, BuildWork, PlanContext};
 use super::generator::{generate_with, GuardStrategy};
 use super::seam::{CheckPlan, GeneratedCheck, Span};
-use crate::template::code_gen::binding::BindingType;
+use crate::template::binding::BindingType;
 
 /// One diagnostic a provider must report, by TypeScript code and the
 /// authored span its range maps to.

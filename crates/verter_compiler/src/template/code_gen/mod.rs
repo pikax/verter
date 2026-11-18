@@ -15,13 +15,11 @@
 //!
 //! All backends share significant logic through the sibling modules:
 //!
-//! - [`binding`] — Binding classification and `_ctx.`/`$setup.`/`.value` prefix resolution.
+//! - [`crate::template::binding`] — Binding classification and `_ctx.`/`$setup.`/`.value` prefix resolution.
 //! - [`walker`] — DFS tree walker that drives the [`TemplateCodeGen`] trait methods.
 //! - [`types`] — [`CodeGenOutput`] accumulator and internal data structures.
 //! - [`shared`] — Runtime helper constants, patch flag constants, and utility functions.
 
-pub mod binding;
-pub mod expression;
 pub mod shared;
 pub mod ssr;
 pub mod types;
@@ -37,8 +35,8 @@ use crate::parser::types::RootNodeTemplate;
 use crate::template::oxc::types::{OxcParsedAst, OxcParsedElement, OxcParsedExpression};
 use crate::types::NodeId;
 
-use self::binding::{BindingResolver, BindingType};
 use self::types::{CodeGenOutput, TemplateImports};
+use crate::template::binding::{BindingResolver, BindingType};
 
 /// Output mode for template code generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,7 +210,8 @@ pub trait TemplateCodeGen<'alloc> {
 /// to the `CodeTransform` in a single pass.
 ///
 /// Returns the categorized runtime helper imports so the caller can emit
-/// `import { ... } from "vue"` and optionally `import { ... } from "vue/server-renderer"`.
+/// `import { ... } from "vue"` and optionally `import { ... } from "vue/server-renderer"`,
+/// or the transform's refusal of a recorded edit.
 #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
 pub fn generate_template<'alloc>(
     ast: &TemplateAst,
@@ -222,7 +221,7 @@ pub fn generate_template<'alloc>(
     alloc: &'alloc Allocator,
     bindings: FxHashMap<&'alloc str, BindingType>,
     options: &TemplateCodeGenOptions,
-) -> TemplateImports<'alloc> {
+) -> Result<TemplateImports<'alloc>, crate::code_transform::CodeTransformError> {
     verter_audit::attribute_scope!(TemplateCodegenRuntime);
     // Convert owned const_props (FxHashSet<String>) to arena-allocated (&'alloc str)
     // for the BindingResolver's lifetime.
@@ -255,7 +254,7 @@ pub fn generate_template<'alloc>(
             r
         }
     };
-    let mut out = CodeGenOutput::new(alloc);
+    let mut out = CodeGenOutput::with_mode(alloc, ct.map_mode());
 
     match options.mode {
         CodeGenMode::Vdom => {

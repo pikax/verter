@@ -3,7 +3,10 @@
 Tier 4 §6.4 deliverable. Captures per-fixture cold-path cost attribution
 across the 17-fixture partial corpus snapshot at
 `golden-corpus/summary-179.csv` (full 179-fixture run blocked by the
-10-min orchestrator timeout per the §00b deferred-baselines doc).
+10-min orchestrator timeout per the §00b deferred-baselines doc). The
+chat-components fixtures `ChatMessage` and `ChatMessages` sort after
+the cut-off, so they have no row here; `golden-corpus/representative-5.json`
+records both as `not-completed-in-10min-timeout`.
 
 **Authority**: D118 drops the class-(a)/(b) language from the r7 plan;
 the substrate IS the cost. This sheet identifies the dominant

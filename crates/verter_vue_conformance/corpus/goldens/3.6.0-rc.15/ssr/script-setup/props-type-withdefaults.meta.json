@@ -1,0 +1,63 @@
+{
+  "schema": 2,
+  "caseId": "script-setup/props-type-withdefaults",
+  "backend": "ssr",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/script-setup/props-type-withdefaults.vue",
+    "sha256": "dea7b00c5a9bc412e9c4e2e02d9ef55436a4e827f80e8fc0e14e96b0a0fce377"
+  },
+  "options": {
+    "sha256": "2f53032933a106f0fa56afafac9438ac2123485040e0abe1913702fc9b780f43",
+    "summary": {
+      "backend": "ssr",
+      "vapor": false,
+      "ssr": true,
+      "filename": "cases/script-setup/props-type-withdefaults.vue",
+      "id": "script-setup/props-type-withdefaults",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/ssr/script-setup/props-type-withdefaults.js",
+      "sha256": "2c215fa7564b9e402ba81bf57413beb2edab1a927b197f2a506e4f3126d03d75",
+      "bytes": 1094
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/ssr/script-setup/props-type-withdefaults.map.json",
+      "sha256": "7ecf74275a768d2e1050e55681b384baa4458b361c58deefa5c3fb4abacb0684"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "defineComponent",
+      "alias": "_defineComponent"
+    }
+  ]
+}

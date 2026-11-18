@@ -819,3 +819,14 @@ pub fn project_options_pair(
         shadowed_macros,
     })
 }
+
+impl crate::framework_common::vue_projection_backend::VueProjectionProduct
+    for CombinedScriptProjection
+{
+    fn project(
+        backend: &crate::framework_common::vue_projection_backend::VueProjectionBackend,
+        input: &crate::framework_common::vue_projection_backend::VueProductInput<'_>,
+    ) -> Result<Self, super::script_setup::SetupProjectionRefusal> {
+        backend.options_projection(input.source, input.artifact)
+    }
+}

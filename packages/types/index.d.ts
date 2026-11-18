@@ -85,13 +85,17 @@ export declare function extractArgumentsFromRenderSlot<
   },
   slotName: N,
 ): TSlots[N] extends ((...args: infer P) => any) | undefined ? P[0] : never;
-export type ExtractLeafElement<T> = T extends HTMLElement
-  ? T
-  : T extends { $el: infer E }
-    ? ExtractLeafElement<E>
-    : T extends { new (): infer I }
-      ? ExtractLeafElement<I>
-      : never;
+export type ExtractLeafElement<T> = 0 extends 1 & T
+  ? any
+  : T extends HTMLElement | SVGElement | MathMLElement
+    ? T
+    : T extends { $el: infer E }
+      ? ExtractLeafElement<E>
+      : T extends { new (): infer I }
+        ? ExtractLeafElement<I>
+        : T extends { readonly $props: unknown; readonly $slots: unknown; $emit: unknown }
+          ? any
+          : never;
 export type ExtractDirectives<T> = {
   [K in keyof T as T[K] extends import("vue").Directive<any, any, any, any>
     ? K extends `v${Capitalize<string>}`
@@ -105,14 +109,14 @@ export declare function runCustomDirective<
 >(
   instance: TInstance,
   directive: TDirective,
-): ExtractLeafElement<TInstance> extends infer El extends HTMLElement
+): ExtractLeafElement<TInstance> extends infer El extends HTMLElement | SVGElement | MathMLElement
   ? TDirective extends import("vue").Directive<
       infer TElement,
       infer TValue,
       infer M extends string,
       infer TArg
     >
-    ? El extends TElement
+    ? [El] extends [TElement]
       ? (
           instance: TInstance,
           value: TValue,

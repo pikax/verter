@@ -5651,3 +5651,17 @@ fn a_binder_behind_an_unread_alias_is_unknown_never_absent() {
         super::call_resolve::BinderReach::Incomplete
     );
 }
+
+/// An argument's literal provenance splits into a plan, the plan's owner
+/// lowerings in the order the walk first uses them, and a finish that
+/// reproduces the in-place answer from those lowered types.
+#[test]
+fn literal_provenance_plan_lists_lowerings_in_first_use_order() {
+    let host = host();
+    upsert_source(&host, CANONICAL, "export const read = \"r\";\n");
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
+    verter_type_engine::project_semantic_dispatch::call_resolve::provenance_plan_tests::plan_lists_authored_contributors_in_first_use_order(
+        &dispatch, CANONICAL,
+    );
+}

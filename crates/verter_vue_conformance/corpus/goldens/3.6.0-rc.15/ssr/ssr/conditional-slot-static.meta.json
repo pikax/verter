@@ -1,0 +1,75 @@
+{
+  "schema": 2,
+  "caseId": "ssr/conditional-slot-static",
+  "backend": "ssr",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/conditional-slot-static.vue",
+    "sha256": "ea6840d458d7a7feb5585193ab1320acaf7ba4ce78eabe080de9ffda7250f32b"
+  },
+  "options": {
+    "sha256": "8e9be244a9ba59a2c645a00ec56f6d268600d2b7fe0199438b06e89f43d71889",
+    "summary": {
+      "backend": "ssr",
+      "vapor": false,
+      "ssr": true,
+      "filename": "cases/ssr/conditional-slot-static.vue",
+      "id": "ssr/conditional-slot-static",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/ssr/ssr/conditional-slot-static.js",
+      "sha256": "0ef0498302476fa684683f6ff62ace80c124a8cfa0dbff4fa517bdc05f8cecd1",
+      "bytes": 1200
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/ssr/ssr/conditional-slot-static.map.json",
+      "sha256": "0a5fdf217580f83c556d5a303cbf00f198ded23c1cb03b000e83f902f79cd0c3"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createSlots",
+      "alias": "_createSlots"
+    },
+    {
+      "imported": "createTextVNode",
+      "alias": "_createTextVNode"
+    },
+    {
+      "imported": "defineComponent",
+      "alias": "_defineComponent"
+    },
+    {
+      "imported": "withCtx",
+      "alias": "_withCtx"
+    }
+  ]
+}

@@ -410,6 +410,25 @@ pub fn host_resolved_id_to_ffi(input: host::ResolvedId) -> FfiResolvedId {
         exists_in_host: input.exists_in_host,
         bundler_id: input.bundler_id,
         lsp_id: input.lsp_id,
+        marker: input.marker.map(|marker| marker.as_str().to_owned()),
+        lang: input.lang,
+        scoped: input.scoped,
+        raw_path: input.raw_path,
+        block_type: input.block_type,
+    }
+}
+
+/// Convert the outcome of a host `resolve` to its FFI representation.
+pub fn host_resolve_outcome_to_ffi(
+    input: Result<host::ResolvedId, host::RejectedRawId>,
+) -> FfiResolveOutcome {
+    match input {
+        Ok(resolved) => FfiResolveOutcome::Resolved(host_resolved_id_to_ffi(resolved)),
+        Err(rejected) => FfiResolveOutcome::Rejected(FfiRejectedId {
+            rejected: rejected.reason.code().to_owned(),
+            raw_path: rejected.raw_path,
+            marker: rejected.marker.map(|marker| marker.as_str().to_owned()),
+        }),
     }
 }
 

@@ -5,6 +5,7 @@
 //! (`update` / `overwrite` / `remove`) range operations.
 
 use smallvec::SmallVec;
+use verter_span::Span;
 
 use super::chunk::{Chunk, InsertAffinity};
 use super::code_transform::CodeTransform;
@@ -31,6 +32,50 @@ pub enum CodeTransformError {
     /// previous edit already replaced (the `magic-string` "cannot split a
     /// chunk that has already been edited" refusal).
     ReplacedContentSplit { offset: u32 },
+    /// Two replacements overlap without one containing the other, or a
+    /// replacement meets content an earlier replacement already owns. The
+    /// producer that recorded the second edit is wrong; no tie-break exists.
+    Conflict { first: Span, second: Span },
+    /// A move whose target lies inside (or on an edge of) the moved range.
+    InvalidMove { range: Span, target: u32 },
+    /// An edit of a range whose bytes were relocated by an earlier move: the
+    /// range has no live chunk left at its authored position.
+    EditInsideRelocated { range: Span },
+    /// A segmented overwrite whose target is not one live, unedited
+    /// `Original` chunk.
+    SegmentedTargetNotLive { range: Span },
+    /// A segmented-overwrite anchor claims its bytes are an exact copy of the
+    /// source at `source_pos`, and they are not.
+    CorrespondenceNotExact {
+        content_offset: u32,
+        source_pos: u32,
+    },
+    /// A source longer than the `u32` offsets every edit uses.
+    Capacity { len: usize },
+    /// A map product was asked of a transform created without map capture.
+    MapNotCaptured,
+    /// A transform was frozen over a source that is not its own text.
+    ForeignSource,
+}
+
+impl CodeTransformError {
+    /// The first source offset the refusal names, for diagnostics that point
+    /// at one position.
+    pub fn offset(&self) -> u32 {
+        match *self {
+            Self::OutOfRange { offset, .. }
+            | Self::MidChar { offset }
+            | Self::ZeroLengthRange { offset }
+            | Self::ReplacedContentSplit { offset } => offset,
+            Self::ReversedRange { start, .. } => start,
+            Self::Conflict { second, .. } => second.start,
+            Self::InvalidMove { range, .. }
+            | Self::EditInsideRelocated { range }
+            | Self::SegmentedTargetNotLive { range } => range.start,
+            Self::CorrespondenceNotExact { source_pos, .. } => source_pos,
+            Self::Capacity { .. } | Self::MapNotCaptured | Self::ForeignSource => 0,
+        }
+    }
 }
 
 impl std::fmt::Display for CodeTransformError {
@@ -56,6 +101,42 @@ impl std::fmt::Display for CodeTransformError {
                     f,
                     "offset {offset} falls inside content already replaced by a previous edit"
                 )
+            }
+            Self::Conflict { first, second } => write!(
+                f,
+                "replacement [{}, {}) conflicts with replacement [{}, {})",
+                second.start, second.end, first.start, first.end
+            ),
+            Self::InvalidMove { range, target } => write!(
+                f,
+                "cannot move [{}, {}) to offset {target} inside or on the edge of itself",
+                range.start, range.end
+            ),
+            Self::EditInsideRelocated { range } => write!(
+                f,
+                "range [{}, {}) was relocated by an earlier move and cannot be edited in place",
+                range.start, range.end
+            ),
+            Self::SegmentedTargetNotLive { range } => write!(
+                f,
+                "segmented overwrite target [{}, {}) is not one live unedited source chunk",
+                range.start, range.end
+            ),
+            Self::CorrespondenceNotExact {
+                content_offset,
+                source_pos,
+            } => write!(
+                f,
+                "anchor at replacement offset {content_offset} claims the source bytes at                  {source_pos} but differs from them"
+            ),
+            Self::Capacity { len } => {
+                write!(f, "source of {len} bytes exceeds the u32 offset range")
+            }
+            Self::MapNotCaptured => {
+                write!(f, "the transform was created without map capture")
+            }
+            Self::ForeignSource => {
+                write!(f, "the transform was frozen over a source that is not its own")
             }
         }
     }
@@ -340,7 +421,9 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
         offset: u32,
     ) -> Result<&mut Self, CodeTransformError> {
         self.check_offset(offset)?;
-        self.sourcemap_locations.push(offset);
+        if self.captures_map() {
+            self.sourcemap_locations.push(offset);
+        }
         Ok(self)
     }
 
@@ -359,6 +442,12 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
                     start: cs,
                     end: ce,
                     content,
+                }
+                | Chunk::OverwrittenSegmented {
+                    start: cs,
+                    end: ce,
+                    content,
+                    ..
                 } => {
                     if !content.is_empty() {
                         if *cs < start && start < *ce {
@@ -614,6 +703,7 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
             return Err(CodeTransformError::ZeroLengthRange { offset: start });
         }
         self.check_no_replaced_content_straddle(start, end)?;
+        self.check_range_is_live(start, end)?;
         self.ensure_anchor_boundary(start)?;
         self.ensure_anchor_boundary(end)?;
         let content_ref = if content.is_empty() {
@@ -654,6 +744,27 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
         Ok(self)
     }
 
+    /// Checked [`overwrite_unmapped_alloc`](Self::overwrite_unmapped_alloc):
+    /// wholly synthetic replacement text, already in this transform's arena
+    /// so its pointer survives into the chunk; malformed offsets return a
+    /// typed [`CodeTransformError`] without mutating anything.
+    pub(crate) fn try_overwrite_unmapped_alloc(
+        &mut self,
+        start: u32,
+        end: u32,
+        content: &'a str,
+    ) -> Result<&mut Self, CodeTransformError> {
+        self.check_range(start, end)?;
+        if start == end {
+            return Err(CodeTransformError::ZeroLengthRange { offset: start });
+        }
+        self.check_no_replaced_content_straddle(start, end)?;
+        self.check_range_is_live(start, end)?;
+        self.ensure_anchor_boundary(start)?;
+        self.ensure_anchor_boundary(end)?;
+        Ok(self.overwrite_unmapped_alloc(start, end, content))
+    }
+
     /// Checked removal: clears the range's content and the boundary
     /// insertions attached to every chunk starting inside it (never the
     /// prior chunk's left-affinity content). A zero-length range is a no-op;
@@ -666,9 +777,291 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
             return Ok(self);
         }
         self.check_no_replaced_content_straddle(start, end)?;
+        self.check_range_is_live(start, end)?;
         self.ensure_anchor_boundary(start)?;
         self.ensure_anchor_boundary(end)?;
         self.replace_range_impl(start, end, "", false);
         Ok(self)
+    }
+
+    /// Refuse an edit of `[start, end)` when some of its bytes no longer sit
+    /// at their authored position: an earlier move took them away, so the
+    /// positioned chunks leave a gap inside the range. An unchecked splice
+    /// over such a range finds no live chunk and lands its replacement at
+    /// the end of the output.
+    pub(super) fn check_range_is_live(
+        &self,
+        start: u32,
+        end: u32,
+    ) -> Result<(), CodeTransformError> {
+        if start == end {
+            return Ok(());
+        }
+        let mut covered = start;
+        for chunk in &self.chunks[self.search_start_for(start)..] {
+            let Some((cs, ce)) = positioned_extent(chunk) else {
+                continue;
+            };
+            if ce <= covered {
+                continue;
+            }
+            if cs > covered {
+                break;
+            }
+            covered = ce;
+            if covered >= end {
+                return Ok(());
+            }
+        }
+        Err(CodeTransformError::EditInsideRelocated {
+            range: Span::new(start, end),
+        })
+    }
+
+    /// The validation a checked move shares with its unchecked twin's
+    /// preconditions: a non-empty live range, a target outside it, and no
+    /// boundary inside content an earlier replacement owns.
+    fn check_move(&self, start: u32, end: u32, target: u32) -> Result<(), CodeTransformError> {
+        self.check_range(start, end)?;
+        if start == end {
+            return Err(CodeTransformError::ZeroLengthRange { offset: start });
+        }
+        self.check_offset(target)?;
+        if start < target && target < end {
+            return Err(CodeTransformError::InvalidMove {
+                range: Span::new(start, end),
+                target,
+            });
+        }
+        self.check_no_replaced_content_straddle(start, end)?;
+        self.check_no_replaced_content_straddle(target, target)?;
+        self.check_range_is_live(start, end)
+    }
+
+    /// Checked [`move_slice`](Self::move_slice): validates the range and the
+    /// target before moving anything.
+    pub fn try_move(
+        &mut self,
+        start: u32,
+        end: u32,
+        target: u32,
+    ) -> Result<&mut Self, CodeTransformError> {
+        self.check_move(start, end, target)?;
+        Ok(self.move_slice(start, end, target))
+    }
+
+    /// Checked [`move_wrapped`](Self::move_wrapped): validates the range and
+    /// the target before moving anything.
+    pub fn try_move_wrapped(
+        &mut self,
+        start: u32,
+        end: u32,
+        target: u32,
+        prefix: &str,
+        suffix: &str,
+    ) -> Result<&mut Self, CodeTransformError> {
+        self.check_move(start, end, target)?;
+        Ok(self.move_wrapped(start, end, target, prefix, suffix))
+    }
+
+    /// Move with arena-backed wrappers without changing their marker identity.
+    pub(crate) fn try_move_wrapped_allocated(
+        &mut self,
+        start: u32,
+        end: u32,
+        target: u32,
+        prefix: &'a str,
+        suffix: &'a str,
+    ) -> Result<&mut Self, CodeTransformError> {
+        self.check_move(start, end, target)?;
+        Ok(self.move_wrapped_allocated(
+            start,
+            end,
+            target,
+            (!prefix.is_empty()).then_some(prefix),
+            (!suffix.is_empty()).then_some(suffix),
+        ))
+    }
+
+    /// Checked [`extract_original`](Self::extract_original): the range and
+    /// the target are validated; the range's current edits do not matter,
+    /// because the extraction reads the source.
+    pub fn try_extract_original(
+        &mut self,
+        start: u32,
+        end: u32,
+        target: u32,
+        prefix: &str,
+        suffix: &str,
+    ) -> Result<&mut Self, CodeTransformError> {
+        self.check_range(start, end)?;
+        if start == end {
+            return Err(CodeTransformError::ZeroLengthRange { offset: start });
+        }
+        self.check_offset(target)?;
+        if start < target && target < end {
+            return Err(CodeTransformError::InvalidMove {
+                range: Span::new(start, end),
+                target,
+            });
+        }
+        self.check_no_replaced_content_straddle(target, target)?;
+        Ok(self.extract_original(start, end, target, prefix, suffix))
+    }
+
+    /// Checked batch replacement. The whole batch is validated before any
+    /// edit is committed: every range is in bounds on character boundaries;
+    /// ranges are sorted by start and pairwise disjoint (a partial overlap and
+    /// a contained range are both a [`CodeTransformError::Conflict`] — a
+    /// caller that resolves containment filters its batch first); and every
+    /// range covers live source.
+    ///
+    /// Against earlier replacements the batch follows the splice's law: a
+    /// range inside an earlier replacement has nothing left to replace and
+    /// is dropped, a range covering one replaces it, and a range splitting
+    /// replaced content is refused. An empty range places its text at one
+    /// position inside an unedited source chunk.
+    ///
+    /// A batch whose every range lies inside one unedited source chunk is
+    /// committed in one chunk rebuild; any other valid batch is committed
+    /// range by range through the shared splice.
+    pub fn try_batch_overwrite(
+        &mut self,
+        overwrites: &[(u32, u32, &'a str)],
+    ) -> Result<&mut Self, CodeTransformError> {
+        let mut within_one_chunk = !self.anchored_present;
+        let mut previous: Option<Span> = None;
+        let mut chunk_index = 0usize;
+        let mut kept: SmallVec<[(u32, u32, &'a str); 32]> = SmallVec::new();
+        for &(start, end, content) in overwrites {
+            self.check_range(start, end)?;
+            let range = Span::new(start, end);
+            if let Some(first) = previous {
+                if start < first.end {
+                    return Err(CodeTransformError::Conflict {
+                        first,
+                        second: range,
+                    });
+                }
+            }
+            previous = Some(range);
+
+            if start == end {
+                match self.chunk_holding_point(chunk_index, start)? {
+                    PointHolder::Unedited(index) => {
+                        chunk_index = index;
+                        kept.push((start, end, content));
+                    }
+                    PointHolder::Replaced => {}
+                }
+                continue;
+            }
+
+            let mut covered = start;
+            let mut touched = 0usize;
+            let mut inside_replacement = false;
+            let mut i = chunk_index;
+            while i < self.chunks.len() && covered < end {
+                let chunk = &self.chunks[i];
+                let Some((cs, ce)) = positioned_extent(chunk) else {
+                    i += 1;
+                    continue;
+                };
+                if ce <= covered {
+                    i += 1;
+                    chunk_index = i;
+                    continue;
+                }
+                if cs > covered {
+                    break;
+                }
+                if let Chunk::Overwritten { content, .. }
+                | Chunk::OverwrittenSegmented { content, .. } = chunk
+                {
+                    if cs <= start && end <= ce && (cs < start || end < ce) {
+                        inside_replacement = true;
+                        break;
+                    }
+                    if !content.is_empty() && (cs < start || ce > end) {
+                        let offset = if cs < start { start } else { end };
+                        return Err(CodeTransformError::ReplacedContentSplit { offset });
+                    }
+                    // Replacing an earlier replacement is the splice's job.
+                    within_one_chunk = false;
+                }
+                touched += 1;
+                covered = ce;
+                chunk_index = i;
+                i += 1;
+            }
+            if inside_replacement {
+                continue;
+            }
+            if covered < end {
+                return Err(CodeTransformError::EditInsideRelocated { range });
+            }
+            within_one_chunk &= touched == 1;
+            kept.push((start, end, content));
+        }
+
+        if within_one_chunk {
+            self.batch_overwrite(&kept);
+        } else {
+            self.record_audit_op();
+            for &(start, end, content) in &kept {
+                self.replace_range_impl(start, end, content, false);
+            }
+        }
+        Ok(self)
+    }
+}
+
+/// Where an empty-range replacement would place its text.
+enum PointHolder {
+    /// Inside (or at the start of) the unedited chunk at this index.
+    Unedited(usize),
+    /// Inside an earlier replacement: there is nothing left to place it in.
+    Replaced,
+}
+
+impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
+    /// The chunk holding `point`, searching from `from`: an unedited
+    /// `Original` chunk or an earlier replacement; a point with no live chunk
+    /// is a [`CodeTransformError::ZeroLengthRange`].
+    fn chunk_holding_point(
+        &self,
+        from: usize,
+        point: u32,
+    ) -> Result<PointHolder, CodeTransformError> {
+        for (index, chunk) in self.chunks.iter().enumerate().skip(from) {
+            let Some((cs, ce)) = positioned_extent(chunk) else {
+                continue;
+            };
+            if ce <= point {
+                continue;
+            }
+            if cs <= point {
+                return Ok(match chunk {
+                    Chunk::Original { .. } => PointHolder::Unedited(index),
+                    _ => PointHolder::Replaced,
+                });
+            }
+            break;
+        }
+        Err(CodeTransformError::ZeroLengthRange { offset: point })
+    }
+}
+
+/// The source extent of a chunk that holds an authored position (`Original`
+/// and the replacements); insertions and moved runs hold none.
+fn positioned_extent(chunk: &Chunk<'_>) -> Option<(u32, u32)> {
+    match *chunk {
+        Chunk::Original { start, end }
+        | Chunk::Overwritten { start, end, .. }
+        | Chunk::OverwrittenSegmented { start, end, .. } => Some((start, end)),
+        Chunk::Inserted { .. }
+        | Chunk::Relocated { .. }
+        | Chunk::InsertedMapped { .. }
+        | Chunk::InsertedAnchored { .. } => None,
     }
 }

@@ -21,6 +21,36 @@ fn setup_of(content: &str) -> TsSetupProjection {
 }
 
 #[test]
+fn template_ref_facts_keep_import_origin_and_carrier_spans() {
+    let normal = "import { useTemplateRef as templateRef } from 'vue';";
+    let setup = "const target = templateRef<InstanceType<typeof Child>>('pa\\u006eel');";
+    let facts = project_script_pair(Some(ts(normal, 20)), Some(ts(setup, 200)), None).unwrap();
+    let setup_facts = facts.setup.unwrap();
+    assert_eq!(setup_facts.template_refs.len(), 1);
+    let usage = &setup_facts.template_refs[0];
+    assert_eq!(usage.key, "panel");
+    let slice = |span: SourceRange| &setup[(span.start - 200) as usize..(span.end - 200) as usize];
+    assert_eq!(slice(usage.binding), "target");
+    assert_eq!(slice(usage.key_span), "'pa\\u006eel'");
+    assert_eq!(
+        slice(usage.type_argument.unwrap()),
+        "InstanceType<typeof Child>"
+    );
+    assert!(setup_facts
+        .bindings
+        .iter()
+        .any(|binding| binding.name == "target"
+            && binding.kind == verter_parser::types::BindingType::SetupRef));
+    for source in [
+        "function useTemplateRef(key: string) { return key; } const target = useTemplateRef('panel');",
+        "import { useTemplateRef } from './other'; const target = useTemplateRef('panel');",
+        "import type { useTemplateRef } from 'vue'; const target = useTemplateRef('panel');",
+    ] {
+        assert!(setup_of(source).template_refs.is_empty(), "{source}");
+    }
+}
+
+#[test]
 fn stp11_universal_binder_keeps_constraints_and_carries_no_arguments() {
     let generic = "T extends { id: number }, U = string";
     let facts =
@@ -199,7 +229,48 @@ fn stp11_assertion_ts_angle_assertion_and_tsx_element_parse_once_under_own_gramm
     assert_eq!(
         project_script_pair(
             None,
-            Some(block("const n = 1", 0, Some(ScriptLanguage::JavaScript))),
+            Some(block(
+                "const n: number = 1",
+                0,
+                Some(ScriptLanguage::JavaScript)
+            )),
+            None
+        )
+        .unwrap_err(),
+        SetupProjectionRefusal::SyntaxErrors { setup: true }
+    );
+}
+
+#[test]
+fn javascript_setup_blocks_project_under_the_javascript_grammar() {
+    // Vue's own default for an unlabeled `<script setup>` is JavaScript
+    // (`sfc_script_dialect`); `lang="js"` and `lang="jsx"` are the same
+    // grammar, the one TypeScript gives every JavaScript file.
+    for lang in [
+        None,
+        Some(ScriptLanguage::JavaScript),
+        Some(ScriptLanguage::JSX),
+    ] {
+        let facts = project_script_pair(
+            None,
+            Some(block(
+                "const props = defineProps({ a: String })\nconst el = <div>{props.a}</div>",
+                0,
+                lang,
+            )),
+            None,
+        )
+        .expect("JavaScript setup projects");
+        let setup = facts.setup.expect("setup");
+        assert_eq!(setup.grammar, ScriptGrammar::JavaScript, "{lang:?}");
+        assert_eq!(setup.macros.len(), 1, "{lang:?}");
+        assert_eq!(setup.macros[0].name, "defineProps");
+    }
+    // Only a language that is neither JavaScript nor TypeScript is refused.
+    assert_eq!(
+        project_script_pair(
+            None,
+            Some(block("const n = 1", 0, Some(ScriptLanguage::Unknown))),
             None
         )
         .unwrap_err(),
@@ -208,12 +279,14 @@ fn stp11_assertion_ts_angle_assertion_and_tsx_element_parse_once_under_own_gramm
 }
 
 #[test]
-fn stp11_absent_lang_is_javascript_not_typescript() {
-    // Vue's own default for an unlabeled `<script setup>` is JavaScript
-    // (`sfc_script_dialect`); this projection only owns TypeScript/TSX.
+fn a_javascript_pair_declares_no_generic_binder() {
     assert_eq!(
-        project_script_pair(None, Some(block("const n = 1", 0, None)), None).unwrap_err(),
-        SetupProjectionRefusal::NotTypeScript
+        project_script_pair(None, Some(block("const n = 1", 0, None)), Some("T")).unwrap_err(),
+        SetupProjectionRefusal::InvalidGeneric
+    );
+    assert!(
+        project_script_pair(None, Some(ts("const n = 1", 0)), Some("T")).is_ok(),
+        "a TypeScript pair keeps its binder"
     );
 }
 

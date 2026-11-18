@@ -256,13 +256,21 @@ Guards: `no_macro_string_heuristics_in_resolver_core`, `no_format_then_reparse`,
 
 See `/component-meta` and `/type-resolution` skills for the typed schema contract, the producer-side lowering points, and the architecture-guard list.
 
-### CodeTransform Is the Single Source of Truth (CRITICAL)
+### Source Editing and Output Assembly (CRITICAL)
 
-**All modifications to generated code MUST go through `CodeTransform` operations** (`overwrite`, `prepend_left`, `append_left`, `move_with_suffix`, etc.) — never string replacements, regex transforms, or manual splicing on the output of `build_string()` or content produced by a `CodeTransform`. `CodeTransform` generates source maps by tracking chunks (Original, Inserted, Moved, Overwritten); modifying the string after the transform desyncs byte offsets → LSP position mismatches (hover landing on the wrong token, go-to-definition jumping to wrong locations).
+`CodeTransform` is the sole engine for source-coordinate edits. Replacement, deletion, insertion affinity, and relocation semantics are implemented there. Deferred edit recorders belong to this owner and must not implement an independent edit-resolution algorithm.
 
-**Correct:** `ct.prepend_left(pos, ".ts")` — chunk list and source map stay consistent. **Wrong:** `content.replace(".vue'", ".vue.ts'")` on the built string — the source map still reflects pre-replace byte offsets.
+Append-only construction and composition use the shared immutable emission representation through `assembly::emit_plan`. An emission plan may contain authored slices, generated pieces, frozen transform fragments, typed insertion slots, and artifact boundaries. It must not resolve source-coordinate edits or reinterpret a fragment's provenance.
 
-Guards: `compile_audit_sourcemap`.
+Final artifact text, requested decoded mappings, and generated boundaries are produced from the same emission record. Exact correspondence, rewritten correspondence, point anchors, and unmapped text remain distinct. Source identities and coordinate spaces must be explicit. V3 encoding occurs only at an external artifact boundary.
+
+No-map execution performs no map-only capture, allocation, position resolution, map construction, or encoding. Source spans required for editing and structural boundaries required for assembly remain permitted.
+
+Published output is immutable. Never replace, regex-transform, or manually splice finalized text while retaining its map. Perform changes before finalization through CodeTransform or declared assembly slots.
+
+Enforcement must land with this rule: sealed fragment and publication constructors, owner-bound source and insertion handles, checked edit failures, and behavioral coverage for edit semantics, mapping fidelity, and no-map execution. `compile_audit_sourcemap` remains applicable. Source-name scanners are not structural enforcement.
+
+Guards: `compile_audit_sourcemap`; compile contracts `emission_fragment_is_not_built_from_text`, `published_artifact_text_is_read_only`, `slot_handle_fills_once`, `segmented_correspondence_is_not_forgeable`; tests `every_product_reads_one_emission_walk`, `no_map_compile_captures_nothing`, `a_fragment_keeps_its_own_source_identity`, `conflicting_replacements_are_refused`.
 
 ### Typeinfo Wire Contract (CRITICAL)
 
@@ -329,6 +337,8 @@ Local edit-time lexing may classify a bounded token or recovery window, but it m
 Production external-TypeScript results for carrier sources are project-bound. The result-producing backend path is `ExternalTsProjectResolver` → `CarrierRegistry` → `EngineBackend`: `EngineBackend::ensure_project` is reached only from a resolved `ProjectBinding`, and `publish_snapshot`, `query`, and `diagnostics` require the resulting `BoundProject` witness. No production external-TS result path may infer a project from a bare path, open a carrier into a config-less/inferred project, or fall back to an inferred backend. Path-shaped transport notifications may exist below this contract, but they cannot construct external-TS results or bypass `BoundProject`.
 
 Ownership is TypeScript-correct. A carrier source (`.vue`, `.svelte`, or any adapter extension) is owned by a configured project only through the default include, a no-extension directory/bare-star glob, or a glob/`files` entry that explicitly covers that extension. An extension-specific `*.ts` glob does not own it. TypeScript include has no brace expansion: multi-extension coverage is separate entries, never `*.{vue,svelte}`.
+
+Builds that check every claiming project use `WorkspaceProjectResolver::resolve_in_project`, preserving the same carrier-path conflict pass and binding witness while reading each project's own published environment dimensions.
 
 **Owner selection is tsgo-faithful, single-winner, and never terminally ambiguous when a configured project owns the carrier.** A carrier claimed by MULTIPLE configured projects is NOT a terminal state: `WorkspaceSnapshot::default_configured_owner_for_file` models tsgo `ProjectCollection.GetDefaultProject` + `findDefaultConfiguredProject` (`microsoft/typescript-go` `internal/project/projectcollection.go`) — start from the nearest ancestor solution (the nearest LITERAL `tsconfig.json`/`jsconfig.json`, not the nearest project root), BFS its `references` in DECLARED array order, take the FIRST project that directly includes the carrier, climb to the next ancestor solution unless `disableSolutionSearching`, and finally fall back to the lexicographically-least `tsconfig_path` among the configured claimants (tsgo `firstConfiguredProject`, a name-least ordering DISTINCT from the reference BFS order). The winner is chosen only from ordered structures (the `projects` Vec, `references` Vec, an ordered visited set) — never `HashSet` iteration; reference cycles resolve via the visited set, never a terminal ambiguity. The resolved owner flows through the SAME `binding_for` → `BoundProject` witness as the unique-owner arm. This selection is provider-neutral: the ONE `WorkspaceSnapshot` decision the tsserver, managed-tsgo, and shared-tsgo carrier routes all consume identically.
 

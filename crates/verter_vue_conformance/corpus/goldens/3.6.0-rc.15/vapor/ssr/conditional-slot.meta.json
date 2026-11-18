@@ -1,0 +1,70 @@
+{
+  "schema": 2,
+  "caseId": "ssr/conditional-slot",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/conditional-slot.vue",
+    "sha256": "8cf666046548b33f8ae470091c3cc915fb68f422b51905f38d9f1d4c1419ea1f"
+  },
+  "options": {
+    "sha256": "a5f28e537c699ffb828ec3c044320381cc87c33c66f044f3e3a9cbb34e2fb5e9",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/ssr/conditional-slot.vue",
+      "id": "ssr/conditional-slot",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/vapor/ssr/conditional-slot.js",
+      "sha256": "785c548fde963262776748a6d185d1e33f5c36aa96fb9cdbf5c626e525923fc9",
+      "bytes": 968
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/vapor/ssr/conditional-slot.map.json",
+      "sha256": "750309cd98ea58182e4d5157eaed3f29e43222bfb1e0c90cac8d846d5e5fc635"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createComponent",
+      "alias": "_createComponent"
+    },
+    {
+      "imported": "defineVaporComponent",
+      "alias": "_defineVaporComponent"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    }
+  ]
+}

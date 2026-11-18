@@ -1,0 +1,78 @@
+{
+  "schema": 2,
+  "caseId": "ssr/css-vars-root",
+  "backend": "vdom",
+  "topology": "inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/css-vars-root.vue",
+    "sha256": "42a2bc2c07a66090a2eef06ac82cd9c028443f873fd627aa3a6b8cdf22e85a47"
+  },
+  "options": {
+    "sha256": "9e2b924430e19b2d600869744195bdb8e3a501c0ab4e80c101290f89f3a00a7c",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/ssr/css-vars-root.vue",
+      "id": "ssr/css-vars-root",
+      "pipeline": "compileScript:inlineTemplate",
+      "topology": "inline",
+      "inlineTemplate": true,
+      "bindingMetadata": false,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/vdom-inline/ssr/css-vars-root.js",
+      "sha256": "63577e1a9af24ccf8ae6040b22e5f97b124f239f7c1ec5e05998dd8890f39920",
+      "bytes": 586
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/vdom-inline/ssr/css-vars-root.map.json",
+      "sha256": "29493e5ca30c8d2ea990f64cfbfa58631b2e7b1a93f100056acbb1dcb6ff1615"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createElementBlock",
+      "alias": "_createElementBlock"
+    },
+    {
+      "imported": "defineComponent",
+      "alias": "_defineComponent"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "useCssVars",
+      "alias": "_useCssVars"
+    }
+  ]
+}

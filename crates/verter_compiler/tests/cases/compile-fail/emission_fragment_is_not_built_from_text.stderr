@@ -1,0 +1,19 @@
+error: cannot construct `EmissionFragment<'_>` with struct literal syntax due to private fields
+  --> tests/cases/compile-fail/emission_fragment_is_not_built_from_text.rs:10:20
+   |
+10 |     let _literal = EmissionFragment {
+   |                    ^^^^^^^^^^^^^^^^
+11 |         len: 0,
+   |         ------ private field
+12 |         mode: MapMode::NoMap,
+   |         -------------------- private field
+   |
+   = note: ...and other private fields `source`, `pieces`, `owned`, `hints`, `external` and `token` that were not provided
+
+error[E0277]: the trait bound `EmissionFragment<'_>: From<std::string::String>` is not satisfied
+ --> tests/cases/compile-fail/emission_fragment_is_not_built_from_text.rs:9:78
+  |
+9 |     let _from_text: EmissionFragment<'static> = String::from("const a = 1;").into();
+  |                                                                              ^^^^ the trait `From<std::string::String>` is not implemented for `EmissionFragment<'_>`
+  |
+  = note: required for `std::string::String` to implement `Into<EmissionFragment<'_>>`

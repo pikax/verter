@@ -72,7 +72,6 @@ pub use route_db::{
     ROUTE_DB_RESOLVER_VERSION,
 };
 
-pub(crate) use component_meta::component_meta_resolved_macros;
 pub use component_meta::{
     collect_local_constructor_binding_keys, collect_requested_binding_demands,
     component_meta_type_registry, resolve_component_meta_parts, ComponentMetaEvalOutputs,
@@ -80,6 +79,7 @@ pub use component_meta::{
     ResolvedImportedMacroSurface, ResolvedJsdocBlock, ResolvedJsdocTag, ResolvedMacroMeta,
     ResolvedTypeRegistryMeta,
 };
+pub(crate) use component_meta::{component_meta_published_macros, component_meta_resolved_macros};
 pub use component_meta_query_engine::ComponentMetaQueryEngine;
 pub(crate) use component_meta_request::{
     ComponentMetaCacheLookup, ComponentMetaComputeOutcome, ComponentMetaRequestResult,

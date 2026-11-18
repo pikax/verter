@@ -1,4 +1,31 @@
 use super::binder_capture::*;
+
+#[test]
+fn declaration_capture_distinguishes_free_checking_helpers_from_owned_aliases() {
+    assert_eq!(
+        declaration_reference_inventory("export type Public = typeof __VerterSetupScope;")
+            .map(|(names, _)| names),
+        Some(vec!["__VerterSetupScope".into()])
+    );
+    assert_eq!(
+        declaration_reference_inventory(
+            "type __VerterPublic<T> = T; export type Public = __VerterPublic<string>;"
+        )
+        .map(|(names, _)| names),
+        Some(vec![])
+    );
+    // Authored names are free too, in value and type positions alike;
+    // the builder decides which of them the closure had to carry.
+    assert_eq!(
+        declaration_reference_inventory(
+            "declare const a: Remote;
+function read() { return status; }
+export default a;"
+        )
+        .map(|(names, _)| names),
+        Some(vec!["Remote".into(), "status".into()])
+    );
+}
 use super::script_setup::{project_script_pair, ScriptBlockInput, SourceRange};
 use crate::cursor::ScriptLanguage;
 
@@ -428,7 +455,7 @@ fn stp14_capture_refuses_the_same_inputs_the_statement_projection_refuses() {
                 content_start: 0,
                 lang: None,
             }),
-            None,
+            Some("T"),
         ),
         (
             Some(ts("const a = 1", 0)),
@@ -621,4 +648,19 @@ fn stp14_local_capture_keeps_signature_type_parameters_bound() {
     let service = captured.declaration("Service").expect("lifted Service");
     assert!(service.binder_params.is_empty());
     assert!(service.binder_references.is_empty());
+}
+
+#[test]
+fn module_bindings_name_every_authored_top_level_binding_of_both_blocks() {
+    let normal = "import { helper } from './helper';\ninterface Shape { a: number }\n";
+    let setup = "const { status } = defineProps<{ status: number }>();\nconst local = 1;\nfunction read() { const inner = 2; return inner; }\n";
+    let captured =
+        capture_binder_plan(Some(ts(normal, 0)), Some(ts(setup, 100)), None).expect("captures");
+    assert_eq!(
+        captured.module_bindings,
+        ["Shape", "helper", "local", "read", "status"]
+    );
+    assert!(plan("defineProps<{ a: string }>()", None)
+        .module_bindings
+        .is_empty());
 }

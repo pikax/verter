@@ -77,6 +77,24 @@ the same list continuation in place, attributed as `read_in_place / signature_li
 Bucket consumers finish the call list before requesting the construct list and
 stop if the call list is unsettled. They preserve declaration order.
 
+Truthiness narrowing retains its arm cursor, survivors and dropped-arm flag in
+`HelperFrame::TruthinessArms`. Each arm's identity carriers use the relation
+owner's `IdentityCarrierRead`, held by `HelperFrame::Carrier`: FLOW requests
+every walk read with shape `Staged` and family-derived nesting, preserving the
+carrier dispatch-intent counters. Answering a staged request, at the root or in
+place, hands the wait back unread (`ReadDelivery::Staged`); the walk makes that
+one read inside `deliver_identity_carrier_read`, so a deferred evaluation the
+walk stands in reads it under its own tracer and its memo's proof names what
+the read observed. The read keeps the attribution answering it would have had:
+`read_in_place` under the request's site, or the root read's answer stage.
+Staged deliveries reach no other reader. Classification still follows the completed
+walk through the direct `classify_truthiness_domain_read`. Native guard chains,
+including guards called between expression-stack arms, settle the same helper
+through `settle_now`, attributed as `read_in_place / carrier`. Their callers do
+not yet retain the guard chain at a request. Concrete carriers settle without
+requesting a read or allocating a standing-walk box. Other carrier wrappers
+continue to use their existing relation entry points.
+
 An unsettled composite is named in the current signature epoch. If that epoch
 retires while its result request waits, the producer refuses the retired handle
 with `StaleHandle`; the list continuation copies the remaining descriptors into

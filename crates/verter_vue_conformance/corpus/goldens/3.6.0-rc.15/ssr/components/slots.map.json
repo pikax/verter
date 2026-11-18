@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/components/slots.vue"
+  ],
+  "names": [],
+  "mappings": ";;;;+DAKa,KAAK,EAAC,SAAS;IACb,MAAM,WAAjB,CAEW;;;;;UADT,aAAc,YAAV,OAAK;;;;IAEA,OAAO,WAAlB,CAEW;;;;;0BADH,IAAI,CAAC,MAAM;;;;UAAjB,aAA6B,4BAAvB,IAAI,CAAC,MAAM,IAAG,OAAK;;;;IAEhB,MAAM,WAAjB,CAEW;;;;;0BADM,KAAK;;;;UAApB,aAA8B,cAAxB,QAAM,oBAAG,KAAK",
+  "sourcesContent": [
+    "\n  <ChildComp label=\"Slotted\">\n    <template #header>\n      <h1>Title</h1>\n    </template>\n    <template #default=\"{ rows }\">\n      <p>{{ rows.length }} rows</p>\n    </template>\n    <template #footer=\"{ total }\">\n      <span>Total {{ total }}</span>\n    </template>\n  </ChildComp>\n"
+  ]
+}

@@ -392,15 +392,26 @@ fn parse_element<'alloc>(
     // ── 2. v-for ────────────────────────────────────────────────
     let v_for = match &element.v_for {
         Some(prop) => match (prop.value_start, prop.value_end) {
-            (Some(vs), Some(ve)) => Some(OxcParsedVFor {
-                parsed: parse_vfor_with_bindings_sliced(
+            (Some(vs), Some(ve)) => {
+                let parsed = parse_vfor_with_bindings_sliced(
                     alloc,
                     Span::new(vs, ve),
                     input,
                     source_type,
                     &**outer.active,
-                ),
-            }),
+                );
+                let source_bindings = parsed.right().map(|expression| {
+                    extract_bindings_from_expression(
+                        expression,
+                        input,
+                        outer.binding_ctx(0, ide_completion),
+                    )
+                });
+                Some(OxcParsedVFor {
+                    parsed,
+                    source_bindings,
+                })
+            }
             _ => None,
         },
         None => None,

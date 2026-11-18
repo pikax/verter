@@ -32,11 +32,13 @@ fn main() {
         LanguageId::new("vue"),
         "svelte",
         Present(VueCarrierFrontend),
-    );
+    )
+    .expect("the test manifest is admitted");
     let _ = TypedCapabilityRegistration::register_projection::<VueSfcV3, _>(
         FrameworkAdapterId::vue(),
         LanguageId::new("vue"),
         "svelte",
         Present(ProjectionOnly),
-    );
+    )
+    .expect("the test manifest is admitted");
 }

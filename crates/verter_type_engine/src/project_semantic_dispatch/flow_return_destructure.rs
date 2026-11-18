@@ -709,15 +709,14 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, '_, D> {
                 self.st.owner,
             ),
         };
-        let key = self.dispatch.lower_type_expr_in_owner_scope_with_context(
+        let key = self.lower_owner_in_place(
             scope.as_ref(),
             owner,
             &verter_type_expr::TypeExpr::TypeOf(verter_type_expr::ValueRef {
                 path: vec!["Symbol".to_owned(), "iterator".to_owned()],
                 type_args: Vec::new(),
             }),
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-        )?;
+        );
         let identity = self.dispatch.unique_symbol_identity_for_typeof_node(key)?;
         let method = self.project_key(
             source,

@@ -87,11 +87,14 @@ fn recursive_alias_self_pick_publishes_shallow_ref() {
         .evaluated_types
         .as_ref()
         .expect("Expanded mode must populate evaluated_types");
+    // The `defineProps` shape is the publication authority for the macro's
+    // members; the flat `props` lane is evaluator metadata.
     let value_field = evaluated
-        .props
+        .define_props
         .iter()
-        .find(|f| f.name == "value")
-        .expect("evaluated_types.props missing field `value`");
+        .flat_map(|shape| shape.result.value.properties.iter())
+        .find(|property| property.name == "value")
+        .expect("the defineProps shape publishes member `value`");
 
     // Shell-materialize the published source WITHOUT a resolution
     // demand: the SHALLOW published shape is exactly what this guard
@@ -99,7 +102,7 @@ fn recursive_alias_self_pick_publishes_shallow_ref() {
     let shallow = verter_session::test_only::semantic_source_probe::shallow_type_expr(
         &host,
         "/c.vue",
-        value_field.authority.source().expect("present source"),
+        value_field.ty.present().expect("present source"),
     )
     .unwrap_or_else(|| panic!("`value`'s published source must shell-materialize"));
 

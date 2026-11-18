@@ -697,6 +697,14 @@ fn push(
     path: PathBuf,
     provenance: Provenance,
 ) {
+    // A relative candidate names a file from the invocation directory. The
+    // validator spawns engines from other working directories, so it is made
+    // absolute once, here.
+    let path = if path.is_relative() {
+        std::path::absolute(&path).unwrap_or(path)
+    } else {
+        path
+    };
     let key = path.canonicalize().unwrap_or_else(|_| path.clone());
     if seen.insert(key.clone()) {
         out.candidates.push(Candidate { path, provenance });
@@ -1017,6 +1025,23 @@ mod tests {
                 .any(|n| n.contains(ENV_OVERRIDE_VAR) && n.contains("not a usable file")),
             "the note must name the var and why it was skipped: {:?}",
             enumeration.notes
+        );
+    }
+
+    /// A relative override names a file from the invocation directory, and the
+    /// candidate keeps that file even where the validator spawns the engine
+    /// from another working directory.
+    #[test]
+    fn relative_env_override_is_a_candidate_from_the_invocation_directory() {
+        // Tests run from the crate directory, which holds its manifest.
+        let relative = PathBuf::from("Cargo.toml");
+        assert!(relative.is_file());
+        let enumeration =
+            enumerate_candidates(&request(None, Some(relative.clone()), vec![], None, None));
+        assert_eq!(enumeration.candidates.len(), 1, "{:?}", enumeration.notes);
+        assert_eq!(
+            enumeration.candidates[0].path,
+            std::env::current_dir().unwrap().join(&relative)
         );
     }
 

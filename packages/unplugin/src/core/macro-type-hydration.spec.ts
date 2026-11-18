@@ -6,15 +6,36 @@
  * in barrel files.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { loadHost, resetHost } from "./compiler";
+import type { VerterHost } from "@verter/native";
+import { BundlerHostSession } from "./host-session/session";
+
+const sessions: BundlerHostSession[] = [];
+
+/** A host owned by a freshly bound session, closed after each test. */
+function openHost(): VerterHost {
+  const session = BundlerHostSession.bind({
+    adapter: "vite",
+    root: "/lib",
+    mode: "dev",
+    defaultTarget: "client",
+    frameworkSelection: "auto",
+    options: {},
+    hostCssPipeline: true,
+    hostStripsTypeScript: true,
+    hostConfig: null,
+    nuxtFileRoles: false,
+  });
+  sessions.push(session);
+  return session.host();
+}
 
 describe("macro-type-hydration export signature integration", () => {
   afterEach(() => {
-    resetHost();
+    for (const session of sessions.splice(0)) session.close();
   });
 
   it("getAnalysis of barrel file includes exportSignatures with reexport metadata", () => {
-    const host = loadHost();
+    const host = openHost();
     host.upsert({
       inputId: "/lib/index.ts",
       source:
@@ -41,7 +62,7 @@ describe("macro-type-hydration export signature integration", () => {
   });
 
   it("exportSignatures distinguishes type-only re-exports", () => {
-    const host = loadHost();
+    const host = openHost();
     host.upsert({
       inputId: "/lib/barrel.ts",
       source:
@@ -64,7 +85,7 @@ describe("macro-type-hydration export signature integration", () => {
   });
 
   it("wildcard re-export produces star export signature", () => {
-    const host = loadHost();
+    const host = openHost();
     host.upsert({
       inputId: "/lib/reexport.ts",
       source: "export * from './types';",
@@ -82,7 +103,7 @@ describe("macro-type-hydration export signature integration", () => {
   });
 
   it("local exports have no reexport fields in analysis", () => {
-    const host = loadHost();
+    const host = openHost();
     host.upsert({
       inputId: "/lib/local.ts",
       source: "export const VALUE = 1;\nexport interface Config { key: string }",
@@ -102,7 +123,7 @@ describe("macro-type-hydration export signature integration", () => {
   it("hydration barrel walk extracts unique reexport sources from exportSignatures", () => {
     // This test verifies the logic that replaced the old moduleReferences heuristic.
     // The new code: (depAnalysis.exportSignatures ?? []).filter(sig => sig.reexportSource).map(...)
-    const host = loadHost();
+    const host = openHost();
     host.upsert({
       inputId: "/lib/multi-barrel.ts",
       source: [

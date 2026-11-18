@@ -215,9 +215,9 @@ test("ARH0-capability dirty twin: another dependency's version in the same file 
   const row = dirty["capability-matrix"].rows.find(
     (r) => r.capability === "svelte-compilation-conformance",
   );
-  // 3.6.0-rc.5 IS in package.json — but as the Vue pin, not Svelte's. The
+  // 3.6.0-rc.15 IS in package.json — but as the Vue pin, not Svelte's. The
   // binding is the named property, so the same-file occurrence must fail.
-  row.version = "3.6.0-rc.5";
+  row.version = "3.6.0-rc.15";
   const result = validate(dirty);
   assert.equal(result.ok, false);
   assert.ok(

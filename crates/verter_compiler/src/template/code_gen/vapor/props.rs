@@ -7,14 +7,15 @@
 //! that update the DOM via setter functions inside `_renderEffect`.
 
 use crate::ast::types::{ElementNode, PropFlags};
-use crate::template::code_gen::binding::{BindingResolver, BindingType};
-use crate::template::code_gen::shared::helpers::{
-    self, is_member_expression, is_multi_statement_handler, VaporHelper, DELEGATABLE_EVENTS,
-};
+use crate::template::binding::{is_simple_ident, BindingResolver, BindingType};
+use crate::template::code_gen::shared::helpers::{self, VaporHelper, DELEGATABLE_EVENTS};
 use crate::template::code_gen::types::{
     CodeGenOutput, VaporCounters, VaporEffect, VaporElementState,
 };
 use crate::template::oxc::types::{OxcParsedElement, OxcParsedExpression};
+use crate::template::vue_syntax::{
+    is_member_expression, is_multi_statement_handler, references_event_param,
+};
 
 use super::{find_prop_oxc_exp, resolve_expr};
 
@@ -61,7 +62,7 @@ pub fn process_dynamic_props(
     ctx: &mut VaporPropsContext<'_, '_>,
     oxc_el: Option<&OxcParsedElement<'_>>,
 ) {
-    // Process template ref (ref="name") — emits _setTemplateRef
+    // Process template ref (ref="name") — emits _setStaticTemplateRef
     if let Some(ref_prop) = &element.v_ref {
         process_template_ref(ref_prop, ctx.source, ctx.state, ctx.counters, ctx.out);
     }
@@ -172,7 +173,14 @@ pub fn process_dynamic_props(
                 let value_resolved =
                     resolve_expr(value, value_start, oxc_exp, ctx.resolver, ctx.force_js);
                 let node_ref = ctx.state.ensure_node_ref(ctx.counters);
-                let obj_expr = format!("{{ [{key_expr}]: {value_resolved} }}");
+                // A nullish runtime key names no attribute: Vue guards the
+                // computed key with `|| ""`, parenthesizing anything that is
+                // not a bare identifier.
+                let obj_expr = if is_simple_ident(inner.trim()) {
+                    format!("{{ [{key_expr} || \"\"]: {value_resolved} }}")
+                } else {
+                    format!("{{ [({key_expr}) || \"\"]: {value_resolved} }}")
+                };
                 ctx.state.own_effects.push(VaporEffect::SetDynamicProps {
                     node_ref,
                     expr: ctx.out.alloc_str(&obj_expr),
@@ -215,7 +223,7 @@ pub fn process_dynamic_props(
         let resolved = if prop.value_start.is_none() {
             match arg {
                 Some(attr_name) => {
-                    let camelized = crate::template::code_gen::vdom::props::camelize(attr_name);
+                    let camelized = crate::template::vue_syntax::camelize(attr_name);
                     ctx.resolver.resolve_simple_expr(&camelized)
                 }
                 None => String::new(),
@@ -556,7 +564,7 @@ fn write_handler_expression(
                 buf.push_str(", ");
             }
             buf.push('"');
-            helpers::escape_js_string_into(buf, m);
+            crate::template::vue_syntax::escape_js_string_into(buf, m);
             buf.push('"');
         }
         buf.push_str("])");
@@ -587,10 +595,10 @@ fn write_handler_expression(
 /// single expression a parenthesised one.
 ///
 /// `is_statement_list` is the parse fact from
-/// [`is_multi_statement_handler`][helpers::is_multi_statement_handler], never a
+/// [`is_multi_statement_handler`][crate::template::vue_syntax::is_multi_statement_handler], never a
 /// probe of the handler text.
 fn push_inline_handler(buf: &mut String, resolved: &str, is_statement_list: bool) {
-    let trimmed = helpers::trim_handler_body(resolved);
+    let trimmed = crate::template::vue_syntax::trim_handler_body(resolved);
     if trimmed.is_empty() {
         // Empty handler: @event="" → no-op
         buf.push_str("$event => {}");
@@ -619,29 +627,6 @@ fn push_inline_handler(buf: &mut String, resolved: &str, is_statement_list: bool
         buf.push_str(trimmed);
         buf.push(')');
     }
-}
-
-/// Whether `body` references the `$event` pseudo-identifier as a whole
-/// word (not merely as a substring of a longer identifier).
-fn references_event_param(body: &str) -> bool {
-    const NEEDLE: &str = "$event";
-    let bytes = body.as_bytes();
-    let mut start = 0;
-    while let Some(pos) = body[start..].find(NEEDLE) {
-        let idx = start + pos;
-        let before_ok = idx == 0
-            || !(bytes[idx - 1].is_ascii_alphanumeric()
-                || bytes[idx - 1] == b'_'
-                || bytes[idx - 1] == b'$');
-        let after = idx + NEEDLE.len();
-        let after_ok =
-            after >= bytes.len() || !(bytes[after].is_ascii_alphanumeric() || bytes[after] == b'_');
-        if before_ok && after_ok {
-            return true;
-        }
-        start = idx + NEEDLE.len();
-    }
-    false
 }
 
 /// Process v-model directive.
@@ -738,7 +723,10 @@ fn determine_model_helper(element: &ElementNode, tag_name: &str, source: &str) -
     }
 }
 
-/// Process a cached template ref attribute (`ref="name"`) → `_setTemplateRef(nN, "name")`.
+/// Process a cached template ref attribute (`ref="name"`) → `_setStaticTemplateRef(nN, "name")`.
+///
+/// A static ref outside `v-for` needs no per-render setter: the runtime's
+/// `setStaticTemplateRef` binds it directly, as the official compiler emits.
 ///
 /// Uses the pre-cached `ElementNode::v_ref` field (populated by the syntax layer)
 /// instead of scanning the props list. This mirrors how `v_for`, `v_once`, etc. work.
@@ -753,13 +741,13 @@ fn process_template_ref<'a>(
         let ref_name = &source[vs as usize..ve as usize];
         let node_ref = state.ensure_node_ref(counters);
         let mut stmt = String::with_capacity(40);
-        stmt.push_str("_setTemplateRef(n");
+        stmt.push_str("_setStaticTemplateRef(n");
         helpers::push_u32(&mut stmt, node_ref);
         stmt.push_str(", \"");
         stmt.push_str(ref_name);
         stmt.push_str("\")");
         state.child_statements.push((out.alloc_str(&stmt), &[]));
-        out.add_vapor_import(VaporHelper::CreateTemplateRefSetter);
+        out.add_vapor_import(VaporHelper::SetStaticTemplateRef);
     }
 }
 
@@ -847,10 +835,7 @@ mod tests {
     }
 
     fn make_resolver_with(
-        entries: &[(
-            &'static str,
-            crate::template::code_gen::binding::BindingType,
-        )],
+        entries: &[(&'static str, crate::template::binding::BindingType)],
         is_inline: bool,
     ) -> BindingResolver<'static> {
         let mut map = FxHashMap::default();
@@ -1061,10 +1046,7 @@ mod tests {
         // `value.is_empty()` conflation, this would silently resolve to
         // `_ctx.id`/`$setup.id` instead of the literal empty string.
         let resolver = make_resolver_with(
-            &[(
-                "id",
-                crate::template::code_gen::binding::BindingType::SetupRef,
-            )],
+            &[("id", crate::template::binding::BindingType::SetupRef)],
             false,
         );
         let mut del_events: Vec<&str> = Vec::new();
@@ -1666,7 +1648,7 @@ mod tests {
 
     #[test]
     fn v_html_resolves_expression() {
-        use crate::template::code_gen::binding::BindingType;
+        use crate::template::binding::BindingType;
 
         let alloc = Allocator::default();
         let mut out = CodeGenOutput::new(&alloc);
@@ -1766,7 +1748,7 @@ mod tests {
 
     #[test]
     fn v_bind_spread_resolves_expression() {
-        use crate::template::code_gen::binding::BindingType;
+        use crate::template::binding::BindingType;
 
         let alloc = Allocator::default();
         let mut out = CodeGenOutput::new(&alloc);
@@ -1819,7 +1801,7 @@ mod tests {
 
     #[test]
     fn dynamic_class_with_setup_ref_inline() {
-        use crate::template::code_gen::binding::BindingType;
+        use crate::template::binding::BindingType;
 
         let alloc = Allocator::default();
         let mut out = CodeGenOutput::new(&alloc);
@@ -1873,7 +1855,7 @@ mod tests {
 
     #[test]
     fn dynamic_style_with_props_inline() {
-        use crate::template::code_gen::binding::BindingType;
+        use crate::template::binding::BindingType;
 
         let alloc = Allocator::default();
         let mut out = CodeGenOutput::new(&alloc);
@@ -1927,7 +1909,7 @@ mod tests {
 
     #[test]
     fn dynamic_prop_with_setup_const_standalone() {
-        use crate::template::code_gen::binding::BindingType;
+        use crate::template::binding::BindingType;
 
         let alloc = Allocator::default();
         let mut out = CodeGenOutput::new(&alloc);
@@ -1984,7 +1966,7 @@ mod tests {
 
     #[test]
     fn dynamic_attr_with_setup_ref_inline() {
-        use crate::template::code_gen::binding::BindingType;
+        use crate::template::binding::BindingType;
 
         let alloc = Allocator::default();
         let mut out = CodeGenOutput::new(&alloc);

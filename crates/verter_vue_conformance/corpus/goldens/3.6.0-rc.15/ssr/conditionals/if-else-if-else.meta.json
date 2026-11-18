@@ -1,0 +1,56 @@
+{
+  "schema": 2,
+  "caseId": "conditionals/if-else-if-else",
+  "backend": "ssr",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/conditionals/if-else-if-else.vue",
+    "sha256": "e4161885c675cfa4536f3a940b5fd6108d9ca656482a4291a26ad5bdd9f5cca7"
+  },
+  "options": {
+    "sha256": "2855fcfb1baa1e4e46b5150517e038e7fa476f7a672a65f496d26546b3d474cd",
+    "summary": {
+      "backend": "ssr",
+      "vapor": false,
+      "ssr": true,
+      "filename": "cases/conditionals/if-else-if-else.vue",
+      "id": "conditionals/if-else-if-else",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/ssr/conditionals/if-else-if-else.js",
+      "sha256": "1c1eabf0714d94601e81dc7182d8da5af1bd64d88c5dc9dc6ccf35d222d810d0",
+      "bytes": 878
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/ssr/conditionals/if-else-if-else.map.json",
+      "sha256": "f14bc036524cca01032d606f30a6f21e8aa976a99452f4cf40d32b9efce175db"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "ref",
+      "alias": "ref"
+    }
+  ]
+}

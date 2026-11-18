@@ -325,7 +325,6 @@ pub fn compile_client<'a>(
             filename: opts.filename.as_deref(),
             want_source_map,
         },
-        alloc,
     )?;
     validate_generated_client_module(&module.code, alloc)?;
     module.css = external_css;

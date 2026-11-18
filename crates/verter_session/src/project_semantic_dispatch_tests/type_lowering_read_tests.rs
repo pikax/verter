@@ -98,6 +98,9 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
             "export declare const key: 'a';\n",
             "export type Box<T> = { value: T };\n",
             "export declare class C { static make<T>(value: T): T; }\n",
+            "export declare const f: { tag: 'kept'; <T>(value: T): T; new<T>(value: T): { value: T } };\n",
+            "export declare function overloaded<T>(value: T): T;\n",
+            "export declare function overloaded<T>(value: T, second: T): T[];\n",
         ),
     );
     upsert_ts(
@@ -335,6 +338,27 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
             ],
         ),
         (
+            "applied callable object",
+            value_type(&["f"], vec![TypeExpr::Primitive(PrimitiveName::String)]),
+            vec![
+                ("TypeOf", Node),
+                ("SignaturesOfType", Whole),
+                ("SignaturesOfType", Whole),
+            ],
+        ),
+        (
+            "applied overloads",
+            value_type(
+                &["overloaded"],
+                vec![TypeExpr::Primitive(PrimitiveName::String)],
+            ),
+            vec![
+                ("TypeOf", Node),
+                ("SignaturesOfType", Whole),
+                ("SignaturesOfType", Whole),
+            ],
+        ),
+        (
             "applied typeof",
             value_type(
                 &["C", "make"],
@@ -405,6 +429,8 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
                     SemanticQueryKey::IndexedAccess { .. } => "IndexedAccess",
                     SemanticQueryKey::MappedType { .. } => "MappedType",
                     SemanticQueryKey::ProjectPath { .. } => "ProjectPath",
+                    SemanticQueryKey::SignaturesOfType { .. } => "SignaturesOfType",
+                    SemanticQueryKey::ReadSignatureResult(_) => "ReadSignatureResult",
                     other => panic!("unexpected lowering read: {other:?}"),
                 };
                 (family, *shape)
@@ -478,6 +504,77 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
             ),
             "{label}"
         );
+        if label == "applied callable object" || label == "applied overloads" {
+            use verter_type_engine::semantic_query::{SignatureKind, SurfaceEntry};
+            let kinds: Vec<_> = trace
+                .requested
+                .iter()
+                .filter_map(|(key, _)| match key {
+                    SemanticQueryKey::SignaturesOfType { kind, .. } => Some(*kind),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                kinds,
+                [SignatureKind::Call, SignatureKind::Construct],
+                "{label}"
+            );
+            let data = dispatch.graph().node_data(trace.node).unwrap();
+            let SemanticNodeData::Object(surface) = data.as_ref() else {
+                panic!("{label}: callable object expected: {data:?}")
+            };
+            let mut calls = 0;
+            let mut constructs = 0;
+            let mut members = 0;
+            for entry in surface.entries().iter() {
+                let signature = match entry {
+                    SurfaceEntry::CallSignature(node) => {
+                        calls += 1;
+                        *node
+                    }
+                    SurfaceEntry::ConstructSignature(node) => {
+                        constructs += 1;
+                        *node
+                    }
+                    SurfaceEntry::Member(_) => {
+                        members += 1;
+                        continue;
+                    }
+                    _ => panic!("{label}: unexpected entry {entry:?}"),
+                };
+                let signature_data = dispatch.graph().node_data(signature).unwrap();
+                let SemanticNodeData::Signature {
+                    params,
+                    type_parameters,
+                    ..
+                } = signature_data.as_ref()
+                else {
+                    panic!("{label}: signature expected")
+                };
+                assert!(
+                    type_parameters.is_empty(),
+                    "{label}: consumed clause removed"
+                );
+                for param in params.iter() {
+                    assert!(
+                        matches!(
+                            dispatch.graph().node_data(param.ty).as_deref(),
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+                        ),
+                        "{label}: explicit argument substitutes each parameter"
+                    );
+                }
+            }
+            assert_eq!(
+                (calls, constructs, members),
+                if label == "applied callable object" {
+                    (1, 1, 1)
+                } else {
+                    (2, 0, 0)
+                },
+                "{label}: retain overloads and non-signature members"
+            );
+        }
         if label == "mapped infer source preserves outer value"
             || label == "mapped infer source preserves outer remap"
             || label == "mapped keyof infer binds value and remap"
@@ -579,4 +676,173 @@ fn type_lowering_preserves_read_order_shapes_and_substitutions() {
             );
         }
     }
+}
+
+/// What one lowering of `[typeof C.make<'x'>; elements]` on a fresh host
+/// produced and paid: its node, the reads it made (stepped only), and the
+/// substitution work the graph counted.
+struct RepeatedInstantiation {
+    /// Element nodes the tuple holds, and how many of them are distinct.
+    elements: (usize, usize),
+    template_reads: usize,
+    child_visits: u64,
+    memo_hits: u64,
+    memo_misses: u64,
+    lookups: u64,
+}
+
+fn lower_repeated_instantiation(elements: usize, stepped: bool) -> RepeatedInstantiation {
+    let host = host();
+    upsert_ts(
+        &host,
+        "/lower.ts",
+        "export declare class C { static make<T extends string>(): `${T}`; }\n",
+    );
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let _construction = dispatch.enter_construction_scope();
+    let scope = file_scope(&dispatch, "/lower.ts");
+    let payload = dispatch
+        .ctx
+        .prepared_decl_bundle("/lower.ts")
+        .map(|bundle| {
+            DeclarationScopePayload::from_bundle(
+                &bundle,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            )
+        });
+    let shadowing = ScopeShadowing::from_scope_payload(payload.as_ref());
+    let names = FxHashMap::default();
+    let env = FxHashMap::default();
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let expr = TypeExpr::Tuple {
+        elements: (0..elements)
+            .map(|_| verter_type_expr::TupleElement {
+                label: None,
+                ty: value_type(&["C", "make"], vec![TypeExpr::string_literal("x")]),
+                optional: false,
+                rest: false,
+            })
+            .collect(),
+        readonly: false,
+    };
+    let before = dispatch.graph().stats_snapshot();
+    let (node, template_reads) = if stepped {
+        let trace = dispatch.step_type_lowering_for_tests(
+            &expr,
+            &env,
+            &scope,
+            &names,
+            payload.as_ref(),
+            &shadowing,
+            context,
+        );
+        let reads = trace
+            .requested
+            .iter()
+            .filter(|(key, _)| matches!(key, SemanticQueryKey::TemplateLiteralReduce { .. }))
+            .count();
+        (trace.node, reads)
+    } else {
+        let mut substitutions = Vec::new();
+        let node = dispatch.shallow_lower_type_expr_with_context_for_tests(
+            &expr,
+            &env,
+            &scope,
+            &names,
+            payload.as_ref(),
+            &shadowing,
+            &mut substitutions,
+            context,
+        );
+        (node, 0)
+    };
+    let after = dispatch.graph().stats_snapshot();
+    let data = dispatch.graph().node_data(node).unwrap();
+    let SemanticNodeData::Tuple {
+        elements: lowered, ..
+    } = data.as_ref()
+    else {
+        panic!("tuple expected: {data:?}")
+    };
+    for element in lowered.iter() {
+        let signature = dispatch.graph().node_data(element.value).unwrap();
+        let SemanticNodeData::Signature {
+            return_type,
+            type_parameters,
+            ..
+        } = signature.as_ref()
+        else {
+            panic!("an applied typeof yields a signature: {signature:?}")
+        };
+        assert!(type_parameters.is_empty(), "the clause is consumed");
+        assert_eq!(
+            dispatch.graph().node_data(*return_type).as_deref(),
+            Some(&SemanticNodeData::Literal(LiteralValue::String(
+                "x".to_owned()
+            ))),
+            "`${{T}}` with T = 'x' reduces to the literal"
+        );
+    }
+    RepeatedInstantiation {
+        elements: (
+            lowered.len(),
+            lowered
+                .iter()
+                .map(|element| element.value)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+        ),
+        template_reads,
+        child_visits: after.substitution_child_visits - before.substitution_child_visits,
+        memo_hits: after.substitute_memo_hits - before.substitute_memo_hits,
+        memo_misses: after.substitute_memo_misses - before.substitute_memo_misses,
+        lookups: (after.hits + after.misses) - (before.hits + before.misses),
+    }
+}
+
+/// An applied `typeof` lowered twice in one lowering instantiates once:
+/// the first substitution walk, suspended at its template read, completes
+/// inside the connected demand its driver holds, publishes its priced
+/// memo entry, and the second element is served from it — with no second
+/// walk and no second `TemplateLiteralReduce` read, in place and stepped.
+#[test]
+fn a_repeated_typeof_instantiation_reuses_its_published_substitution() {
+    let single = lower_repeated_instantiation(1, false);
+    let pair = lower_repeated_instantiation(2, false);
+    let stepped = lower_repeated_instantiation(2, true);
+    assert!(
+        single.child_visits > 0,
+        "the first element walks its substitution"
+    );
+    assert_eq!(
+        pair.child_visits, single.child_visits,
+        "the second element walks no substitution in place"
+    );
+    assert_eq!(
+        pair.memo_misses, single.memo_misses,
+        "the second element misses no substitution memo entry"
+    );
+    assert!(
+        pair.memo_hits > single.memo_hits,
+        "the second element is served by the published substitution"
+    );
+    assert_eq!(
+        stepped.template_reads, 1,
+        "the template is read once across both elements"
+    );
+    assert_eq!(
+        (stepped.child_visits, stepped.memo_hits, stepped.memo_misses),
+        (pair.child_visits, pair.memo_hits, pair.memo_misses),
+        "stepped and in-place lowering pay the same substitution work"
+    );
+    assert_eq!(
+        stepped.lookups, pair.lookups,
+        "in-place lowering makes the reads the stepped lowering requests"
+    );
+    assert_eq!(single.elements, (1, 1));
+    assert_eq!(
+        (pair.elements, stepped.elements),
+        ((2, 1), (2, 1)),
+        "both elements are the one instantiated signature"
+    );
 }

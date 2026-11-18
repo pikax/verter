@@ -1176,22 +1176,7 @@ fn carrier_parse_key_under(
     file_language: &verter_language::FileLanguage,
     grammar: &verter_language::carrier_grammar::CarrierGrammarConfig,
 ) -> Option<ParseKey> {
-    use verter_language::carrier_grammar::CarrierGrammarConfig;
-    let options = match grammar {
-        CarrierGrammarConfig::Vue { delimiters, .. } => verter_language::ParseOptions {
-            delimiters: (
-                delimiters.open().to_string(),
-                delimiters.close().to_string(),
-            ),
-            custom_elements: grammar
-                .custom_element_names()
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-            svelte_loose: false,
-        },
-        CarrierGrammarConfig::Svelte => verter_language::ParseOptions::default(),
-    };
+    let options = grammar.parse_options().clone();
     // The language crate owns the (language, options) → compatibility
     // domain/epoch selection: a carrier of any adapter keys under its OWN
     // domain, never another framework's.

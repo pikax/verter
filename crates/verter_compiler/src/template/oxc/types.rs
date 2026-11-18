@@ -216,6 +216,10 @@ pub struct OxcParsedProp<'alloc> {
 pub struct OxcParsedVFor<'alloc> {
     /// Parsed v-for expression with extracted locals and references.
     pub parsed: VForWithBindings<'alloc>,
+    /// Complete iterable occurrence inventory, including template-scope locals,
+    /// callback free reads, shorthand values and access kinds. Positions are
+    /// file-absolute, matching the retained v-for AST.
+    pub source_bindings: Option<BindingExtractionResult<'alloc>>,
 }
 
 /// OXC-parsed v-slot directive result.
@@ -449,6 +453,18 @@ impl<'alloc> OxcParsedAst<'alloc> {
         ast.nodes[id.0]
             .parent
             .map_or(LexicalScopeId::ROOT, |parent| self.children_scope(parent))
+    }
+
+    /// Whether `expression` reads a name that `scope` or an enclosing frame
+    /// declares: a `v-for` alias or `v-slot` parameter. Name-based, like
+    /// Vue's `hasScopeRef`: a name the expression itself rebinds still counts.
+    pub fn reads_scope(&self, expression: &OxcParsedExpression<'_>, scope: LexicalScopeId) -> bool {
+        expression.bindings.as_ref().is_some_and(|bindings| {
+            bindings
+                .bindings
+                .iter()
+                .any(|binding| binding.ignore && self.scopes.declares(scope, binding.name))
+        })
     }
 
     /// The IDE slot summary for the component at `id`, built once and memoized.

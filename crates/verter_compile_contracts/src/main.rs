@@ -133,7 +133,6 @@ fn main() {
             !matches!(
                 path.file_name().and_then(|name| name.to_str()),
                 Some("pending_nav_request_unreachable.rs")
-                    | Some("segmented_overwrite_authority_unreachable.rs")
             )
         });
     }

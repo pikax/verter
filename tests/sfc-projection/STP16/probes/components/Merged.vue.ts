@@ -17,7 +17,7 @@
 interface Props { label?: string }
 interface Props { id: number }
 
-type __VerterPublicProps = import("vue").PublicProps & (Props) & { "modelValue": string; "modelModifiers"?: Partial<Record<string, true>>; "onUpdate:modelValue"?: (value: string) => void };
+type __VerterPublicProps = import("vue").PublicProps & (Props) & { "modelValue": string; modelModifiers?: Record<string, true | undefined>; "onUpdate:modelValue"?: (value: string) => void };
 type __VerterPublicInstance = Omit<import("vue").ComponentPublicInstance, "$props" | "$emit" | "$slots"> & {
   readonly $props: __VerterPublicProps;
   $emit: ((event: "update:modelValue", value: string) => void);

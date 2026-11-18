@@ -247,6 +247,72 @@ pub(crate) fn strip_owner_route_fact(
     Arc::from(filtered.into_boxed_slice())
 }
 
+/// Project already-published macro shapes onto the legacy Rust evaluation API.
+/// This data-only adapter runs after resolution, outside component-meta compute,
+/// and adopts the resolution's completeness through the shared handoff.
+pub(super) fn evaluated_types_at_api_boundary(
+    resolved: crate::meta_resolve::ResolvedComponentMetaState,
+) -> Option<verter_session_query::analysis::type_expand::ExpandedComponentTypes> {
+    use verter_session_query::analysis::type_expand::{
+        ExpandedField, ExpandedObjectShape, ExpansionResult,
+    };
+
+    fn copy_shape_fields(
+        fields: &mut Vec<ExpandedField>,
+        owner: verter_type_expr::TopLevelOwnerId,
+        shape: &ExpansionResult<ExpandedObjectShape>,
+    ) {
+        for property in &shape.value.properties {
+            let field = ExpandedField::from_source_position(
+                property.name.clone(),
+                owner,
+                property.ty.clone(),
+                None,
+                property.optional,
+                shape.exactness,
+                shape.execution_status,
+                shape
+                    .diagnostics
+                    .iter()
+                    .filter(|diagnostic| {
+                        diagnostic.property_name.as_deref() == Some(property.name.as_str())
+                    })
+                    .cloned()
+                    .collect(),
+                property.declared_in_macro_type_arg,
+                verter_type_expr::ResolutionProvenance::FrameworkSurface,
+            );
+            if let Some(existing) = fields
+                .iter_mut()
+                .find(|existing| existing.name == field.name)
+            {
+                *existing = field;
+            } else {
+                fields.push(field);
+            }
+        }
+    }
+
+    let owners: Vec<_> = resolved
+        .snapshot
+        .macros
+        .iter()
+        .map(|mac| mac.owner)
+        .collect();
+    let mut evaluated = resolved.into_evaluated_types()?;
+    for shape in &evaluated.define_props {
+        if let Some(owner) = owners.get(shape.macro_index) {
+            copy_shape_fields(&mut evaluated.props, *owner, &shape.result);
+        }
+    }
+    for shape in &evaluated.define_emits {
+        if let Some(owner) = owners.get(shape.macro_index) {
+            copy_shape_fields(&mut evaluated.emits, *owner, &shape.result);
+        }
+    }
+    Some(evaluated)
+}
+
 impl VerterHost {
     pub fn evaluate_types(
         &self,
@@ -259,7 +325,7 @@ impl VerterHost {
             canonical_or_alias,
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
         )?;
-        resolved.into_evaluated_types()
+        evaluated_types_at_api_boundary(resolved)
     }
 
     /// Single native component-meta query.

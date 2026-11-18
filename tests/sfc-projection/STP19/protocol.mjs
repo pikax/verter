@@ -8,7 +8,7 @@
  *   bytes and admitted carrier blocks per mandatory case;
  * - the anchored negative probes run on every resolved engine: each
  *   construction that violates a component's exact contract reports one
- *   TS2769 at the offending authored member, and each explicit argument that
+ *   its pinned assignability or overload error at the authored member, and each explicit argument that
  *   violates the authored binder reports one TS2344 at that argument;
  * - every Rust dirty twin is applied as a source patch against the owned
  *   product and must make its discriminator tests FAIL;
@@ -26,6 +26,7 @@
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { withTemporaryRepository } from "../temporary-repository.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -141,7 +142,7 @@ const DIRTY_TWIN_PATCHES = Object.freeze({
   }),
   DIRTY_ADAPTER_ANY: Object.freeze({
     caseId: "STP19-erasure",
-    find: ": C) : __VerterUseCalls<C, unknown, never, []>;",
+    find: ": C) : __VerterUseCalls<C, unknown, never, [], Public>;",
     replace: ": C) : any;",
     discriminators: Object.freeze(["foreign_contract_declarations_keep_published_shapes"]),
   }),
@@ -180,7 +181,7 @@ const TS_TWINS = Object.freeze({
     caseId: "STP19-erasure",
     probe: "negative.ts",
     rewrite: (text) =>
-      text.replace(": C) : __VerterUseCalls<C, unknown, never, []>;", ": C) : any;"),
+      text.replace(": C) : __VerterUseCalls<C, unknown, never, [], Public>;", ": C) : any;"),
     expect: { loses: '"level": (4)' },
   }),
   // The open catch-all replaces the whole constructor with its own `$props`
@@ -201,7 +202,7 @@ const TS_TWINS = Object.freeze({
     caseId: "STP19-overloads",
     probe: "positive.ts",
     rewrite: (text) =>
-      text.replace(": C) : __VerterUseCalls<C, unknown, never, []>;", ": C) : unknown;"),
+      text.replace(": C) : __VerterUseCalls<C, unknown, never, [], Public>;", ": C) : unknown;"),
     expect: { gains: '"mode": "on"' },
   }),
   // Every rebuilt call overload tolerates unknown attributes: an earlier
@@ -223,7 +224,7 @@ const TS_TWINS = Object.freeze({
     probe: "negative-construction.ts",
     rewrite: (text) =>
       text.replace(
-        "__VerterUseSame<[A, I], Prev> extends true ? __VerterUseOrdered<Out, unknown> :",
+        "__VerterUseSame<[A, I], Prev> extends true ? ([Single] extends [never] ? __VerterUseOrdered<Out, unknown> : Fallback) :",
         "__VerterUseSame<[A, I], Prev> extends true ? C :",
       ),
     expect: { loses: '"label": (1)' },
@@ -252,15 +253,17 @@ const TS_TWINS = Object.freeze({
   }),
 });
 
-// Construction violations: each anchored line carries exactly one TS2769 at
-// an authored member. With more than three candidate signatures TypeScript
+// Construction violations: each anchored line carries one pinned diagnostic
+// at an authored member. A single concrete contract reports assignability;
+// generic and overloaded contracts retain overload diagnostics.
+// With more than three candidate signatures TypeScript
 // reports its last candidate's failure, exactly as it does for the same
 // props passed to `new Shape(...)` directly, so the six-overload use anchors
 // at the member that last candidate rejects.
 const CONSTRUCTION_ANCHORS = Object.freeze([
   { caseId: "STP19-forward", line: '"field": "missing"', at: '"field"' },
-  { caseId: "STP19-instantiation-alias", line: '"field": "label"', at: '"field"' },
-  { caseId: "STP19-foreign", line: "\"count\": ('1')", at: '"count"' },
+  { caseId: "STP19-instantiation-alias", line: '"field": "label"', at: '"field"', code: 2322 },
+  { caseId: "STP19-foreign", line: "\"count\": ('1')", at: '"count"', code: 2322 },
   { caseId: "STP19-overloads", line: "\"sides\": ('five')", at: '"kind"' },
   { caseId: "STP19-overloads", line: '"label": (1)', at: '"label"' },
 ]);
@@ -428,6 +431,10 @@ export function assertRustCases(run) {
 }
 
 export function assertDirtyTwinsRejected(repoRoot = REPO_ROOT, only = null) {
+  return withTemporaryRepository(repoRoot, (temporary) => assertDirtyTwinsInCopy(temporary, only));
+}
+
+function assertDirtyTwinsInCopy(repoRoot, only) {
   const errors = [];
   const abs = path.join(repoRoot, PRODUCT_RS);
   let original = null;
@@ -541,7 +548,7 @@ async function checkFile(runEngine, engine, repoRoot, rel) {
     cleanTwin: rel,
     tsconfig: `${PROBES}/tsconfig.json`,
   };
-  const run = await runEngine(engine, probes);
+  const run = await runEngine(engine, probes, repoRoot);
   const text = fs.readFileSync(path.join(repoRoot, rel), "utf8");
   return { diags: run.positive.diags, text };
 }
@@ -553,7 +560,7 @@ function lineAt(text, pos) {
 }
 
 /**
- * Every diagnostic of `rel` has `code` and sits on an anchored line at the
+ * Every diagnostic has its anchor's code (or the file default) and sits at the
  * anchored authored token; every anchor has exactly one diagnostic.
  */
 export async function assertAnchoredNegatives({ repoRoot = REPO_ROOT, engines, runEngine }) {
@@ -571,7 +578,7 @@ export async function assertAnchoredNegatives({ repoRoot = REPO_ROOT, engines, r
         const anchor = file.anchors.find(
           (a) => line.includes(a.line) && text.startsWith(a.at, diag.pos),
         );
-        if (diag.code !== file.code || !anchor) {
+        if (!anchor || diag.code !== (anchor.code ?? file.code)) {
           errors.push(
             err(
               file.anchors[0].caseId,
@@ -589,7 +596,7 @@ export async function assertAnchoredNegatives({ repoRoot = REPO_ROOT, engines, r
             err(
               anchor.caseId,
               "missing-negative",
-              `${engine.id} ${file.rel}: ${count} TS${file.code} at ${anchor.at} on the line with ${anchor.line}`,
+              `${engine.id} ${file.rel}: ${count} TS${anchor.code ?? file.code} at ${anchor.at} on the line with ${anchor.line}`,
             ),
           );
         }
@@ -605,6 +612,12 @@ export async function assertAnchoredNegatives({ repoRoot = REPO_ROOT, engines, r
  * apply (or a verdict the clean probe already has) cannot pass.
  */
 export async function assertTsTwinsRejected({ repoRoot = REPO_ROOT, engines, runEngine }) {
+  return withTemporaryRepository(repoRoot, (temporary) =>
+    assertTsTwinsInCopy({ repoRoot: temporary, engines, runEngine }),
+  );
+}
+
+async function assertTsTwinsInCopy({ repoRoot, engines, runEngine }) {
   const errors = [];
   const verdict = (diags, text, expect) => {
     const anchor = expect.gains || expect.loses;

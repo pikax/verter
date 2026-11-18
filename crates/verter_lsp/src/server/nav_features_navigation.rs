@@ -1219,7 +1219,7 @@ pub(super) async fn handle_rename(
     // handshake cannot advertise a rename this handler would refuse: an
     // editor-owned carrier rename and a generated virtual buffer answer nothing,
     // and a multi-claimant carrier fails closed with a user-visible reason.
-    let ownership_witness = match rename_request_admission(server, uri) {
+    let ownership_witness = match rename_request_admission(server, uri).await {
         RenameAdmission::Decline => return Ok(None),
         RenameAdmission::Refuse(error) => return Err(error),
         RenameAdmission::Serve { ownership_witness } => ownership_witness,

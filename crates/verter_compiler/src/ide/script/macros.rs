@@ -6,8 +6,8 @@
 //! aliases, variable rebinds, inherit-attrs detection) from the parsed
 //! `ScriptMacro` items.
 
+use crate::code_transform::EditRecorder;
 use crate::common::Span;
-use crate::template::code_gen::types::CodeGenOutput;
 use crate::utils::oxc::vue::{MacroDeclarator, MacroTypeParams, ScriptItem, ScriptMacro};
 
 use super::PREFIX;
@@ -60,7 +60,7 @@ pub(super) struct ModelBindingEntry {
 pub(super) struct MacroSourceCtx<'a, 'alloc> {
     pub(super) source: &'a str,
     pub(super) content_start: u32,
-    pub(super) out: &'a mut CodeGenOutput<'alloc>,
+    pub(super) out: &'a mut EditRecorder<'alloc>,
     pub(super) is_jsx: bool,
 }
 
@@ -275,9 +275,10 @@ fn process_standard_macro(
             };
             let suffix = if needs_prettify { ">;" } else { ";" };
 
-            // Move original type content to stmt_start, wrapped with type declaration.
-            // This preserves fine-grained sourcemap for hover on individual properties.
-            ctx.out.move_wrapped(
+            // Emit the authored type at stmt_start, wrapped with a type
+            // declaration. It keeps its fine-grained sourcemap for hover on
+            // individual properties.
+            ctx.out.extract_original(
                 tp.type_span.start,
                 tp.type_span.end,
                 stmt_start,
@@ -285,7 +286,8 @@ fn process_standard_macro(
                 suffix,
             );
 
-            // Fill the gap left by the move with the type alias name
+            // The type argument becomes the type alias name.
+            ctx.out.overwrite(tp.type_span.start, tp.type_span.end, "");
             ctx.out.prepend_alloc(tp.type_span.start, &type_name_str);
         }
     }
@@ -383,9 +385,10 @@ fn process_define_model(
             };
             let suffix = if needs_prettify { ">;" } else { ";" };
 
-            // Move original type content to stmt_start, wrapped with type declaration.
-            // This preserves fine-grained sourcemap for hover on individual properties.
-            ctx.out.move_wrapped(
+            // Emit the authored type at stmt_start, wrapped with a type
+            // declaration. It keeps its fine-grained sourcemap for hover on
+            // individual properties.
+            ctx.out.extract_original(
                 tp.type_span.start,
                 tp.type_span.end,
                 stmt_start,
@@ -393,7 +396,8 @@ fn process_define_model(
                 suffix,
             );
 
-            // Fill the gap left by the move with the type alias name
+            // The type argument becomes the type alias name.
+            ctx.out.overwrite(tp.type_span.start, tp.type_span.end, "");
             ctx.out.prepend_alloc(tp.type_span.start, &type_name_str);
         }
     }
@@ -460,9 +464,10 @@ fn process_with_defaults(
             };
             let suffix = if needs_prettify { ">;" } else { ";" };
 
-            // Move original type content to stmt_start, wrapped with type declaration.
-            // This preserves fine-grained sourcemap for hover on individual properties.
-            ctx.out.move_wrapped(
+            // Emit the authored type at stmt_start, wrapped with a type
+            // declaration. It keeps its fine-grained sourcemap for hover on
+            // individual properties.
+            ctx.out.extract_original(
                 tp.type_span.start,
                 tp.type_span.end,
                 stmt_start,
@@ -470,7 +475,8 @@ fn process_with_defaults(
                 suffix,
             );
 
-            // Fill the gap left by the move with the type alias name
+            // The type argument becomes the type alias name.
+            ctx.out.overwrite(tp.type_span.start, tp.type_span.end, "");
             ctx.out.prepend_alloc(tp.type_span.start, &type_name_str);
         }
     }
@@ -517,7 +523,8 @@ fn lower_destructured_declarator(
     let suffix = format!(" = {}", auto_var_name);
 
     ctx.out
-        .move_wrapped(binding_start, binding_end, call_end, ", ", &suffix);
+        .extract_original(binding_start, binding_end, call_end, ", ", &suffix);
+    ctx.out.overwrite(binding_start, binding_end, "");
     ctx.out.prepend_alloc(binding_start, auto_var_name);
 }
 

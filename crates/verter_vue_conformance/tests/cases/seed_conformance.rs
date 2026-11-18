@@ -1,5 +1,6 @@
 //! Seed conformance run — Verter Vapor + VDOM output vs the vendored
-//! official Vue 3.6 RC goldens for all 32 seed SFCs (64 cells).
+//! official Vue 3.6 RC goldens for every corpus SFC. The server-render goldens
+//! are registered as pending comparison until Verter emits server output.
 //!
 //! Per case per backend, the harness compiles the SFC with Verter
 //! (`verter_compiler::compile`, `force_vapor` for the vapor cell) and
@@ -113,6 +114,15 @@ fn corpus_host() -> &'static VerterHost {
     })
 }
 
+/// Backends whose goldens are vendored but whose Verter output does not exist
+/// yet. Their cells are registered as pending: the golden and metadata must
+/// load, the comparison is not run, and no divergence entry is tracked. Remove
+/// a backend from this list when its Verter output lands, so its cells join
+/// the tracked dispositions.
+fn comparison_pending(backend: Backend) -> bool {
+    backend == Backend::Ssr
+}
+
 fn dispositions_path() -> std::path::PathBuf {
     corpus_root().join("known-divergences.json")
 }
@@ -131,7 +141,7 @@ fn golden_meta(backend: Backend, topology: Topology, case_id: &str) -> GoldenMet
     let path = corpus_file(
         &corpus_root(),
         &format!(
-            "goldens/3.6.0-rc.5/{}/{case_id}.meta.json",
+            "goldens/3.6.0-rc.15/{}/{case_id}.meta.json",
             golden_dir(backend, topology)
         ),
     );
@@ -251,7 +261,7 @@ fn compile_verter_cell(case_id: &str, backend: Backend, topology: Topology) -> V
         .collect();
 
     let sfc_has_script = sfc.contains("<script");
-    let bundle = verter_compiler::framework_common::vue_bridge::vue_result_to_runtime_bundle(
+    let bundle = verter_compiler::framework_common::vue_bundle::vue_result_to_runtime_bundle(
         &sfc,
         &parsed,
         compile_result,
@@ -353,8 +363,20 @@ fn seed_conformance_matches_tracked_dispositions() {
     let path = dispositions_path();
 
     let mut outcomes: Vec<(String, Backend, Topology, Comparison)> = Vec::new();
+    let mut pending = 0usize;
     for case in &manifest.cases {
         for backend in Backend::ALL {
+            if comparison_pending(backend) {
+                let code = golden_code(&golden_dir(backend, Topology::NonInline), &case.id);
+                let meta = golden_meta(backend, Topology::NonInline, &case.id);
+                assert!(
+                    !code.trim().is_empty() && meta.case_id == case.id,
+                    "{} [{backend:?}]: a pending cell must still carry its golden",
+                    case.id
+                );
+                pending += 1;
+                continue;
+            }
             let comparison = compare_cell(&case.id, backend, Topology::NonInline);
             outcomes.push((case.id.clone(), backend, Topology::NonInline, comparison));
         }
@@ -375,7 +397,7 @@ fn seed_conformance_matches_tracked_dispositions() {
         .filter(|(_, _, t, _)| *t == Topology::Inline)
         .count();
     eprintln!(
-        "vue-conformance seed run: {pass}/{} cells PASS ({inline_pass}/{inline_total} inline)",
+        "vue-conformance seed run: {pass}/{} cells PASS ({inline_pass}/{inline_total} inline), {pending} pending comparison",
         outcomes.len()
     );
 

@@ -174,6 +174,88 @@ fn authored_plain_css_reaches_the_same_scoped_selector_stage_without_any_overrid
     assert!(style.code.contains(".tone"), "{}", style.code);
 }
 
+/// A stylesheet that imports another keeps a map naming both files: the
+/// tool's map names the imported file first and the block second, the host
+/// accepts it, and the published style map names both.
+#[test]
+fn a_supplied_map_naming_an_imported_stylesheet_reaches_the_published_style_map() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let update = host
+        .upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "/workspace/Imports.vue".to_string(),
+            source: Arc::from(
+                "<template><div class=\"tone\">x</div></template>\
+                 <style lang=\"postcss\" scoped>.tone { color: red; }</style>",
+            ),
+            file_language: FileLanguage::vue(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    let request = update
+        .preprocessor_requests
+        .first()
+        .expect("the postcss style block needs external preprocessing");
+    let imported = ".base { margin: 0; }";
+    let map = serde_json::json!({
+        "version": 3,
+        "sources": ["/workspace/base.css", "/workspace/Imports.vue"],
+        "sourcesContent": [imported, request.content],
+        "names": [],
+        "mappings": "AAAA;ACAA",
+    })
+    .to_string();
+    let mut entry = supplied_entry(request, ".base { margin: 0; }\n.tone { color: red; }");
+    entry.source_map_hash = Some(hash_block_content(&map));
+    entry.source_map = Some(Arc::from(map));
+    let profile = CompileProfile {
+        source_map: true,
+        ..CompileProfile::default()
+    };
+    let _ = host
+        .apply_block_overrides(BlockOverrideRequest {
+            canonical_id: update.canonical_id.clone(),
+            compile_profile: profile.clone(),
+            overrides: vec![entry],
+        })
+        .expect("a map naming the block and an imported file is accepted");
+    let declared = host
+        .get_block_content(BlockContentQuery {
+            canonical_id: update.canonical_id.clone(),
+            block_token: request.block_token.to_string(),
+            compile_profile: profile.clone(),
+            expected_basis_token: None,
+        })
+        .expect("the supplied content is selected")
+        .composed_map
+        .declared_space_tokens;
+    assert_eq!(
+        declared.len(),
+        2,
+        "the block and the imported file: {declared:?}"
+    );
+    assert_eq!(declared[0], request.source_space_token);
+
+    let style = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: None,
+            canonical_id: Some(update.canonical_id.clone()),
+            node_kind: Some(VirtualNodeKind::Style { index: 0 }),
+            compile_profile: profile,
+        })
+        .expect("the supplied stylesheet publishes a style node");
+    let published = style.source_map.expect("the style node carries a map");
+    let published: serde_json::Value =
+        serde_json::from_str(&published).expect("the published map is JSON");
+    let sources = published["sources"].as_array().expect("map sources");
+    for name in ["/workspace/base.css", "/workspace/Imports.vue"] {
+        assert!(
+            sources.iter().any(|source| source == name),
+            "the published map names {name}: {published}"
+        );
+    }
+}
+
 fn query(canonical_id: &str, block_token: &impl std::fmt::Display) -> BlockContentQuery {
     BlockContentQuery {
         canonical_id: canonical_id.to_string(),

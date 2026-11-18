@@ -12,9 +12,9 @@ use crate::ast::types::{AstNodeKind, ElementNode, ElementNodeConditionKind, Temp
 use crate::template::oxc::types::OxcParsedElement;
 use crate::types::{NodeId, NodeProp};
 
-use super::super::binding::{BindingResolver, ReactivityLevel};
 use super::super::shared::helpers::{extract_directive_value, parse_v_for_expression, VdomHelper};
 use super::super::types::{CodeGenOutput, ConditionBranchClose, ScopeClose};
+use crate::template::binding::{BindingResolver, ReactivityLevel};
 
 // ======================== v-if / v-else-if / v-else ========================
 

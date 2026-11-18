@@ -933,10 +933,22 @@ pub enum BindingInitializer {
         #[serde(default)]
         binds_whole_call_result: bool,
     },
+    /// Created by calling a member of a named value: `const x = ns.foo()`.
+    MemberCall {
+        object: String,
+        property: String,
+        /// Whether this binding name is bound to the call's whole result;
+        /// see [`BindingInitializer::FunctionCall`]'s field of the same name.
+        #[serde(default)]
+        binds_whole_call_result: bool,
+    },
     /// Created by a literal: `const x = 42`
     Literal { kind: LiteralKind },
     /// Created by an identifier reference: `const x = importedValue`
     Reference { name: String },
+    /// A destructured member of a named value: `c` in `const { b: c } = ns`
+    /// reads property `b` of `ns`.
+    MemberReference { object: String, property: String },
     /// Created by something we can't classify
     Other,
 }

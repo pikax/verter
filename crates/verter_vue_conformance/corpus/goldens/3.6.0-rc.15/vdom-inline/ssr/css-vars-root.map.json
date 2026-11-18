@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/ssr/css-vars-root.vue"
+  ],
+  "names": [],
+  "mappings": ";;;;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;;;;;AACxB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;wBAIrB,oBAAqB,KAArB,UAAqB,EAAR,MAAI",
+  "sourcesContent": [
+    "<script setup lang=\"ts\">\nimport { ref } from \"vue\"\nconst color = ref(\"red\")\n</script>\n\n<template>\n  <p class=\"a\">text</p>\n</template>\n\n<style>\n.a {\n  color: v-bind(color);\n}\n</style>\n"
+  ]
+}

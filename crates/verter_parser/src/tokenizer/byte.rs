@@ -213,12 +213,12 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
         self.emit(Event::OpenTagName { start, end });
     }
 
-    /// Emit OpenTagEnd with exclusive-end (after the `>`).
-    fn emit_open_tag_end(&mut self, gt_index: u32) {
+    /// Emit OpenTagEnd at an exclusive boundary, including recovery before a closing tag.
+    fn emit_open_tag_end(&mut self, end: u32) {
         if self.sfc_mode {
             self.sfc_depth += 1;
         }
-        self.emit(Event::OpenTagEnd { end: gt_index + 1 });
+        self.emit(Event::OpenTagEnd { end });
     }
 
     fn decrement_v_pre_depth(&mut self) {
@@ -897,7 +897,7 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
                 self.emit_open_tag_name(self.section_start as u32, self.index as u32);
 
                 if c == GT {
-                    self.emit_open_tag_end(self.index as u32);
+                    self.emit_open_tag_end((self.index + 1) as u32);
                     self.index += 1;
                     self.transition_after_tag_close();
                     return;
@@ -933,7 +933,7 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
         while self.index < self.input.len() {
             let c = self.input[self.index];
             if c == GT {
-                self.emit_open_tag_end(self.index as u32);
+                self.emit_open_tag_end((self.index + 1) as u32);
                 self.index += 1;
                 self.transition_after_tag_close();
                 return;
@@ -953,6 +953,7 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
                 && self.index + 1 < self.input.len()
                 && self.input[self.index + 1] == SLASH
             {
+                // The recovered opening ends before the closing tag's `<`.
                 self.emit_open_tag_end(self.index as u32);
                 self.state = State::BeforeTagName;
                 self.section_start = self.index;
@@ -1051,7 +1052,7 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
                     while self.index < self.input.len() {
                         let c = self.input[self.index];
                         if c == GT {
-                            self.emit_open_tag_end(self.index as u32);
+                            self.emit_open_tag_end((self.index + 1) as u32);
 
                             self.index += 1;
                             self.transition_after_tag_close();
@@ -1293,7 +1294,7 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
                 quote: QuoteType::NoValue,
                 end: self.index as u32,
             });
-            self.emit_open_tag_end(self.index as u32);
+            self.emit_open_tag_end((self.index + 1) as u32);
             self.index += 1;
             self.transition_after_tag_close();
         } else if c == SLASH {
@@ -1464,7 +1465,7 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
                     quote: QuoteType::Unquoted,
                     end: self.index as u32,
                 });
-                self.emit_open_tag_end(self.index as u32);
+                self.emit_open_tag_end((self.index + 1) as u32);
                 self.index += 1;
                 self.transition_after_tag_close();
                 return;

@@ -25,11 +25,23 @@
 //!   ... })`: the [`ForeignComponentContractAdapter`] hands TypeScript the
 //!   component's adapted contract (subject to the adapter's documented
 //!   generic-overload reflection limits) and then an attribute-tolerant
-//!   signature, so TypeScript still
+//!   signature. A single concrete contract uses the tolerant signature alone
+//!   to preserve prop assignability diagnostics. TypeScript still
 //!   infers the component's binder at the construction, checks and
 //!   contextually types every declared key, and keeps literal types, while
 //!   a fallthrough attribute is not an excess-key error (excess-key policy
 //!   is a separate obligation, not a side effect of inference).
+//! - A member is spelled as the component's camel-case prop, which the
+//!   runtime's `camelize(key)` prop lookup reads and vue-tsc writes
+//!   (`:initial-count` is `initialCount`, listener-shaped keys included);
+//!   `data-*` / `aria-*` keep their spelling. Its direct-key check also
+//!   accepts the authored spelling, under which an undeclared attribute
+//!   falls through (`stroke-width` onto an `<svg>` root). Such an attribute,
+//!   like an `EmitsToProps` listener published under a kebab-case name, then
+//!   reaches the attribute-tolerant index, so its key is checked and its
+//!   value is not, as in vue-tsc. A later key with an already constructed
+//!   member's camel-case spelling (`:fooBar` after `:foo-bar`) is a
+//!   validation against that prop, and keeps its own direct-key check.
 //! - Keys follow the runtime property plan: a certainly overwritten write
 //!   never reaches the construction, a later object spread keeps its
 //!   position, and a listener key accumulates, so its first handler reaches
@@ -60,17 +72,21 @@ use crate::framework_common::projection_plan::{
     AdmittedExpressionId, ComponentUse, ComponentUseId, ExpressionKind, HandlerShape,
     PlanSnapshotId, ProjectionPlan,
 };
+use crate::ide::template::props::normalized_component_prop_name;
 use crate::ide::vue_projection::attribute_operations::{
     is_reserved, AttributeOperationsProjection, AttributeSyntax, EffectiveProperty, MergeRule,
-    RuntimeKey, RuntimePropertyKeyPlan, VueAttributeSequence, WriteValue,
+    RuntimeKey, RuntimePropertyKeyPlan, VueAttributeOp, VueAttributeSequence, WriteValue,
 };
+use crate::ide::vue_projection::callback_reentry::{
+    CallbackReentryPlan, EXPRESSION_HANDLER_OPEN, STATEMENTS_HANDLER_OPEN,
+};
+use crate::ide::vue_projection::checking_fragment::{CheckingFragment, StatementPhase};
 use crate::ide::vue_projection::generic_interop::{
     foreign_contract_declarations, ForeignComponentContractAdapter,
 };
 use crate::ide::vue_projection::props::{project_props, PropsProjection};
-use crate::template::code_gen::shared::helpers::{
-    is_member_expression, to_pascal_case, trim_handler_body,
-};
+use crate::ide::vue_projection::script_setup::SourceRange;
+use crate::template::vue_syntax::{is_member_expression, to_pascal_case, trim_handler_body};
 
 /// Attribute-tolerant construction signature: the component's (last)
 /// construct or call signature with an `unknown` attribute index on its
@@ -93,7 +109,11 @@ pub const USE_SLOT_PROPS: &str = "__VerterUseSlotProps";
 /// domain. A generic spread is checked through its constraint.
 pub const USE_SPREAD: &str = "__VerterUseSpread";
 /// Direct attribute key checker. A misspelled key written on the element is
-/// rejected. Hyphenated attributes, Vue `on*` listeners, and global
+/// rejected. A kebab-case key is accepted when its camel-case spelling is on
+/// the props surface (a declared prop) or its authored spelling is (an
+/// attribute that falls through as written, `stroke-width` on an `<svg>`
+/// root); otherwise it is rejected under the camel-case spelling.
+/// `data-*` / `aria-*` attributes, Vue `on*` listeners, and global
 /// fallthrough attributes are not excess-key errors. An open props domain
 /// is not.
 pub const USE_DIRECT: &str = "__VerterUseDirect";
@@ -118,12 +138,13 @@ pub const USE_PRELUDE: &str = concat!(
     "declare function __VerterUseSpread<C, S, O extends PropertyKey>(component: C, spread: S & __VerterUseKnownSpread<S, __VerterUseComponentProps<C>, O>, overwritten: readonly O[]): S;\n",
     "type __VerterUseKeyOn<P, K extends PropertyKey> = P extends unknown ? (K extends keyof P ? true : false) : never;\n",
     "type __VerterUseFallthrough<K extends PropertyKey> = K extends `${string}-${string}` ? true : K extends `on${Capitalize<string>}` ? true : K extends \"id\" | \"role\" | \"tabindex\" | \"slot\" | \"lang\" | \"dir\" | \"hidden\" | \"draggable\" | \"autofocus\" | \"inert\" | \"popover\" | \"part\" | \"nonce\" | \"is\" | \"accesskey\" | \"contenteditable\" | \"spellcheck\" | \"translate\" | \"inputmode\" ? true : false;\n",
-    "type __VerterUseDirectOk<P, K extends PropertyKey> = 0 extends 1 & P ? true : string extends keyof P ? true : number extends keyof P ? true : symbol extends keyof P ? true : [__VerterUseKeyOn<P, K>] extends [false] ? __VerterUseFallthrough<K> extends true ? true : false : true;\n",
-    "declare function __VerterUseDirect<C, I, K extends PropertyKey>(component: C, instance: I, key: 0 extends 1 & C ? K : (__VerterUseDirectOk<I extends { readonly $props: infer P } ? P : never, K> extends true ? K : never)): void;\n",
+    "type __VerterUseDirectOk<P, K extends PropertyKey, A extends PropertyKey = K> = 0 extends 1 & P ? true : string extends keyof P ? true : number extends keyof P ? true : symbol extends keyof P ? true : [__VerterUseKeyOn<P, K>] extends [false] ? [__VerterUseKeyOn<P, A>] extends [false] ? __VerterUseFallthrough<K> extends true ? true : false : true : true;\n",
+    "declare function __VerterUseDirect<C, I, K extends PropertyKey, A extends PropertyKey = K>(component: C, instance: I, key: 0 extends 1 & C ? K : (__VerterUseDirectOk<I extends { readonly $props: infer P } ? P : never, K, A> extends true ? K : never), authored?: A): void;\n",
     "type __VerterUseProp<I, K extends PropertyKey> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : unknown) : unknown;\n",
     "type __VerterUseListener<I, K extends PropertyKey, F extends PropertyKey = K> = I extends { readonly $props: infer P } ? (K extends keyof P ? P[K] : F extends keyof P ? P[F] : (...args: any[]) => unknown) : (...args: any[]) => unknown;\n",
     "type __VerterUseSlotProps<I, K extends PropertyKey> = I extends { readonly $slots: infer S } ? (K extends keyof S ? (NonNullable<S[K]> extends (props: infer A, ...rest: any[]) => any ? A : unknown) : unknown) : unknown;\n",
     "type __VerterUseModel<I, K extends PropertyKey> = NonNullable<__VerterUseProp<I, K>> extends (value: infer V, ...rest: any[]) => any ? V : unknown;\n",
+    "void (null! as [__VerterUseListener<unknown, never>, __VerterUseSlotProps<unknown, never>, __VerterUseModel<unknown, never>]);\n",
 );
 
 /// Revision-qualified identity of one use's checking inputs: the logical
@@ -178,9 +199,9 @@ impl MemberValue {
                 spelling,
                 statements: true,
                 ..
-            } => format!("($event) => {{ {spelling};\n}}"),
+            } => format!("{STATEMENTS_HANDLER_OPEN}{spelling};\n}}"),
             Self::InlineHandler { spelling, .. } => {
-                format!("($event) => ({})", trim_handler_body(spelling))
+                format!("{EXPRESSION_HANDLER_OPEN}{})", trim_handler_body(spelling))
             }
             Self::StaticText(text) => quote(text),
         }
@@ -205,6 +226,8 @@ pub enum TransactionMember {
         op_index: u32,
         /// Runtime key.
         key: String,
+        /// Authored bytes the key is spelled from, when it has any.
+        key_source: Option<SourceRange>,
         /// Carried value.
         value: MemberValue,
     },
@@ -240,7 +263,9 @@ impl TransactionMember {
 
     fn render(&self, component: &str) -> String {
         match self {
-            Self::Property { key, value, .. } => format!("{}: {}", quote(key), value.render()),
+            Self::Property { key, value, .. } => {
+                format!("{}: {}", quote(&contract_key(key)), value.render())
+            }
             Self::Spread {
                 value,
                 overwritten_keys,
@@ -282,6 +307,17 @@ pub struct ValidationCheck {
     pub fallback: Option<String>,
     /// Carried value.
     pub value: MemberValue,
+}
+
+impl ValidationCheck {
+    /// The key the contract is read under: a prop under its camel-case
+    /// spelling, a listener under its runtime key.
+    fn contract_key(&self) -> std::borrow::Cow<'_, str> {
+        match self.contract {
+            CheckContract::Prop => contract_key(&self.key),
+            CheckContract::Listener => std::borrow::Cow::Borrowed(&self.key),
+        }
+    }
 }
 
 /// Why an operation never reaches the construction.
@@ -398,15 +434,13 @@ impl ComponentUseWitness {
             ForeignComponentContractAdapter.construction_callee(&self.component),
             members.join(", ")
         );
-        for member in &self.transaction.members {
-            if let TransactionMember::Property { key, .. } = member {
-                out.push_str(&format!(
-                    "{USE_DIRECT}({}, {}, {});\n",
-                    self.component,
-                    self.binding,
-                    quote(key)
-                ));
-            }
+        for key in self.direct_keys() {
+            out.push_str(&format!(
+                "{USE_DIRECT}({}, {}, {});\n",
+                self.component,
+                self.binding,
+                direct_key_arguments(key)
+            ));
         }
         for (ordinal, check) in self.transaction.validations.iter().enumerate() {
             let contract = match check.contract {
@@ -414,15 +448,244 @@ impl ComponentUseWitness {
                 CheckContract::Prop => USE_PROP,
             };
             out.push_str(&format!(
-                "const {}_check{ordinal}: {contract}<typeof {}, {}{}> = {};\n",
+                "const {}: {contract}<typeof {}, {}{}> = {};\n",
+                self.check_binding(ordinal),
                 self.binding,
-                self.binding,
-                quote(&check.key),
+                quote(&check.contract_key()),
                 fallback_argument(check.fallback.as_deref()),
                 check.value.render()
             ));
         }
         out
+    }
+}
+
+impl ComponentUseWitness {
+    /// The statements of [`Self::render`] as fragments: the construction
+    /// (`Main`), then one direct-key check and one validation per line
+    /// (`After`). Inline handlers come from `reentry`. With a pending
+    /// `reentry`, flattening equals `render()` byte for byte.
+    #[must_use]
+    pub fn statement_fragments(
+        &self,
+        reentry: &CallbackReentryPlan,
+    ) -> Vec<(StatementPhase, CheckingFragment)> {
+        self.statement_fragments_over(reentry, WitnessComponent::Named { tag: None })
+    }
+
+    /// Every binding the statements declare: the witness, then one per
+    /// validation check.
+    #[must_use]
+    pub fn declared_bindings(&self) -> Vec<String> {
+        std::iter::once(self.binding.clone())
+            .chain(
+                (0..self.transaction.validations.len()).map(|ordinal| self.check_binding(ordinal)),
+            )
+            .collect()
+    }
+
+    fn check_binding(&self, ordinal: usize) -> String {
+        format!("{}_check{ordinal}", self.binding)
+    }
+
+    /// Every key a direct-key check covers: each property member, then each
+    /// prop validation whose authored key is no member's (a second key
+    /// naming one prop, `:fooBar` after `:foo-bar`), so every authored key
+    /// is checked once.
+    fn direct_keys(&self) -> impl Iterator<Item = &str> {
+        let members = &self.transaction.members;
+        members.iter().filter_map(TransactionMember::key).chain(
+            self.transaction
+                .validations
+                .iter()
+                .filter(move |check| {
+                    check.contract == CheckContract::Prop
+                        && !members
+                            .iter()
+                            .any(|member| member.key() == Some(check.key.as_str()))
+                })
+                .map(|check| check.key.as_str()),
+        )
+    }
+
+    /// [`Self::statement_fragments`] with the component written as
+    /// `component` says: a name stays the witness's own text; an authored
+    /// `:is` value is the admitted expression, mapped once and replayed at
+    /// every further use.
+    #[must_use]
+    pub fn statement_fragments_over(
+        &self,
+        reentry: &CallbackReentryPlan,
+        component: WitnessComponent,
+    ) -> Vec<(StatementPhase, CheckingFragment)> {
+        let mut writer = FragmentWriter {
+            reentry,
+            witness: self,
+            component,
+            mapped: Vec::new(),
+        };
+        let mut construction = CheckingFragment::synth(format!("const {} = new (", self.binding));
+        // The adapter owns the callee's shape; the component goes where its
+        // rendering puts it.
+        let callee = ForeignComponentContractAdapter.construction_callee(CALLEE_SLOT);
+        let mut parts = callee.split(CALLEE_SLOT).peekable();
+        while let Some(part) = parts.next() {
+            construction.push_synth(part);
+            if parts.peek().is_some() {
+                writer.component(&mut construction);
+            }
+        }
+        construction.push_synth(")({ ");
+        for (index, member) in self.transaction.members.iter().enumerate() {
+            if index > 0 {
+                construction.push_synth(", ");
+            }
+            match member {
+                TransactionMember::Property {
+                    key,
+                    key_source,
+                    value,
+                    ..
+                } => {
+                    // TypeScript reports a member's failure against the
+                    // construction on its key: the key stands at the
+                    // attribute it was written as, spelled as the
+                    // component's camel-case prop.
+                    match key_source {
+                        Some(source) => construction.push_alias(quote(&contract_key(key)), *source),
+                        None => construction.push_synth(quote(&contract_key(key))),
+                    };
+                    construction.push_synth(": ");
+                    writer.value(&mut construction, value);
+                }
+                TransactionMember::Spread {
+                    value,
+                    overwritten_keys,
+                    ..
+                } => {
+                    construction.push_synth(format!("...{USE_SPREAD}("));
+                    writer.component(&mut construction);
+                    construction.push_synth(", ");
+                    writer.value(&mut construction, value);
+                    construction.push_synth(format!(
+                        ", [{}] as const)",
+                        overwritten_keys
+                            .iter()
+                            .map(|key| quote(key))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+            }
+        }
+        construction.push_synth(" });\n");
+        let mut statements = vec![(StatementPhase::Main, construction)];
+        for key in self.direct_keys() {
+            let mut direct = CheckingFragment::synth(format!("{USE_DIRECT}("));
+            writer.component(&mut direct);
+            direct.push_synth(format!(
+                ", {}, {});\n",
+                self.binding,
+                direct_key_arguments(key)
+            ));
+            statements.push((StatementPhase::After, direct));
+        }
+        for (ordinal, check) in self.transaction.validations.iter().enumerate() {
+            let contract = match check.contract {
+                CheckContract::Listener => USE_LISTENER,
+                CheckContract::Prop => USE_PROP,
+            };
+            let mut validation = CheckingFragment::synth(format!(
+                "const {}: {contract}<typeof {}, {}{}> = ",
+                self.check_binding(ordinal),
+                self.binding,
+                quote(&check.contract_key()),
+                fallback_argument(check.fallback.as_deref())
+            ));
+            writer.value(&mut validation, &check.value);
+            validation.push_synth(";\n");
+            statements.push((StatementPhase::After, validation));
+        }
+        statements
+    }
+}
+
+/// How a witness's component is written in its statements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WitnessComponent {
+    /// The witness's own component text: a name the module binds. With
+    /// `tag`, the text stands for the authored tag name and maps to it.
+    Named { tag: Option<SourceRange> },
+    /// The authored component expression (`<component :is>`), read in the
+    /// template context.
+    Authored,
+}
+
+/// Placeholder the adapter's callee is rendered around.
+const CALLEE_SLOT: &str = "\u{0}";
+
+/// Writes one witness's pieces, mapping each admitted expression once.
+struct FragmentWriter<'w> {
+    reentry: &'w CallbackReentryPlan,
+    witness: &'w ComponentUseWitness,
+    component: WitnessComponent,
+    mapped: Vec<&'w AdmittedExpressionId>,
+}
+
+impl<'w> FragmentWriter<'w> {
+    /// The expression, mapped at its first occurrence and replayed after.
+    fn expression(&mut self, fragment: &mut CheckingFragment, id: &'w AdmittedExpressionId) {
+        if self.mapped.contains(&id) {
+            fragment.push_replay(id.clone());
+        } else {
+            self.mapped.push(id);
+            fragment.push_expression(id.clone());
+        }
+    }
+
+    fn component(&mut self, fragment: &mut CheckingFragment) {
+        match self.component {
+            WitnessComponent::Named { tag: Some(tag) } => {
+                fragment.push_alias(self.witness.component.as_str(), tag);
+            }
+            WitnessComponent::Named { tag: None } => {
+                fragment.push_synth(self.witness.component.as_str());
+            }
+            WitnessComponent::Authored => {
+                let witness = self.witness;
+                fragment.push_synth("(");
+                self.expression(fragment, &witness.component_expression);
+                fragment.push_synth(")");
+            }
+        }
+    }
+
+    /// A value as [`MemberValue::render`] writes it. An inline handler is
+    /// the re-entry plan's callback once that plan is projected.
+    fn value(&mut self, fragment: &mut CheckingFragment, value: &'w MemberValue) {
+        match value {
+            MemberValue::Expression { id, .. } => {
+                fragment.push_synth("(");
+                self.expression(fragment, id);
+                fragment.push_synth(")");
+            }
+            MemberValue::InlineHandler { id, statements, .. } => {
+                if !self.reentry.pending {
+                    fragment.append(self.reentry.inline_handler(id, *statements));
+                } else if *statements {
+                    fragment.push_synth(STATEMENTS_HANDLER_OPEN);
+                    self.expression(fragment, id);
+                    fragment.push_synth(";\n}");
+                } else {
+                    fragment.push_synth(EXPRESSION_HANDLER_OPEN);
+                    self.expression(fragment, id);
+                    fragment.push_synth(")");
+                }
+            }
+            MemberValue::StaticText(text) => {
+                fragment.push_synth(quote(text));
+            }
+        }
     }
 }
 
@@ -640,7 +903,7 @@ fn assemble_transaction(
             };
             place(
                 property,
-                op.index,
+                op,
                 key,
                 carried,
                 &mut members,
@@ -661,19 +924,28 @@ fn assemble_transaction(
 
 /// Route one effective write: the first handler of a listener key and the
 /// first write of any other key reach the construction; a later write of a
-/// combined or accumulated key, an inline handler and any handler of an
-/// event-option key (whose contract may be another key's) is a validation
-/// check.
+/// combined or accumulated key, a later key naming an already constructed
+/// prop, an inline handler and any handler of an event-option key (whose
+/// contract may be another key's) is a validation check.
 fn place(
     property: &EffectiveProperty,
-    op_index: u32,
+    op: &VueAttributeOp,
     key: &str,
     value: MemberValue,
     members: &mut Vec<TransactionMember>,
     listeners: &mut Vec<TransactionMember>,
     validations: &mut Vec<ValidationCheck>,
 ) {
-    let placed = |list: &[TransactionMember]| list.iter().any(|m| m.key() == Some(key));
+    let op_index = op.index;
+    // A key is placed when a member already has its camel spelling: distinct
+    // runtime keys (`:foo-bar` and `:fooBar`) can name one prop or listener,
+    // which the construction holds once.
+    let contract = contract_key(key);
+    let placed = |list: &[TransactionMember]| {
+        list.iter()
+            .filter_map(TransactionMember::key)
+            .any(|placed| contract_key(placed) == contract)
+    };
     let fallback = listener_fallback(property.rule, key);
     let constructible = !matches!(value, MemberValue::InlineHandler { .. })
         && !has_event_option(property.rule, key);
@@ -682,6 +954,7 @@ fn place(
             listeners.push(TransactionMember::Property {
                 op_index,
                 key: key.to_string(),
+                key_source: op.key_source,
                 value,
             });
         }
@@ -692,16 +965,21 @@ fn place(
             fallback,
             value,
         }),
-        MergeRule::Combine if placed(members) => validations.push(ValidationCheck {
-            op_index,
-            key: key.to_string(),
-            contract: CheckContract::Prop,
-            fallback: None,
-            value,
-        }),
+        // A later write of a combined key, or a later key naming an already
+        // constructed prop, is checked against that prop.
+        MergeRule::Combine | MergeRule::Overwrite if placed(members) => {
+            validations.push(ValidationCheck {
+                op_index,
+                key: key.to_string(),
+                contract: CheckContract::Prop,
+                fallback: None,
+                value,
+            });
+        }
         MergeRule::Combine | MergeRule::Overwrite => members.push(TransactionMember::Property {
             op_index,
             key: key.to_string(),
+            key_source: op.key_source,
             value,
         }),
     }
@@ -822,7 +1100,30 @@ fn fallback_argument(fallback: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-fn quote(text: &str) -> String {
+/// The camel-case prop spelling of a runtime key, which the runtime's
+/// `camelize(key)` declared-prop lookup reads (`initial-count` is the
+/// `initialCount` prop); `data-*` / `aria-*` attributes keep their authored
+/// spelling. The IDE template path's `normalized_component_prop_name` owns
+/// this rule; the runtime key plan keeps the authored key. Two runtime keys
+/// with one camel spelling name one prop.
+fn contract_key(key: &str) -> std::borrow::Cow<'_, str> {
+    normalized_component_prop_name(true, key)
+}
+
+/// The key arguments of a direct-key check: the camel-case spelling, then
+/// the authored spelling when they differ, under which an undeclared
+/// attribute falls through (`stroke-width` reaches an `<svg>` root as
+/// `stroke-width`).
+fn direct_key_arguments(key: &str) -> String {
+    let contract = contract_key(key);
+    if contract == key {
+        quote(key)
+    } else {
+        format!("{}, {}", quote(&contract), quote(key))
+    }
+}
+
+pub(super) fn quote(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
     for c in text.chars() {
@@ -839,4 +1140,15 @@ fn quote(text: &str) -> String {
     }
     out.push('"');
     out
+}
+
+impl crate::framework_common::vue_projection_backend::VueProjectionProduct
+    for ComponentUseProjection
+{
+    fn project(
+        backend: &crate::framework_common::vue_projection_backend::VueProjectionBackend,
+        input: &crate::framework_common::vue_projection_backend::VueProductInput<'_>,
+    ) -> Result<Self, super::script_setup::SetupProjectionRefusal> {
+        backend.component_uses(input.source, input.artifact, input.canonical_id)
+    }
 }

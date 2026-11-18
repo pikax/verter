@@ -1,15 +1,23 @@
 //! Mapped generated-code carriers for the native Svelte runtime backend.
 //!
 //! Source-derived fragments retain byte ranges as they move through planning and
-//! emission. The final module is lowered once through [`CodeTransform`], which is
-//! the repository's source-map authority. Synthesized scaffolding is represented
-//! only by unmapped text and therefore cannot inherit a preceding authored map.
+//! emission. The finished module text is handed to the shared emission writer as
+//! one owned buffer cut into anchored and synthetic pieces, and its map comes from
+//! that same write. Synthesized scaffolding is represented only by unmapped text
+//! and therefore cannot inherit a preceding authored map.
 
 use std::ops::{Deref, DerefMut};
 
-use oxc_allocator::Allocator;
+use verter_audit::observe::Uncaptured;
+use verter_identity::identity::ContentId;
 
-use crate::code_transform::{CodeTransform, SourceMapOptions};
+use crate::assembly::compose::encoded;
+use crate::assembly::emit_plan::{
+    EmissionBuilder, EmitPlanBuilder, MapMode, MapSource, QualifiedSource, SourceKey,
+};
+use crate::assembly::source_space::SourceSpaceKind;
+use crate::assembly::source_unit::source_unit_id;
+use crate::work_ledger::CompilerWorkLedger;
 
 use super::{ClientCompileError, GeneratedSourceMapInvalidReason};
 
@@ -140,76 +148,85 @@ impl SvelteRuntimeOutput {
         source: &str,
         filename: Option<&str>,
         want_source_map: bool,
-        allocator: &Allocator,
     ) -> Result<(String, Option<String>), ClientCompileError> {
-        verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
-            if !want_source_map {
-                return Ok((self.text, None));
-            }
+        if !want_source_map {
+            return Ok((self.text, None));
+        }
+        let invalid = |reason| ClientCompileError::GeneratedSourceMapInvalid { reason };
 
-            let mut transform = CodeTransform::<M>::new_in(source, allocator);
-            if !source.is_empty() {
-                transform.remove(0, source.len() as u32);
-            }
-
-            let mut mappings = self.mappings;
-            mappings.sort_by_key(|mapping| (mapping.generated_start, mapping.generated_end));
-
-            let mut items = Vec::with_capacity(mappings.len() * 2 + 1);
-            let mut cursor = 0usize;
-            for mapping in mappings {
-                let start = mapping.generated_start as usize;
-                let end = mapping.generated_end as usize;
-                let invalid = if start == end {
-                    Some(GeneratedSourceMapInvalidReason::EmptyGeneratedRange)
-                } else if start > self.text.len() || end > self.text.len() {
-                    Some(GeneratedSourceMapInvalidReason::GeneratedRangeOutOfBounds)
-                } else if !self.text.is_char_boundary(start) || !self.text.is_char_boundary(end) {
-                    Some(GeneratedSourceMapInvalidReason::GeneratedRangeNotUtf8Boundary)
-                } else if start < cursor {
-                    Some(GeneratedSourceMapInvalidReason::OverlappingGeneratedRanges)
+        let mut mappings = self.mappings;
+        mappings.sort_by_key(|mapping| (mapping.generated_start, mapping.generated_end));
+        let mut anchored = Vec::with_capacity(mappings.len());
+        let mut cursor = 0usize;
+        for mapping in mappings {
+            let start = mapping.generated_start as usize;
+            let end = mapping.generated_end as usize;
+            let reason = if start == end {
+                Some(GeneratedSourceMapInvalidReason::EmptyGeneratedRange)
+            } else if start > self.text.len() || end > self.text.len() {
+                Some(GeneratedSourceMapInvalidReason::GeneratedRangeOutOfBounds)
+            } else if !self.text.is_char_boundary(start) || !self.text.is_char_boundary(end) {
+                Some(GeneratedSourceMapInvalidReason::GeneratedRangeNotUtf8Boundary)
+            } else if start < cursor {
+                Some(GeneratedSourceMapInvalidReason::OverlappingGeneratedRanges)
+            } else {
+                let source_start = mapping.source_start as usize;
+                if source_start >= source.len() {
+                    Some(GeneratedSourceMapInvalidReason::SourceOffsetOutOfBounds)
+                } else if !source.is_char_boundary(source_start) {
+                    Some(GeneratedSourceMapInvalidReason::SourceOffsetNotUtf8Boundary)
                 } else {
-                    let source_start = mapping.source_start as usize;
-                    if source_start >= source.len() {
-                        Some(GeneratedSourceMapInvalidReason::SourceOffsetOutOfBounds)
-                    } else if !source.is_char_boundary(source_start) {
-                        Some(GeneratedSourceMapInvalidReason::SourceOffsetNotUtf8Boundary)
-                    } else {
-                        None
-                    }
-                };
-                if let Some(reason) = invalid {
-                    return Err(ClientCompileError::GeneratedSourceMapInvalid { reason });
+                    None
                 }
-                if cursor < start {
-                    let content = allocator.alloc_str(&self.text[cursor..start]);
-                    items.push((0, None, content));
-                }
-                let content = allocator.alloc_str(&self.text[start..end]);
-                items.push((0, Some((mapping.source_start, 0)), content));
-                cursor = end;
+            };
+            if let Some(reason) = reason {
+                return Err(invalid(reason));
             }
-            if cursor < self.text.len() {
-                let content = allocator.alloc_str(&self.text[cursor..]);
-                items.push((0, None, content));
-            }
-            transform.batch_prepend_left_with_source_map(&items);
+            anchored.push((
+                mapping.generated_start..mapping.generated_end,
+                mapping.source_start,
+            ));
+            cursor = end;
+        }
 
-            let code = transform.build_string();
-            if code != self.text {
-                return Err(ClientCompileError::GeneratedSourceMapInvalid {
-                    reason: GeneratedSourceMapInvalidReason::GeneratedCodeChanged,
-                });
-            }
-            let map_name = filename.map_or("(unknown)", map_basename);
-            let source_map = transform.generate_map_json(SourceMapOptions {
-                source: Some(map_name),
-                file: Some(map_name),
-                include_content: true,
-            });
-            Ok((code, Some(source_map)))
-
-        })
+        let map_name = filename.map_or("(unknown)", map_basename);
+        let component = QualifiedSource {
+            key: SourceKey {
+                unit: source_unit_id(map_name, "svelte-component"),
+                content: ContentId::from_content_bytes(source.as_bytes()),
+                space: SourceSpaceKind::Original,
+            },
+            text: source,
+        };
+        // The module buffer moves into the fragment; the writer copies it once
+        // into the artifact.
+        let mut fragment = EmissionBuilder::new(MapMode::Map).with_source(component);
+        fragment
+            .push_owned_ranges(self.text, &anchored)
+            .map_err(|_| invalid(GeneratedSourceMapInvalidReason::GeneratedRangeOutOfBounds))?;
+        let mut plan = EmitPlanBuilder::new(MapMode::Map);
+        let artifact = fragment
+            .finish()
+            .map_err(Into::into)
+            .and_then(|fragment| plan.push_fragment(fragment))
+            .and_then(|()| plan.finish())
+            .and_then(|plan| plan.write(&mut CompilerWorkLedger::<Uncaptured>::new()))
+            .map_err(|_| invalid(GeneratedSourceMapInvalidReason::GeneratedRangeOutOfBounds))?;
+        let (code, map) = encoded(
+            artifact,
+            &[MapSource {
+                name: map_name,
+                content: Some(source),
+            }],
+            None,
+        );
+        let Some(mut map) = map else {
+            return Err(invalid(
+                GeneratedSourceMapInvalidReason::GeneratedRangeOutOfBounds,
+            ));
+        };
+        map.set_file(map_name);
+        Ok((code, Some(map.to_json_string())))
     }
 }
 
@@ -253,13 +270,53 @@ mod tests {
                 },
             ],
         };
-        let allocator = Allocator::default();
 
         assert_eq!(
-            output.finish("abcd", Some("App.svelte"), true, &allocator),
+            output.finish("abcd", Some("App.svelte"), true),
             Err(ClientCompileError::GeneratedSourceMapInvalid {
                 reason: GeneratedSourceMapInvalidReason::OverlappingGeneratedRanges,
             })
         );
+    }
+
+    #[test]
+    fn finishing_a_mapped_module_builds_no_transform() {
+        let source = "<p>{count}</p>";
+        let output = SvelteRuntimeOutput {
+            text: "$.text(count);".to_string(),
+            mappings: vec![SourceMapping {
+                generated_start: 7,
+                generated_end: 12,
+                source_start: 4,
+            }],
+        };
+        crate::code_transform::reset_code_transform_construction_count();
+        let (code, map) = output
+            .finish(source, Some("src/App.svelte"), true)
+            .expect("a valid range maps");
+        assert_eq!(
+            crate::code_transform::code_transform_construction_count(),
+            0
+        );
+        assert_eq!(code, "$.text(count);");
+        let json = map.expect("a demanded map");
+        let map = oxc_sourcemap::SourceMap::from_json_string(&json).expect("valid JS map");
+        assert_eq!(map.get_file(), Some("App.svelte"));
+        assert_eq!(map.get_sources().collect::<Vec<_>>(), vec!["App.svelte"]);
+        assert_eq!(map.get_source_content(0), Some(source));
+        let tokens: Vec<_> = map
+            .get_tokens()
+            .map(|token| {
+                (
+                    token.get_dst_col(),
+                    token
+                        .get_source_id()
+                        .map(|source| (source, token.get_src_col())),
+                )
+            })
+            .collect();
+        // The authored identifier maps to its source offset; the synthetic
+        // call scaffolding around it does not inherit that mapping.
+        assert_eq!(tokens, vec![(7, Some((0, 4))), (12, None)]);
     }
 }

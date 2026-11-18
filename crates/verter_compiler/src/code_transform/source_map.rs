@@ -1,41 +1,15 @@
 use std::borrow::Cow;
 
 use memchr::memchr_iter;
+use smallvec::SmallVec;
 
-use super::chunk::Chunk;
 use super::code_transform::CodeTransform;
-use crate::cursor::position::{utf16_len, PositionResolver};
+use super::fallible::CodeTransformError;
+use super::freeze::{chunk_content, synthetic_sequence};
+use crate::assembly::map_input::WireSegment;
+use crate::emission::correspondence::{classify, wire_tokens, WireCursor, WireSource};
+use crate::emission::{MapMode, Piece, Provenance};
 use oxc_sourcemap::{SourceMap, Token};
-
-/// Advance a generated `(line, column)` position through `content`.
-///
-/// Lines advance one per `U+000A`; the column counts UTF-16 code units from the
-/// last `U+000A` (or, with no newline, from wherever the column already was).
-/// This is the SINGLE definition of generated-position advance shared by
-/// [`CodeTransform::generate_map`], by
-/// [`CodeTransform::chain_source_map`](CodeTransform::chain_source_map), and by
-/// out-of-crate assemblers that must track a write cursor in the same
-/// coordinate space — so a caller composing a map alongside its own output
-/// cannot end up with a second, subtly different advance model.
-///
-/// Successive calls compose: advancing through `a` then `b` lands where
-/// advancing through `a ++ b` lands.
-#[inline]
-pub fn advance_generated_position(content: &str, line: &mut u32, column: &mut u32) {
-    let bytes = content.as_bytes();
-    let mut prev = 0usize;
-    for nl_pos in memchr_iter(b'\n', bytes) {
-        *line += 1;
-        prev = nl_pos + 1;
-    }
-    if prev == 0 {
-        // No newlines at all — advance column by UTF-16 length
-        *column += utf16_len(content) as u32;
-    } else {
-        // Column is UTF-16 length from last newline to end
-        *column = utf16_len(&content[prev..]) as u32;
-    }
-}
 
 /// Options for source map generation
 #[derive(Debug, Clone)]
@@ -96,12 +70,19 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     ///     .with_source("input.js")
     ///     .with_file("output.js");
     ///
-    /// let source_map = ct.generate_map(options);
+    /// let source_map = ct.generate_map(options)?;
     /// ```
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// [`CodeTransformError::MapNotCaptured`] for a transform created without
+    /// map capture.
     #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
-    pub fn generate_map(&self, options: SourceMapOptions) -> SourceMap<'static> {
-        self.generate_map_product(options).0
+    pub fn generate_map(
+        &self,
+        options: SourceMapOptions,
+    ) -> Result<SourceMap<'static>, CodeTransformError> {
+        Ok(self.generate_map_product(options)?.0)
     }
 
     /// Like [`generate_map`](Self::generate_map), but ALSO returns the generated-TSX position
@@ -112,18 +93,39 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     /// `None` for the boundary when no preamble was recorded or its chunk was not emitted (e.g.
     /// empty content). This is the SINGLE source of generated-position tracking; `generate_map`
     /// delegates here and drops the boundary.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// [`CodeTransformError::MapNotCaptured`] for a transform created without
+    /// map capture.
     #[allow(unused_assignments)] // generated_line/column updated in outro but intentionally not read after
     #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub fn generate_map_with_preamble(
         &self,
         options: SourceMapOptions,
-    ) -> (SourceMap<'static>, Option<(u32, u32)>) {
-        let (map, preamble_end, _) = self.generate_map_product(options);
-        (map, preamble_end)
+    ) -> Result<(SourceMap<'static>, Option<(u32, u32)>), CodeTransformError> {
+        let (map, preamble_end, _) = self.generate_map_product(options)?;
+        Ok((map, preamble_end))
     }
 
+    #[allow(clippy::type_complexity)]
     fn generate_map_product(
+        &self,
+        options: SourceMapOptions,
+    ) -> Result<
+        (
+            SourceMap<'static>,
+            Option<(u32, u32)>,
+            Option<super::mapping_product::InsertionAnchor>,
+        ),
+        CodeTransformError,
+    > {
+        self.require_map()?;
+        Ok(self.captured_map_product(options))
+    }
+
+    /// The map product of a transform that captured map facts.
+    pub(super) fn captured_map_product(
         &self,
         options: SourceMapOptions,
     ) -> (
@@ -175,351 +177,115 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
         sourcemap_locations.sort_unstable();
         sourcemap_locations.dedup();
 
-        // Reserve the exact per-variant token count up front so population does
-        // not reallocate or materially over-reserve replacement-heavy maps.
+        // Reserve an upper bound of the tokens the walk can place, so
+        // population does not reallocate.
         let token_capacity =
             self.estimate_sourcemap_token_capacity(source_id.is_some(), &sourcemap_locations);
-        let mut tokens: Vec<Token> = Vec::with_capacity(token_capacity);
+        let mut wire: Vec<WireSegment> = Vec::with_capacity(token_capacity);
+        let mut cursor = WireCursor::default();
+        let source = source_id.map(|index| WireSource { index, resolver });
 
-        // Capture the reserved capacity at the reservation point so tests can
-        // assert the buffer covers the full emitted token count — proving the
-        // reservation exists (a missing one collapses this to 0) without
-        // reallocating during population.
-        #[cfg(test)]
-        self.record_reserved_token_capacity(tokens.capacity());
+        // The intro is synthetic text.
+        for piece in synthetic_sequence(self.intro(), MapMode::Map) {
+            wire_tokens(
+                classify(&piece),
+                self.piece_text(&piece),
+                source,
+                &sourcemap_locations,
+                &mut cursor,
+                &mut wire,
+            );
+        }
+        // The helper-import preamble may BE the module intro (the Svelte IDE projection prepends
+        // its `@jsxImportSource`-led prelude as the intro so the pragma stays the leading output
+        // bytes). When it is, capture the generated position immediately after it as the
+        // preamble-end boundary — the same boundary Vue publishes from its `Inserted` preamble
+        // chunk. First capture wins (the debug-assert catches accidental double-publication: a
+        // preamble can be the intro OR an inserted chunk, never both).
+        if self.intro_len() > 0 && self.sole_intro_piece().is_some_and(is_preamble) {
+            verter_debug_assert!(preamble_end.is_none());
+            preamble_end.get_or_insert((cursor.line, cursor.column));
+            insertion_anchor = self.helper_preamble_carrier_anchor().map(|carrier| {
+                super::mapping_product::InsertionAnchor {
+                    projected: 0,
+                    carrier,
+                }
+            });
+        }
 
-        let mut generated_line = 0u32;
-        let mut generated_column = 0u32;
-
-        // Add intro (no source mapping for inserted content)
-        if !self.intro().is_empty() {
-            tokens.push(Token::new(
-                generated_line,
-                generated_column,
-                0,
-                0,
-                None,
-                None,
-            ));
-            advance_generated_position(self.intro(), &mut generated_line, &mut generated_column);
-            // The helper-import preamble may BE the module intro (the Svelte IDE projection prepends
-            // its `@jsxImportSource`-led prelude as the intro so the pragma stays the leading output
-            // bytes). When it is, capture the generated position immediately after it as the
-            // preamble-end boundary — the same boundary Vue publishes from its `Inserted` preamble
-            // chunk. First capture wins (the debug-assert catches accidental double-publication: a
-            // preamble can be the intro OR an inserted chunk, never both).
-            if is_preamble(self.intro()) {
+        // Every byte through the one interpretation and the one wire policy:
+        // the pieces each chunk becomes, the same pieces a frozen transform
+        // holds, placed exactly as the emission writer places them.
+        let mut generated_byte = self.intro_len() as u32;
+        let mut pieces: SmallVec<[Piece<'a>; 4]> = SmallVec::new();
+        for (chunk, relocated) in self.leaf_chunks() {
+            let chunk_start = generated_byte;
+            pieces.clear();
+            self.leaf_pieces(chunk, relocated, &mut |piece| pieces.push(piece));
+            for piece in &pieces {
+                let text = self.piece_text(piece);
+                generated_byte = generated_byte.saturating_add(text.len() as u32);
+                wire_tokens(
+                    classify(piece),
+                    text,
+                    source,
+                    &sourcemap_locations,
+                    &mut cursor,
+                    &mut wire,
+                );
+            }
+            // The helper-import preamble is an unmapped insertion: capture the
+            // generated position immediately after it as the preamble-end
+            // boundary. First capture wins (the debug-assert catches
+            // accidental double-publication).
+            if chunk_content(chunk).is_some_and(is_preamble) {
                 verter_debug_assert!(preamble_end.is_none());
-                preamble_end.get_or_insert((generated_line, generated_column));
+                preamble_end.get_or_insert((cursor.line, cursor.column));
                 insertion_anchor = self.helper_preamble_carrier_anchor().map(|carrier| {
                     super::mapping_product::InsertionAnchor {
-                        projected: 0,
+                        projected: chunk_start,
                         carrier,
                     }
                 });
             }
         }
 
-        // Process chunks
-        let mut generated_byte = self.intro().len() as u32;
-        for chunk in self.chunks() {
-            let chunk_start = generated_byte;
-            generated_byte = generated_byte.saturating_add(match chunk {
-                Chunk::Original { start, end } => end.saturating_sub(*start),
-                Chunk::Moved { content, .. }
-                | Chunk::Overwritten { content, .. }
-                | Chunk::OverwrittenSegmented { content, .. }
-                | Chunk::Inserted { content }
-                | Chunk::InsertedAnchored { content, .. }
-                | Chunk::InsertedMapped { content, .. } => content.len() as u32,
-            });
-            match chunk {
-                Chunk::Original { start, end } => {
-                    if let Some(source_id) = source_id {
-                        let slice = &self.original()[*start as usize..*end as usize];
-
-                        Self::emit_mapped_content(
-                            &mut tokens,
-                            slice,
-                            source_id,
-                            resolver,
-                            *start,
-                            *end,
-                            &sourcemap_locations,
-                            &mut generated_line,
-                            &mut generated_column,
-                        );
-                    }
-                }
-                Chunk::Moved {
-                    start: orig_start,
-                    end: orig_end,
-                    content,
-                    replacement,
-                    ..
-                } => {
-                    if content.is_empty() {
-                        continue;
-                    }
-                    // Byte-preserved moved content maps linearly. Replacement
-                    // text retains its pre-move non-linear identity and maps
-                    // only at the replaced source span's start.
-                    if *replacement {
-                        if let Some(source_id) = source_id {
-                            let (src_line_1, src_col_1) =
-                                resolver.offset_to_line_and_col(*orig_start as usize);
-                            tokens.push(Token::new(
-                                generated_line,
-                                generated_column,
-                                (src_line_1 - 1) as u32,
-                                (src_col_1 - 1) as u32,
-                                Some(source_id),
-                                None,
-                            ));
-                        }
-                        advance_generated_position(
-                            content,
-                            &mut generated_line,
-                            &mut generated_column,
-                        );
-                    } else if let Some(source_id) = source_id {
-                        Self::emit_mapped_content(
-                            &mut tokens,
-                            content,
-                            source_id,
-                            resolver,
-                            *orig_start,
-                            *orig_end,
-                            &sourcemap_locations,
-                            &mut generated_line,
-                            &mut generated_column,
-                        );
-                    }
-                }
-                Chunk::Overwritten {
-                    start: orig_start,
-                    content,
-                    ..
-                } => {
-                    if content.is_empty() {
-                        continue;
-                    }
-                    // Overwritten content — emit a single token at the original start
-                    // position. Unlike Original/Moved chunks, there is no character-level
-                    // correspondence between replacement content and the source, so
-                    // per-line tokens would be misleading. This matches MagicString behavior.
-                    //
-                    // Content produced via `overwrite_unmapped` has NO correspondence to
-                    // the replaced span AT ALL (wholly synthetic wrapper text, e.g. a
-                    // generated object literal replacing a `<script setup>` tag) — even
-                    // the single "original start" claim below is false for it, so it is
-                    // looked up by content identity and skipped entirely rather than
-                    // mapped.
-                    let is_unmapped = self
-                        .unmapped_overwrite_contents
-                        .contains(&(content.as_ptr() as usize, content.len()));
-                    if let (Some(source_id), false) = (source_id, is_unmapped) {
-                        let (src_line_1, src_col_1) =
-                            resolver.offset_to_line_and_col(*orig_start as usize);
-                        let source_line = (src_line_1 - 1) as u32;
-                        let source_column = (src_col_1 - 1) as u32;
-
-                        tokens.push(Token::new(
-                            generated_line,
-                            generated_column,
-                            source_line,
-                            source_column,
-                            Some(source_id),
-                            None,
-                        ));
-                    }
-
-                    advance_generated_position(content, &mut generated_line, &mut generated_column);
-                }
-                Chunk::OverwrittenSegmented {
-                    content, anchors, ..
-                } => {
-                    if content.is_empty() {
-                        continue;
-                    }
-                    // Multi-anchor replacement — see `segmented.rs`'s module
-                    // doc. Bytes outside every anchor (before the first,
-                    // between two, after the last) are synthetic scaffolding:
-                    // emitted as an unmapped token, exactly like a pure
-                    // `Inserted` run. Each anchor's own byte span is an
-                    // AUTHORED lexeme: emitted as a mapped token at the
-                    // anchor's source position, then the generated cursor
-                    // advances through EXACTLY the anchor's own length before
-                    // the next gap starts — this is what stops the mapping
-                    // from bleeding into trailing synthetic bytes (a source
-                    // map token is a point that applies until the next one).
-                    let mut cursor = 0u32;
-                    for anchor in *anchors {
-                        if anchor.content_offset > cursor {
-                            let gap = &content[cursor as usize..anchor.content_offset as usize];
-                            tokens.push(Token::new(
-                                generated_line,
-                                generated_column,
-                                0,
-                                0,
-                                None,
-                                None,
-                            ));
-                            advance_generated_position(
-                                gap,
-                                &mut generated_line,
-                                &mut generated_column,
-                            );
-                        }
-                        if anchor.length > 0 {
-                            let anchor_text = &content[anchor.content_offset as usize
-                                ..(anchor.content_offset + anchor.length) as usize];
-                            if let Some(source_id) = source_id {
-                                let (src_line_1, src_col_1) =
-                                    resolver.offset_to_line_and_col(anchor.source_pos as usize);
-                                tokens.push(Token::new(
-                                    generated_line,
-                                    generated_column,
-                                    (src_line_1 - 1) as u32,
-                                    (src_col_1 - 1) as u32,
-                                    Some(source_id),
-                                    None,
-                                ));
-                            }
-                            advance_generated_position(
-                                anchor_text,
-                                &mut generated_line,
-                                &mut generated_column,
-                            );
-                        }
-                        cursor = anchor.content_offset + anchor.length;
-                    }
-                    if (cursor as usize) < content.len() {
-                        let tail = &content[cursor as usize..];
-                        tokens.push(Token::new(
-                            generated_line,
-                            generated_column,
-                            0,
-                            0,
-                            None,
-                            None,
-                        ));
-                        advance_generated_position(
-                            tail,
-                            &mut generated_line,
-                            &mut generated_column,
-                        );
-                    }
-                }
-                Chunk::Inserted { content } | Chunk::InsertedAnchored { content, .. } => {
-                    if content.is_empty() {
-                        continue;
-                    }
-                    // Pure insertion — unmapped (an anchored insertion's
-                    // affinity only affects edit semantics, not mapping)
-                    tokens.push(Token::new(
-                        generated_line,
-                        generated_column,
-                        0,
-                        0,
-                        None,
-                        None,
-                    ));
-
-                    advance_generated_position(content, &mut generated_line, &mut generated_column);
-                    // The helper-import preamble is an unmapped insertion: capture the
-                    // generated position immediately after it as the preamble-end boundary.
-                    // First capture wins (the debug-assert catches accidental double-publication).
-                    if is_preamble(content) {
-                        verter_debug_assert!(preamble_end.is_none());
-                        preamble_end.get_or_insert((generated_line, generated_column));
-                        insertion_anchor = self.helper_preamble_carrier_anchor().map(|carrier| {
-                            super::mapping_product::InsertionAnchor {
-                                projected: chunk_start,
-                                carrier,
-                            }
-                        });
-                    }
-                }
-                Chunk::InsertedMapped {
-                    content,
-                    source_start,
-                    content_offset,
-                } => {
-                    if content.is_empty() {
-                        continue;
-                    }
-                    // Inserted content mapped to a specific source position.
-                    // `content_offset` shifts the source map token within the content:
-                    // characters before `content_offset` are unmapped (e.g., `(__props.`),
-                    // then the token is emitted at `content_offset` pointing to `source_start`.
-                    let offset = (*content_offset as usize).min(content.len());
-                    if offset > 0 {
-                        // Unmapped prefix (e.g., the `(` and binding prefix)
-                        let prefix = &content[..offset];
-                        tokens.push(Token::new(
-                            generated_line,
-                            generated_column,
-                            0,
-                            0,
-                            None,
-                            None,
-                        ));
-                        advance_generated_position(
-                            prefix,
-                            &mut generated_line,
-                            &mut generated_column,
-                        );
-                    }
-                    // Mapped token at content_offset → source_start
-                    let rest = &content[offset..];
-                    if !rest.is_empty() {
-                        if let Some(source_id) = source_id {
-                            let (sl, sc) = resolver.offset_to_line_and_col(*source_start as usize);
-                            tokens.push(Token::new(
-                                generated_line,
-                                generated_column,
-                                (sl - 1) as u32,
-                                (sc - 1) as u32,
-                                Some(source_id),
-                                None,
-                            ));
-                        }
-                        advance_generated_position(
-                            rest,
-                            &mut generated_line,
-                            &mut generated_column,
-                        );
-                    }
-                    // Defensive: the helper-import preamble is emitted unmapped (`Inserted`) or as
-                    // the module intro, but match here too so the boundary survives if a preamble is
-                    // ever routed through a mapped insertion. First capture wins.
-                    if is_preamble(content) {
-                        verter_debug_assert!(preamble_end.is_none());
-                        preamble_end.get_or_insert((generated_line, generated_column));
-                        insertion_anchor = self.helper_preamble_carrier_anchor().map(|carrier| {
-                            super::mapping_product::InsertionAnchor {
-                                projected: chunk_start,
-                                carrier,
-                            }
-                        });
-                    }
-                }
-            }
+        // The outro is synthetic text.
+        for piece in synthetic_sequence(self.outro(), MapMode::Map) {
+            wire_tokens(
+                classify(&piece),
+                self.piece_text(&piece),
+                source,
+                &sourcemap_locations,
+                &mut cursor,
+                &mut wire,
+            );
         }
 
-        // Add outro (no source mapping)
-        if !self.outro().is_empty() {
-            tokens.push(Token::new(
-                generated_line,
-                generated_column,
+        let mut tokens: Vec<Token> = Vec::with_capacity(wire.len());
+        // Capture the reserved capacity at the reservation point so tests can
+        // assert the buffer covers the full emitted token count without
+        // reallocating during population.
+        #[cfg(test)]
+        self.record_reserved_token_capacity(wire.capacity());
+        tokens.extend(wire.iter().map(|segment| match segment.payload {
+            Some(payload) => Token::new(
+                segment.generated_line,
+                segment.generated_column,
+                payload.source_line,
+                payload.source_column,
+                Some(payload.source_index),
+                None,
+            ),
+            None => Token::new(
+                segment.generated_line,
+                segment.generated_column,
                 0,
                 0,
                 None,
                 None,
-            ));
-            advance_generated_position(self.outro(), &mut generated_line, &mut generated_column);
-        }
+            ),
+        }));
 
         (
             SourceMap::new(
@@ -545,49 +311,16 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
         has_source: bool,
         sourcemap_locations: &[u32],
     ) -> usize {
-        let mut capacity =
-            usize::from(!self.intro().is_empty()) + usize::from(!self.outro().is_empty());
+        let mut capacity = usize::from(self.intro_len() > 0) + usize::from(self.outro_len() > 0);
 
-        for chunk in self.chunks() {
-            capacity += match chunk {
-                Chunk::Original { start, end } if has_source => Self::mapped_content_token_count(
-                    &self.original()[*start as usize..*end as usize],
-                    *start,
-                    *end,
-                    sourcemap_locations,
-                ),
-                Chunk::Original { .. } => 0,
-                Chunk::Moved {
-                    start,
-                    end,
-                    content,
-                    replacement,
-                } if has_source && !content.is_empty() => {
-                    if *replacement {
-                        1
-                    } else {
-                        Self::mapped_content_token_count(content, *start, *end, sourcemap_locations)
-                    }
-                }
-                Chunk::Moved { .. } => 0,
-                Chunk::Overwritten { content: "", .. } => 0,
-                Chunk::Overwritten { .. } => usize::from(has_source),
-                Chunk::OverwrittenSegmented { content: "", .. } => 0,
-                Chunk::OverwrittenSegmented {
-                    content, anchors, ..
-                } => Self::segmented_token_count(content, anchors, has_source),
-                Chunk::Inserted { content } | Chunk::InsertedAnchored { content, .. } => {
-                    usize::from(!content.is_empty())
-                }
-                Chunk::InsertedMapped {
-                    content,
-                    content_offset,
-                    ..
-                } => {
-                    let offset = (*content_offset as usize).min(content.len());
-                    usize::from(offset > 0) + usize::from(has_source && offset < content.len())
-                }
-            };
+        let mut pieces: SmallVec<[Piece<'a>; 4]> = SmallVec::new();
+        for (chunk, relocated) in self.leaf_chunks() {
+            pieces.clear();
+            self.leaf_pieces(chunk, relocated, &mut |piece| pieces.push(piece));
+            for piece in &pieces {
+                let text = self.piece_text(piece);
+                capacity += Self::piece_token_count(piece, text, has_source, sourcemap_locations);
+            }
         }
 
         capacity
@@ -595,7 +328,7 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
 
     /// Count the initial mapped token plus the union of interior line starts
     /// and authored boundaries. A boundary exactly at a line start shares the
-    /// line token, matching `emit_mapped_content`.
+    /// line token, matching the identity runs of `wire_tokens`.
     fn mapped_content_token_count(
         content: &str,
         original_start: u32,
@@ -619,31 +352,29 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
         1 + interior_line_starts + authored_boundaries
     }
 
-    /// Exact token count for one `OverwrittenSegmented` chunk — variant-for-
-    /// variant with the emission walk's `OverwrittenSegmented` arm above: one
-    /// unconditional token per non-empty gap (before/between/after anchors,
-    /// matching a pure `Inserted` run) plus one token per non-empty anchor
-    /// ONLY when a source is present (matching `Overwritten`).
-    fn segmented_token_count(
-        content: &str,
-        anchors: &[super::segmented::SegmentAnchor],
+    /// Upper bound of the tokens [`wire_tokens`] places for one piece: a
+    /// synthetic run needs its sourceless token only while a mapping is
+    /// active on its line.
+    fn piece_token_count(
+        piece: &Piece<'_>,
+        text: &str,
         has_source: bool,
+        sourcemap_locations: &[u32],
     ) -> usize {
-        let mut count = 0usize;
-        let mut cursor = 0u32;
-        for anchor in anchors {
-            if anchor.content_offset > cursor {
-                count += 1;
-            }
-            if anchor.length > 0 {
-                count += usize::from(has_source);
-            }
-            cursor = anchor.content_offset + anchor.length;
+        if text.is_empty() {
+            return usize::from(piece.provenance() == Provenance::Unmapped);
         }
-        if (cursor as usize) < content.len() {
-            count += 1;
+        match piece.provenance() {
+            Provenance::Exact { source_start } if has_source => Self::mapped_content_token_count(
+                text,
+                source_start,
+                source_start + text.len() as u32,
+                sourcemap_locations,
+            ),
+            Provenance::Exact { .. } => 1,
+            Provenance::Rewritten { .. } | Provenance::Anchor { .. } => 1,
+            Provenance::Unmapped | Provenance::External(_) => 1,
         }
-        count
     }
 
     #[cfg(test)]
@@ -654,102 +385,18 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
         self.estimate_sourcemap_token_capacity(has_source, &sourcemap_locations)
     }
 
-    /// Emit source map tokens for content that maps back to original source.
-    /// Used for both Original chunks and moved Edited chunks.
-    ///
-    /// Scans `content` once, merging line starts with explicitly registered
-    /// authored offsets. Both streams are ordered, so this remains linear in
-    /// the content plus emitted boundaries and does not allocate per chunk.
-    #[allow(clippy::too_many_arguments)]
-    fn emit_mapped_content(
-        tokens: &mut Vec<Token>,
-        content: &str,
-        source_id: u32,
-        resolver: &PositionResolver,
-        original_start: u32,
-        original_end: u32,
-        sourcemap_locations: &[u32],
-        generated_line: &mut u32,
-        generated_column: &mut u32,
-    ) {
-        let content_bytes = content.as_bytes();
-        let content_len = content_bytes.len();
-
-        // Single resolver lookup for the initial source position (O(log N) once per chunk)
-        let (sl, sc) = resolver.offset_to_line_and_col(original_start as usize);
-        let mut source_line = (sl - 1) as u32;
-        let mut source_column = (sc - 1) as u32;
-
-        tokens.push(Token::new(
-            *generated_line,
-            *generated_column,
-            source_line,
-            source_column,
-            Some(source_id),
-            None,
-        ));
-
-        // Scan for newlines — O(1) manual tracking per newline (no binary search)
-        // The chunk-start token already covers a requested location at
-        // `original_start`; a request at `original_end` belongs to the next
-        // surviving mapped chunk, if there is one.
-        let mut explicit_index =
-            sourcemap_locations.partition_point(|location| *location <= original_start);
-        let mut newline_boundaries = memchr_iter(b'\n', content_bytes)
-            .map(|position| position + 1)
-            .filter(|position| *position < content_len)
-            .peekable();
-        let mut prev = 0usize;
-
-        loop {
-            let next_explicit = sourcemap_locations
-                .get(explicit_index)
-                .copied()
-                .filter(|location| *location < original_end)
-                .and_then(|location| {
-                    let relative = (location - original_start) as usize;
-                    (relative < content_len).then_some(relative)
-                });
-            let next_newline = newline_boundaries.peek().copied();
-            let Some(boundary) = (match (next_explicit, next_newline) {
-                (Some(explicit), Some(newline)) => Some(explicit.min(newline)),
-                (Some(explicit), None) => Some(explicit),
-                (None, Some(newline)) => Some(newline),
-                (None, None) => None,
-            }) else {
-                break;
-            };
-
-            let traversed = &content[prev..boundary];
-            advance_generated_position(traversed, generated_line, generated_column);
-            advance_generated_position(traversed, &mut source_line, &mut source_column);
-            tokens.push(Token::new(
-                *generated_line,
-                *generated_column,
-                source_line,
-                source_column,
-                Some(source_id),
-                None,
-            ));
-            prev = boundary;
-
-            if next_explicit == Some(boundary) {
-                explicit_index += 1;
-            }
-            if next_newline == Some(boundary) {
-                newline_boundaries.next();
-            }
-        }
-
-        advance_generated_position(&content[prev..], generated_line, generated_column);
-    }
-
     /// Generate source map and return as JSON string
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// [`CodeTransformError::MapNotCaptured`] for a transform created without
+    /// map capture.
     #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
-    pub fn generate_map_json(&self, options: SourceMapOptions) -> String {
-        let map = self.generate_map(options);
-        map.to_json_string()
+    pub fn generate_map_json(
+        &self,
+        options: SourceMapOptions,
+    ) -> Result<String, CodeTransformError> {
+        Ok(self.generate_map(options)?.to_json_string())
     }
 
     /// Generate the source map JSON, augmented with the typed helper-import-preamble end boundary
@@ -759,10 +406,24 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     /// source-map extension convention) because the only compiler→LSP transport is the source-map
     /// string; `oxc_sourcemap` ignores the unknown member on parse, and the strict `PositionMapper`
     /// recovers it into a typed field.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// [`CodeTransformError::MapNotCaptured`] for a transform created without
+    /// map capture.
     #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
-    pub fn generate_map_json_with_preamble(&self, options: SourceMapOptions) -> String {
-        let (map, preamble_end, insertion_anchor) = self.generate_map_product(options);
+    pub fn generate_map_json_with_preamble(
+        &self,
+        options: SourceMapOptions,
+    ) -> Result<String, CodeTransformError> {
+        self.require_map()?;
+        Ok(self.captured_map_json_with_preamble(options))
+    }
+
+    /// [`generate_map_json_with_preamble`](Self::generate_map_json_with_preamble)
+    /// of a transform that captured map facts.
+    pub(super) fn captured_map_json_with_preamble(&self, options: SourceMapOptions) -> String {
+        let (map, preamble_end, insertion_anchor) = self.captured_map_product(options);
         inject_mapping_product(map.to_json_string(), preamble_end, insertion_anchor)
     }
 }

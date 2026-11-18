@@ -13,16 +13,16 @@ use verter_span::{SourceByteOffset, SourceByteRange};
 
 use super::flow::{CallbackSource, FlowNarrowing};
 use crate::ast::types::{ElementNode, TagType};
+use crate::code_transform::EditRecorder;
 use crate::ide::template::emit::{
     emit_expr_plan, emit_op, emit_synthesized_shorthand_value, plan_user_expr, trim_span, EmitOp,
     EmitText, ExprOptions, ExprPlan, Placement,
 };
 use crate::ide::{event_to_jsx_name, get_directive_name, TemplateComponentBindings};
-use crate::template::code_gen::binding::BindingResolver;
-use crate::template::code_gen::types::CodeGenOutput;
-use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
-use crate::template::code_gen::vdom::props::camelize;
+use crate::template::binding::prefixed_expr::build_prefixed_expr;
+use crate::template::binding::BindingResolver;
 use crate::template::oxc::types::{OxcParsedElement, OxcParsedProp};
+use crate::template::vue_syntax::camelize;
 use crate::types::NodeProp;
 
 /// One emission piece of a custom directive's relocated `v-directive` payload.
@@ -242,7 +242,7 @@ pub fn process_element_props<'alloc>(
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
     source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
     components: &TemplateComponentBindings,
@@ -685,7 +685,7 @@ fn process_merged_class_or_style<'alloc>(
     prop: &NodeProp,
     oxc_prop: Option<&OxcParsedProp<'alloc>>,
     source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     resolver: &BindingResolver<'alloc>,
     attr_name: &str,
     helper_name: &str,
@@ -747,7 +747,7 @@ fn process_v_bind<'alloc>(
     prop: &NodeProp,
     oxc_prop: Option<&OxcParsedProp<'alloc>>,
     source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     _alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
     flow: &mut FlowNarrowing,
@@ -1091,7 +1091,7 @@ fn emit_in_place_jsx_value<'alloc>(
     prop: &NodeProp,
     oxc_prop: Option<&OxcParsedProp<'alloc>>,
     source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     resolver: &BindingResolver<'alloc>,
     vs: u32,
     ve: u32,
@@ -1140,7 +1140,7 @@ fn process_v_html<'alloc>(
     prop: &NodeProp,
     oxc_prop: Option<&OxcParsedProp<'alloc>>,
     source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     resolver: &BindingResolver<'alloc>,
 ) {
     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
@@ -1163,7 +1163,7 @@ fn process_v_text<'alloc>(
     prop: &NodeProp,
     oxc_prop: Option<&OxcParsedProp<'alloc>>,
     source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     resolver: &BindingResolver<'alloc>,
 ) {
     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
@@ -1204,7 +1204,7 @@ fn is_builtin_directive(prop: &NodeProp, source: &str, dir: &str) -> bool {
 
 /// Remove a prop from output by overwriting with empty string.
 /// Handles the full span including value and modifiers.
-fn remove_prop(prop: &NodeProp, _source: &str, out: &mut CodeGenOutput<'_>) {
+fn remove_prop(prop: &NodeProp, _source: &str, out: &mut EditRecorder<'_>) {
     let prop_end = get_prop_end(prop);
     out.overwrite(prop.start, prop_end, "");
 }
@@ -1240,7 +1240,7 @@ fn normalize_component_prop_name(
     start: u32,
     end: u32,
     source: &str,
-    out: &mut CodeGenOutput<'_>,
+    out: &mut EditRecorder<'_>,
 ) {
     if !is_component || start >= end {
         return;
@@ -1252,7 +1252,7 @@ fn normalize_component_prop_name(
     }
 }
 
-pub(super) fn normalized_component_prop_name(
+pub(crate) fn normalized_component_prop_name(
     is_component: bool,
     authored: &str,
 ) -> std::borrow::Cow<'_, str> {

@@ -2756,7 +2756,7 @@ fn compiler_assembly_map_refusal_does_not_publish_or_warm_main() {
 
     let artifact = verter_compiler::framework_common::registered_carrier_projection::parse_registered_source_for_tests(
         FileLanguage::vue(),
-        verter_language::carrier_grammar::CarrierGrammarConfig::vue(
+        verter_compiler::framework_common::vue_grammar_config(
             "{{",
             "}}",
             std::iter::empty::<&str>(),

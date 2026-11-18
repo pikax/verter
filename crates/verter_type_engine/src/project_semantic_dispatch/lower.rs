@@ -295,6 +295,15 @@ impl<'e> TypeLowerCursor<'e> {
 
 /// A type's lowering held between reads. The factory's path cache and root
 /// identity live for the entire lowering, including every suspension.
+///
+/// Its holder keeps the connected demand open for the lowering's whole
+/// extent, as for a held `DeferredRead`: an applied `typeof` stands at its
+/// substitution walk's template read with the walk's cost recordings open
+/// on that demand, and a root demand the read entered instead would clear
+/// them, so the completed substitution could not publish its priced memo
+/// entry. The read itself holds no guard. The in-place drivers instead hold
+/// it exactly around each substitution, where the public substitution entry
+/// does.
 pub(super) struct TypeLowerRead<'e> {
     cursor: TypeLowerCursor<'e>,
     infer_binders: crate::semantic_query::InferBinderFactory,
@@ -312,7 +321,7 @@ pub(super) struct LowerRead {
 /// An answer to the last yielded read, retaining its original envelope.
 pub(super) enum LowerDelivery {
     Node(QueryResult<SemanticQueryOutput<SemanticNodeId>>),
-    Whole(crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>),
+    Whole(crate::semantic_query::CacheRead<QueryResult<crate::semantic_query::SemanticQueryValue>>),
 }
 
 pub(super) enum LowerProgress {
@@ -322,6 +331,10 @@ pub(super) enum LowerProgress {
 
 /// The operation waiting for a query answer, with its completed inputs.
 enum LowerReadResume<'e> {
+    TypeofInstantiation {
+        instantiation: super::explicit_instantiation::ExplicitInstantiation,
+        arguments: Vec<SemanticNodeId>,
+    },
     ImportTail,
     ImportAnchor {
         anchor: Box<super::carrier::AnchorRead>,
@@ -1420,6 +1433,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             scope_payload,
             shadowing,
         };
+        // A suspending holder keeps the connected demand open for the
+        // lowering's extent.
+        let _demand = self.enter_connected_demand(false).0;
         let mut read = self.begin_type_lowering(expr, scope, reduction_context);
         let mut requested = Vec::new();
         let mut progress = self.advance_type_lowering(&lowering, &mut read, None);
@@ -1516,6 +1532,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let mut cursor = TypeLowerCursor::new(expr, reduction_context);
         let mut delivered = None;
+        let mut demand = None;
         loop {
             match self.advance_type_lowering_cursor(
                 &lowering,
@@ -1523,6 +1540,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 &mut cursor,
                 substitutions,
                 delivered.take(),
+                super::explicit_instantiation::InstantiationDemand::InPlace(&mut demand),
             ) {
                 LowerProgress::Done(node) => return node,
                 LowerProgress::Read(request) => delivered = Some(self.answer_lower_read(request)),
@@ -1544,6 +1562,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Lend the context for one advance; no dispatcher borrow survives it.
+    /// The caller keeps the connected demand open for the lowering's extent.
     pub(super) fn advance_type_lowering(
         &self,
         lowering: &TypeExprLowering<'_>,
@@ -1556,6 +1575,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &mut read.cursor,
             &mut read.substitutions,
             delivered,
+            super::explicit_instantiation::InstantiationDemand::Held,
         )
     }
 
@@ -1563,7 +1583,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub(super) fn answer_lower_read(&self, request: LowerRead) -> LowerDelivery {
         match request.shape {
             LowerReadShape::Node => LowerDelivery::Node(self.execute_type_node(request.key)),
-            LowerReadShape::Whole => LowerDelivery::Whole(self.execute_read(request.key)),
+            LowerReadShape::Whole => {
+                LowerDelivery::Whole(self.execute_via_cold_build_helper(request.key))
+            }
         }
     }
 
@@ -1573,21 +1595,30 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         read: &mut TypeLowerRead<'_>,
     ) -> SemanticNodeId {
         let mut delivered = None;
+        let mut demand = None;
         loop {
-            match self.advance_type_lowering(lowering, read, delivered.take()) {
+            match self.advance_type_lowering_cursor(
+                lowering,
+                &read.infer_binders,
+                &mut read.cursor,
+                &mut read.substitutions,
+                delivered.take(),
+                super::explicit_instantiation::InstantiationDemand::InPlace(&mut demand),
+            ) {
                 LowerProgress::Done(node) => return node,
                 LowerProgress::Read(request) => delivered = Some(self.answer_lower_read(request)),
             }
         }
     }
 
-    fn advance_type_lowering_cursor(
-        &self,
+    fn advance_type_lowering_cursor<'g>(
+        &'g self,
         lowering: &TypeExprLowering<'_>,
         infer_binders: &crate::semantic_query::InferBinderFactory,
         cursor: &mut TypeLowerCursor<'_>,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         delivered: Option<LowerDelivery>,
+        mut demand: super::explicit_instantiation::InstantiationDemand<'_, 'g>,
     ) -> LowerProgress {
         let mut step = if let Some(delivery) = delivered {
             let Some(LowerFrame::Read(resume)) = cursor.frames.pop() else {
@@ -1597,7 +1628,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 env: cursor.environment.as_deref().unwrap_or(lowering.env),
                 ..*lowering
             };
-            self.resume_lower_read(&scoped, resume, delivery, &mut cursor.frames)
+            self.resume_lower_read(
+                &scoped,
+                resume,
+                delivery,
+                &mut cursor.frames,
+                demand.reborrow(),
+            )
         } else {
             let (expr, context) = cursor
                 .next
@@ -1658,23 +1695,45 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         value,
                         substitutions,
                         &mut cursor.frames,
+                        demand.reborrow(),
                     );
                 }
             }
         }
     }
 
-    fn resume_lower_read<'e>(
-        &self,
+    fn resume_lower_read<'e, 'g>(
+        &'g self,
         lowering: &TypeExprLowering<'_>,
         resume: LowerReadResume<'e>,
         delivery: LowerDelivery,
         frames: &mut LowerFrames<'e>,
+        demand: super::explicit_instantiation::InstantiationDemand<'_, 'g>,
     ) -> LowerStep<'e> {
         match (resume, delivery) {
-            (LowerReadResume::ImportTail, LowerDelivery::Whole(read)) => {
-                LowerStep::Value(self.carrier_resolution_of(read).node)
+            (
+                LowerReadResume::TypeofInstantiation {
+                    mut instantiation,
+                    arguments,
+                },
+                LowerDelivery::Whole(read),
+            ) => {
+                let mut read = Some(read);
+                let step = self.advance_explicit_instantiation(
+                    &mut instantiation,
+                    &arguments,
+                    &mut || {
+                        read.take()
+                            .expect("an instantiation consumes its delivery once")
+                    },
+                    demand,
+                );
+                Self::lower_typeof_instantiation_step(instantiation, arguments, step, frames)
             }
+            (LowerReadResume::ImportTail, LowerDelivery::Whole(read)) => LowerStep::Value(
+                self.carrier_resolution_of(super::narrow_value_cache_read(read))
+                    .node,
+            ),
             (
                 LowerReadResume::ImportAnchor {
                     anchor,
@@ -1683,7 +1742,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 },
                 LowerDelivery::Whole(read),
             ) => {
-                let answer = self.carrier_resolution_of(read);
+                let answer = self.carrier_resolution_of(super::narrow_value_cache_read(read));
                 match self.resume_anchor(*anchor, answer) {
                     super::carrier::CarrierResolutionPlan::Ready(value) => {
                         LowerStep::Value(value.node)
@@ -1701,7 +1760,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 },
                 LowerDelivery::Whole(read),
             ) => {
-                let answer = self.carrier_resolution_of(read);
+                let answer = self.carrier_resolution_of(super::narrow_value_cache_read(read));
                 match self.resume_anchor(*anchor, answer) {
                     super::carrier::CarrierResolutionPlan::Ready(value) => {
                         LowerStep::Value(value.node)
@@ -1712,7 +1771,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             (LowerReadResume::CarrierFinish(finish), LowerDelivery::Whole(read)) => {
-                let answer = self.carrier_resolution_of(read);
+                let answer = self.carrier_resolution_of(super::narrow_value_cache_read(read));
                 LowerStep::Value(self.resume_carrier_finish(finish, answer).node)
             }
             (LowerReadResume::MappedKeySpace(mut state), LowerDelivery::Node(answer)) => {
@@ -1760,6 +1819,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             _ => panic!("lowering read delivered the wrong answer shape"),
+        }
+    }
+
+    /// Retain the instantiation at its own read, with the arguments already
+    /// lowered. Signature sets keep their original query-value envelope.
+    fn lower_typeof_instantiation_step<'e>(
+        instantiation: super::explicit_instantiation::ExplicitInstantiation,
+        arguments: Vec<SemanticNodeId>,
+        step: super::explicit_instantiation::InstantiationStep,
+        frames: &mut LowerFrames<'e>,
+    ) -> LowerStep<'e> {
+        match step {
+            super::explicit_instantiation::InstantiationStep::Done(node) => LowerStep::Value(node),
+            super::explicit_instantiation::InstantiationStep::Read(key) => {
+                frames.push(LowerFrame::Read(LowerReadResume::TypeofInstantiation {
+                    instantiation,
+                    arguments,
+                }));
+                LowerStep::Read(LowerRead {
+                    key,
+                    shape: LowerReadShape::Whole,
+                })
+            }
         }
     }
 
@@ -3090,14 +3172,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Deliver `value`, the child `frame` descended into, and continue that
     /// node's lowering.
-    fn resume_type_expr_frame<'e>(
-        &self,
+    #[allow(clippy::too_many_arguments)]
+    fn resume_type_expr_frame<'e, 'g>(
+        &'g self,
         lowering: &TypeExprLowering<'_>,
         infer_binders: &crate::semantic_query::InferBinderFactory,
         frame: LowerFrame<'e>,
         value: SemanticNodeId,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         frames: &mut LowerFrames<'e>,
+        demand: super::explicit_instantiation::InstantiationDemand<'_, 'g>,
     ) -> LowerStep<'e> {
         let graph = self.graph();
         match frame {
@@ -3144,7 +3228,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         });
                         LowerStep::Descend(next, context)
                     }
-                    None => LowerStep::Value(self.apply_typeof_instantiation_args(base, &lowered)),
+                    None => {
+                        let mut instantiation =
+                            super::explicit_instantiation::ExplicitInstantiation::new();
+                        let step = self.begin_explicit_instantiation(
+                            &mut instantiation,
+                            base,
+                            &lowered,
+                            demand,
+                        );
+                        Self::lower_typeof_instantiation_step(instantiation, lowered, step, frames)
+                    }
                 }
             }
 

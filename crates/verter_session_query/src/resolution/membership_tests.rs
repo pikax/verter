@@ -132,3 +132,26 @@ fn default_excludes_are_memoized_per_root() {
         "same root must reuse the memoized allocation"
     );
 }
+
+// ── StaticMembershipSpec::descends_into ──
+
+#[test]
+fn a_member_walk_skips_excluded_and_implicitly_excluded_directories() {
+    let mut s = spec(&[], &["/proj/**/*.ts"], &["/proj/dist/**/*"]);
+    s.include = s
+        .include
+        .into_iter()
+        .map(CompiledGlob::as_typescript_include)
+        .collect();
+    for (dir, descends) in [
+        ("/proj", true),
+        ("/proj/src", true),
+        ("/proj/src/deep", true),
+        ("/proj/dist", false),
+        ("/proj/dist/sub", false),
+        ("/proj/node_modules", false),
+        ("/proj/.cache", false),
+    ] {
+        assert_eq!(s.descends_into(&CanonicalPath::new(dir)), descends, "{dir}");
+    }
+}

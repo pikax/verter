@@ -9,12 +9,12 @@
 use rustc_hash::FxHashMap;
 
 use crate::ast::types::{AstNodeKind, TemplateAst};
+use crate::code_transform::EditRecorder;
 use crate::cursor::ScriptLanguage;
 use crate::ide::{
     matches_custom_element, GlobalComponentFallback, IdeScriptOptions,
     CARRIER_API_MODULE_SPECIFIER_SUFFIX, CARRIER_API_VIRTUAL_SUFFIX,
 };
-use crate::template::code_gen::types::CodeGenOutput;
 
 /// Prefix for all emitted ___VERTER___ types/functions.
 pub(super) const PREFIX: &str = "___VERTER___";
@@ -116,8 +116,7 @@ pub(super) fn collect_global_component_fallbacks(
             let tag_name = &source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize];
 
             // Skip builtins
-            if crate::template::code_gen::shared::helpers::is_builtin_component(tag_name).is_some()
-            {
+            if crate::template::vue_syntax::builtin_component(tag_name).is_some() {
                 continue;
             }
 
@@ -343,7 +342,7 @@ pub(super) fn to_pascal_case(tag: &str) -> String {
 // ── Helpers ───────────────────────────────────────────────────────
 
 pub(super) fn emit_minimal_wrapper(
-    out: &mut CodeGenOutput<'_>,
+    out: &mut EditRecorder<'_>,
     options: &IdeScriptOptions<'_>,
     pos: u32,
     template_end: Option<u32>,

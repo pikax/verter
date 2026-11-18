@@ -1,5 +1,6 @@
 use super::*;
 use crate::oxc_parse::Parser;
+use crate::types::BindingType;
 use oxc_allocator::Allocator;
 use oxc_span::SourceType;
 
@@ -11,7 +12,7 @@ const count = ref(0);"#;
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     // Should have import + declaration
     let imports: Vec<_> = result
@@ -36,7 +37,7 @@ fn test_parse_setup_with_macro() {
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     let macros: Vec<_> = result
         .items
@@ -63,7 +64,7 @@ fn define_model_name_is_decoded_while_span_remains_the_authored_literal() {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::tsx()).parse();
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-    let result = parse_script(&parsed.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&parsed.program, ScriptMode::Setup, 0, source, &[]);
 
     let (name, name_span) = result
         .items
@@ -88,7 +89,7 @@ fn with_defaults_object(source: &str, check: impl FnOnce(&str, &MacroObjectArg<'
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::tsx()).parse();
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-    let result = parse_script(&parsed.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&parsed.program, ScriptMode::Setup, 0, source, &[]);
     let defaults = result
         .items
         .iter()
@@ -184,7 +185,7 @@ const emit = defineEmits({ change: (value: Réel /* Phantom */) => true })
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::tsx()).parse();
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-    let result = parse_script(&parsed.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&parsed.program, ScriptMode::Setup, 0, source, &[]);
     let macros = result
         .items
         .iter()
@@ -240,7 +241,7 @@ fn test_parse_setup_with_async() {
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     assert!(result.is_async);
     let async_items: Vec<_> = result
@@ -259,7 +260,7 @@ fn test_parse_setup_with_top_level_await_expression() {
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     assert!(
         result.is_async,
@@ -288,7 +289,7 @@ await processResults(a, b);
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     assert!(result.is_async);
     let async_items: Vec<_> = result
@@ -311,7 +312,7 @@ fn test_parse_setup_with_await_using() {
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     assert!(result.is_async, "is_async should be true for await using");
     let async_items: Vec<_> = result
@@ -336,7 +337,7 @@ for await (const item of asyncIterable) {
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     assert!(
         result.is_async,
@@ -361,7 +362,7 @@ fn test_parse_setup_with_nested_await() {
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     assert!(result.is_async, "is_async should be true for nested await");
     let async_items: Vec<_> = result
@@ -382,7 +383,7 @@ fn test_parse_setup_with_await_in_binary_expression() {
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     assert!(result.is_async);
     let async_items: Vec<_> = result
@@ -404,7 +405,7 @@ fn test_parse_setup_with_await_in_conditional() {
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     assert!(result.is_async);
     let async_items: Vec<_> = result
@@ -435,7 +436,7 @@ const handler = async () => {
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     assert!(
         !result.is_async,
@@ -459,7 +460,7 @@ fn test_parse_setup_async_span_is_correct() {
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     let async_items: Vec<_> = result
         .items
@@ -490,7 +491,7 @@ if (await checkCondition()) {
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     assert!(
         result.is_async,
@@ -525,7 +526,7 @@ let a = {};"#;
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     // Should detect the top-level await, but NOT the one inside the async arrow function
     assert!(
@@ -567,7 +568,7 @@ fn test_parse_setup_with_await_in_ts_non_null_assertion() {
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     assert!(
         result.is_async,
@@ -583,7 +584,7 @@ fn test_parse_setup_with_await_in_ts_as_expression() {
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     assert!(
         result.is_async,
@@ -603,7 +604,7 @@ export default defineComponent({
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Options, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Options, 0, source, &[]);
 
     let default_exports: Vec<_> = result
         .items
@@ -636,7 +637,7 @@ fn test_parse_options_plain_object() {
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Options, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Options, 0, source, &[]);
 
     let default_exports: Vec<_> = result
         .items
@@ -680,7 +681,7 @@ fn test_statement_spans_are_local() {
     let source_type = SourceType::tsx();
     let ret = Parser::new(&allocator, source, source_type).parse();
 
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     let decls: Vec<_> = result
         .items
@@ -741,7 +742,13 @@ fn test_get_current_instance_before_await() {
                     } else {
                         None
                     };
-                    check_expression_for_usage(init, &ctx, &mut collector, binding_span);
+                    check_expression_for_usage(
+                        init,
+                        &ctx,
+                        &mut collector,
+                        binding_span,
+                        &bindings::VueImportAliases::default(),
+                    );
                 }
             }
         }
@@ -788,12 +795,24 @@ const instance = getCurrentInstance();
                             } else {
                                 None
                             };
-                        check_expression_for_usage(init, &ctx, &mut collector, binding_span);
+                        check_expression_for_usage(
+                            init,
+                            &ctx,
+                            &mut collector,
+                            binding_span,
+                            &bindings::VueImportAliases::default(),
+                        );
                     }
                 }
             }
             oxc_ast::ast::Statement::ExpressionStatement(expr) => {
-                check_expression_for_usage(&expr.expression, &ctx, &mut collector, None);
+                check_expression_for_usage(
+                    &expr.expression,
+                    &ctx,
+                    &mut collector,
+                    None,
+                    &bindings::VueImportAliases::default(),
+                );
             }
             _ => {}
         }
@@ -815,6 +834,82 @@ const instance = getCurrentInstance();
 }
 
 #[test]
+fn local_template_ref_function_is_not_a_vue_usage() {
+    let source = "function useTemplateRef(key: string) { return key; } const panel = useTemplateRef('panel');";
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    let ctx = shared::ScriptParseContext::new(0, source.as_bytes());
+    let mut collector = usage::UsageCollector::new(source.as_bytes());
+    for statement in &parsed.program.body {
+        if let oxc_ast::ast::Statement::VariableDeclaration(vars) = statement {
+            for declaration in &vars.declarations {
+                if let Some(init) = &declaration.init {
+                    setup::check_expression_for_usage(
+                        init,
+                        &ctx,
+                        &mut collector,
+                        None,
+                        &bindings::VueImportAliases::default(),
+                    );
+                }
+            }
+        }
+    }
+    assert!(collector.template_utils.is_empty());
+}
+
+#[test]
+fn aliased_template_ref_usage_retains_binding_key_and_type_argument() {
+    let source = "import { useTemplateRef as templateRef } from 'vue'; const target = templateRef<InstanceType<typeof Child>>('pa\\u006eel');";
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::ts()).parse();
+    assert!(parsed.diagnostics.is_empty());
+    let ctx = shared::ScriptParseContext::new(0, source.as_bytes());
+    let mut aliases = bindings::VueImportAliases::default();
+    for statement in &parsed.program.body {
+        if let Some(ScriptItem::Import(import)) = shared::try_process_import(statement, &ctx) {
+            aliases.register_setup_import(&import);
+        }
+    }
+    let mut collector = usage::UsageCollector::new(source.as_bytes());
+    for statement in &parsed.program.body {
+        if let oxc_ast::ast::Statement::VariableDeclaration(vars) = statement {
+            for declaration in &vars.declarations {
+                if let Some(init) = &declaration.init {
+                    let span = declaration.id.get_binding_identifiers()[0].span;
+                    let binding = Some(crate::common::Span::new(span.start, span.end));
+                    setup::check_expression_for_usage(
+                        init,
+                        &ctx,
+                        &mut collector,
+                        binding,
+                        &aliases,
+                    );
+                    if let oxc_ast::ast::Expression::CallExpression(call) = init {
+                        let (_, key) = setup::collect_template_util_usage(
+                            call,
+                            VueApiKind::UseTemplateRef,
+                            &ctx,
+                            binding,
+                        );
+                        assert_eq!(key, Some("panel"));
+                    }
+                }
+            }
+        }
+    }
+    let usage = &collector.template_utils[0];
+    assert_eq!(collector.template_utils.len(), 1);
+    let text = |span: crate::common::Span| &source[span.start as usize..span.end as usize];
+    assert_eq!(text(usage.binding_span.unwrap()), "target");
+    assert_eq!(text(usage.ref_name_span.unwrap()), "'pa\\u006eel'");
+    assert_eq!(
+        text(usage.type_arg_span.unwrap()),
+        "InstanceType<typeof Child>"
+    );
+}
+
+#[test]
 fn array_arg_element_names_come_from_ast_literal() {
     // Prop / event names are read from the string-literal AST value, transparently
     // unwrapping a TS `as` / `satisfies` / non-null wrapper. Dynamic and
@@ -822,7 +917,7 @@ fn array_arg_element_names_come_from_ast_literal() {
     let source = r#"defineProps(['foo' as const, dynamic, `tpl`, 'bar'])"#;
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, SourceType::tsx()).parse();
-    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
 
     let arr = result
         .items
@@ -846,5 +941,128 @@ fn array_arg_element_names_come_from_ast_literal() {
             Some("bar"), // plain string literal
         ],
         "array element names must come from the AST literal, not span slicing"
+    );
+}
+
+fn type_only_export_items(source: &str) -> Vec<(Option<String>, (u32, u32))> {
+    let allocator = Allocator::default();
+    let ret = Parser::new(&allocator, source, SourceType::tsx()).parse();
+    assert!(
+        ret.diagnostics.is_empty(),
+        "parse errors: {:?}",
+        ret.diagnostics
+    );
+    let result = parse_script(&ret.program, ScriptMode::Setup, 0, source, &[]);
+    result
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ScriptItem::TypeDeclaration(td) => {
+                Some((td.name.map(str::to_string), (td.span.start, td.span.end)))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn setup_type_reexport_is_a_type_only_export_item() {
+    let source = "export type { Foo, Bar } from './types';
+const n = 1;";
+    let items = type_only_export_items(source);
+    let stmt = "export type { Foo, Bar } from './types';";
+    assert_eq!(items, vec![(None, (0, stmt.len() as u32))]);
+}
+
+#[test]
+fn setup_single_type_reexport_names_the_exported_type() {
+    let source = "export type { Foo } from './types';";
+    let items = type_only_export_items(source);
+    assert_eq!(
+        items,
+        vec![(Some("Foo".to_string()), (0, source.len() as u32))]
+    );
+}
+
+#[test]
+fn setup_local_type_export_list_is_a_type_only_export_item() {
+    let source = "type A = string;
+export type { A };";
+    let items = type_only_export_items(source);
+    assert_eq!(items.len(), 2);
+    let export = &items[1];
+    assert_eq!(export.0.as_deref(), Some("A"));
+    assert_eq!(
+        &source[export.1 .0 as usize..export.1 .1 as usize],
+        "export type { A };"
+    );
+}
+
+#[test]
+fn setup_value_reexport_is_not_a_type_only_export_item() {
+    let source = "export { Foo } from './types';";
+    assert!(type_only_export_items(source).is_empty());
+}
+
+/// Binding types of a `<script setup>` source, classified with the items of
+/// its companion `<script>` source.
+fn setup_bindings_with_companion(companion: &str, setup: &str) -> Vec<(String, BindingType)> {
+    let companion_alloc = Allocator::default();
+    let companion_ret = Parser::new(&companion_alloc, companion, SourceType::tsx()).parse();
+    let companion_result = parse_script(
+        &companion_ret.program,
+        ScriptMode::Options,
+        0,
+        companion,
+        &[],
+    );
+    let setup_alloc = Allocator::default();
+    let setup_ret = Parser::new(&setup_alloc, setup, SourceType::tsx()).parse();
+    let result = parse_script(
+        &setup_ret.program,
+        ScriptMode::Setup,
+        0,
+        setup,
+        &companion_result.items,
+    );
+    result
+        .bindings
+        .iter()
+        .map(|(span, binding_type)| {
+            let name = &setup[span.start as usize..span.end as usize];
+            (name.to_string(), *binding_type)
+        })
+        .collect()
+}
+
+/// A `vue` import in the companion `<script>` names Vue's API for the setup
+/// block too, aliases included.
+#[test]
+fn setup_call_of_companion_vue_import_is_setup_ref() {
+    let bindings = setup_bindings_with_companion(
+        "import { ref, reactive as rx } from 'vue';",
+        "const a = ref(0);\nconst b = rx({});",
+    );
+    assert_eq!(
+        bindings,
+        vec![
+            ("a".to_string(), BindingType::SetupRef),
+            ("b".to_string(), BindingType::SetupReactiveConst),
+        ]
+    );
+}
+
+/// A companion import binds its local name first: a later setup import of
+/// `vue`'s `ref` under the same name does not make the companion's `ref`
+/// Vue's.
+#[test]
+fn setup_call_of_name_bound_by_companion_elsewhere_is_maybe_ref() {
+    let bindings = setup_bindings_with_companion(
+        "import { ref } from './my-reactivity';",
+        "import { ref } from 'vue';\nconst a = ref(0);",
+    );
+    assert!(
+        bindings.contains(&("a".to_string(), BindingType::SetupMaybeRef)),
+        "{bindings:?}"
     );
 }

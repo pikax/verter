@@ -735,7 +735,6 @@ pub fn markup_cursor_region(
     for node in inventory.markup().nodes() {
         match node.kind() {
             MarkupNodeKind::Element(element) => {
-                let full = element.full_span;
                 let region = if contains(element.opening_span.start, element.opening_span.end) {
                     MarkupCursorRegion::OpeningTag {
                         name: inventory
@@ -748,7 +747,7 @@ pub fn markup_cursor_region(
                 } else {
                     MarkupCursorRegion::Neutral
                 };
-                consider(full.start, full.end, region);
+                consider(element.full_span.start, parsed_element_end(element), region);
             }
             MarkupNodeKind::Recovered {
                 opening_span,
@@ -836,9 +835,12 @@ pub fn markup_cursor_region(
 }
 
 /// Parser-supplied lower bound for lexing a parser-UNOWNED trailing gap: the
-/// closest parsed boundary at or before `offset` — arena node ends, section
-/// opening/closing ends. A cursor inside a raw-text (script/style) section is
-/// never a markup gap: the bound collapses to `offset` (empty window).
+/// closest parsed boundary at or before `offset` — arena node ends (an
+/// element's parsed end, see [`parsed_element_end`]), section opening ends and
+/// parsed section closing ends. A section without a closing tag bounds nothing
+/// past its opening: its recovered body end is not a parsed boundary. A cursor
+/// inside a raw-text (script/style) section is never a markup gap: the bound
+/// collapses to `offset` (empty window).
 pub fn markup_gap_window_start(structure: &RegisteredFileStructure, offset: u32) -> u32 {
     let inventory = structure.inventory();
     let mut floor = 0u32;
@@ -848,8 +850,10 @@ pub fn markup_gap_window_start(structure: &RegisteredFileStructure, offset: u32)
         }
     };
     for node in inventory.markup().nodes() {
-        let span = node.kind().full_span();
-        raise(span.end);
+        match node.kind() {
+            MarkupNodeKind::Element(element) => raise(parsed_element_end(element)),
+            kind => raise(kind.full_span().end),
+        }
     }
     for block in inventory.blocks() {
         if let CarrierBlock::Section { role, syntax, .. } = block {
@@ -858,10 +862,25 @@ pub fn markup_gap_window_start(structure: &RegisteredFileStructure, offset: u32)
                 return offset;
             }
             raise(syntax.opening_span.end);
-            raise(syntax.full_span.end);
+            if let Some(closing) = syntax.closing_span {
+                raise(closing.end);
+            }
         }
     }
     floor
+}
+
+/// End of the source an element's parsed syntax bounds: its closing tag, or
+/// its opening tag when the parser parsed no closing tag of its own. Error
+/// recovery extends an unclosed element's body to the next ancestor close or
+/// to EOF; that recovered extent is not a parsed boundary, so a fragment the
+/// parser dropped inside it (a mid-typed tag, an unterminated interpolation)
+/// stays a parser-unowned gap. Self-closing and void elements end at their
+/// opening tag.
+fn parsed_element_end(element: &MarkupElementSyntax) -> u32 {
+    element
+        .closing_span
+        .map_or(element.opening_span.end, |closing| closing.end)
 }
 
 #[derive(Debug, Clone)]
@@ -1222,7 +1241,11 @@ mod tests {
             .iter()
             .find(|block| block.open_tag_start > template.open_tag_start)
             .map_or(source.len() as u32, |block| block.open_tag_start);
-        assert_eq!(template.close_tag_start, boundary);
+        assert_eq!(
+            template.close_tag_start,
+            source.find("</template>").unwrap() as u32
+        );
+        assert!(template.close_tag_end <= boundary);
         assert!(source.find("<div >").unwrap() as u32 >= template.open_tag_end);
         assert!((source.find("<div >").unwrap() as u32) < template.close_tag_start);
     }

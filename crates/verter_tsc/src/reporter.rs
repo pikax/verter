@@ -61,6 +61,24 @@ verter_codes! {
     /// `lang`s. Vue's own `compileScript` throws on it; Verter refuses to
     /// generate any companion for it.
     ScriptLangMismatch => "VTER1002",
+    /// A real file occupies the carrier's checking path; skip the carrier.
+    CarrierPathConflict => "VTER1003",
+    /// `VTER1004` — the carrier's own syntax error, from its parser or recovery.
+    CarrierSyntax => "VTER1004",
+    /// `VTER1005` — the carrier has no checking module, and is not checked.
+    CarrierProjectionRefused => "VTER1005",
+    /// `VTER1006` — a defect in the carrier's projection (a refused invariant
+    /// or a caught panic). The run fails.
+    CarrierProjectionInternal => "VTER1006",
+    /// `VTER1007` — the carrier could not be read. The run fails.
+    CarrierUnreadable => "VTER1007",
+    /// `VTER1008` — a project's engine program could not be checked. The
+    /// run fails; the other projects are still checked.
+    ProjectCheckFailed => "VTER1008",
+    /// `VTER1009` — the carrier was checked, but some of its products were
+    /// withheld, so their checks did not run. A warning: the exit status is
+    /// unaffected.
+    PartialCheck => "VTER1009",
 }
 
 impl fmt::Display for VerterCode {
@@ -132,14 +150,17 @@ impl Diagnostic {
     /// `None` — a position that could not be converted exactly is never
     /// guessed.
     fn render_at(&self, position: Option<(u32, u32)>) -> String {
+        // An unlocated diagnostic (empty file) prints without a location, as
+        // tsc prints a global diagnostic.
         let location = match position {
-            Some((line, col)) => format!("{}({},{})", self.file, line, col),
-            None => self.file.clone(),
+            _ if self.file.is_empty() => String::new(),
+            Some((line, col)) => format!("{}({},{}): ", self.file, line, col),
+            None => format!("{}: ", self.file),
         };
         match self.verter_code {
-            Some(code) => format!("{location}: {} {code}: {}", self.severity, self.message),
+            Some(code) => format!("{location}{} {code}: {}", self.severity, self.message),
             None => format!(
-                "{location}: {} TS{}: {}",
+                "{location}{} TS{}: {}",
                 self.severity, self.ts_code, self.message
             ),
         }
@@ -290,24 +311,59 @@ fn same_file(reported: &str, selected: &str) -> bool {
 /// ```text
 /// path/to/file.ts(line,col): error TS1234: message
 /// ```
-/// Multi-line messages (continuation lines without `(`/`: `) are folded into
-/// the previous diagnostic.
+/// Indented continuation lines are kept in the previous diagnostic's message,
+/// including their whitespace. Build progress and the next diagnostic delimit it.
 pub fn parse_tsc_output(raw: &str) -> Vec<TscDiagnostic> {
-    let mut result = Vec::new();
+    parse_tsc_build_output(raw)
+        .filter_map(|event| match event {
+            TscBuildEvent::Diagnostic(diagnostic) => Some(diagnostic),
+            TscBuildEvent::BuildingProject(_) => None,
+        })
+        .collect()
+}
 
-    for line in raw.lines() {
-        if let Some(d) = parse_tsc_line(line) {
-            result.push(d);
+/// Build progress and diagnostics in engine output order. Build progress is
+/// authoritative for diagnostics in files shared by several project programs.
+pub(crate) enum TscBuildEvent {
+    BuildingProject(String),
+    Diagnostic(TscDiagnostic),
+}
+
+pub(crate) fn parse_tsc_build_output(raw: &str) -> impl Iterator<Item = TscBuildEvent> + '_ {
+    let mut lines = raw.lines().peekable();
+    std::iter::from_fn(move || loop {
+        let line = lines.next()?;
+        let Some(mut event) = parse_tsc_build_line(line) else {
+            continue;
+        };
+        if let TscBuildEvent::Diagnostic(diagnostic) = &mut event {
+            while matches!(lines.peek(), Some(line)
+                if (line.starts_with(' ') || line.starts_with('\t'))
+                    && parse_tsc_build_line(line).is_none())
+            {
+                let continuation = lines.next().expect("peeked continuation");
+                diagnostic.message.push('\n');
+                diagnostic.message.push_str(continuation);
+            }
         }
-    }
+        return Some(event);
+    })
+}
 
-    result
+fn parse_tsc_build_line(line: &str) -> Option<TscBuildEvent> {
+    if let Some(diagnostic) = parse_tsc_line(line) {
+        return Some(TscBuildEvent::Diagnostic(diagnostic));
+    }
+    let (_, project) = line.split_once("Building project '")?;
+    let project = project.strip_suffix("'...")?;
+    Some(TscBuildEvent::BuildingProject(project.replace('\\', "/")))
 }
 
 /// A raw tsc diagnostic before source-map remapping.
 #[derive(Debug, Clone)]
 pub struct TscDiagnostic {
-    /// File path as reported by tsc (may be `.tsc.tsx`).
+    /// File path as reported by tsc (may be `.tsc.tsx`). Empty for an
+    /// unlocated diagnostic; its line and column are then zero.
     pub file: String,
     pub line: u32,
     pub col: u32,
@@ -339,22 +395,29 @@ impl TscDiagnostic {
 /// Attempt to parse a tsc error line:
 /// `<file>(<line>,<col>): error TS<code>: <message>`
 fn parse_tsc_line(line: &str) -> Option<TscDiagnostic> {
-    // Find the `(line,col): ` part.
-    let paren_start = line.find('(')?;
-    let paren_end = line[paren_start..].find(')')? + paren_start;
+    let (file, line_n, col_n, rest) =
+        if line.starts_with("error TS") || line.starts_with("warning TS") {
+            ("", 0, 0, line)
+        } else {
+            // Find the `(line,col): ` part.
+            let paren_start = line.find('(')?;
+            let paren_end = line[paren_start..].find(')')? + paren_start;
 
-    let file = &line[..paren_start];
-    let coords = &line[paren_start + 1..paren_end];
+            let file = &line[..paren_start];
+            let coords = &line[paren_start + 1..paren_end];
 
-    // coords = "line,col"
-    let mut parts = coords.splitn(2, ',');
-    let line_n: u32 = parts.next()?.trim().parse().ok()?;
-    let col_n: u32 = parts.next()?.trim().parse().ok()?;
+            // coords = "line,col"
+            let mut parts = coords.splitn(2, ',');
+            let line_n: u32 = parts.next()?.trim().parse().ok()?;
+            let col_n: u32 = parts.next()?.trim().parse().ok()?;
 
-    // Rest should be `: error TS<code>: <message>` or `: warning TS<code>: ...`
-    let rest = line[paren_end + 1..].trim();
-    let rest = rest.strip_prefix(':')?;
-    let rest = rest.trim();
+            // Rest should be `: error TS<code>: <message>` or `: warning TS<code>: ...`
+            let rest = line[paren_end + 1..].trim();
+            let rest = rest.strip_prefix(':')?;
+            let rest = rest.trim();
+
+            (file, line_n, col_n, rest)
+        };
 
     let (severity, rest) = if let Some(after) = rest.strip_prefix("error ") {
         (Severity::Error, after)
@@ -470,6 +533,44 @@ mod tests {
     }
 
     #[test]
+    fn multiline_diagnostics_preserve_messages_and_project_boundaries() {
+        let output = concat!(
+            "12:00:00 PM - Building project 'a/tsconfig.json'...\n",
+            "tsconfig.json(1,68): error TS5102: Option 'baseUrl' has been removed. Please remove it from your configuration.\n",
+            "  Use '\"paths\": {\"*\": [\"./*\"]}' instead.\n",
+            "Found 1 error.\n",
+            "12:00:01 PM - Building project 'b/tsconfig.json'...\n",
+            "error TS2318: Cannot find global type 'Array'.\n",
+            "  A required global declaration is missing.\n",
+            "src/next.ts(2,3): error TS2322: Type error.\n",
+        );
+        let diagnostics = parse_tsc_output(output);
+        assert_eq!(diagnostics.len(), 3);
+        assert_eq!(
+            diagnostics[0].message,
+            "Option 'baseUrl' has been removed. Please remove it from your configuration.\n  Use '\"paths\": {\"*\": [\"./*\"]}' instead."
+        );
+        assert_eq!(
+            diagnostics[1].message,
+            "Cannot find global type 'Array'.\n  A required global declaration is missing."
+        );
+        assert!(diagnostics[1].file.is_empty());
+        assert_eq!(diagnostics[2].message, "Type error.");
+        assert_eq!(diagnostics[2].file, "src/next.ts");
+        let events: Vec<_> = parse_tsc_build_output(output).collect();
+        assert_eq!(events.len(), 5);
+        assert!(matches!(&events[0], TscBuildEvent::BuildingProject(p) if p == "a/tsconfig.json"));
+        assert!(
+            matches!(&events[1], TscBuildEvent::Diagnostic(d) if d.message == diagnostics[0].message)
+        );
+        assert!(matches!(&events[2], TscBuildEvent::BuildingProject(p) if p == "b/tsconfig.json"));
+        assert!(
+            matches!(&events[3], TscBuildEvent::Diagnostic(d) if d.message == diagnostics[1].message)
+        );
+        assert!(matches!(&events[4], TscBuildEvent::Diagnostic(d) if d.ts_code == 2322));
+    }
+
+    #[test]
     fn parse_tsc_output_multiple_diagnostics() {
         let output = "\
 src/a.ts(1,1): error TS2304: Cannot find name 'foo'.
@@ -491,6 +592,26 @@ Found 1 error.
         let diags = parse_tsc_output(output);
         assert_eq!(diags.len(), 1, "should ignore non-diagnostic lines");
         assert_eq!(diags[0].ts_code, 2304);
+    }
+
+    #[test]
+    fn parse_tsc_output_preserves_unlocated_errors_beside_located_errors() {
+        let output = "error TS2318: Cannot find global type 'Array'.\nsrc/a.ts(1,2): error TS2322: Type error.\n";
+        let diagnostics = parse_tsc_output(output);
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0].ts_code, 2318);
+        assert!(diagnostics[0].file.is_empty());
+        assert_eq!((diagnostics[0].line, diagnostics[0].col), (0, 0));
+        assert_eq!(diagnostics[1].file, "src/a.ts");
+        assert_eq!((diagnostics[1].line, diagnostics[1].col), (1, 2));
+        let events: Vec<_> = parse_tsc_build_output(&format!(
+            "12:00:00 PM - Building project 'a/tsconfig.json'...\n{output}"
+        ))
+        .collect();
+        assert!(
+            matches!(&events[0], TscBuildEvent::BuildingProject(path) if path == "a/tsconfig.json")
+        );
+        assert!(matches!(&events[1], TscBuildEvent::Diagnostic(d) if d.ts_code == 2318));
     }
 
     #[test]
@@ -520,6 +641,24 @@ Found 1 error.
         let s = format!("{d}");
         assert_eq!(s, "src/App.vue(10,5): error TS2322: Type error");
         assert!(!s.contains("warning"), "should be error, not warning");
+        let renderer = PositionRenderer::new(crate::position::ColumnEncoding::Utf16);
+        assert_eq!(
+            renderer.render(&d),
+            "src/App.vue: error TS2322: Type error",
+            "an unreadable file keeps its name but loses the position"
+        );
+        let global = Diagnostic {
+            file: String::new(),
+            line: 0,
+            col: 0,
+            ts_code: 2318,
+            message: "Cannot find global type 'Array'.".to_string(),
+            ..d
+        };
+        assert_eq!(
+            renderer.render(&global),
+            "error TS2318: Cannot find global type 'Array'."
+        );
     }
 
     /// A Verter-native diagnostic renders its OWN code, never a TypeScript

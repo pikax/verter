@@ -39,7 +39,7 @@ function legacyOwnerAssetKey(root: string): string {
   const vue = realpathSync(path.join(root, "node_modules", "vue"));
   const runtime = realpathSync(path.join(vue, "jsx-runtime", "index.d.ts"));
   const fields: readonly (string | Buffer)[] = [
-    "3.5.40",
+    "3.6.0-rc.15",
     path.resolve(vue).replace(/\\/gu, "/"),
     path.resolve(runtime).replace(/\\/gu, "/"),
     readFileSync(path.join(vue, "package.json")),
@@ -69,7 +69,7 @@ function workspace(): string {
     path.join(vue, "package.json"),
     JSON.stringify({
       name: "vue",
-      version: "3.5.40",
+      version: "3.6.0-rc.15",
       exports: { "./jsx-runtime": { types: "./jsx-runtime/index.d.ts" } },
     }),
   );

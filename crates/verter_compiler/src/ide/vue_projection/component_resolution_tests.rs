@@ -13,13 +13,14 @@ fn resolve(
     bindings: &[&str],
 ) -> super::component_resolution::ComponentResolutionProjection {
     let source = format!("<template>{template}</template>");
-    let parsed = crate::compile::parse_sfc(&source, None, None);
+    let parsed = crate::framework_common::vue_bridge::parse_sfc(&source, None, None);
     let plan = build_projection_plan(PlanInput {
         canonical_id: "file:///src/RecursiveCard.vue",
         source: &source,
         parsed: &parsed,
         parse_key: None,
         syntax_profile: None,
+        custom_elements: None,
     });
     let attributes = project_attribute_operations(&plan, &parsed, &source);
     let uses = project_component_uses(&plan, &attributes);
@@ -173,13 +174,14 @@ fn imported_namespace_and_async_setup_binding_use_script_facts() {
     let source = format!(
         "<script setup lang=\"ts\">{body}</script><template><Icons.Button/><AsyncCard/></template>"
     );
-    let parsed = crate::compile::parse_sfc(&source, None, None);
+    let parsed = crate::framework_common::vue_bridge::parse_sfc(&source, None, None);
     let plan = build_projection_plan(PlanInput {
         canonical_id: "file:///src/Parent.vue",
         source: &source,
         parsed: &parsed,
         parse_key: None,
         syntax_profile: None,
+        custom_elements: None,
     });
     let attributes = project_attribute_operations(&plan, &parsed, &source);
     let uses = project_component_uses(&plan, &attributes);
@@ -223,13 +225,14 @@ fn resolution_specialization_changes_with_binding_authority_and_snapshot() {
 fn configured_custom_element_never_enters_component_resolution() {
     let source = "<template><my-widget label=\"native\"/></template>";
     let configured = ["my-".to_string()];
-    let parsed = crate::compile::parse_sfc(source, None, Some(&configured));
+    let parsed = crate::framework_common::vue_bridge::parse_sfc(source, None, Some(&configured));
     let plan = build_projection_plan(PlanInput {
         canonical_id: "file:///src/Parent.vue",
         source,
         parsed: &parsed,
         parse_key: None,
         syntax_profile: None,
+        custom_elements: None,
     });
     let attributes = project_attribute_operations(&plan, &parsed, source);
     let uses = project_component_uses(&plan, &attributes);

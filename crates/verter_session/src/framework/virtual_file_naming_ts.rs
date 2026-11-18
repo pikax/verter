@@ -16,8 +16,8 @@
 //! a descriptor-row change without a regen fails the gate.
 
 use crate::framework::descriptor::{
-    svelte_descriptor, svelte_rune_module_naming, vue_descriptor, DeclarationSurface,
-    FrameworkAdapterDescriptor, VirtualFileNaming, VirtualPathPolicy,
+    svelte_descriptor, svelte_rune_module_naming, vue_descriptor, CheckingSurface,
+    DeclarationSurface, FrameworkAdapterDescriptor, VirtualFileNaming, VirtualPathPolicy,
 };
 
 /// The committed path of the generated mirror, relative to the workspace
@@ -105,7 +105,21 @@ fn render_descriptor_entry(
         "    declarationSurface: {},\n",
         render_declaration_surface(naming.declaration_surface)
     ));
+    out.push_str(&format!(
+        "    checkingSurface: {},\n",
+        render_checking_surface(naming.checking_surface)
+    ));
     out.push_str("  },\n");
+}
+
+fn render_checking_surface(surface: CheckingSurface) -> String {
+    match surface {
+        CheckingSurface::None => "{ kind: \"none\" }".to_string(),
+        CheckingSurface::DialectSuffixes(suffixes) => format!(
+            "{{ kind: \"dialectSuffixes\", suffixes: {} }}",
+            render_str_array(suffixes)
+        ),
+    }
 }
 
 fn render_declaration_surface(surface: DeclarationSurface) -> String {
@@ -209,6 +223,17 @@ export interface DeclarationSurfaceExtensionMiddleTs {
 
 export type DeclarationSurface = DeclarationSurfaceNone | DeclarationSurfaceExtensionMiddleTs;
 
+export interface CheckingSurfaceNone {
+  kind: "none";
+}
+
+export interface CheckingSurfaceDialectSuffixes {
+  kind: "dialectSuffixes";
+  suffixes: string[];
+}
+
+export type CheckingSurface = CheckingSurfaceNone | CheckingSurfaceDialectSuffixes;
+
 export interface VirtualFileNaming {
   carrierExtension: string | null;
   ide: VirtualPathPolicy;
@@ -216,6 +241,7 @@ export interface VirtualFileNaming {
   testingApiSuffix: string | null;
   sidecarSuffixes: string[];
   declarationSurface: DeclarationSurface;
+  checkingSurface: CheckingSurface;
 }
 
 export const VIRTUAL_FILE_NAMING: Readonly<Record<string, VirtualFileNaming>> = {
@@ -284,6 +310,26 @@ mod tests {
         assert!(
             a.contains("declarationSurface: { kind: \"none\" }"),
             "the rune-module row renders a none declaration surface"
+        );
+    }
+
+    #[test]
+    fn render_includes_the_checking_surface_column() {
+        let a = render_virtual_file_naming_ts();
+        assert!(
+            a.contains(
+                "checkingSurface: { kind: \"dialectSuffixes\", suffixes: [\".ts\", \".tsx\", \".js\", \".jsx\"] }"
+            ),
+            "the Vue row renders its checking-module dialect suffixes"
+        );
+        assert!(
+            a.contains("checkingSurface: CheckingSurface;"),
+            "the VirtualFileNaming TS interface declares the checkingSurface field"
+        );
+        assert_eq!(
+            a.matches("checkingSurface: { kind: \"none\" }").count(),
+            2,
+            "the Svelte component and the rune module compose no checking module"
         );
     }
 }

@@ -147,6 +147,8 @@ mod tests;
 
 Extracted file contains module contents directly — `use super::*;`, helpers, and `#[test]` fns. No wrapping `mod tests { }` block.
 
+**Integration-test case modules are generated.** In `verter_session`, `verter_semantic`, `verter_compiler` and `verter_lsp`, `tests/cases/mod.rs` is generated from the entries beside it: every `tests/cases/<entry>.rs` and every `tests/cases/<entry>/` directory is one module. After adding, removing or renaming a case, run `pnpm gen:test-cases` and commit the result; each crate's freshness test (`test_case_modules_freshness`) renders the list in memory and fails with that command when the committed file differs. The discovery rules live in `tools/rust/test_case_discovery.rs`; a feature-gated entry, a module name that differs from its file name, and a support-only directory are declared in its `rules_for` table.
+
 ### Repository guard scans
 
 Repository source guards reuse immutable source inventories or indexes within
@@ -344,7 +346,7 @@ never shipped runtime speed. Full contributor-facing text:
 ### Pinned Vue Macro Runtime Oracle
 
 The official Vue macro baseline is generated only from the repository-pinned
-local `@vue/compiler-sfc@3.6.0-rc.5`; tests must not fetch compiler output from the
+local `@vue/compiler-sfc@3.6.0-rc.15`; tests must not fetch compiler output from the
 network. `scripts/vue-macro-runtime-oracle/oracle-lib.mjs` parses compiled
 JavaScript and compares normalized runtime facts instead of carrier formatting.
 Schema v2 records compiler/profile provenance, constructor order, `skipCheck`,

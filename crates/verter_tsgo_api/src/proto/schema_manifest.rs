@@ -183,6 +183,7 @@ pub const PINNED_OPS: &[&str] = &[
     "getConfigFileParsingDiagnostics",
     "getCurrentLanguageServerSnapshot",
     "getDefaultProjectForFile",
+    "getProgramDiagnostics",
     "getSemanticDiagnostics",
     "getSourceFile",
     "getSymbolAtPosition",
@@ -229,6 +230,7 @@ pub const PINNED_REQUEST_FIELDS: &[(&str, &[&str])] = &[
         "getCurrentLanguageServerSnapshot",
         &["baseSnapshot", "changes"],
     ),
+    ("getProgramDiagnostics", &["project", "snapshot"]),
     ("getSemanticDiagnostics", &["files", "project", "snapshot"]),
     (
         "getSymbolAtPosition",

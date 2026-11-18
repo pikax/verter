@@ -8,17 +8,16 @@
 //! Also processes companion `<script>` blocks to extract `export default`
 //! options and type declarations for cross-block type resolution.
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use verter_macro_dto::{
     MacroRuntimeBundle, MacroRuntimeOutcome, MacroRuntimeShape, ModelRuntimeShape,
     PropsRuntimeShape, RuntimeConstructor, RuntimeProp,
 };
 
 use super::prepared::PreparedCompanion;
-use crate::template::code_gen::binding::BindingType;
-use crate::template::code_gen::shared::helpers::escape_js_string_into;
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::template::code_gen::vdom::props::needs_quoted_key;
+use crate::template::vue_syntax::escape_js_string_into;
 use crate::utils::oxc::vue::{MacroObjectArg, MacroProperty};
 use crate::utils::oxc::vue::{ScriptItem, ScriptMacro};
 
@@ -298,11 +297,6 @@ pub(super) struct MacroState {
     /// (never dropped, never unwrapped) and merged into the component
     /// (spread for TS, first Object.assign target for JS).
     pub has_companion_default: bool,
-    /// Named/default user imports official marks `setup-maybe-ref` — inline
-    /// template refs to these names bind `ref_key`/`ref: name`. Collected
-    /// for BOTH the setup block and the companion (merged into the script
-    /// context's set).
-    pub ref_bindable_imports: FxHashSet<String>,
     /// Whether `defineExpose` was used.
     pub has_expose: bool,
     /// Whether `defineEmits` was used (needs `__emit` in setup params).
@@ -325,11 +319,69 @@ impl MacroState {
             emits_section: None,
             options_expr: None,
             has_companion_default: false,
-            ref_bindable_imports: FxHashSet::default(),
             has_expose: false,
             has_emit: false,
             models: Vec::new(),
         }
+    }
+}
+
+// ======================== macro binding names ========================
+
+/// The prop names a macro call binds for the template, in the order the
+/// script lane records them: a `defineProps` object's keys or array's
+/// string elements (from the macro AST of the single parse), then, for a
+/// type-based `defineProps`, `defineModel` or `withDefaults` (with a
+/// defaults argument), the names of its complete runtime shape.
+pub(super) fn macro_binding_names(
+    mac: &ScriptMacro<'_>,
+    syntax_index: u32,
+    runtime_bundle: Option<&MacroRuntimeBundle>,
+    push: &mut dyn FnMut(&str),
+) {
+    match mac {
+        ScriptMacro::DefineProps {
+            object_arg,
+            array_arg,
+            type_params,
+            ..
+        } => {
+            if let Some(obj) = object_arg {
+                for prop in &obj.properties {
+                    push(prop.name);
+                }
+            } else if let Some(arr) = array_arg {
+                for name in arr.elements.iter().filter_map(|elem| elem.name) {
+                    push(name);
+                }
+            }
+            if type_params.is_some() {
+                if let Some(shape @ MacroRuntimeShape::Props(_)) =
+                    runtime_shape(runtime_bundle, syntax_index)
+                {
+                    super::visit_runtime_macro_binding_names(shape, |name| push(name));
+                }
+            }
+        }
+        ScriptMacro::DefineModel { type_params, .. } if type_params.is_some() => {
+            if let Some(shape @ MacroRuntimeShape::Model(_)) =
+                runtime_shape(runtime_bundle, syntax_index)
+            {
+                super::visit_runtime_macro_binding_names(shape, |name| push(name));
+            }
+        }
+        ScriptMacro::WithDefaults {
+            define_props_type_params,
+            defaults_arg_span,
+            ..
+        } if define_props_type_params.is_some() && defaults_arg_span.is_some() => {
+            if let Some(shape @ MacroRuntimeShape::Props(_)) =
+                runtime_shape(runtime_bundle, syntax_index)
+            {
+                super::visit_runtime_macro_binding_names(shape, |name| push(name));
+            }
+        }
+        _ => {}
     }
 }
 
@@ -340,8 +392,8 @@ impl MacroState {
 /// Replaces the macro call with its runtime equivalent and accumulates
 /// metadata in [`MacroState`] for later use in the component definition.
 ///
-/// Also extracts prop names directly from defineProps arguments and
-/// adds them to bindings with `BindingType::Props`. The names come from the
+/// The prop names a macro binds are not recorded here: the script lane's
+/// bindings come from [`macro_binding_names`], which reads them from the
 /// macro AST surfaced by the single parse (object property keys and array
 /// string-literal elements), not from `parse_result.bindings`, whose Props have
 /// inconsistent span coordinate systems (object-syntax keys are SFC-absolute,
@@ -402,26 +454,14 @@ pub(super) fn process_macro_item<'a>(
             if let Some(obj) = object_arg {
                 let obj_text = section_text(obj.span.start, obj.span.end, content_str, stripped);
                 state.props_section = Some(obj_text.to_string());
-                for prop in &obj.properties {
-                    ctx.bindings.insert(prop.name, BindingType::Props);
-                }
             } else if let Some(arr) = array_arg {
                 let arr_text = section_text(arr.span.start, arr.span.end, content_str, stripped);
                 state.props_section = Some(arr_text.to_string());
-                for elem in &arr.elements {
-                    if let Some(name) = elem.name {
-                        ctx.bindings.insert(name, BindingType::Props);
-                    }
-                }
             }
 
             if type_params.is_some() {
                 state.props_section = match runtime_shape(runtime_bundle, syntax_index) {
-                    Some(runtime_shape @ MacroRuntimeShape::Props(shape)) => {
-                        super::visit_runtime_macro_binding_names(runtime_shape, |name| {
-                            ctx.bindings
-                                .insert(ctx.alloc.alloc_str(name), BindingType::Props);
-                        });
+                    Some(MacroRuntimeShape::Props(shape)) => {
                         Some(render_runtime_props(shape, runtime_profile, None))
                     }
                     _ => None,
@@ -522,13 +562,9 @@ pub(super) fn process_macro_item<'a>(
                 options_span.map(|span| section_text(span.start, span.end, content_str, stripped));
 
             if type_params.is_some() {
-                if let Some(runtime_shape @ MacroRuntimeShape::Model(model)) =
+                if let Some(MacroRuntimeShape::Model(model)) =
                     runtime_shape(runtime_bundle, syntax_index)
                 {
-                    super::visit_runtime_macro_binding_names(runtime_shape, |name| {
-                        ctx.bindings
-                            .insert(ctx.alloc.alloc_str(name), BindingType::Props);
-                    });
                     state.models.push(ModelSection {
                         prop_name: model.prop.name.clone(),
                         prop_options: render_model_options(model, options_src, is_production),
@@ -567,14 +603,7 @@ pub(super) fn process_macro_item<'a>(
                     runtime_shape(runtime_bundle, syntax_index),
                     defaults_arg_span,
                 ) {
-                    (
-                        Some(runtime_shape @ MacroRuntimeShape::Props(shape)),
-                        Some(defaults_span),
-                    ) => {
-                        super::visit_runtime_macro_binding_names(runtime_shape, |name| {
-                            ctx.bindings
-                                .insert(ctx.alloc.alloc_str(name), BindingType::Props);
-                        });
+                    (Some(MacroRuntimeShape::Props(shape)), Some(defaults_span)) => {
                         if let Some(static_defaults) = defaults.as_ref().and_then(|defaults| {
                             render_static_defaults(defaults, content_str, stripped)
                         }) {
@@ -631,77 +660,67 @@ pub(super) fn slice_call_argument<'a>(call_text: &'a str, _callee: &str) -> Opti
 /// Apply the companion `<script>` codegen when `<script setup>` is present.
 ///
 /// The companion script's tags are already stripped by `compile.rs`, so its
-/// content remains in the output. This function:
-/// 1. Rebinds `export default <expr>` to `const __default__ = <expr>` —
-///    the FULL expression is preserved verbatim (object literals, variable
-///    refs, `defineComponent(...)` / factory calls, spreads — never dropped,
-///    never unwrapped). Official merges it into the component: spread into
-///    `_defineComponent` (TS) or the first `Object.assign` target (JS).
-/// 2. Collects non-type import binding names for template resolution
-/// 3. Collects local runtime declarations (`const`/`let`/`function`/`class`) so
-///    template expressions like `isNumber(modelValue)` (reka-ui ProgressRoot)
-///    resolve via `$setup` instead of missing `_ctx.isNumber`
+/// content remains in the output. This function rebinds `export default
+/// <expr>` to `const __default__ = <expr>`: the FULL expression is preserved
+/// verbatim (object literals, variable refs, `defineComponent(...)` / factory
+/// calls, spreads — never dropped, never unwrapped). Official merges it into
+/// the component: spread into `_defineComponent` (TS) or the first
+/// `Object.assign` target (JS). The names the companion exposes to the
+/// template are [`companion_binding_names`]'s.
 ///
 /// The companion was parsed once when the prepared script was built, and its
 /// type declarations were already folded into the setup parse, so this reads the
-/// prepared parse facts rather than re-parsing. Returns companion binding names
-/// (imports + local declarations) that setup should expose.
+/// prepared parse facts rather than re-parsing.
 pub(super) fn process_companion_script(
     prepared: &PreparedCompanion<'_>,
     out: &mut CodeGenOutput<'_>,
     macro_state: &mut MacroState,
-) -> Vec<String> {
+) {
     let content_start = prepared.content_start();
     let parse_result = prepared.parse_result();
 
-    // Collect non-type import binding names + local runtime declarations.
-    let mut companion_binding_names = Vec::new();
-
     for item in &parse_result.items {
+        if let ScriptItem::DefaultExport(de) = item {
+            // Rebind `export default` → `const __default__ =` (official
+            // `normalScriptDefaultVar`), preserving the expression
+            // verbatim — including `defineComponent(...)` / other calls.
+            // The component wrapper merges `__default__` in (spread or
+            // Object.assign target), so no companion option is ever lost.
+            let abs_start = content_start + de.span.start;
+            let export_default_text = "export default";
+            let replace_end = abs_start + export_default_text.len() as u32;
+            out.overwrite(abs_start, replace_end, "const __default__ =");
+            macro_state.has_companion_default = true;
+        }
+    }
+}
+
+/// The names a companion `<script>` exposes to the template from setup, in
+/// source order, and those of them Vue marks `setup-maybe-ref`:
+///
+/// - its value imports (type-only imports do not exist at runtime); an
+///   inline template ref to a ref-bindable one binds `ref_key`/`ref`;
+/// - its top-level runtime declarations (`const isNumber = …`,
+///   `function f() {}`), which live in module scope and are re-exported from
+///   setup for template access, like its imports.
+pub(super) fn companion_binding_names<'a>(
+    prepared: &PreparedCompanion<'a>,
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    let mut names = Vec::new();
+    let mut ref_bindable = Vec::new();
+    for item in &prepared.parse_result().items {
         match item {
-            ScriptItem::Import(imp) => {
-                // Skip type-only imports — they don't exist at runtime
-                if !imp.is_type_only {
-                    for binding in &imp.bindings {
-                        if !binding.is_type_only {
-                            companion_binding_names.push(binding.name.to_string());
-                            // Official `setup-maybe-ref` import bindings — inline
-                            // template refs to these names bind `ref_key`/`ref`.
-                            if super::process::is_ref_bindable_import(
-                                imp.source,
-                                binding.import_kind,
-                            ) {
-                                macro_state
-                                    .ref_bindable_imports
-                                    .insert(binding.name.to_string());
-                            }
-                        }
+            ScriptItem::Import(imp) if !imp.is_type_only => {
+                for binding in imp.bindings.iter().filter(|binding| !binding.is_type_only) {
+                    names.push(binding.name);
+                    if super::process::is_ref_bindable_import(imp.source, binding.import_kind) {
+                        ref_bindable.push(binding.name);
                     }
                 }
             }
-            ScriptItem::Declaration(decl) => {
-                // Top-level companion locals (const isNumber = …, function f(){})
-                // are in module scope and must be re-exported from setup for
-                // template access — same as companion imports.
-                if let Some(name) = decl.name {
-                    companion_binding_names.push(name.to_string());
-                }
-            }
-            ScriptItem::DefaultExport(de) => {
-                // Rebind `export default` → `const __default__ =` (official
-                // `normalScriptDefaultVar`), preserving the expression
-                // verbatim — including `defineComponent(...)` / other calls.
-                // The component wrapper merges `__default__` in (spread or
-                // Object.assign target), so no companion option is ever lost.
-                let abs_start = content_start + de.span.start;
-                let export_default_text = "export default";
-                let replace_end = abs_start + export_default_text.len() as u32;
-                out.overwrite(abs_start, replace_end, "const __default__ =");
-                macro_state.has_companion_default = true;
-            }
+            ScriptItem::Declaration(decl) => names.extend(decl.name),
             _ => {}
         }
     }
-
-    companion_binding_names
+    (names, ref_bindable)
 }

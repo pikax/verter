@@ -1,5 +1,44 @@
 use super::*;
 
+#[test]
+fn empty_raw_template_emits_a_valid_fragment() {
+    let alloc = Allocator::new();
+    let parsed = crate::compile::parse_template_block("", None, None);
+    let ast = parsed.template_ast().unwrap();
+    let oxc_ast = crate::template::oxc::parse_template_expressions(
+        ast,
+        "",
+        &alloc,
+        oxc_span::SourceType::tsx(),
+        true,
+    );
+    let mut transform =
+        CodeTransform::<verter_audit::observe::Uncaptured>::new_mapped_in("", &alloc);
+    let mut edits = EditRecorder::new(&alloc);
+    generate_ide_template(
+        ast,
+        &oxc_ast,
+        "",
+        &mut edits,
+        &alloc,
+        &FxHashMap::default(),
+        &IdeTemplateOptions {
+            self_name: "App",
+            comments: true,
+            is_jsx: false,
+            strict_slots: false,
+            custom_elements: None,
+        },
+        &TemplateComponentBindings::default(),
+    );
+    edits.apply(&mut transform).unwrap();
+    let code = transform.build_string();
+    assert_eq!(code, "<></>");
+    let syntax =
+        verter_parser::oxc_parse::Parser::new(&alloc, &code, oxc_span::SourceType::tsx()).parse();
+    assert!(syntax.diagnostics.is_empty(), "{:?}", syntax.diagnostics);
+}
+
 // ── Basic nodes ────────────────────────────────────────────
 
 #[test]
@@ -1004,7 +1043,7 @@ fn synthesized_core_not_found_falls_back_unmapped() {
     // The CodeTransform source is a single original char `x` so the inserted synthetic
     // text is the only thing that could carry a (wrong) mapping.
     let mut ct = CodeTransform::new("x", &alloc);
-    let mut out = CodeGenOutput::new(&alloc);
+    let mut out = EditRecorder::new(&alloc);
 
     // `resolved` = `$setup.bar` (a resolver rewrite), `core` = `zzz` is NOT a
     // substring of it → the no-core fallback path. `core_source_start` points at the
@@ -1016,7 +1055,7 @@ fn synthesized_core_not_found_falls_back_unmapped() {
         "zzz",
         SourceByteOffset(0),
     );
-    out.apply_to(&mut ct);
+    out.apply(&mut ct).expect("recorded edits apply");
 
     let built = ct.build_string();
     // The synthetic text is still emitted verbatim (semantics preserved).
@@ -1025,7 +1064,9 @@ fn synthesized_core_not_found_falls_back_unmapped() {
         "the synthetic value text must still be emitted: {built:?}"
     );
 
-    let map = ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"));
+    let map = ct
+        .generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"))
+        .expect("mapped transform");
     let tokens: Vec<(u32, u32, u32)> = map
         .get_tokens()
         .filter(|t| t.get_source_id().is_some())

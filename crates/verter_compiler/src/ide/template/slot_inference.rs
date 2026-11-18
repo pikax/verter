@@ -2,10 +2,10 @@
 //! The duplicate inference expression is unmapped; the JSX props retain navigation.
 
 use crate::ast::types::ElementNode;
-use crate::template::code_gen::binding::BindingResolver;
-use crate::template::code_gen::expression::{
+use crate::template::binding::prefixed_expr::{
     build_prefixed_expr_segments, resolve_simple_expr_segments,
 };
+use crate::template::binding::BindingResolver;
 use crate::template::oxc::types::{OxcParsedElement, OxcParsedExpression};
 
 pub(super) fn component_props(
@@ -41,7 +41,7 @@ pub(super) fn component_props(
             ));
             continue;
         }
-        let directive = super::directive_name(prop, source);
+        let directive = crate::ide::get_directive_name(prop, source);
         if !matches!(directive, "bind" | "model") {
             // Events are checked in JSX. Inference takes the covariant prop
             // inputs, without re-evaluating inline statements or $event here.

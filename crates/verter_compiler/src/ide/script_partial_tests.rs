@@ -69,7 +69,8 @@ fn gen(source: &str) -> (String, FxHashMap<String, BindingType>, String) {
         &alloc,
         &options,
         template_end,
-    );
+    )
+    .expect("recorded script edits apply");
 
     if let (Some(return_close), Some(tpl_end)) = (&result.return_close, template_end) {
         ct.prepend_left(tpl_end, return_close);

@@ -63,9 +63,11 @@ impl<K, R: Copy> Clone for Region<K, R> {
 }
 
 /// Preorder builder. Parent nodes must still be on the open ancestor stack.
-/// A region's owner is the node immediately outside its body; nested regions
-/// must name that owner's region as their parent. Root regions have no owner.
-/// Framework-specific branch/body meaning stays in the region payload `R`.
+/// A region's owner is the node immediately outside its body. A nested region
+/// names as its parent either its owner's region or another region of the same
+/// owner, so one owner can nest several regions (a branch around a loop body)
+/// and every owner chain ends at the owner's region. Root regions have no
+/// owner. Framework-specific branch/body meaning stays in the region payload `R`.
 pub struct Structure<'s, K, R: Copy, N: Copy> {
     store: TopologyStore<'s, K, R, N>,
     open: Vec<NodeId<K>>,
@@ -107,9 +109,10 @@ impl<'s, K, R: Copy, N: Copy> Structure<'s, K, R, N> {
         match (parent, owner) {
             (None, None) => {}
             (Some(parent), Some(owner)) => {
-                if self.store.regions.get(parent).is_none()
-                    || self.store.region(owner) != Some(parent)
-                {
+                let Some(parent_region) = self.store.regions.get(parent) else {
+                    return Err(StructureError::RegionOwnership);
+                };
+                if self.store.region(owner) != Some(parent) && parent_region.owner != Some(owner) {
                     return Err(StructureError::RegionOwnership);
                 }
             }
@@ -151,6 +154,8 @@ impl<'s, K, R: Copy, N: Copy> Structure<'s, K, R, N> {
             .regions
             .get(region)
             .ok_or(StructureError::UnknownId)?;
+        // A region owned by `p` reaches `p`'s region through its same-owner
+        // parent chain, which `add_region` guarantees.
         let valid = match parent {
             None => r.parent.is_none() && r.owner.is_none(),
             Some(p) => self.store.region(p) == Some(region) || r.owner == Some(p),
@@ -206,6 +211,24 @@ impl<'s, K, R: Copy, N: Copy> Structure<'s, K, R, N> {
 impl<'s, K, R: Copy, N: Copy> TopologyStore<'s, K, R, N> {
     pub fn node(&self, id: NodeId<K>) -> Option<&N> {
         self.nodes.get(id)
+    }
+    /// Every node in preorder, which is dense identity order.
+    pub fn node_ids(&self) -> impl Iterator<Item = NodeId<K>> + '_ {
+        self.nodes.ids()
+    }
+    /// Every region in insertion order.
+    pub fn region_ids(&self) -> impl Iterator<Item = RegionId<R>> + '_ {
+        self.regions.ids()
+    }
+    pub fn first_child(&self, id: NodeId<K>) -> Option<NodeId<K>> {
+        self.topology.get(id.index())?.first_child
+    }
+    pub fn next_sibling(&self, id: NodeId<K>) -> Option<NodeId<K>> {
+        self.topology.get(id.index())?.next_sibling
+    }
+    /// The whole authored source the spans index into.
+    pub fn source(&self) -> &'s str {
+        self.source
     }
     pub fn span(&self, id: NodeId<K>) -> Option<Span> {
         self.spans.get(id.index()).copied()

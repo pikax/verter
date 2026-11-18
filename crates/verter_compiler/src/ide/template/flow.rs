@@ -29,7 +29,7 @@
 //! Generated size is bounded by a constant per branch, frame, callback and
 //! outer reference plus the authored text and three copies of each outer
 //! reference chain a callback reads; the depth of the condition path never
-//! appears. Every byte goes through `CodeGenOutput` (and so `CodeTransform`):
+//! appears. Every byte goes through `EditRecorder` (and so `CodeTransform`):
 //! snapshot declarations fill a prepend reserved when their scope opened.
 
 use oxc_ast::ast::{
@@ -42,8 +42,9 @@ use oxc_syntax::operator::AssignmentOperator;
 use oxc_syntax::scope::ScopeFlags;
 use rustc_hash::FxHashMap;
 
-use crate::template::code_gen::binding::BindingResolver;
-use crate::template::code_gen::types::{CodeGenOutput, ReservedPrepend};
+use crate::code_transform::EditRecorder;
+use crate::code_transform::ReservedPrepend;
+use crate::template::binding::BindingResolver;
 use crate::template::oxc::types::OxcParsedExpression;
 
 /// Re-narrows a reference to the type of its snapshot.
@@ -234,7 +235,7 @@ impl FlowNarrowing {
     /// already recorded at `at` and before every one recorded later.
     pub(crate) fn open(
         &mut self,
-        out: &mut CodeGenOutput<'_>,
+        out: &mut EditRecorder<'_>,
         at: u32,
         kind: ScopeKind<'_>,
     ) -> ScopeToken {
@@ -270,7 +271,7 @@ impl FlowNarrowing {
     }
 
     /// Close the scope `token` opened, emitting its text.
-    pub(crate) fn close(&mut self, out: &mut CodeGenOutput<'_>, token: ScopeToken) {
+    pub(crate) fn close(&mut self, out: &mut EditRecorder<'_>, token: ScopeToken) {
         if token.condition {
             self.conditions -= 1;
         }

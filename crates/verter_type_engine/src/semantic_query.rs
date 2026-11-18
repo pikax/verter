@@ -4421,7 +4421,7 @@ pub struct SurfaceMember {
     /// from an external source). See
     /// the macro-root `declared_in_macro_type_arg` provenance bit
     /// for the structural definition. Propagated through the prepared-surface
-    /// walker and `surface_member_to_expanded_field`. Witness-gated: a
+    /// walker and the framework-surface normalizers. Witness-gated: a
     /// non-neutral value exists only via
     /// [`ProjectionReductionContext::own_body_stamp`].
     pub declared_in_macro_type_arg: MacroOwnBodyStamp,

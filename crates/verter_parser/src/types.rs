@@ -68,6 +68,88 @@ impl NodeProp {
     }
 }
 
+/// A directive Vue gives a fixed meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BuiltinDirective {
+    If,
+    ElseIf,
+    Else,
+    For,
+    Slot,
+    Model,
+    Show,
+    Html,
+    Text,
+    Once,
+    Memo,
+    Pre,
+    Cloak,
+}
+
+/// What an attribute or directive name stands for. The one classification
+/// of directive names: every reader of attributes asks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DirectiveKind {
+    /// A plain attribute.
+    Static,
+    /// `v-bind`, `:` and the `.` prop shorthand.
+    Bind,
+    /// `v-on` and `@`.
+    On,
+    Builtin(BuiltinDirective),
+    /// Any other `v-*` directive.
+    Custom,
+}
+
+/// Classify a directive name. The name may stand alone (`v-bind`, `:`) or
+/// carry its argument and modifiers (`v-bind:id.prop`, `:id`, `#default`).
+pub fn classify_directive_name(name: &[u8]) -> DirectiveKind {
+    match name.first() {
+        Some(b':' | b'.') => return DirectiveKind::Bind,
+        Some(b'@') => return DirectiveKind::On,
+        Some(b'#') => return DirectiveKind::Builtin(BuiltinDirective::Slot),
+        _ => {}
+    }
+    let Some(rest) = name.strip_prefix(b"v-") else {
+        return DirectiveKind::Static;
+    };
+    let head_end = rest
+        .iter()
+        .position(|b| matches!(b, b':' | b'.' | b'[' | b'@'))
+        .unwrap_or(rest.len());
+    match &rest[..head_end] {
+        b"bind" => DirectiveKind::Bind,
+        b"on" => DirectiveKind::On,
+        b"if" => DirectiveKind::Builtin(BuiltinDirective::If),
+        b"else-if" => DirectiveKind::Builtin(BuiltinDirective::ElseIf),
+        b"else" => DirectiveKind::Builtin(BuiltinDirective::Else),
+        b"for" => DirectiveKind::Builtin(BuiltinDirective::For),
+        b"slot" => DirectiveKind::Builtin(BuiltinDirective::Slot),
+        b"model" => DirectiveKind::Builtin(BuiltinDirective::Model),
+        b"show" => DirectiveKind::Builtin(BuiltinDirective::Show),
+        b"html" => DirectiveKind::Builtin(BuiltinDirective::Html),
+        b"text" => DirectiveKind::Builtin(BuiltinDirective::Text),
+        b"once" => DirectiveKind::Builtin(BuiltinDirective::Once),
+        b"memo" => DirectiveKind::Builtin(BuiltinDirective::Memo),
+        b"pre" => DirectiveKind::Builtin(BuiltinDirective::Pre),
+        b"cloak" => DirectiveKind::Builtin(BuiltinDirective::Cloak),
+        _ => DirectiveKind::Custom,
+    }
+}
+
+impl NodeProp {
+    /// The kind of this attribute: a non-directive is always `Static`.
+    /// `source` is the buffer the prop offsets index.
+    pub fn kind(&self, source: &[u8]) -> DirectiveKind {
+        if !self.is_directive {
+            return DirectiveKind::Static;
+        }
+        source
+            .get(self.start as usize..self.name_end as usize)
+            .map_or(DirectiveKind::Static, classify_directive_name)
+    }
+}
+
 // ── Binding classification ─────────────────────────────────────────────────
 
 /// Classification of a binding for correct accessor prefix/suffix in template codegen.
@@ -133,4 +215,67 @@ impl BindingType {
 pub enum ReactivityLevel {
     Static,
     Dynamic,
+}
+
+#[cfg(test)]
+mod directive_kind_tests {
+    use super::*;
+
+    #[test]
+    fn names_classify_with_or_without_their_argument() {
+        use BuiltinDirective as B;
+        let cases: &[(&str, DirectiveKind)] = &[
+            (":", DirectiveKind::Bind),
+            (":href", DirectiveKind::Bind),
+            (".prop", DirectiveKind::Bind),
+            ("v-bind", DirectiveKind::Bind),
+            ("v-bind:id.camel", DirectiveKind::Bind),
+            ("@", DirectiveKind::On),
+            ("@click.stop", DirectiveKind::On),
+            ("v-on", DirectiveKind::On),
+            ("v-on:click", DirectiveKind::On),
+            ("#", DirectiveKind::Builtin(B::Slot)),
+            ("#default", DirectiveKind::Builtin(B::Slot)),
+            ("v-slot:item.title", DirectiveKind::Builtin(B::Slot)),
+            ("v-if", DirectiveKind::Builtin(B::If)),
+            ("v-else-if", DirectiveKind::Builtin(B::ElseIf)),
+            ("v-else", DirectiveKind::Builtin(B::Else)),
+            ("v-for", DirectiveKind::Builtin(B::For)),
+            ("v-model:title.trim", DirectiveKind::Builtin(B::Model)),
+            ("v-memo", DirectiveKind::Builtin(B::Memo)),
+            ("v-focus", DirectiveKind::Custom),
+            ("v-bindx", DirectiveKind::Custom),
+            ("class", DirectiveKind::Static),
+            ("data-v-x", DirectiveKind::Static),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(
+                classify_directive_name(name.as_bytes()),
+                *expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plain_attribute_is_static_whatever_it_is_called() {
+        let source = b":x=\"1\"";
+        let prop = NodeProp {
+            start: 0,
+            name_end: 2,
+            is_directive: false,
+            arg_start: None,
+            arg_end: None,
+            value_start: None,
+            value_end: None,
+            modifiers: SmallVec::new(),
+            is_dynamic: None,
+        };
+        assert_eq!(prop.kind(source), DirectiveKind::Static);
+        let directive = NodeProp {
+            is_directive: true,
+            ..prop
+        };
+        assert_eq!(directive.kind(source), DirectiveKind::Bind);
+    }
 }

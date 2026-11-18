@@ -928,9 +928,17 @@ const NAPI_OUT_OF_SCOPE: &[(&str, &str)] = &[
     ("getLastAuditRecord", "audit records"),
     ("getLintRuleMetadata", "lint metadata"),
     ("getMetrics", "host metrics"),
+    (
+        "isCarrierSourcePath",
+        "carrier path classification, not a product route",
+    ),
     ("lint", "lint product"),
     ("matchCssSelectors", "CSS analysis product"),
     ("remove", "lifecycle"),
+    (
+        "renderBundlerId",
+        "bundler module-id rendering, not a product route",
+    ),
     ("resolve", "id resolution"),
     ("resolveExports", "type-resolution product"),
     ("resolveImport", "import resolution"),

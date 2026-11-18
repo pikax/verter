@@ -1002,7 +1002,7 @@ describe("host-proxy matrix: getScriptSnapshot", () => {
       join(vue, "package.json"),
       JSON.stringify({
         name: "vue",
-        version: "3.5.40",
+        version: "3.6.0-rc.15",
         exports: { "./jsx-runtime": { types: "./jsx-runtime/index.d.ts" } },
       }),
       "utf8",

@@ -90,6 +90,7 @@ fn publishes_exactly_the_planned_runtime_client_artifact() {
     )]);
     let fragment = fragment_with_helper("_openBlock");
     let contribution = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::RuntimeClient,
         fragments: vec![&fragment],
         code: "import { _openBlock } from 'vue'".to_string(),
@@ -116,6 +117,7 @@ fn ide_companion_without_projection_map_is_refused() {
         IdeProductRequest::default(),
     )]);
     let contribution = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::IdeCompanion,
         fragments: vec![],
         code: "export default {}".to_string(),
@@ -139,6 +141,7 @@ fn ide_companion_with_projection_map_publishes_both_atomically() {
         IdeProductRequest::default(),
     )]);
     let contribution = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::IdeCompanion,
         fragments: vec![],
         code: "export default {}".to_string(),
@@ -159,6 +162,7 @@ fn runtime_map_absent_when_not_requested_is_a_true_none_not_an_empty_map() {
         ..Default::default()
     })]);
     let contribution = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::RuntimeClient,
         fragments: vec![],
         code: "export default {}".to_string(),
@@ -184,6 +188,7 @@ fn unrequested_runtime_map_attached_anyway_is_refused() {
         ..Default::default()
     })]);
     let contribution = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::RuntimeClient,
         fragments: vec![],
         code: "export default {}".to_string(),
@@ -208,6 +213,7 @@ fn undeclared_import_name_is_refused() {
     )]);
     let fragment = fragment_with_helper("_openBlock");
     let contribution = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::RuntimeClient,
         fragments: vec![&fragment],
         code: "import { _createVNode } from 'vue'".to_string(),
@@ -241,6 +247,7 @@ fn digest_of(
     // `publish` fail-closes on a map the plan did not request, so the plan
     // has to ask for one whenever this helper supplies one.
     let contribution = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::RuntimeClient,
         fragments: vec![],
         code: code.to_string(),
@@ -389,6 +396,7 @@ impl DigestFixture {
 
     fn digest(&self) -> [u8; 32] {
         let contribution = ArtifactContribution {
+            grammar: None,
             kind: self.product.kind(),
             fragments: vec![],
             code: self.code.clone(),
@@ -1131,6 +1139,7 @@ fn declared_import_name_publishes_cleanly() {
     )]);
     let fragment = fragment_with_helper("_openBlock");
     let contribution = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::RuntimeClient,
         fragments: vec![&fragment],
         code: "import { _openBlock } from 'vue'".to_string(),
@@ -1155,6 +1164,7 @@ fn multi_product_request_publishes_exactly_those_products_and_nothing_else() {
         CompileProduct::Declarations(Default::default()),
     ]);
     let runtime = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::RuntimeClient,
         fragments: vec![],
         code: "export default {}".to_string(),
@@ -1164,6 +1174,7 @@ fn multi_product_request_publishes_exactly_those_products_and_nothing_else() {
         runtime_source_map: None,
     };
     let declarations = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::Declarations,
         fragments: vec![],
         code: "export default {}".to_string(),
@@ -1186,6 +1197,7 @@ fn missing_planned_artifact_is_refused_and_publishes_nothing() {
         CompileProduct::IdeCompanion(IdeProductRequest::default()),
     ]);
     let contribution = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::RuntimeClient,
         fragments: vec![],
         code: "export default {}".to_string(),
@@ -1212,6 +1224,7 @@ fn unplanned_artifact_contribution_is_refused() {
     // The plan is satisfied (RuntimeClient present); the extra
     // IdeCompanion contribution was never requested at all.
     let runtime = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::RuntimeClient,
         fragments: vec![],
         code: "export default {}".to_string(),
@@ -1221,6 +1234,7 @@ fn unplanned_artifact_contribution_is_refused() {
         runtime_source_map: None,
     };
     let unplanned = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::IdeCompanion,
         fragments: vec![],
         code: "export default {}".to_string(),
@@ -1244,6 +1258,7 @@ fn duplicate_contribution_for_the_same_kind_is_refused() {
         RuntimeProductRequest::default(),
     )]);
     let first = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::RuntimeClient,
         fragments: vec![],
         code: "export default {}".to_string(),
@@ -1253,6 +1268,7 @@ fn duplicate_contribution_for_the_same_kind_is_refused() {
         runtime_source_map: None,
     };
     let second = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::RuntimeClient,
         fragments: vec![],
         code: "export default { a: 1 }".to_string(),
@@ -1277,6 +1293,7 @@ fn a_single_contribution_per_kind_still_publishes_cleanly() {
         RuntimeProductRequest::default(),
     )]);
     let contribution = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::RuntimeClient,
         fragments: vec![],
         code: "export default {}".to_string(),
@@ -1294,6 +1311,7 @@ fn code_bearing_artifact_that_fails_to_parse_is_refused() {
         RuntimeProductRequest::default(),
     )]);
     let contribution = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::RuntimeClient,
         fragments: vec![],
         // Genuinely malformed — not a stand-in for "too simple".
@@ -1320,6 +1338,7 @@ fn code_bearing_artifact_that_parses_cleanly_publishes() {
         RuntimeProductRequest::default(),
     )]);
     let contribution = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::RuntimeClient,
         fragments: vec![],
         code: "const _sfc_main = {}\nexport default _sfc_main".to_string(),
@@ -1337,6 +1356,7 @@ fn non_code_bearing_artifact_is_not_final_parse_checked() {
     // it as ECMAScript and refuse it for failing to parse as such.
     let plan = plan_with(vec![CompileProduct::Analysis(Default::default())]);
     let contribution = ArtifactContribution {
+        grammar: None,
         kind: ProductKind::Analysis,
         fragments: vec![],
         code: "{ not json or js at all !!".to_string(),

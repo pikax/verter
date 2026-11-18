@@ -463,16 +463,20 @@ mod regex;
 mod runtime_inspector;
 mod security;
 mod semantic_diff;
-mod sfc_projection_cache;
+pub mod sfc_projection_cache;
 #[cfg(test)]
 mod sfc_projection_cache_tests;
 mod sfc_projection_consumers;
 #[cfg(test)]
 mod sfc_projection_consumers_tests;
-mod sfc_projection_diagnostics;
+pub mod sfc_projection_diagnostics;
 #[cfg(test)]
 mod sfc_projection_diagnostics_tests;
-mod sfc_projection_observations;
+// Lives here because the external TypeScript runtime cannot see the mapper plane.
+pub mod sfc_projection_mapper;
+#[cfg(test)]
+mod sfc_projection_mapper_tests;
+pub mod sfc_projection_observations;
 #[cfg(test)]
 mod sfc_projection_observations_tests;
 mod structural_search;
@@ -562,7 +566,7 @@ pub use verter_protocol::types::PublicApiProjectionSubject;
 
 use std::sync::Arc;
 
-pub use id::resolve_external;
+pub use id::{parse_raw_id, resolve_external};
 pub use input_basis::{
     commit_workspace_canonical, retry_workspace_wave, CommitError, DirectoryEntry, InputBasis,
     LoadWave, NegativeFact, NegativeKind, Observation, ObservationKind, ObserveError, RetryError,

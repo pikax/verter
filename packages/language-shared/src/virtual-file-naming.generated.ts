@@ -46,6 +46,17 @@ export interface DeclarationSurfaceExtensionMiddleTs {
 
 export type DeclarationSurface = DeclarationSurfaceNone | DeclarationSurfaceExtensionMiddleTs;
 
+export interface CheckingSurfaceNone {
+  kind: "none";
+}
+
+export interface CheckingSurfaceDialectSuffixes {
+  kind: "dialectSuffixes";
+  suffixes: string[];
+}
+
+export type CheckingSurface = CheckingSurfaceNone | CheckingSurfaceDialectSuffixes;
+
 export interface VirtualFileNaming {
   carrierExtension: string | null;
   ide: VirtualPathPolicy;
@@ -53,6 +64,7 @@ export interface VirtualFileNaming {
   testingApiSuffix: string | null;
   sidecarSuffixes: string[];
   declarationSurface: DeclarationSurface;
+  checkingSurface: CheckingSurface;
 }
 
 export const VIRTUAL_FILE_NAMING: Readonly<Record<string, VirtualFileNaming>> = {
@@ -63,6 +75,7 @@ export const VIRTUAL_FILE_NAMING: Readonly<Record<string, VirtualFileNaming>> = 
     testingApiSuffix: ".__verter_test.ts",
     sidecarSuffixes: [".tsx.__verter_types.d.ts", ".jsx.__verter_types.d.ts"],
     declarationSurface: { kind: "extensionMiddleTs" },
+    checkingSurface: { kind: "dialectSuffixes", suffixes: [".ts", ".tsx", ".js", ".jsx"] },
   },
   FRAMEWORK_TAG_SVELTE: {
     carrierExtension: ".svelte",
@@ -71,6 +84,7 @@ export const VIRTUAL_FILE_NAMING: Readonly<Record<string, VirtualFileNaming>> = 
     testingApiSuffix: null,
     sidecarSuffixes: [".tsx.__verter_types.d.ts", ".jsx.__verter_types.d.ts"],
     declarationSurface: { kind: "extensionMiddleTs" },
+    checkingSurface: { kind: "none" },
   },
   SVELTE_RUNE_MODULE: {
     carrierExtension: ".svelte.ts",
@@ -79,5 +93,6 @@ export const VIRTUAL_FILE_NAMING: Readonly<Record<string, VirtualFileNaming>> = 
     testingApiSuffix: null,
     sidecarSuffixes: [],
     declarationSurface: { kind: "none" },
+    checkingSurface: { kind: "none" },
   },
 };

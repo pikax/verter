@@ -1,8 +1,8 @@
-//! The Svelte carrier compiler — parser + neutral artifact bridge.
+//! The Svelte carrier — parser, frontend and neutral artifact bridge.
 //!
 //! This module owns the Svelte-specific compiler surface: the byte parser
 //! ([`parser`]) producing a [`parser::ParsedSvelte`], and the
-//! [`carrier::SvelteCarrierCompiler`] that lifts it into the framework-neutral
+//! [`carrier_frontend::SvelteCarrierFrontend`] that lifts it into the framework-neutral
 //! [`FrameworkParseArtifact`](verter_compiler::framework_common::FrameworkParseArtifact).
 //! The typed [`svelte_projection_backend::SvelteProjectionBackend`] and
 //! [`svelte_runtime_backend::SvelteRuntimeBackend`] drive IDE projection and
@@ -23,6 +23,7 @@ mod bind_contract_data;
 #[cfg(test)]
 mod bind_contract_tests;
 pub mod carrier;
+pub mod carrier_bundle;
 pub mod carrier_frontend;
 pub mod ide;
 pub mod parser;
@@ -32,9 +33,8 @@ pub mod svelte_projection_backend;
 pub mod svelte_runtime_backend;
 pub mod template_facts;
 
-pub use carrier::SvelteCarrierCompiler;
 pub use carrier_frontend::{
-    svelte_carrier_frontend_registration, SvelteCarrierFrontend, SvelteSfc5,
+    svelte_carrier_frontend_registration, svelte_grammar_config, SvelteCarrierFrontend, SvelteSfc5,
 };
 pub use ide::{project_svelte_ide, SvelteIdeProjection};
 pub use parser::{parse_svelte, ParsedSvelte};

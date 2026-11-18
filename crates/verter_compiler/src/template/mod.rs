@@ -5,5 +5,8 @@
 //! and Vapor backends as concrete implementations. OXC is used for expression
 //! parsing and binding resolution within template interpolations and directives.
 
+pub mod binding;
 pub mod code_gen;
 pub mod oxc;
+pub mod topology;
+pub mod vue_syntax;

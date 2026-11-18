@@ -95,6 +95,9 @@ pub struct ExternalLink {
     pub specifier: String,
     /// Byte range of the specifier in the carrier file, when known.
     pub span: Option<Span>,
+    /// Role of the script block that declares the link; `None` for a
+    /// template or style link.
+    pub script_role: Option<ScriptRole>,
 }
 
 /// Severity of a neutral carrier-parse diagnostic (closed set).
@@ -422,10 +425,10 @@ impl FrameworkParseCommon {
                 let CarrierBlock::Section { role, syntax, .. } = block else {
                     return None;
                 };
-                let kind = match role {
-                    SectionRole::Script { .. } => ExternalLinkKind::Script,
-                    SectionRole::TemplateHost => ExternalLinkKind::Template,
-                    SectionRole::Style { .. } => ExternalLinkKind::Style,
+                let (kind, script_role) = match role {
+                    SectionRole::Script { role, .. } => (ExternalLinkKind::Script, Some(*role)),
+                    SectionRole::TemplateHost => (ExternalLinkKind::Template, None),
+                    SectionRole::Style { .. } => (ExternalLinkKind::Style, None),
                     SectionRole::Custom { .. } => return None,
                 };
                 let attribute = syntax
@@ -447,6 +450,7 @@ impl FrameworkParseCommon {
                     kind,
                     specifier: self.inventory.slice(*raw).ok()?.to_owned(),
                     span: Some(source_span(raw.span)),
+                    script_role,
                 })
             })
             .collect()

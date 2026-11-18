@@ -314,6 +314,26 @@ defineEmits<{ save: [id: number] }>()
 /// missing-source policy keeps rendering the canonical typed `Unknown`.
 #[test]
 fn member_path_projection_onto_interned_miss_refuses_value_never_silent_unknown() {
+    let failed_authority = verter_type_expr::ResolvedTypeAuthority::from_source_position(
+        &verter_type_expr::facts::SourcePosition::Failed(
+            verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+        ),
+        verter_type_expr::ResolutionExactness::ExactConcrete,
+        verter_type_expr::ResolutionProvenance::FrameworkSurface,
+        std::sync::Arc::from([]),
+    );
+    let metadata = verter_session_query::analysis::type_expand::ExpansionMetadata::from_authority(
+        &failed_authority,
+    );
+    assert_eq!(
+        metadata.exactness,
+        verter_session_query::type_solver::result::SolverExactness::Incomplete,
+        "a failed member cannot report exact expansion metadata"
+    );
+    assert_eq!(
+        metadata.execution_status,
+        verter_session_query::type_solver::result::ExecutionStatus::HardStop
+    );
     let project = project_with(
         "/App.vue",
         r#"<script setup lang="ts">

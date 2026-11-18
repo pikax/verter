@@ -488,13 +488,19 @@ pub fn canonicalize_path_cow(raw: &str) -> Cow<'_, str> {
     Cow::Owned(canonicalize_owned(raw))
 }
 
+/// Normalize path separators without changing drive casing, prefixes or
+/// components. Borrow a path that already uses forward slashes.
+pub fn normalize_path_separators(raw: &str) -> Cow<'_, str> {
+    if raw.contains('\\') {
+        Cow::Owned(raw.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(raw)
+    }
+}
+
 fn canonicalize_owned(raw: &str) -> String {
     // Step 1: backslash → forward slash (only allocate if needed).
-    let normalized = if raw.contains('\\') {
-        raw.replace('\\', "/")
-    } else {
-        raw.to_string()
-    };
+    let normalized = normalize_path_separators(raw).into_owned();
 
     // Step 2: strip Windows extended-length prefix — `//?/UNC/` BEFORE `//?/`.
     let normalized = if let Some(rest) = normalized.strip_prefix("//?/UNC/") {

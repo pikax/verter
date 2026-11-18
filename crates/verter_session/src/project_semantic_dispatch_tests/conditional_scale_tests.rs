@@ -47,6 +47,8 @@ use verter_type_expr::{LiteralValue, TypeExpr};
 
 const SCENARIO: &str = "/scale/scenario.ts";
 
+type HostDispatch<'a> = super::ProjectSemanticDispatch<'a, crate::resolver_core::HostCapabilities>;
+
 /// The route tree of `parents` parents with five children each, and the two
 /// recursive conditionals that collect its names and joined paths.
 fn route_tree(parents: usize) -> String {
@@ -225,6 +227,7 @@ fn named_probe_measured(source: &str, probe: &str, operations: usize) -> Measure
     let _trace = enable_dispatch_trace_for_test();
     let probes_before = seam_need_probes_for_tests();
     let questions_before = seam_need_questions_for_tests();
+    let preparations_before = HostDispatch::conditional_operand_preparations_for_tests();
     let (((outcome, _), usage), charged, _) =
         verter_type_engine::request_budget::with_request_spend_capture_for_tests(|| {
             verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
@@ -241,7 +244,9 @@ fn named_probe_measured(source: &str, probe: &str, operations: usize) -> Measure
     let dispatches = DISPATCH_TRACE.with(|trace| trace.borrow().len()) as u64;
     let seam_need_probes = seam_need_probes_for_tests() - probes_before;
     let seam_need_questions = seam_need_questions_for_tests() - questions_before;
-    // Asking whether a read is already one of a decision's needs compares
+    let operand_preparations =
+        HostDispatch::conditional_operand_preparations_for_tests() - preparations_before;
+    // Asking whether a read is already one of a flow's needs compares
     // it with the need that shares its demand's hash: on average at most one
     // stored need per question, whatever the number of needs. Comparing the
     // read with every need reached before it is quadratic in the members.
@@ -275,7 +280,7 @@ fn named_probe_measured(source: &str, probe: &str, operations: usize) -> Measure
         ("decided conditionals", stats.conditional_decided_count),
         ("relation checks", stats.relation_check_count),
         ("substitutions", stats.substitute_memo_misses),
-        ("decision need questions", seam_need_questions),
+        ("operand preparations", operand_preparations as u64),
     ];
     Measured {
         answer: literals,
@@ -520,8 +525,8 @@ fn templates_built_at_substitution_fold_nullish_and_union_holes() {
 }
 
 /// The gate version of a full-size growth test: the same demand at three
-/// small, equally spaced sizes. Each size answers exactly `expected`, its need
-/// questions compare at most one stored need on average (checked by
+/// small, equally spaced sizes. Each size answers exactly `expected`, any flow
+/// need questions compare at most one stored need on average (checked by
 /// [`named_probe_measured`]: comparing a read with every need before it is
 /// quadratic and fails at these sizes already), and every work counter and the
 /// operations charged against its fuse grow by the same amount per step, so the
@@ -610,7 +615,7 @@ fn route_tree_paths_work_is_affine_and_meets_the_full_size_bounds() {
 
 /// The repeated-infer pattern at 10, 20 and 30 members: the gate version of
 /// the 100- and 1,000-member test and of the 30-, 100- and 300-member decision
-/// need test in the nightly scale tier. Every size asks need questions.
+/// preparation test in the nightly scale tier. Every size prepares operands.
 #[test]
 fn repeated_infer_work_is_affine_and_meets_the_full_size_bounds() {
     let work = affine_probe_work("Pat", [10, 20, 30], |members| {
@@ -623,8 +628,8 @@ fn repeated_infer_work_is_affine_and_meets_the_full_size_bounds() {
         )
     });
     assert!(
-        work.at("decision need questions", 10) > 0,
-        "the decision must ask need questions"
+        work.at("operand preparations", 10) > 0,
+        "the decision must prepare its operands"
     );
     let fuse = checker_instantiations_repeated_infer;
     assert_full_size_work("Pat", &work, &[100, 1000], fuse);
@@ -738,15 +743,10 @@ mod nightly_scale {
         assert_linear_growth("Pat", work[0], work[1]);
     }
 
-    /// The decision over a wide union reaches a read per member, two per member
-    /// over its operand passes, and asks for each whether it is already one of
-    /// its needs. Comparing a read with every need reached before it made that
-    /// question quadratic in the members, which was most of the work at 6,000
-    /// members; each question compares at most one stored need on average
-    /// ([`named_probe`] checks it on every probe), and the questions grow with
-    /// the members. Measured: the numbers `0` to `n - 1`.
+    /// Operand preparation over the repeated-infer pattern grows linearly
+    /// with its members. Measured: the numbers `0` to `n - 1`.
     #[test]
-    fn repeated_infer_decision_needs_grow_linearly_across_three_sizes() {
+    fn repeated_infer_operand_preparations_grow_linearly_across_three_sizes() {
         let work = [30, 100, 300].map(|members| {
             let (source, probe) = repeated_infer(members);
             let (answer, work) = named_probe(
@@ -755,13 +755,13 @@ mod nightly_scale {
                 checker_instantiations_repeated_infer(members),
             );
             assert_answer(&format!("Pat over {members}"), &answer, &numbers(members));
-            let questions = work
+            let preparations = work
                 .iter()
-                .find(|(what, _)| *what == "decision need questions")
+                .find(|(what, _)| *what == "operand preparations")
                 .map(|(_, value)| *value);
             assert!(
-                questions.is_some_and(|questions| questions > 0),
-                "Pat over {members}: the decision asked no need question"
+                preparations.is_some_and(|preparations| preparations > 0),
+                "Pat over {members}: the decision prepared no operands"
             );
             (members, work)
         });

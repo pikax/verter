@@ -38,3 +38,4 @@ oxc_span = { workspace = true }
 # composition specifically — not the direct core's.
 verter_compiler = { path = "../verter_compiler", features = ["test-support"] }
 verter_session = { path = "../verter_session" }
+verter_audit = { path = "../verter_audit" }

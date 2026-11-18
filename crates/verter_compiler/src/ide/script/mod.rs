@@ -55,9 +55,9 @@ use rustc_hash::FxHashMap;
 
 use crate::ast::types::TemplateAst;
 use crate::code_transform::CodeTransform;
+use crate::code_transform::EditRecorder;
 use crate::parser::types::RootNodeScript;
-use crate::template::code_gen::binding::BindingType;
-use crate::template::code_gen::types::CodeGenOutput;
+use crate::template::binding::BindingType;
 
 use crate::ide::{IdeScriptOptions, TemplateComponentBindings};
 
@@ -95,6 +95,7 @@ use type_constructs::{
     emit_helper_imports_with_define_component, emit_type_constructs,
     proven_vue_async_component_bindings, unbound_builtin_components,
 };
+pub(crate) use type_constructs::{DIRECTIVE_CHECKING_HELPERS, GLOBAL_COMPONENT_CHECKING_HELPERS};
 pub(crate) use wrapper::emit_global_component_fallbacks;
 use wrapper::{
     collect_global_component_fallbacks, directive_accessor_declaration, emit_minimal_wrapper,
@@ -165,8 +166,8 @@ pub fn generate_ide_script<'alloc>(
     alloc: &'alloc Allocator,
     options: &IdeScriptOptions<'_>,
     template_end: Option<u32>,
-) -> IdeScriptGenResult<'alloc> {
-    let mut out = CodeGenOutput::new(alloc);
+) -> Result<IdeScriptGenResult<'alloc>, crate::code_transform::CodeTransformError> {
+    let mut out = EditRecorder::new(alloc);
     let mut bindings = FxHashMap::default();
     let mut type_constructs = String::new();
     let builtin_components = collect_builtin_components(template_ast, source);
@@ -250,7 +251,7 @@ pub fn generate_ide_script<'alloc>(
     }
 
     // Apply accumulated operations
-    out.apply_to(ct);
+    out.apply(ct)?;
 
     // Emit the component's PUBLIC-FACADE re-export as a top-level statement on
     // the IDE carrier. A consumer importing the component must see its PUBLIC
@@ -296,7 +297,7 @@ pub fn generate_ide_script<'alloc>(
         None
     };
 
-    IdeScriptGenResult {
+    Ok(IdeScriptGenResult {
         bindings,
         type_constructs,
         return_close,
@@ -308,7 +309,7 @@ pub fn generate_ide_script<'alloc>(
                 .map(|f| f.pascal)
                 .collect(),
         ),
-    }
+    })
 }
 
 #[cfg(test)]

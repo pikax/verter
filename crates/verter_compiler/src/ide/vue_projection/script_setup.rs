@@ -5,11 +5,13 @@
 //! [`TsSetupProjection`] (ordered setup statements, top-level `await`, macro
 //! calls) and [`UniversalSetupBinder`] (the authored `generic` binder, never
 //! specialized by a parent use). The grammar follows the block's `lang`
-//! (absent `lang` is Vue's own JavaScript default and is refused, matching
+//! (absent `lang` is Vue's own JavaScript default, matching
 //! `sfc_script_dialect`), so a TypeScript angle assertion and an actual TSX
 //! element are each parsed once under their own grammar; no second TSX parse
-//! repairs TypeScript syntax. A script/script-setup pair with mismatched
-//! `lang` is refused rather than silently classified from one block alone.
+//! repairs TypeScript syntax. JavaScript and JSX share one grammar, the one
+//! TypeScript gives every JavaScript file. A script/script-setup pair with
+//! mismatched `lang` is refused rather than silently classified from one
+//! block alone.
 //!
 //! Macros are recognised by resolution, not spelling: a root-level call to
 //! `defineProps` (and siblings) is a macro when the callee is a free
@@ -28,9 +30,9 @@
 
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    ArrowFunctionExpression, AwaitExpression, CallExpression, Class, ClassElement, Declaration,
-    Expression, ForOfStatement, Function, ImportDeclarationSpecifier, Program, PropertyKey,
-    Statement,
+    ArrowFunctionExpression, AwaitExpression, BindingPattern, CallExpression, Class, ClassElement,
+    Declaration, Expression, ForOfStatement, Function, ImportDeclarationSpecifier, Program,
+    PropertyKey, Statement, VariableDeclarator,
 };
 use oxc_ast_visit::{walk, Visit};
 use oxc_semantic::{Scoping, SemanticBuilder, SymbolFlags};
@@ -38,7 +40,14 @@ use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::scope::ScopeFlags;
 use rustc_hash::FxHashSet;
 use verter_parser::oxc_parse::Parser;
+use verter_parser::types::BindingType;
 use verter_parser::utils::oxc::script::export_parts::NamedExportParts;
+use verter_parser::utils::oxc::vue::{
+    bindings::{extract_bindings, VueImportAliases},
+    setup::collect_template_util_usage,
+    shared::{try_process_import, ScriptParseContext},
+    VueApiKind,
+};
 
 use crate::cursor::ScriptLanguage;
 use crate::utils::oxc::vue::parse_generic;
@@ -71,6 +80,9 @@ pub enum ScriptGrammar {
     TypeScript,
     /// `lang="tsx"`: `<div/>` is JSX.
     Tsx,
+    /// Absent `lang`, `lang="js"` or `lang="jsx"`: JavaScript with JSX, the
+    /// grammar TypeScript gives every JavaScript file.
+    JavaScript,
 }
 
 impl ScriptGrammar {
@@ -78,6 +90,7 @@ impl ScriptGrammar {
         match self {
             Self::TypeScript => SourceType::ts().with_module(true),
             Self::Tsx => SourceType::tsx().with_module(true),
+            Self::JavaScript => SourceType::jsx().with_module(true),
         }
     }
 }
@@ -89,8 +102,8 @@ pub struct ScriptBlockInput<'s> {
     pub content: &'s str,
     /// Carrier offset of the first content byte.
     pub content_start: u32,
-    /// Authored `lang`; absent (`None`) is Vue's own JavaScript default, not
-    /// TypeScript, and is refused via
+    /// Authored `lang`; absent (`None`) is Vue's own JavaScript default. A
+    /// language that is neither JavaScript nor TypeScript is refused via
     /// [`SetupProjectionRefusal::NotTypeScript`].
     pub lang: Option<ScriptLanguage>,
 }
@@ -98,7 +111,8 @@ pub struct ScriptBlockInput<'s> {
 /// Refusals raised before any projection is produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetupProjectionRefusal {
-    /// The block is not TypeScript/TSX; JavaScript owns a separate projection.
+    /// The block's language is neither JavaScript nor TypeScript (for
+    /// example `lang="coffee"`).
     NotTypeScript,
     /// The `<script>` and `<script setup>` blocks declared different `lang`s;
     /// Vue's own `compileScript` throws on this pair rather than picking one.
@@ -108,7 +122,8 @@ pub enum SetupProjectionRefusal {
         /// True for the setup block, false for the normal script.
         setup: bool,
     },
-    /// The `generic` attribute does not parse as type parameters.
+    /// The `generic` attribute does not parse as type parameters, or the
+    /// script is JavaScript, which declares no type parameters.
     InvalidGeneric,
     /// No admitted parse (or a parse of different source) backs the request.
     MissingParse,
@@ -174,6 +189,73 @@ pub struct ModuleScopeProjection {
     pub named_exports: Vec<String>,
     /// Normal-script top-level bindings in source order.
     pub normal_script_bindings: Vec<String>,
+    /// The file pragma the script blocks open with, the later one winning.
+    pub file_pragma: Option<FilePragma>,
+}
+
+/// A TypeScript file pragma: a `// @ts-check` or `// @ts-nocheck` comment
+/// before a block's first directive or statement. TypeScript reads it only
+/// from a file's leading comments, and the last one wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilePragma {
+    Check,
+    NoCheck,
+}
+
+impl FilePragma {
+    /// The pragma as the leading line of a checking module, closed by an
+    /// empty statement: no authored comment after it leads the module, so
+    /// this pragma is the one TypeScript reads.
+    #[must_use]
+    pub fn line(self) -> &'static str {
+        match self {
+            Self::Check => "// @ts-check\n;\n",
+            Self::NoCheck => "// @ts-nocheck\n;\n",
+        }
+    }
+}
+
+/// The last file pragma among `program`'s leading comments. The comments are
+/// the parser's; only their text is read, as TypeScript's pragma reader does.
+fn leading_file_pragma(program: &Program<'_>, content: &str) -> Option<FilePragma> {
+    let first = program
+        .directives
+        .first()
+        .map(|directive| directive.span.start)
+        .into_iter()
+        .chain(program.body.first().map(|statement| statement.span().start))
+        .min()
+        .unwrap_or(u32::MAX);
+    program
+        .comments
+        .iter()
+        .filter(|comment| comment.span.end <= first)
+        .filter(|comment| comment.is_line())
+        .filter_map(|comment| {
+            let text = comment.content_span();
+            file_pragma(content.get(text.start as usize..text.end as usize)?)
+        })
+        .next_back()
+}
+
+/// The pragma one line comment's text (after its `//`) states, read as
+/// TypeScript reads a single-line pragma: an optional third `/`, optional
+/// blanks, then `@name` ending at a blank or `:`, the name compared without
+/// case. A block comment states none.
+fn file_pragma(text: &str) -> Option<FilePragma> {
+    let body = text.strip_prefix('/').unwrap_or(text).trim_start();
+    let name = body.strip_prefix('@')?;
+    let name = name
+        .split(|c: char| c.is_whitespace() || c == ':')
+        .next()
+        .unwrap_or_default();
+    if name.eq_ignore_ascii_case("ts-check") {
+        Some(FilePragma::Check)
+    } else if name.eq_ignore_ascii_case("ts-nocheck") {
+        Some(FilePragma::NoCheck)
+    } else {
+        None
+    }
 }
 
 /// One authored generic parameter; ranges index the `generic` attribute value.
@@ -206,6 +288,25 @@ pub struct TsSetupProjection {
     pub top_level_await: Option<SourceRange>,
     /// Calls resolved as Vue macros.
     pub macros: Vec<SetupMacroCall>,
+    /// Parser-classified runtime bindings, in carrier coordinates.
+    pub bindings: Vec<SetupBinding>,
+    /// Parser-owned literal template-ref keys and their receiving bindings.
+    pub template_refs: Vec<SetupTemplateRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupBinding {
+    pub name: String,
+    pub span: SourceRange,
+    pub kind: BindingType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetupTemplateRef {
+    pub binding: SourceRange,
+    pub key: String,
+    pub key_span: SourceRange,
+    pub type_argument: Option<SourceRange>,
 }
 
 impl TsSetupProjection {
@@ -235,9 +336,11 @@ pub(super) fn grammar_of(
     match lang {
         Some(ScriptLanguage::TypeScript) => Ok(ScriptGrammar::TypeScript),
         Some(ScriptLanguage::TSX) => Ok(ScriptGrammar::Tsx),
-        // Absent `lang` is Vue's own JavaScript default (`sfc_script_dialect`),
-        // not TypeScript; JavaScript owns a separate projection.
-        None | Some(_) => Err(SetupProjectionRefusal::NotTypeScript),
+        // Absent `lang` is Vue's own JavaScript default (`sfc_script_dialect`).
+        None | Some(ScriptLanguage::JavaScript | ScriptLanguage::JSX) => {
+            Ok(ScriptGrammar::JavaScript)
+        }
+        Some(ScriptLanguage::Unknown) => Err(SetupProjectionRefusal::NotTypeScript),
     }
 }
 
@@ -325,20 +428,41 @@ pub fn project_script_pair(
             return Err(SetupProjectionRefusal::ScriptLangConflict);
         }
     }
+    let lang = setup.or(normal).map(|block| block.lang);
     let mut module = ModuleScopeProjection::default();
-    let normal_value_bindings = match normal {
-        Some(block) => project_normal(block, &mut module)?,
-        None => FxHashSet::default(),
+    let setup = match normal {
+        Some(block) => project_normal(block, setup, &mut module)?,
+        None => match setup {
+            Some(block) => Some(project_setup(
+                block,
+                &mut module,
+                &FxHashSet::default(),
+                &VueImportAliases::default(),
+            )?),
+            None => None,
+        },
     };
-    let setup = match setup {
-        Some(block) => Some(project_setup(block, &mut module, &normal_value_bindings)?),
-        None => None,
-    };
+    let binder = project_binder(generic)?;
+    refuse_javascript_binder(lang, &binder)?;
     Ok(ScriptProjectionFacts {
         module,
         setup,
-        binder: project_binder(generic)?,
+        binder,
     })
+}
+
+/// Type parameters exist only in a TypeScript script, so a JavaScript pair
+/// with a `generic` binder is refused. `lang` is the pair's language (the
+/// setup block's, else the normal script's). Every owner that reads the
+/// binder applies this one rule.
+pub(super) fn refuse_javascript_binder(
+    lang: Option<Option<ScriptLanguage>>,
+    binder: &UniversalSetupBinder,
+) -> Result<(), SetupProjectionRefusal> {
+    if !binder.params.is_empty() && lang.map(grammar_of) == Some(Ok(ScriptGrammar::JavaScript)) {
+        return Err(SetupProjectionRefusal::InvalidGeneric);
+    }
+    Ok(())
 }
 
 fn project_binder(generic: Option<&str>) -> Result<UniversalSetupBinder, SetupProjectionRefusal> {
@@ -397,15 +521,18 @@ fn is_type_only_declaration(declaration: &Declaration<'_>) -> bool {
 
 fn project_normal(
     block: ScriptBlockInput<'_>,
+    setup: Option<ScriptBlockInput<'_>>,
     module: &mut ModuleScopeProjection,
-) -> Result<FxHashSet<String>, SetupProjectionRefusal> {
+) -> Result<Option<TsSetupProjection>, SetupProjectionRefusal> {
     let grammar = grammar_of(block.lang)?;
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, block.content, grammar.source_type()).parse();
     if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(SetupProjectionRefusal::SyntaxErrors { setup: false });
     }
-    collect_imports(&parsed.program, block.content_start, false, module);
+    let mut aliases = VueImportAliases::default();
+    collect_imports(&parsed.program, block, false, module, &mut aliases);
+    module.file_pragma = leading_file_pragma(&parsed.program, block.content).or(module.file_pragma);
     for statement in &parsed.program.body {
         match statement {
             Statement::ExportDeclaration(_)
@@ -452,22 +579,37 @@ fn project_normal(
     .semantic;
     let scoping = semantic.scoping();
     module.normal_script_bindings = root_bindings(scoping);
-    Ok(value_bindings(scoping))
+    // Keep the companion's import atoms alive while the setup pass registers
+    // its imports with the same Vue alias authority.
+    setup
+        .map(|setup| project_setup(setup, module, &value_bindings(scoping), &aliases))
+        .transpose()
 }
 
-fn collect_imports(
-    program: &Program<'_>,
-    base: u32,
+fn collect_imports<'a>(
+    program: &Program<'a>,
+    block: ScriptBlockInput<'a>,
     from_setup: bool,
     module: &mut ModuleScopeProjection,
+    aliases: &mut VueImportAliases<'a>,
 ) {
+    let ctx = ScriptParseContext::new(0, block.content.as_bytes());
     for statement in &program.body {
         if let Statement::ImportDeclaration(import) = statement {
             module.imports.push(ModuleImport {
-                span: range(import.span, base),
+                span: range(import.span, block.content_start),
                 source: import.source.value.to_string(),
                 from_setup,
             });
+            if let Some(verter_parser::utils::oxc::vue::ScriptItem::Import(import)) =
+                try_process_import(statement, &ctx)
+            {
+                if from_setup {
+                    aliases.register_setup_import(&import);
+                } else {
+                    aliases.register_companion_import(&import);
+                }
+            }
         }
     }
 }
@@ -476,6 +618,7 @@ fn project_setup(
     block: ScriptBlockInput<'_>,
     module: &mut ModuleScopeProjection,
     normal_value_bindings: &FxHashSet<String>,
+    companion_aliases: &VueImportAliases<'_>,
 ) -> Result<TsSetupProjection, SetupProjectionRefusal> {
     let grammar = grammar_of(block.lang)?;
     let allocator = Allocator::default();
@@ -484,7 +627,10 @@ fn project_setup(
         return Err(SetupProjectionRefusal::SyntaxErrors { setup: true });
     }
     let program = &parsed.program;
-    collect_imports(program, block.content_start, true, module);
+    let mut aliases = companion_aliases.clone();
+    collect_imports(program, block, true, module, &mut aliases);
+    // The setup block follows the normal script, so its pragma wins.
+    module.file_pragma = leading_file_pragma(program, block.content).or(module.file_pragma);
 
     let semantic = verter_parser::oxc_parse::with_program_stack(program, || {
         SemanticBuilder::new().build(program)
@@ -492,6 +638,18 @@ fn project_setup(
     .semantic;
     let module_bound: FxHashSet<&str> = normal_value_bindings.iter().map(String::as_str).collect();
     let vue_macro_imports = vue_runtime_macro_imports(program);
+    let parser_ctx = ScriptParseContext::new(0, block.content.as_bytes());
+    let bindings = extract_bindings(program, &parser_ctx, &aliases)
+        .into_iter()
+        .map(|(span, kind)| SetupBinding {
+            name: block.content[span.start as usize..span.end as usize].to_string(),
+            span: SourceRange {
+                start: block.content_start + span.start,
+                end: block.content_start + span.end,
+            },
+            kind,
+        })
+        .collect();
     let mut collector = SetupCollector {
         macros_ctx: MacroContext {
             scoping: semantic.scoping(),
@@ -503,6 +661,10 @@ fn project_setup(
         depth: 0,
         top_level_await: None,
         macros: Vec::new(),
+        aliases: &aliases,
+        parser_ctx,
+        current_binding: None,
+        template_refs: Vec::new(),
     };
     verter_parser::oxc_parse::with_program_stack(program, || collector.visit_program(program));
 
@@ -519,6 +681,8 @@ fn project_setup(
         statements,
         top_level_await: collector.top_level_await,
         macros: collector.macros,
+        bindings,
+        template_refs: collector.template_refs,
     })
 }
 
@@ -608,6 +772,10 @@ struct SetupCollector<'s> {
     depth: u32,
     top_level_await: Option<SourceRange>,
     macros: Vec<SetupMacroCall>,
+    aliases: &'s VueImportAliases<'s>,
+    parser_ctx: ScriptParseContext<'s>,
+    current_binding: Option<verter_parser::common::Span>,
+    template_refs: Vec<SetupTemplateRef>,
 }
 
 impl SetupCollector<'_> {
@@ -669,6 +837,20 @@ fn computed_class_key<'e, 'a>(element: &'e ClassElement<'a>) -> Option<&'e Prope
 }
 
 impl<'a> Visit<'a> for SetupCollector<'_> {
+    fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
+        let previous = self.current_binding;
+        self.current_binding = match (&it.id, &it.init) {
+            (BindingPattern::BindingIdentifier(id), Some(init))
+                if matches!(unwrap_expression(init), Expression::CallExpression(_))
+                    && self.depth == 0 =>
+            {
+                Some(verter_parser::common::Span::new(id.span.start, id.span.end))
+            }
+            _ => None,
+        };
+        walk::walk_variable_declarator(self, it);
+        self.current_binding = previous;
+    }
     fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
         self.depth += 1;
         walk::walk_function(self, it, flags);
@@ -719,6 +901,35 @@ impl<'a> Visit<'a> for SetupCollector<'_> {
     }
 
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
+        if self.depth == 0 {
+            if let (Expression::Identifier(callee), Some(binding)) =
+                (&it.callee, self.current_binding.take())
+            {
+                if self
+                    .aliases
+                    .is_vue_export(callee.name.as_str(), "useTemplateRef")
+                {
+                    let (usage, key) = collect_template_util_usage(
+                        it,
+                        VueApiKind::UseTemplateRef,
+                        &self.parser_ctx,
+                        Some(binding),
+                    );
+                    if let (Some(key), Some(key_span)) = (key, usage.ref_name_span) {
+                        let carrier = |span: verter_parser::common::Span| SourceRange {
+                            start: self.base + span.start,
+                            end: self.base + span.end,
+                        };
+                        self.template_refs.push(SetupTemplateRef {
+                            binding: carrier(binding),
+                            key: key.to_string(),
+                            key_span: carrier(key_span),
+                            type_argument: usage.type_arg_span.map(carrier),
+                        });
+                    }
+                }
+            }
+        }
         if let Some(macro_name) = self.macros_ctx.resolve(it, self.depth) {
             self.macros.push(SetupMacroCall {
                 name: macro_name,
@@ -787,5 +998,16 @@ fn declaration_names(declaration: &Declaration<'_>) -> Vec<String> {
         Declaration::TSTypeAliasDeclaration(t) => vec![t.id.name.to_string()],
         Declaration::TSInterfaceDeclaration(t) => vec![t.id.name.to_string()],
         _ => Vec::new(),
+    }
+}
+
+impl crate::framework_common::vue_projection_backend::VueProjectionProduct
+    for ScriptProjectionFacts
+{
+    fn project(
+        backend: &crate::framework_common::vue_projection_backend::VueProjectionBackend,
+        input: &crate::framework_common::vue_projection_backend::VueProductInput<'_>,
+    ) -> Result<Self, SetupProjectionRefusal> {
+        backend.script_projection(input.source, input.artifact)
     }
 }

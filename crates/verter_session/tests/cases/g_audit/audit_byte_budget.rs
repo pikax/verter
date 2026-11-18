@@ -72,9 +72,11 @@ fn chatmessage_audit_byte_budget_via_host_only() {
     }
     let chat_message = std::fs::read_to_string(&chat_path).expect("read ChatMessage.vue");
 
-    let mut config = HostConfig::default();
-    config.audit_enabled = true;
-    config.footprint_capture = true;
+    let config = HostConfig {
+        audit_enabled: true,
+        footprint_capture: true,
+        ..HostConfig::default()
+    };
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));

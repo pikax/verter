@@ -3,7 +3,7 @@
   "private": true,
   "dependencies": {
     "verter": "file:../../../../..",
-    "vue": "3.5.40"
+    "vue": "3.6.0-rc.15"
   },
   "devDependencies": {
     "@types/react": "19.2.17",

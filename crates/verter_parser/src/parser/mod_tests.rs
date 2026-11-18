@@ -57,6 +57,48 @@ fn parse_sfc(input: &str) -> crate::parser::types::ParsedSfc {
     syn.into_parsed_sfc()
 }
 
+#[test]
+fn incomplete_slot_opening_ends_before_the_ancestor_closing_tag() {
+    let source = "<template><MyChild><template #\n</MyChild></template>";
+    let parsed = parse_sfc(source);
+    let ast = parsed.template_ast().expect("recovered template");
+    let slot = ast
+        .nodes
+        .iter()
+        .find_map(|node| match &node.kind {
+            AstNodeKind::Element(element) if element.v_slot.is_some() => Some(element),
+            _ => None,
+        })
+        .expect("recovered slot");
+    let boundary = source.find("</MyChild>").unwrap() as u32;
+    assert_eq!(slot.tag_open.end, boundary);
+    let content = slot.content.as_ref().expect("empty recovered body");
+    assert_eq!((content.start, content.end), (boundary, boundary));
+    assert_eq!(
+        ast.root.tag_close.as_ref().unwrap().start,
+        source.find("</template>").unwrap() as u32
+    );
+}
+
+#[test]
+fn unclosed_template_bodies_retain_their_content_through_eof() {
+    let source = "<template><div>tail";
+    let parsed = parse_sfc(source);
+    let ast = parsed.template_ast().expect("recovered template");
+    assert_eq!(ast.root.content.as_ref().unwrap().end, source.len() as u32);
+    let div = ast
+        .nodes
+        .iter()
+        .find_map(|node| match &node.kind {
+            AstNodeKind::Element(element) => Some(element),
+            _ => None,
+        })
+        .expect("unclosed child");
+    assert_eq!(div.content.as_ref().unwrap().end, source.len() as u32);
+    assert!(div.tag_close.is_none());
+    assert!(ast.root.tag_close.is_none());
+}
+
 // ========================================================================
 // 1. Script root nodes
 // ========================================================================
@@ -604,16 +646,16 @@ fn v_pre_is_recorded_as_a_directive_fact() {
 }
 
 // ========================================================================
-// 11. Mismatched tags — strict mode
+// 11. Mismatched tags — recovery follows Vue's compiler-core
 // ========================================================================
 
-/// @ai-generated - Tests strict close-tag validation with mismatched names.
+/// A close tag matching no open element is rejected; a close tag matching an
+/// ancestor closes the elements opened inside it.
 #[test]
-fn mismatched_close_tag_emits_diagnostic_and_preserves_stack() {
-    // </span> doesn't match <div>. Strict mode: reject the close tag,
-    // emit XInvalidEndTag, and leave <div> unclosed.
-    // Then </template> doesn't match <div> either → another XInvalidEndTag.
-    // At EOF: <div> and <template> are both unclosed → 2× XMissingEndTag.
+fn unmatched_close_tag_is_rejected_and_ancestor_close_tag_closes_inner_elements() {
+    // </span> matches no open element → XInvalidEndTag, ignored.
+    // </template> matches the root, so the unclosed <div> is closed with it
+    // → one XMissingEndTag, and the template root gets its close tag.
     let input = "<template><div></span></template>";
     let opts = SyntaxPluginOptions::default();
     let ctx = make_ctx(input, &opts);
@@ -632,24 +674,40 @@ fn mismatched_close_tag_emits_diagnostic_and_preserves_stack() {
         .filter(|d| d.code == CompilerErrorCode::XMissingEndTag)
         .collect();
 
-    // XInvalidEndTag for </span> (vs <div>) and </template> (vs <div>)
     assert_eq!(
         invalid_end.len(),
-        2,
-        "expected 2 XInvalidEndTag diagnostics, got {}",
-        invalid_end.len()
+        1,
+        "expected XInvalidEndTag for </span> only, got {:?}",
+        syn.diagnostics
+    );
+    assert_eq!(
+        span_str(input, invalid_end[0].span.start, invalid_end[0].span.end),
+        "</span>"
     );
 
-    // XMissingEndTag for <div> and <template> (both unclosed at EOF)
     assert_eq!(
         missing_end.len(),
-        2,
-        "expected 2 XMissingEndTag diagnostics, got {}",
-        missing_end.len()
+        1,
+        "expected XMissingEndTag for <div> only, got {:?}",
+        syn.diagnostics
+    );
+    assert_eq!(
+        span_str(input, missing_end[0].span.start, missing_end[0].span.end),
+        "<div>"
     );
 
-    // Template AST should still be produced (force-closed at EOF).
-    assert!(syn.template_ast.is_some());
+    let ast = syn
+        .template_ast
+        .as_ref()
+        .expect("template_ast should exist");
+    let close = ast
+        .root
+        .tag_close
+        .as_ref()
+        .expect("</template> closes the template root");
+    assert_eq!(span_str(input, close.start, close.end), "</template>");
+    let content = ast.root.content.as_ref().expect("template content");
+    assert_eq!(content.children.len(), 1, "the <div> is the root's child");
 }
 
 // ========================================================================
@@ -4221,4 +4279,185 @@ fn v_slot_shorthand_dotted_name() {
         v_slot.modifiers.is_empty(),
         "shorthand v-slot modifiers should be empty"
     );
+}
+
+// ========================================================================
+// v-if key uniqueness is checked inside one chain only
+// ========================================================================
+
+fn if_same_key_count(input: &str) -> usize {
+    parse_sfc(input)
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == CompilerErrorCode::XVIfSameKey)
+        .count()
+}
+
+#[test]
+fn sibling_v_ifs_in_separate_chains_may_share_a_key() {
+    let input = r#"<template><div><p v-if="sel" :key="sel.id">a</p><span v-if="sel" :key="sel.id">b</span></div></template>"#;
+    assert_eq!(if_same_key_count(input), 0);
+}
+
+#[test]
+fn v_if_starting_a_new_chain_after_a_complete_chain_may_reuse_its_key() {
+    let input = r#"<template><div><p v-if="a" :key="k">a</p><p v-else :key="j">b</p><p v-if="b" :key="k">c</p><p v-else :key="j">d</p></div></template>"#;
+    assert_eq!(if_same_key_count(input), 0);
+}
+
+#[test]
+fn v_else_with_the_same_dynamic_key_as_its_v_if_is_rejected() {
+    let input = r#"<template><div><p v-if="kind === 'a'" :key="`k:${id}`">a</p><span v-else :key="`k:${id}`">b</span></div></template>"#;
+    assert_eq!(if_same_key_count(input), 1);
+}
+
+#[test]
+fn v_else_if_with_the_same_key_as_an_earlier_branch_is_rejected() {
+    let input = r#"<template><div><p v-if="a" :key="1">a</p><p v-else-if="b" :key="2">b</p><p v-else :key="1">c</p></div></template>"#;
+    assert_eq!(if_same_key_count(input), 1);
+}
+
+#[test]
+fn v_else_branches_with_distinct_keys_are_accepted() {
+    let input =
+        r#"<template><div><p v-if="a" :key="1">a</p><p v-else :key="2">b</p></div></template>"#;
+    assert_eq!(if_same_key_count(input), 0);
+}
+
+// ========================================================================
+// An unclosed element inside a v-if branch keeps the branch's siblings
+// ========================================================================
+
+fn parse_template_mode(input: &str) -> (TemplateAst, Vec<Diagnostic>) {
+    let opts = SyntaxPluginOptions::default();
+    let ctx = make_ctx(input, &opts);
+    let mut syn = Syntax::new(true);
+    tokenize_and_feed(&mut syn, input, &ctx);
+    let ast = syn.template_ast.take().expect("template_ast should exist");
+    (ast, syn.diagnostics)
+}
+
+fn element_of(ast: &TemplateAst, id: NodeId) -> &ElementNode {
+    match &ast.nodes[id.0].kind {
+        AstNodeKind::Element(el) => el,
+        other => panic!("expected Element, got {other:?}"),
+    }
+}
+
+fn condition_kind_of(ast: &TemplateAst, id: NodeId) -> Option<ElementNodeConditionKind> {
+    element_of(ast, id)
+        .v_condition
+        .as_ref()
+        .map(|c| c.kind.clone())
+}
+
+/// The parsed shape every closing-an-ancestor case must have: the `v-if` and
+/// `v-else` are siblings in ONE chain, the unclosed element stays inside the
+/// `v-if` branch, and the only diagnostic is one missing end tag at it.
+fn assert_unclosed_child_keeps_v_else_in_chain(
+    input: &str,
+    chain_children: &[NodeId],
+    chains: &[crate::ast::types::ConditionalChain],
+    ast: &TemplateAst,
+    diagnostics: &[Diagnostic],
+    unclosed_tag: &str,
+) {
+    assert_eq!(
+        chains.len(),
+        1,
+        "{input}: expected one v-if chain, got {chains:?}"
+    );
+    let members = chains[0].member_indices.as_slice();
+    assert_eq!(
+        members.len(),
+        2,
+        "{input}: expected 2 branches, got {members:?}"
+    );
+    assert_eq!(
+        condition_kind_of(ast, chain_children[members[0]]),
+        Some(ElementNodeConditionKind::If)
+    );
+    assert_eq!(
+        condition_kind_of(ast, chain_children[members[1]]),
+        Some(ElementNodeConditionKind::Else)
+    );
+
+    let codes: Vec<_> = diagnostics.iter().map(|d| d.code).collect();
+    assert_eq!(
+        codes,
+        vec![CompilerErrorCode::XMissingEndTag],
+        "{input}: expected only a missing end tag, got {diagnostics:?}"
+    );
+    let span = diagnostics[0].span;
+    assert_eq!(span_str(input, span.start, span.end), unclosed_tag);
+}
+
+#[test]
+fn unclosed_child_in_v_if_branch_keeps_v_else_in_the_same_chain() {
+    for input in [
+        r#"<div v-if="a"><span></div><div v-else/>"#,
+        r#"<div v-if="a"><span></div><p v-else/>"#,
+    ] {
+        let (ast, diagnostics) = parse_template_mode(input);
+        let root = ast.root.content.as_ref().expect("root content");
+        assert_eq!(
+            root.children.len(),
+            2,
+            "{input}: v-if and v-else are root siblings"
+        );
+        assert_unclosed_child_keeps_v_else_in_chain(
+            input,
+            &root.children,
+            &root.v_if_chains,
+            &ast,
+            &diagnostics,
+            "<span>",
+        );
+
+        // The unclosed <span> stays the v-if branch's only child.
+        let v_if = element_of(&ast, root.children[0]);
+        let branch_children = &v_if.content.as_ref().expect("v-if content").children;
+        assert_eq!(branch_children.len(), 1, "{input}");
+        let span = element_of(&ast, branch_children[0]);
+        assert!(span.tag_close.is_none(), "{input}: implied close");
+        assert!(
+            span.content
+                .as_ref()
+                .is_none_or(|content| content.children.is_empty()),
+            "{input}: the v-else must not be nested inside <span>"
+        );
+    }
+}
+
+#[test]
+fn several_unclosed_descendants_in_a_nested_v_if_branch_close_with_the_branch() {
+    let input = r#"<section><div v-if="a"><p><span></div><div v-else/></section>"#;
+    let (ast, diagnostics) = parse_template_mode(input);
+    let root = ast.root.content.as_ref().expect("root content");
+    assert_eq!(root.children.len(), 1, "only <section> at the root");
+    assert!(root.v_if_chains.is_empty());
+
+    let section = element_of(&ast, root.children[0]);
+    let section_content = section.content.as_ref().expect("section content");
+    assert!(
+        section.tag_close.is_some(),
+        "</section> still closes <section>"
+    );
+    assert_eq!(section_content.children.len(), 2);
+    // One diagnostic for the innermost unclosed element, as Vue reports it.
+    assert_unclosed_child_keeps_v_else_in_chain(
+        input,
+        &section_content.children,
+        &section_content.v_if_chains,
+        &ast,
+        &diagnostics,
+        "<span>",
+    );
+
+    // <p><span> both stay nested inside the v-if branch.
+    let v_if = element_of(&ast, section_content.children[0]);
+    let p_id = v_if.content.as_ref().expect("v-if content").children[0];
+    let p = element_of(&ast, p_id);
+    assert!(p.tag_close.is_none(), "<p> is closed implicitly");
+    assert_eq!(p.content.as_ref().expect("p content").children.len(), 1);
 }

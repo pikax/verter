@@ -55,7 +55,7 @@ fn make_empty_ast(root: &RootNodeTemplate) -> TemplateAst {
 
 fn apply_output<'a>(source: &str, out: CodeGenOutput<'a>, alloc: &'a Allocator) -> String {
     let mut ct = crate::code_transform::CodeTransform::new(source, alloc);
-    out.apply_to(&mut ct);
+    out.apply_to(&mut ct).expect("recorded edits apply");
     ct.build_string()
 }
 
@@ -111,7 +111,14 @@ fn run_full_pipeline_mode(source: &str, mode: super::super::CodeGenMode) -> Stri
         &mut ct,
         &alloc,
         &script_opts,
-    );
+        crate::script::bindings::script_lane_bindings(
+            syntax.script_setup(),
+            &prepared,
+            script_opts.macro_runtime,
+            &alloc,
+        ),
+    )
+    .expect("recorded script edits apply");
 
     let template_ast = syntax.take_template_ast();
     if let Some(ast) = &template_ast {
@@ -128,7 +135,8 @@ fn run_full_pipeline_mode(source: &str, mode: super::super::CodeGenMode) -> Stri
                 mode,
                 ..Default::default()
             },
-        );
+        )
+        .expect("recorded template edits apply");
         ct2.build_string()
     } else {
         "(no template)".to_string()
@@ -752,13 +760,15 @@ fn v_for_with_key() {
 
 #[test]
 fn template_ref_static() {
-    // Vue 3.6: _setTemplateRef(n0, "el")
+    // Vue 3.6: a static ref outside `v-for` binds through
+    // `_setStaticTemplateRef(n0, "el")` with no per-render setter.
     let source = "<template><div ref=\"el\">content</div></template>";
     let result = run_full_pipeline(source);
     assert!(
-        result.contains("_setTemplateRef(n0, \"el\")"),
-        "Expected _setTemplateRef, got: {result}"
+        result.contains("_setStaticTemplateRef(n0, \"el\")"),
+        "Expected _setStaticTemplateRef, got: {result}"
     );
+    assert!(!result.contains("_setTemplateRef("), "got: {result}");
 }
 
 // ==================== v-once / v-memo ====================
@@ -1233,7 +1243,7 @@ fn component_with_named_slot() {
 /// @ai-generated — Multiple named slots. Vapor's plain named-slots object
 /// carries NO trailing `_: N` stability marker (that's a VDOM-only
 /// convention; Vapor's own non-stable marker is the distinct `_extend(...,
-/// { _: 8 })` forwarding form — confirmed against the vendored rc.5 dist's
+/// { _: 1 })` forwarding form — confirmed against the vendored rc.15 dist's
 /// `genStaticSlots`, which never emits a bare `_` field).
 #[test]
 fn component_with_multiple_named_slots() {
@@ -1474,7 +1484,7 @@ const BYTE_IDENTICAL_CORPUS: &[(&str, &str, &str)] = &[
         "<template><div><span>static</span><p>{{ msg }}</p><span>more</span></div></template>",
         // Dynamic <p> text ref consumes id 0 before the root nav ref. A
         // single effect gets a concise (non-block) arrow body.
-        "const t0 = _template(\"<div><span>static</span><p> </p><span>more\", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t0()\n  const p0 = _next(n1, 1)\n  const x0 = _txt(p0)\n  _renderEffect(() => _setText(x0, _toDisplayString(_ctx.msg)))\n  return n1\n}",
+        "const t0 = _template(\"<div><span>static</span><p> </p><span>more\", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t0()\n  const p0 = _next(_child(n1))\n  const x0 = _txt(p0)\n  _renderEffect(() => _setText(x0, _toDisplayString(_ctx.msg)))\n  return n1\n}",
     ),
     (
         "dynamic_after_siblings",
@@ -1496,7 +1506,7 @@ const BYTE_IDENTICAL_CORPUS: &[(&str, &str, &str)] = &[
         "comment_between_siblings",
         "<template><div><span>a</span><!-- c --><p>{{ b }}</p></div></template>",
         // Dynamic <p> text ref consumes id 0 before the root nav ref.
-        "const t0 = _template(\"<div><span>a</span><!-- c --><p> \", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t0()\n  const p0 = _next(n1, 2)\n  const x0 = _txt(p0)\n  _renderEffect(() => _setText(x0, _toDisplayString(_ctx.b)))\n  return n1\n}",
+        "const t0 = _template(\"<div><span>a</span><!-- c --><p> \", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n1 = t0()\n  const p0 = _nthChild(n1, 2)\n  const x0 = _txt(p0)\n  _renderEffect(() => _setText(x0, _toDisplayString(_ctx.b)))\n  return n1\n}",
     ),
     (
         "component",
@@ -1572,14 +1582,15 @@ const BYTE_IDENTICAL_CORPUS: &[(&str, &str, &str)] = &[
         // (`t1 = "<div><!> "`, `_setInsertionState(n3, n2)`). The trailing
         // text is a direct sibling of a STRUCTURAL (component) child, so it
         // reaches its own position through the SAME shared nav chain the
-        // component's anchor uses (`n1 = _next(n2)`), not a standalone
-        // `_txt()` off the container — confirmed against live
-        // `@vue/compiler-vapor` 3.6.0-rc.5 (`_next(n0)`/no `_txt()`, same
-        // shape modulo Verter's own id numbering). Official ALSO interleaves
+        // component's anchor uses (`n1 = _next(n2, true)`, carrying the
+        // text-node hint), not a standalone `_txt()` off the container —
+        // official `@vue/compiler-vapor` emits the same chained `_next` with
+        // no `_txt()` (same shape modulo Verter's own id numbering; 3.6.0-rc.15
+        // adds the `true` text hint). Official ALSO interleaves
         // the resulting `_renderEffect` right after the component statement
         // instead of deferring it to the end. Official 3rd-arg default-slot
         // form vs `{default:...}` is a disclosed, separate divergence.
-        "const t0 = _template(\"x\", 2)\nconst t1 = _template(\"<div><!> \", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n3 = t1()\n  const n2 = _child(n3)\n  const n1 = _next(n2)\n  _setInsertionState(n3, n2)\n  const _component_MyComp = _resolveComponent(\"MyComp\")\n  const n0 = _createComponent(_component_MyComp, null, { default: () => {\n      const n0 = t0()\n      return n0\n    }, _: 2 }, true)\n  _renderEffect(() => _setText(n1, \"after \" + _toDisplayString(_ctx.a)))\n  return n3\n}",
+        "const t0 = _template(\"x\", 2)\nconst t1 = _template(\"<div><!> \", 1)\nfunction render(_ctx, $props, $emit, $attrs, $slots) {\n  const n3 = t1()\n  const n2 = _child(n3)\n  const n1 = _next(n2, true)\n  _setInsertionState(n3, n2)\n  const _component_MyComp = _resolveComponent(\"MyComp\")\n  const n0 = _createComponent(_component_MyComp, null, { default: () => {\n      const n0 = t0()\n      return n0\n    }, _: 2 }, true)\n  _renderEffect(() => _setText(n1, \"after \" + _toDisplayString(_ctx.a)))\n  return n3\n}",
     ),
 ];
 
@@ -1619,11 +1630,11 @@ fn dom_child_index_counts_preceding_siblings_exactly() {
         "<template><div><span>0</span><span>1</span><span>2</span><span>{{ d }}</span></div></template>",
     );
     assert!(
-        r.contains("_next(n1, 3)"),
+        r.contains("_nthChild(n1, 3)"),
         "dynamic 4th element child must be DOM index 3, got:\n{r}"
     );
     assert!(
-        !r.contains("_next(n1, 2)") && !r.contains("_next(n1, 4)"),
+        !r.contains("_nthChild(n1, 2)") && !r.contains("_nthChild(n1, 4)"),
         "DOM index off-by-one for the 4th child, got:\n{r}"
     );
 
@@ -1631,7 +1642,7 @@ fn dom_child_index_counts_preceding_siblings_exactly() {
     let r =
         run_full_pipeline("<template><div><span>a</span><!-- c --><p>{{ b }}</p></div></template>");
     assert!(
-        r.contains("_next(n1, 2)"),
+        r.contains("_nthChild(n1, 2)"),
         "an enabled comment must advance the DOM index to 2, got:\n{r}"
     );
 
@@ -1647,7 +1658,7 @@ fn dom_child_index_counts_preceding_siblings_exactly() {
     // → the span is DOM child 1.
     let r = run_full_pipeline("<template><div>t{{ i }}<span>{{ d }}</span></div></template>");
     assert!(
-        r.contains("_next(n0, 1)"),
+        r.contains("_next(_child(n0))"),
         "a leading text+interpolation run coalesces to one child; the span must be DOM index 1, got:\n{r}"
     );
 
@@ -2050,21 +2061,21 @@ fn quadruple_nested_v_for_v_if_v_for_matches_official_nesting_and_flags() {
 // compute_if_flags
 //
 // Bit-for-bit / name-for-name against official's `genIfFlags`/
-// `genIfFlagNames` (vendored rc.5 `@vue/compiler-vapor`), confirmed against
+// `genIfFlagNames` (`@vue/compiler-vapor`), confirmed against
 // the pinned rc.5 golden for basic-interpolation.vue's own v-if/v-else
 // (flags 325 for a dynamic positive + static negative + index 0).
 
 #[test]
 fn compute_if_flags_bare_if_no_else_dynamic_positive_omits_argument() {
     // Official `flags === 1`: omit the 4th arg (bare v-if, not NO_SCOPE).
-    let flags = compute_if_flags(false, IfNegative::None, Some(0), true, false);
+    let flags = compute_if_flags(false, false, IfNegative::None, Some(0), true, false);
     assert_eq!(flags, None);
 }
 
 #[test]
 fn compute_if_flags_bare_if_no_else_static_positive_emits_no_scope_only() {
     // Static positive, no negative — TRUE_NO_SCOPE only (index unused).
-    let flags = compute_if_flags(true, IfNegative::None, Some(0), true, false);
+    let flags = compute_if_flags(true, false, IfNegative::None, Some(0), true, false);
     assert_eq!(
         flags.as_deref(),
         Some("33 /* TRUE_SINGLE_ROOT, TRUE_NO_SCOPE */")
@@ -2074,7 +2085,14 @@ fn compute_if_flags_bare_if_no_else_static_positive_emits_no_scope_only() {
 #[test]
 fn compute_if_flags_dynamic_positive_static_negative_matches_basic_interpolation_golden() {
     // rc.5 `basic-interpolation.vue` `<p v-if>{{ count }}</p><p v-else>zero</p>`.
-    let flags = compute_if_flags(false, IfNegative::Terminal(true), Some(0), true, false);
+    let flags = compute_if_flags(
+        false,
+        false,
+        IfNegative::Terminal(true, false),
+        Some(0),
+        true,
+        false,
+    );
     assert_eq!(
         flags.as_deref(),
         Some("325 /* TRUE_SINGLE_ROOT, FALSE_SINGLE_ROOT, FALSE_NO_SCOPE, KEYED_INDEX_0 */")
@@ -2083,7 +2101,14 @@ fn compute_if_flags_dynamic_positive_static_negative_matches_basic_interpolation
 
 #[test]
 fn compute_if_flags_both_branches_dynamic_no_no_scope_bits() {
-    let flags = compute_if_flags(false, IfNegative::Terminal(false), Some(2), true, false);
+    let flags = compute_if_flags(
+        false,
+        false,
+        IfNegative::Terminal(false, false),
+        Some(2),
+        true,
+        false,
+    );
     assert_eq!(
         flags.as_deref(),
         Some("773 /* TRUE_SINGLE_ROOT, FALSE_SINGLE_ROOT, KEYED_INDEX_2 */")
@@ -2093,17 +2118,54 @@ fn compute_if_flags_both_branches_dynamic_no_no_scope_bits() {
 #[test]
 fn compute_if_flags_else_if_chain_never_gets_false_no_scope() {
     // `v-else-if` is never NO_SCOPE (`negative.type !== 14`).
-    let flags = compute_if_flags(true, IfNegative::Chain, Some(1), true, false);
+    // A `v-else-if` false branch is the ELSE_IF shape (3 << 2).
+    let flags = compute_if_flags(true, false, IfNegative::Chain, Some(1), true, false);
     assert_eq!(
         flags.as_deref(),
-        Some("549 /* TRUE_SINGLE_ROOT, FALSE_SINGLE_ROOT, TRUE_NO_SCOPE, KEYED_INDEX_1 */")
+        Some("557 /* TRUE_SINGLE_ROOT, FALSE_ELSE_IF, TRUE_NO_SCOPE, KEYED_INDEX_1 */")
+    );
+}
+
+#[test]
+fn compute_if_flags_multi_root_branches_use_the_multi_root_shape() {
+    // Official `getBlockShape`: a text-only `<template>` branch is MULTI_ROOT.
+    let flags = compute_if_flags(
+        false,
+        true,
+        IfNegative::Terminal(true, false),
+        Some(0),
+        true,
+        false,
+    );
+    assert_eq!(
+        flags.as_deref(),
+        Some("326 /* TRUE_MULTI_ROOT, FALSE_SINGLE_ROOT, FALSE_NO_SCOPE, KEYED_INDEX_0 */")
+    );
+    let flags = compute_if_flags(
+        true,
+        false,
+        IfNegative::Terminal(false, true),
+        Some(0),
+        true,
+        false,
+    );
+    assert_eq!(
+        flags.as_deref(),
+        Some("297 /* TRUE_SINGLE_ROOT, FALSE_MULTI_ROOT, TRUE_NO_SCOPE, KEYED_INDEX_0 */")
     );
 }
 
 #[test]
 fn compute_if_flags_nested_v_if_never_gets_no_scope_bits() {
     // Nested v-if (`allowNoScope` false) suppresses both NO_SCOPE bits.
-    let flags = compute_if_flags(true, IfNegative::Terminal(true), Some(0), false, false);
+    let flags = compute_if_flags(
+        true,
+        false,
+        IfNegative::Terminal(true, false),
+        Some(0),
+        false,
+        false,
+    );
     assert_eq!(
         flags.as_deref(),
         Some("261 /* TRUE_SINGLE_ROOT, FALSE_SINGLE_ROOT, KEYED_INDEX_0 */")
@@ -2112,7 +2174,14 @@ fn compute_if_flags_nested_v_if_never_gets_no_scope_bits() {
 
 #[test]
 fn compute_if_flags_production_mode_omits_comment() {
-    let flags = compute_if_flags(false, IfNegative::Terminal(true), Some(0), true, true);
+    let flags = compute_if_flags(
+        false,
+        false,
+        IfNegative::Terminal(true, false),
+        Some(0),
+        true,
+        true,
+    );
     assert_eq!(flags.as_deref(), Some("325"));
 }
 

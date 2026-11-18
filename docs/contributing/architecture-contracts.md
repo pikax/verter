@@ -139,9 +139,10 @@ The host-owned memo table keyed by `SemanticQueryKey`. The cross-crate
 surface is cut to exactly ten retained envelope types (`HashValue`,
 `SemanticNodeId`, `ScopeId`, `ResolveDeclKey`, `SemanticQueryKey`,
 `ResultCompleteness`, `PartialReason`, `PartialReasonSet`,
-`ProjectionMode`, `OriginEdgeKind`) plus eleven retained associated items
+`ProjectionMode`, `OriginEdgeKind`) plus thirteen retained associated items
 (`PartialReasonSet::PROPAGATED`, `PartialReasonSet::SEMANTIC_QUERY_FAULT`,
 `PartialReasonSet::CONNECTED_MEMORY_LIMIT`, `PartialReasonSet::UNDECIDED_CONDITIONAL`,
+`PartialReasonSet::MISSING_DEPENDENCY`, `PartialReasonSet::UNSTABLE_STATE`,
 `PartialReasonSet::empty`, `PartialReasonSet::is_empty`,
 `PartialReasonSet::contains`, `PartialReasonSet::iter`,
 `ResultCompleteness::partial`, `ResultCompleteness::is_partial`, `ScopeId::file`)
@@ -150,6 +151,15 @@ its 68-file consumer migration in the contract). The per-variant key/env
 binding table lives in
 `crates/verter_type_engine/src/semantic_query/query_key_spec.rs` and is
 written only by its generator.
+
+Two of the retained partial reasons are read by name outside the crate.
+`PartialReasonSet::MISSING_DEPENDENCY` marks a result built from an exact
+authored declaration while at least one imported dependency owner could not
+be resolved: the usable authored subset is kept for fail-closed consumers and
+is never admitted warm as a complete result.
+`PartialReasonSet::UNSTABLE_STATE` marks a compute that observed a torn or
+unstable intermediate state (`QueryError::UnstableState`); its result is
+returned to the caller only and never published to a shared cache.
 
 ### Flow slice content — `crates/verter_semantic_source/src/flow_slice_content.rs`
 

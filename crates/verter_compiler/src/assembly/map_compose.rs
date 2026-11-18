@@ -14,6 +14,17 @@ use crate::oxc_sourcemap::{SourceMap, Token};
 
 use super::map_input::DecodedFragmentMap;
 
+#[cfg(test)]
+thread_local! {
+    static SOURCE_MAPS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Source maps encoded on this thread since the last call; resets the count.
+#[cfg(test)]
+pub(crate) fn take_source_maps_built() -> usize {
+    SOURCE_MAPS_BUILT.with(|built| built.replace(0))
+}
+
 /// Lift a decoded map into the typed wire form
 /// [`verter_compiler::assembly::compose_main_module`]'s request consumes
 /// (also used by the caller to re-encode an already-validated template map
@@ -25,6 +36,8 @@ use super::map_input::DecodedFragmentMap;
 /// boundary safely). Tables ride along untouched; only the segment
 /// sequence is what chaining acts on.
 pub fn to_source_map(map: &DecodedFragmentMap) -> SourceMap<'static> {
+    #[cfg(test)]
+    SOURCE_MAPS_BUILT.with(|built| built.set(built.get() + 1));
     use std::borrow::Cow;
 
     let tokens: Vec<Token> = map

@@ -4,11 +4,11 @@
 //! capable), immutable identity (duplicate construction + deterministic
 //! iteration), and generic catalog independence from framework-private types.
 
+use verter_compiler::framework_common::profile::FrameworkProfileManifest;
 use verter_compiler::framework_common::{
-    CarrierFrontend, CatalogCapability, CatalogRow, DuplicateCatalogIdentity, FrameworkEpoch,
-    FrameworkHostIntegrationBackend, FrameworkSemanticAuthority, HostEpoch, HostEpochId,
-    ImmutableCapabilityCatalog, Present, ProjectionBackend, RuntimeCompilerBackend,
-    TypedCapabilityRegistration,
+    CarrierFrontend, CatalogCapability, CatalogTable, DuplicateCatalogIdentity, FrameworkEpoch,
+    FrameworkHostIntegrationBackend, FrameworkSemanticAuthority, FrontendCap, HostCap, HostEpoch,
+    HostEpochId, Present, ProjectionBackend, RuntimeCompilerBackend, TypedCapabilityRegistration,
 };
 use verter_language::{FrameworkAdapterId, LanguageId};
 
@@ -56,27 +56,52 @@ impl ProjectionBackend for ProjectionOnly {
 
 struct TestEpoch;
 impl FrameworkEpoch for TestEpoch {
-    const ID: &'static str = "vue-sfc-v3";
+    const MANIFEST: FrameworkProfileManifest = FrameworkProfileManifest {
+        family: "vue-sfc-v3",
+        release: "1",
+        admitted_majors: &[1],
+        claimed_carriers: &[],
+    };
 }
 
 struct HtmlEpoch;
 impl FrameworkEpoch for HtmlEpoch {
-    const ID: &'static str = "html-v1";
+    const MANIFEST: FrameworkProfileManifest = FrameworkProfileManifest {
+        family: "html-v1",
+        release: "1",
+        admitted_majors: &[1],
+        claimed_carriers: &[],
+    };
 }
 
 struct DtsEpoch;
 impl FrameworkEpoch for DtsEpoch {
-    const ID: &'static str = "dts-v1";
+    const MANIFEST: FrameworkProfileManifest = FrameworkProfileManifest {
+        family: "dts-v1",
+        release: "1",
+        admitted_majors: &[1],
+        claimed_carriers: &[],
+    };
 }
 
 struct EpochOne;
 impl FrameworkEpoch for EpochOne {
-    const ID: &'static str = "e1";
+    const MANIFEST: FrameworkProfileManifest = FrameworkProfileManifest {
+        family: "e1",
+        release: "1",
+        admitted_majors: &[1],
+        claimed_carriers: &[],
+    };
 }
 
 struct EpochTwo;
 impl FrameworkEpoch for EpochTwo {
-    const ID: &'static str = "e2";
+    const MANIFEST: FrameworkProfileManifest = FrameworkProfileManifest {
+        family: "e2",
+        release: "1",
+        admitted_majors: &[1],
+        claimed_carriers: &[],
+    };
 }
 
 struct SessionHostEpoch;
@@ -198,37 +223,22 @@ impl FrameworkHostIntegrationBackend<TestEpoch, HostEpochB> for HostCapable {
     }
 }
 
-type TestCatalogRow =
-    CatalogRow<ToolingFrontend, ProjectionOnly, SemanticCapable, RuntimeCapable, HostCapable>;
-
-fn frontend_row<E: FrameworkEpoch>(adapter: &str, language: &str) -> TestCatalogRow {
+fn frontend_row<E: FrameworkEpoch>(
+    adapter: &str,
+    language: &str,
+) -> TypedCapabilityRegistration<FrontendCap<ToolingFrontend>> {
     TypedCapabilityRegistration::register_frontend::<E, _>(
         FrameworkAdapterId::new(adapter),
         LanguageId::new(language),
         Present(ToolingFrontend),
     )
-    .into()
+    .expect("the test manifest is admitted")
 }
 
-fn projection_row<E: FrameworkEpoch>(adapter: &str, language: &str) -> TestCatalogRow {
-    TypedCapabilityRegistration::register_projection::<E, _>(
-        FrameworkAdapterId::new(adapter),
-        LanguageId::new(language),
-        Present(ProjectionOnly),
-    )
-    .into()
-}
-
-fn runtime_row(adapter: &str, language: &str) -> TestCatalogRow {
-    TypedCapabilityRegistration::register_runtime::<TestEpoch, _>(
-        FrameworkAdapterId::new(adapter),
-        LanguageId::new(language),
-        Present(RuntimeCapable),
-    )
-    .into()
-}
-
-fn host_row<HostE: HostEpoch>(adapter: &str, language: &str) -> TestCatalogRow
+fn host_row<HostE: HostEpoch>(
+    adapter: &str,
+    language: &str,
+) -> TypedCapabilityRegistration<HostCap<HostCapable>>
 where
     HostCapable: FrameworkHostIntegrationBackend<TestEpoch, HostE>,
 {
@@ -237,7 +247,7 @@ where
         LanguageId::new(language),
         Present(HostCapable),
     )
-    .into()
+    .expect("the test manifest is admitted")
 }
 
 #[test]
@@ -246,9 +256,13 @@ fn frontend_only_registration_does_not_require_runtime_backend() {
         FrameworkAdapterId::new("tooling"),
         LanguageId::new("html"),
         Present(ToolingFrontend),
-    );
+    )
+    .expect("the test manifest is admitted");
     assert_eq!(row.identity().capability(), CatalogCapability::Frontend);
-    assert_eq!(row.identity().epoch().as_str(), HtmlEpoch::ID);
+    assert_eq!(
+        row.identity().framework_family(),
+        HtmlEpoch::MANIFEST.family
+    );
     assert!(row.identity().host_epoch().is_none());
     let _ = row.frontend();
 }
@@ -259,9 +273,10 @@ fn projection_only_registration_does_not_require_runtime_backend() {
         FrameworkAdapterId::new("api"),
         LanguageId::new("dts"),
         Present(ProjectionOnly),
-    );
+    )
+    .expect("the test manifest is admitted");
     assert_eq!(row.identity().capability(), CatalogCapability::Projection);
-    assert_eq!(row.identity().epoch().as_str(), DtsEpoch::ID);
+    assert_eq!(row.identity().framework_family(), DtsEpoch::MANIFEST.family);
     assert!(row.identity().host_epoch().is_none());
     let _ = row.projection();
 }
@@ -272,9 +287,13 @@ fn runtime_capable_registration_binds_a_real_runtime_backend() {
         FrameworkAdapterId::new("rt"),
         LanguageId::new("vue"),
         Present(RuntimeCapable),
-    );
+    )
+    .expect("the test manifest is admitted");
     assert_eq!(row.identity().capability(), CatalogCapability::Runtime);
-    assert_eq!(row.identity().epoch().as_str(), TestEpoch::ID);
+    assert_eq!(
+        row.identity().framework_family(),
+        TestEpoch::MANIFEST.family
+    );
     assert!(row.identity().host_epoch().is_none());
     let _ = row.runtime();
 }
@@ -285,24 +304,32 @@ fn semantic_and_host_registrations_are_typed_without_stubs() {
         FrameworkAdapterId::new("sem"),
         LanguageId::new("vue"),
         Present(SemanticCapable),
-    );
+    )
+    .expect("the test manifest is admitted");
     let host =
         TypedCapabilityRegistration::register_host_integration::<TestEpoch, SessionHostEpoch, _>(
             FrameworkAdapterId::new("host"),
             LanguageId::new("vue"),
             Present(HostCapable),
-        );
+        )
+        .expect("the test manifest is admitted");
     assert_eq!(
         semantic.identity().capability(),
         CatalogCapability::Semantic
     );
-    assert_eq!(semantic.identity().epoch().as_str(), TestEpoch::ID);
+    assert_eq!(
+        semantic.identity().framework_family(),
+        TestEpoch::MANIFEST.family
+    );
     assert!(semantic.identity().host_epoch().is_none());
     assert_eq!(
         host.identity().capability(),
         CatalogCapability::HostIntegration
     );
-    assert_eq!(host.identity().epoch().as_str(), TestEpoch::ID);
+    assert_eq!(
+        host.identity().framework_family(),
+        TestEpoch::MANIFEST.family
+    );
     assert_eq!(
         host.identity().host_epoch().map(HostEpochId::as_str),
         Some(SessionHostEpoch::ID)
@@ -317,28 +344,33 @@ fn host_epoch_is_present_only_on_host_integration_rows() {
         FrameworkAdapterId::new("tooling"),
         LanguageId::new("html"),
         Present(ToolingFrontend),
-    );
+    )
+    .expect("the test manifest is admitted");
     let projection = TypedCapabilityRegistration::register_projection::<DtsEpoch, _>(
         FrameworkAdapterId::new("api"),
         LanguageId::new("dts"),
         Present(ProjectionOnly),
-    );
+    )
+    .expect("the test manifest is admitted");
     let semantic = TypedCapabilityRegistration::register_semantic::<TestEpoch, _>(
         FrameworkAdapterId::new("sem"),
         LanguageId::new("vue"),
         Present(SemanticCapable),
-    );
+    )
+    .expect("the test manifest is admitted");
     let runtime = TypedCapabilityRegistration::register_runtime::<TestEpoch, _>(
         FrameworkAdapterId::new("rt"),
         LanguageId::new("vue"),
         Present(RuntimeCapable),
-    );
+    )
+    .expect("the test manifest is admitted");
     let host =
         TypedCapabilityRegistration::register_host_integration::<TestEpoch, SessionHostEpoch, _>(
             FrameworkAdapterId::new("host"),
             LanguageId::new("vue"),
             Present(HostCapable),
-        );
+        )
+        .expect("the test manifest is admitted");
     assert!(frontend.identity().host_epoch().is_none());
     assert!(projection.identity().host_epoch().is_none());
     assert!(semantic.identity().host_epoch().is_none());
@@ -350,14 +382,23 @@ fn host_epoch_is_present_only_on_host_integration_rows() {
 fn register_frontend_catalog_epoch_is_derived_from_the_epoch_type() {
     struct LocalEpoch;
     impl FrameworkEpoch for LocalEpoch {
-        const ID: &'static str = "local-frontend-epoch";
+        const MANIFEST: FrameworkProfileManifest = FrameworkProfileManifest {
+            family: "local-frontend-epoch",
+            release: "1",
+            admitted_majors: &[1],
+            claimed_carriers: &[],
+        };
     }
     let row = TypedCapabilityRegistration::register_frontend::<LocalEpoch, _>(
         FrameworkAdapterId::new("tooling"),
         LanguageId::new("html"),
         Present(ToolingFrontend),
+    )
+    .expect("the test manifest is admitted");
+    assert_eq!(
+        row.identity().framework_family(),
+        LocalEpoch::MANIFEST.family
     );
-    assert_eq!(row.identity().epoch().as_str(), LocalEpoch::ID);
     let _ = row.frontend();
 }
 
@@ -365,14 +406,23 @@ fn register_frontend_catalog_epoch_is_derived_from_the_epoch_type() {
 fn register_projection_catalog_epoch_is_derived_from_the_epoch_type() {
     struct LocalEpoch;
     impl FrameworkEpoch for LocalEpoch {
-        const ID: &'static str = "local-projection-epoch";
+        const MANIFEST: FrameworkProfileManifest = FrameworkProfileManifest {
+            family: "local-projection-epoch",
+            release: "1",
+            admitted_majors: &[1],
+            claimed_carriers: &[],
+        };
     }
     let row = TypedCapabilityRegistration::register_projection::<LocalEpoch, _>(
         FrameworkAdapterId::new("api"),
         LanguageId::new("dts"),
         Present(ProjectionOnly),
+    )
+    .expect("the test manifest is admitted");
+    assert_eq!(
+        row.identity().framework_family(),
+        LocalEpoch::MANIFEST.family
     );
-    assert_eq!(row.identity().epoch().as_str(), LocalEpoch::ID);
     let _ = row.projection();
 }
 
@@ -380,7 +430,12 @@ fn register_projection_catalog_epoch_is_derived_from_the_epoch_type() {
 fn register_semantic_catalog_epoch_is_derived_from_the_epoch_type() {
     struct LocalEpoch;
     impl FrameworkEpoch for LocalEpoch {
-        const ID: &'static str = "local-epoch";
+        const MANIFEST: FrameworkProfileManifest = FrameworkProfileManifest {
+            family: "local-epoch",
+            release: "1",
+            admitted_majors: &[1],
+            claimed_carriers: &[],
+        };
     }
     struct LocalSemantic;
     impl FrameworkSemanticAuthority<LocalEpoch> for LocalSemantic {
@@ -397,14 +452,18 @@ fn register_semantic_catalog_epoch_is_derived_from_the_epoch_type() {
         FrameworkAdapterId::new("sem"),
         LanguageId::new("vue"),
         Present(LocalSemantic),
+    )
+    .expect("the test manifest is admitted");
+    assert_eq!(
+        row.identity().framework_family(),
+        LocalEpoch::MANIFEST.family
     );
-    assert_eq!(row.identity().epoch().as_str(), LocalEpoch::ID);
     let _ = row.semantic();
 }
 
 #[test]
 fn duplicate_identities_fail_construction() {
-    let err = ImmutableCapabilityCatalog::try_from_rows([
+    let err = CatalogTable::try_from_rows([
         frontend_row::<TestEpoch>("vue", "vue"),
         frontend_row::<TestEpoch>("vue", "vue"),
     ])
@@ -413,21 +472,21 @@ fn duplicate_identities_fail_construction() {
 }
 
 #[test]
-fn duplicate_frontend_is_detected_across_languages_with_intervening_projection() {
-    let err = ImmutableCapabilityCatalog::try_from_rows([
+fn duplicate_frontend_is_detected_across_languages_with_an_intervening_row() {
+    let err = CatalogTable::try_from_rows([
         frontend_row::<TestEpoch>("vue", "a"),
-        projection_row::<TestEpoch>("vue", "m"),
+        frontend_row::<TestEpoch>("other", "m"),
         frontend_row::<TestEpoch>("vue", "z"),
     ])
     .expect_err("same adapter/epoch/Frontend is duplicate regardless of language");
     assert_eq!(err.identity.capability(), CatalogCapability::Frontend);
     assert_eq!(err.identity.adapter_id().as_str(), "vue");
-    assert_eq!(err.identity.epoch().as_str(), "vue-sfc-v3");
+    assert_eq!(err.identity.framework_family(), "vue-sfc-v3");
 }
 
 #[test]
 fn host_epoch_distinguishes_otherwise_equal_rows() {
-    ImmutableCapabilityCatalog::try_from_rows([
+    CatalogTable::try_from_rows([
         host_row::<HostEpochA>("vue", "vue"),
         host_row::<HostEpochB>("vue", "vue"),
     ])
@@ -436,7 +495,7 @@ fn host_epoch_distinguishes_otherwise_equal_rows() {
 
 #[test]
 fn same_host_epoch_duplicate_fails_construction() {
-    let err = ImmutableCapabilityCatalog::try_from_rows([
+    let err = CatalogTable::try_from_rows([
         host_row::<HostEpochA>("vue", "vue"),
         host_row::<HostEpochA>("vue", "vue"),
     ])
@@ -452,80 +511,25 @@ fn same_host_epoch_duplicate_fails_construction() {
 }
 
 #[test]
-fn frozen_catalog_retains_typed_capability_payloads() {
-    let catalog = ImmutableCapabilityCatalog::try_from_rows([
-        frontend_row::<HtmlEpoch>("tooling", "html"),
-        projection_row::<DtsEpoch>("api", "dts"),
-        runtime_row("rt", "vue"),
-        TypedCapabilityRegistration::register_semantic::<TestEpoch, _>(
-            FrameworkAdapterId::new("sem"),
-            LanguageId::new("vue"),
-            Present(SemanticCapable),
-        )
-        .into(),
-        host_row::<SessionHostEpoch>("host", "vue"),
-    ])
-    .expect("distinct capabilities must coexist");
-    let mut saw_frontend = false;
-    let mut saw_projection = false;
-    let mut saw_semantic = false;
-    let mut saw_runtime = false;
-    let mut saw_host = false;
-    for row in catalog.iter() {
-        match row {
-            CatalogRow::Frontend(reg) => {
-                saw_frontend = true;
-                let _ = reg.frontend();
-            }
-            CatalogRow::Projection(reg) => {
-                saw_projection = true;
-                let _ = reg.projection();
-            }
-            CatalogRow::Semantic(reg) => {
-                saw_semantic = true;
-                let _ = reg.semantic();
-            }
-            CatalogRow::Runtime(reg) => {
-                saw_runtime = true;
-                let _ = reg.runtime();
-            }
-            CatalogRow::HostIntegration(reg) => {
-                saw_host = true;
-                let _ = reg.host_integration();
-            }
-        }
-        assert!(
-            row.frontend().is_some()
-                || row.projection().is_some()
-                || row.semantic().is_some()
-                || row.runtime().is_some()
-                || row.host_integration().is_some(),
-            "frozen row must retain a typed payload, not identity-only"
-        );
-    }
-    assert!(saw_frontend && saw_projection && saw_semantic && saw_runtime && saw_host);
-}
-
-#[test]
 fn catalog_iteration_is_deterministic_regardless_of_insert_order() {
     let rows_a = [
-        projection_row::<EpochTwo>("b", "b"),
+        frontend_row::<EpochTwo>("b", "b"),
         frontend_row::<EpochOne>("a", "a"),
-        runtime_row("a", "a"),
+        frontend_row::<EpochTwo>("a", "a"),
     ];
     let rows_b = [
-        runtime_row("a", "a"),
+        frontend_row::<EpochTwo>("a", "a"),
         frontend_row::<EpochOne>("a", "a"),
-        projection_row::<EpochTwo>("b", "b"),
+        frontend_row::<EpochTwo>("b", "b"),
     ];
-    let catalog_a = ImmutableCapabilityCatalog::try_from_rows(rows_a).unwrap();
-    let catalog_b = ImmutableCapabilityCatalog::try_from_rows(rows_b).unwrap();
+    let catalog_a = CatalogTable::try_from_rows(rows_a).unwrap();
+    let catalog_b = CatalogTable::try_from_rows(rows_b).unwrap();
     let keys_a: Vec<_> = catalog_a
         .iter()
         .map(|row| {
             (
                 row.identity().adapter_id().as_str().to_owned(),
-                row.identity().epoch().as_str().to_owned(),
+                row.identity().framework_family().to_owned(),
                 row.identity().capability(),
             )
         })
@@ -535,16 +539,58 @@ fn catalog_iteration_is_deterministic_regardless_of_insert_order() {
         .map(|row| {
             (
                 row.identity().adapter_id().as_str().to_owned(),
-                row.identity().epoch().as_str().to_owned(),
+                row.identity().framework_family().to_owned(),
                 row.identity().capability(),
             )
         })
         .collect();
     assert_eq!(keys_a, keys_b);
-    assert_eq!(keys_a[0].0, "a");
-    assert_eq!(keys_a[0].2, CatalogCapability::Frontend);
-    assert_eq!(keys_a[1].2, CatalogCapability::Runtime);
-    assert_eq!(keys_a[2].0, "b");
+    assert_eq!(keys_a.len(), 3);
+    assert!(
+        catalog_a.iter().map(|row| row.identity()).is_sorted(),
+        "rows iterate in identity order, whatever order they were inserted in"
+    );
+}
+
+struct VueThree;
+impl FrameworkEpoch for VueThree {
+    const MANIFEST: FrameworkProfileManifest = FrameworkProfileManifest {
+        family: "vue",
+        release: "3",
+        admitted_majors: &[3],
+        claimed_carriers: &["vue"],
+    };
+}
+
+struct VueThreeSix;
+impl FrameworkEpoch for VueThreeSix {
+    const MANIFEST: FrameworkProfileManifest = FrameworkProfileManifest {
+        family: "vue",
+        release: "3.6",
+        admitted_majors: &[3],
+        claimed_carriers: &["vue"],
+    };
+}
+
+#[test]
+fn two_releases_of_one_family_are_two_catalog_rows_and_one_release_twice_is_a_duplicate() {
+    let table = CatalogTable::try_from_rows([
+        frontend_row::<VueThree>("vue", "vue"),
+        frontend_row::<VueThreeSix>("vue", "vue"),
+    ])
+    .expect("two exact releases of one family are two rows");
+    assert_eq!(table.len(), 2);
+    let profiles: Vec<_> = table
+        .iter()
+        .map(|row| row.identity().framework_profile().clone())
+        .collect();
+    assert_ne!(profiles[0], profiles[1]);
+    let err = CatalogTable::try_from_rows([
+        frontend_row::<VueThree>("vue", "vue"),
+        frontend_row::<VueThree>("vue", "vue"),
+    ])
+    .expect_err("one release registered twice is a duplicate");
+    assert_eq!(err.identity.framework_family(), "vue");
 }
 
 #[test]
@@ -579,45 +625,40 @@ fn generic_catalog_module_source_does_not_name_framework_or_session_owners() {
 
 #[test]
 fn frontend_row_grammar_fact_is_explicit_registration_not_default() {
-    use verter_language::carrier_grammar::CarrierGrammarConfig;
     let bare = TypedCapabilityRegistration::register_frontend::<HtmlEpoch, _>(
         FrameworkAdapterId::new("tooling"),
         LanguageId::new("html"),
         Present(ToolingFrontend),
-    );
+    )
+    .expect("the test manifest is admitted");
     // A frontend row without a registered grammar fact publishes none —
     // the consumer must fail closed, never substitute a framework default.
     assert!(bare.registered_grammar().is_none());
-    let with_grammar = bare.with_registered_grammar(CarrierGrammarConfig::Svelte);
+    let with_grammar =
+        bare.with_registered_grammar(verter_compiler::svelte::svelte_grammar_config());
     assert_eq!(
         with_grammar.registered_grammar(),
-        Some(&CarrierGrammarConfig::Svelte)
+        Some(&verter_compiler::svelte::svelte_grammar_config())
     );
-    let row: TestCatalogRow = with_grammar.into();
-    assert_eq!(
-        row.registered_grammar(),
-        Some(&CarrierGrammarConfig::Svelte)
-    );
-    // Non-frontend rows never carry a grammar fact.
-    assert!(projection_row::<HtmlEpoch>("tooling", "html")
-        .registered_grammar()
-        .is_none());
 }
 
 #[test]
 fn built_in_frontend_rows_publish_registered_grammar_facts() {
     use verter_compiler::framework_common::registered_carrier_projection::registered_grammar_for;
-    use verter_language::carrier_grammar::CarrierGrammarConfig;
     let vue = registered_grammar_for(&FrameworkAdapterId::vue(), &LanguageId::new("vue"))
         .expect("Vue frontend row carries its registered grammar");
     assert_eq!(
         vue,
-        &CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>())
-            .expect("default Vue grammar")
+        &verter_compiler::framework_common::vue_grammar_config(
+            "{{",
+            "}}",
+            std::iter::empty::<&str>()
+        )
+        .expect("default Vue grammar")
     );
     let svelte = registered_grammar_for(&FrameworkAdapterId::svelte(), &LanguageId::new("svelte"))
         .expect("Svelte frontend row carries its registered grammar");
-    assert_eq!(svelte, &CarrierGrammarConfig::Svelte);
+    assert_eq!(svelte, &verter_compiler::svelte::svelte_grammar_config());
 }
 
 #[test]

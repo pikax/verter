@@ -131,6 +131,12 @@ export interface HostConfig {
    * admission is a different host.
    */
   frameworks?: string[];
+  /**
+   * Extra carrier suffixes for this host: `[{ suffix: ".md", framework: "vue" }]`
+   * reads `.md` files as Vue carriers on this host only. A suffix that
+   * already has a language, or an unknown framework, rejects construction.
+   */
+  carrierExtensions?: HostCarrierExtension[];
 }
 
 export interface HostIdeProjectConfig {
@@ -323,6 +329,12 @@ export interface HostResolvedExport {
 
 export interface HostUpdateResult {
   canonicalId: string;
+  /**
+   * The host's whole-content hash of the registered source, as 32 lower-case
+   * hex digits: equal for equal bytes, so callers compare it instead of
+   * hashing the source themselves.
+   */
+  contentHash: string;
   changed: boolean;
   sliceChanges: HostSliceChanges;
   changedVirtualNodes: HostVirtualNodeKind[];
@@ -340,12 +352,63 @@ export interface HostUpdateResult {
   parseDurationMs: number;
 }
 
+/** The marker of a bundler sub-request id. */
+export type HostRequestMarker = "vue" | "verter";
+
+/** One extra carrier suffix of a host and the framework it belongs to. */
+export interface HostCarrierExtension {
+  /** The file suffix, with or without its dot (`".md"`). */
+  suffix: string;
+  /** The framework name, as `frameworks` spells it (`"vue"`). */
+  framework: string;
+}
+
 export interface HostResolvedId {
   canonicalId: string;
   nodeKind: HostVirtualNodeKind;
   existsInHost: boolean;
   bundlerId: string;
   lspId: string;
+  /** Absent for a main request and for an LSP-format id. */
+  marker?: HostRequestMarker;
+  /** From `lang.<ext>` or `lang=<ext>`; may be dotted (`module.css`). */
+  lang?: string;
+  scoped: boolean;
+  /** The raw id up to its query or virtual-file suffix, as received. */
+  rawPath: string;
+  /** The block type of a custom block request (its `type` value); absent for every other node. */
+  blockType?: string;
+}
+
+/** A raw request id as the host's id grammar reads it, with no host. */
+export interface HostParsedRequestId {
+  nodeKind: HostVirtualNodeKind;
+  /** Absent for a main request and for an LSP-format id. */
+  marker?: HostRequestMarker;
+  /** From `lang.<ext>` or `lang=<ext>`; may be dotted (`module.css`). */
+  lang?: string;
+  scoped: boolean;
+  /** The raw id up to its query or virtual-file suffix, as received. */
+  rawPath: string;
+  /** The block type of a custom block request; absent for every other node. */
+  blockType?: string;
+}
+
+/** Why a raw id is not a request of the host's id grammar. */
+export type HostIdRejection =
+  | "both-markers"
+  | "marker-without-type"
+  | "repeated-owned-key"
+  | "invalid-index"
+  | "unknown-virtual-suffix";
+
+/** A raw id the host's id grammar rejects. */
+export interface HostRejectedId {
+  rejected: HostIdRejection;
+  /** The raw id up to its query or virtual-file suffix, as received. */
+  rawPath: string;
+  /** The single marker the request carries, when it carries one kind. */
+  marker?: HostRequestMarker;
 }
 
 export interface HostVirtualMeta {

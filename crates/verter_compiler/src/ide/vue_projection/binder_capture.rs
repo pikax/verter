@@ -60,6 +60,7 @@ use oxc_ast::ast::{
     TSTypeQueryExprName, TSTypeReference,
 };
 use oxc_ast_visit::{walk, Visit};
+use oxc_parser::{config::TokensParserConfig, Token};
 use oxc_semantic::SemanticBuilder;
 use oxc_span::GetSpan;
 use oxc_syntax::scope::ScopeFlags;
@@ -67,10 +68,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use verter_parser::oxc_parse::Parser;
 
 use super::script_setup::{
-    binder_product_from, grammar_of, macro_positions, range, value_bindings,
-    vue_runtime_macro_imports, MacroContext, ScriptBlockInput, SetupProjectionRefusal, SourceRange,
-    UniversalSetupBinder,
+    binder_product_from, grammar_of, macro_positions, range, refuse_javascript_binder,
+    value_bindings, vue_runtime_macro_imports, MacroContext, ScriptBlockInput,
+    SetupProjectionRefusal, SourceRange, UniversalSetupBinder,
 };
+use crate::tsc::script::{render_declaration_dependency, DeclarationEmissionFragment};
 use crate::utils::oxc::vue::parse_generic;
 
 /// The space a captured binding occupies at its reference site.
@@ -247,6 +249,9 @@ pub struct LiftedSourceDeclaration {
     pub binder_references: Vec<BinderReference>,
     /// Free bindings of the declaration, de-duplicated by `(name, space)`.
     pub dependencies: Vec<CapturedDependency>,
+    /// Declaration-safe emission produced from the original parse snapshot.
+    /// `None` means syntax alone cannot name this capture for publication.
+    pub emission: Option<DeclarationEmissionFragment>,
 }
 
 /// An import the emitted declaration keeps rather than lifting.
@@ -299,6 +304,12 @@ pub struct BinderCapturePlan {
     pub duplicates: Vec<DuplicateDeclaration>,
     /// Cycles observed while closing over declarations.
     pub cycles: Vec<AliasCycle>,
+    /// Names bound at the authored module scope of either script block
+    /// (declarations, imports and destructured bindings), sorted. Empty for a
+    /// carrier without `<script setup>`, whose public declaration names no
+    /// authored binding. A published declaration must bind or refuse each
+    /// one it names: at its own module scope a global would answer instead.
+    pub module_bindings: Vec<String>,
 }
 
 impl BinderCapturePlan {
@@ -348,13 +359,17 @@ pub fn capture_binder_plan(
     }
     let allocator = Allocator::default();
     let (binder, binder_param_dependencies) = capture_binder(&allocator, generic)?;
+    refuse_javascript_binder(setup.or(normal).map(|block| block.lang), &binder)?;
 
     let mut declarations: Vec<DeclRecord<'_>> = Vec::new();
     let mut imports: Vec<RetainedImport> = Vec::new();
+    let mut normal_tokens = Vec::new();
+    let mut setup_tokens = Vec::new();
 
     let normal_program = match normal {
         Some(block) => {
-            let program = parse_block(&allocator, block, false)?;
+            let (program, tokens) = parse_block(&allocator, block, false)?;
+            normal_tokens = tokens;
             index_block(
                 program,
                 block.content_start,
@@ -368,7 +383,8 @@ pub fn capture_binder_plan(
     };
     let setup_program = match setup {
         Some(block) => {
-            let program = parse_block(&allocator, block, true)?;
+            let (program, tokens) = parse_block(&allocator, block, true)?;
+            setup_tokens = tokens;
             index_block(
                 program,
                 block.content_start,
@@ -381,6 +397,24 @@ pub fn capture_binder_plan(
         None => None,
     };
 
+    let normal_semantic = normal_program
+        .filter(|_| setup_program.is_some())
+        .map(|program| {
+            verter_parser::oxc_parse::with_program_stack(program, || {
+                SemanticBuilder::new().with_enum_eval(true).build(program)
+            })
+            .semantic
+        });
+    let setup_semantic = setup_program.map(|program| {
+        verter_parser::oxc_parse::with_program_stack(program, || {
+            SemanticBuilder::new().with_enum_eval(true).build(program)
+        })
+        .semantic
+    });
+    let normal_bindings = normal_semantic
+        .as_ref()
+        .map(|semantic| value_bindings(semantic.scoping()))
+        .unwrap_or_default();
     let (scope, duplicates) = resolve_module_scope(&declarations, &imports);
     let binder_names: Vec<&str> = binder.params.iter().map(|p| p.name.as_str()).collect();
     let resolver = Resolver {
@@ -389,7 +423,16 @@ pub fn capture_binder_plan(
     };
 
     let slices = match (setup_program, setup) {
-        (Some(program), Some(block)) => capture_slices(program, block, normal_program, &resolver),
+        (Some(program), Some(block)) => capture_slices(
+            program,
+            block,
+            setup_semantic
+                .as_ref()
+                .expect("setup has a semantic snapshot")
+                .scoping(),
+            &normal_bindings,
+            &resolver,
+        ),
         _ => Vec::new(),
     };
 
@@ -400,7 +443,36 @@ pub fn capture_binder_plan(
         &binder,
         &binder_param_dependencies,
         &scope,
+        |record| {
+            let (block, tokens, semantic) = if record.from_setup {
+                (setup?, setup_tokens.as_slice(), setup_semantic.as_ref()?)
+            } else {
+                (normal?, normal_tokens.as_slice(), normal_semantic.as_ref()?)
+            };
+            render_declaration_dependency(
+                record.declaration,
+                tokens,
+                semantic.scoping(),
+                block.content,
+                block.content_start,
+                &record.name,
+            )
+        },
     );
+
+    let mut module_bindings: Vec<String> = [normal_semantic.as_ref(), setup_semantic.as_ref()]
+        .into_iter()
+        .flatten()
+        .flat_map(|semantic| {
+            let scoping = semantic.scoping();
+            scoping
+                .get_bindings(scoping.root_scope_id())
+                .keys()
+                .map(|name| name.as_str().to_string())
+        })
+        .collect();
+    module_bindings.sort_unstable();
+    module_bindings.dedup();
 
     Ok(BinderCapturePlan {
         binder,
@@ -410,6 +482,7 @@ pub fn capture_binder_plan(
         imports,
         duplicates,
         cycles,
+        module_bindings,
     })
 }
 
@@ -417,14 +490,56 @@ fn parse_block<'a>(
     allocator: &'a Allocator,
     block: ScriptBlockInput<'_>,
     setup: bool,
-) -> Result<&'a Program<'a>, SetupProjectionRefusal> {
+) -> Result<(&'a Program<'a>, Vec<Token>), SetupProjectionRefusal> {
     let grammar = grammar_of(block.lang)?;
     let content = allocator.alloc_str(block.content);
-    let parsed = Parser::new(allocator, content, grammar.source_type()).parse();
+    let parsed = Parser::new(allocator, content, grammar.source_type())
+        .with_config(TokensParserConfig)
+        .parse();
     if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return Err(SetupProjectionRefusal::SyntaxErrors { setup });
     }
-    Ok(allocator.alloc(parsed.program))
+    Ok((
+        allocator.alloc(parsed.program),
+        parsed.tokens.as_slice().to_vec(),
+    ))
+}
+
+/// Free references of a declaration contract, sorted, and its module
+/// specifiers. Reuses the capture owner's parser; the semantic snapshot
+/// resolves names in both spaces, so a name the contract declares itself,
+/// generated or authored, is not free.
+pub(crate) fn declaration_reference_inventory(
+    source: &str,
+) -> Option<(Vec<String>, Vec<crate::tsc::ModuleSpecifierSpan>)> {
+    let allocator = Allocator::default();
+    let block = |lang| ScriptBlockInput {
+        content: source,
+        content_start: 0,
+        lang: Some(lang),
+    };
+    let program = parse_block(
+        &allocator,
+        block(crate::cursor::ScriptLanguage::TypeScript),
+        false,
+    )
+    .ok()?
+    .0;
+    let semantic = verter_parser::oxc_parse::with_program_stack(program, || {
+        SemanticBuilder::new().with_enum_eval(true).build(program)
+    })
+    .semantic;
+    let mut names: Vec<String> = semantic
+        .scoping()
+        .root_unresolved_references()
+        .keys()
+        .map(|name| name.as_str().to_string())
+        .collect();
+    names.sort_unstable();
+    let specifiers = crate::tsc::module_specifiers::collect_module_specifier_spans_from_program(
+        source, program,
+    )?;
+    Some((names, specifiers))
 }
 
 /// The authored binder plus, per parameter, the ordinals its constraint and
@@ -478,6 +593,7 @@ fn capture_binder(
 
 /// A module-scope declaration, with the AST nodes its public surface spans.
 struct DeclRecord<'a> {
+    declaration: &'a Declaration<'a>,
     name: String,
     kind: LiftedDeclarationKind,
     span: SourceRange,
@@ -567,6 +683,7 @@ fn record_declaration<'a>(
 ) {
     let mut push = |name: String, kind, span, own_type_params, body| {
         out.push(DeclRecord {
+            declaration,
             name,
             kind,
             span,
@@ -1216,26 +1333,15 @@ impl<'a> Visit<'a> for RootMacroVisitor<'_, '_> {
 fn capture_slices<'a>(
     setup: &'a Program<'a>,
     block: ScriptBlockInput<'_>,
-    normal: Option<&'a Program<'a>>,
+    scoping: &oxc_semantic::Scoping,
+    normal_bindings: &FxHashSet<String>,
     resolver: &Resolver<'_>,
 ) -> Vec<PublicTypeDependencySlice> {
-    let semantic =
-        verter_parser::oxc_parse::with_program_stack(setup, || SemanticBuilder::new().build(setup))
-            .semantic;
-    let normal_bindings = normal
-        .map(|program| {
-            let semantic = verter_parser::oxc_parse::with_program_stack(program, || {
-                SemanticBuilder::new().build(program)
-            })
-            .semantic;
-            value_bindings(semantic.scoping())
-        })
-        .unwrap_or_default();
     let module_bound: FxHashSet<&str> = normal_bindings.iter().map(String::as_str).collect();
     let vue_macro_imports = vue_runtime_macro_imports(setup);
     let mut visitor = RootMacroVisitor {
         macros: MacroContext {
-            scoping: semantic.scoping(),
+            scoping,
             module_bound: &module_bound,
             vue_macro_imports: &vue_macro_imports,
             macro_positions: macro_positions(setup),
@@ -1415,12 +1521,13 @@ fn detect_cycles(lifted: &[PendingLift], declarations: &[DeclRecord<'_>]) -> Vec
 /// Turns the closure's pending entries into the lifted product, naming each
 /// declaration's binder parameters so that emitting it at module scope cannot
 /// capture an unrelated declaration of the same name.
-fn assign_binder_names(
+fn assign_binder_names<'a>(
     lifted: Vec<PendingLift>,
-    declarations: &[DeclRecord<'_>],
+    declarations: &[DeclRecord<'a>],
     binder: &UniversalSetupBinder,
     binder_param_dependencies: &[Vec<usize>],
     scope: &FxHashMap<(String, DependencySpace), Binding>,
+    emit: impl Fn(&DeclRecord<'a>) -> Option<DeclarationEmissionFragment>,
 ) -> Vec<LiftedSourceDeclaration> {
     let module_names: FxHashSet<&str> = scope.keys().map(|(name, _)| name.as_str()).collect();
     let positions: FxHashMap<usize, usize> = lifted
@@ -1471,6 +1578,7 @@ fn assign_binder_names(
                     })
                 })
                 .collect();
+            let emission = binder_params.is_empty().then(|| emit(record)).flatten();
             LiftedSourceDeclaration {
                 name: record.name.clone(),
                 kind: record.kind,
@@ -1480,6 +1588,7 @@ fn assign_binder_names(
                 binder_params,
                 binder_references: entry.binder_references,
                 dependencies: entry.dependencies,
+                emission,
             }
         })
         .collect()
@@ -1524,5 +1633,14 @@ fn free_name(
             return candidate;
         }
         suffix += 1;
+    }
+}
+
+impl crate::framework_common::vue_projection_backend::VueProjectionProduct for BinderCapturePlan {
+    fn project(
+        backend: &crate::framework_common::vue_projection_backend::VueProjectionBackend,
+        input: &crate::framework_common::vue_projection_backend::VueProductInput<'_>,
+    ) -> Result<Self, super::script_setup::SetupProjectionRefusal> {
+        backend.public_type_dependencies(input.source, input.artifact)
     }
 }

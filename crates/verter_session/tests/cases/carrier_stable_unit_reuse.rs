@@ -25,7 +25,8 @@ use verter_session::carrier_publication_store::{
 };
 
 fn vue_grammar() -> CarrierGrammarConfig {
-    CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).unwrap()
+    verter_compiler::framework_common::vue_grammar_config("{{", "}}", std::iter::empty::<&str>())
+        .unwrap()
 }
 
 fn authorities() -> (Arc<RegisteredSourceAuthority>, Arc<CarrierGrammarAuthority>) {

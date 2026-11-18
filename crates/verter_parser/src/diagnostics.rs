@@ -138,6 +138,13 @@ pub enum CompilerErrorCode {
     // -- Style errors --
     /// Error parsing or processing CSS in a `<style>` block.
     XCssParseError,
+
+    // -- Code generation --
+    /// Code generation recorded source edits the transform refused (two
+    /// replacements that overlap without one containing the other, or an
+    /// edit the source does not admit). The affected output is omitted
+    /// rather than emitted with a wrong map.
+    XCodegenEditRefused,
 }
 
 /// The machine-stable diagnostic-code STRING for
@@ -225,6 +232,7 @@ impl CompilerErrorCode {
             Self::MissingSfcEntryBlock => "MissingSfcEntryBlock",
             Self::TemplateFunctionalUnsupported => "TemplateFunctionalUnsupported",
             Self::XCssParseError => "XCssParseError",
+            Self::XCodegenEditRefused => "XCodegenEditRefused",
         }
     }
 
@@ -308,6 +316,7 @@ impl CompilerErrorCode {
                 "The <template functional> marker is not supported in Vue 3."
             }
             Self::XCssParseError => "Error parsing or processing CSS.",
+            Self::XCodegenEditRefused => "Code generation recorded edits the transform refused.",
         }
     }
 }
@@ -617,6 +626,7 @@ mod tests {
             MissingSfcEntryBlock,
             TemplateFunctionalUnsupported,
             XCssParseError,
+            XCodegenEditRefused,
         ];
         for code in all {
             assert_eq!(

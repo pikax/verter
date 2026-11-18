@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/components/child-comp.vue"
+  ],
+  "names": [],
+  "mappings": ";;;;gDAaU,KAAK,EAAC,YAAY;;;oBAErB,YAAK;;oBAAQ,YAAK;;;0CAEA,KAAK,EAAE,YAAK",
+  "sourcesContent": [
+    "\n  <button class=\"child-comp\" @click=\"onClick\">\n    <slot name=\"header\"></slot>\n    {{ label }} ({{ count }})\n    <slot></slot>\n    <slot name=\"footer\" :total=\"count\"></slot>\n  </button>\n"
+  ]
+}

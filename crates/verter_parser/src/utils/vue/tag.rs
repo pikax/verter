@@ -51,6 +51,11 @@ static VOID_TAGS_B: phf::Set<&'static [u8]> = phf_set! {
   b"source", b"track", b"wbr",
 };
 
+/// Elements whose content the tokenizer reads as raw text.
+static RAW_TEXT_TAGS_B: phf::Set<&'static [u8]> = phf_set! {
+  b"script", b"style", b"textarea",
+};
+
 static FORMATTING_TAGS_B: phf::Set<&'static [u8]> = phf_set! {
   b"a", b"b", b"big", b"code", b"em", b"font", b"i", b"nobr", b"s", b"small", b"strike", b"strong",
   b"tt", b"u",
@@ -97,6 +102,11 @@ pub fn is_void_tag(key: &[u8]) -> bool {
 }
 
 #[inline(always)]
+pub fn is_raw_text_tag(key: &[u8]) -> bool {
+    RAW_TEXT_TAGS_B.contains(key)
+}
+
+#[inline(always)]
 pub fn is_formatting_tag(key: &[u8]) -> bool {
     FORMATTING_TAGS_B.contains(key)
 }
@@ -116,6 +126,16 @@ pub fn is_block_tag(key: &[u8]) -> bool {
     BLOCK_TAGS_B.contains(key)
 }
 
+/// Whether `tag_name` matches a configured custom-element prefix.
+///
+pub fn matches_custom_element(custom_elements: Option<&[String]>, tag_name: &str) -> bool {
+    custom_elements.is_some_and(|prefixes| {
+        prefixes
+            .iter()
+            .any(|prefix| tag_name.starts_with(prefix.as_str()))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,6 +146,8 @@ mod tests {
         assert!(is_svg_tag(b"animateTransform"));
         assert!(is_mathml_tag(b"msubsup"));
         assert!(is_void_tag(b"img"));
+        assert!(is_raw_text_tag(b"textarea"));
+        assert!(!is_raw_text_tag(b"div"));
         assert!(is_formatting_tag(b"strong"));
         assert!(is_always_close_tag(b"textarea"));
         assert!(is_inline_tag(b"span"));

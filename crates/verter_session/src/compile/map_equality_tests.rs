@@ -20,8 +20,9 @@ use std::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 use verter_compiler::framework_common::{
-    QualifiedRuntimeStyle, RuntimeCompileOutput, RuntimeOutputDescriptor, RuntimeScriptBlock,
-    RuntimeTemplateBlock, SourceMapFidelity, TemplateRenderExport,
+    FrameworkParseArtifact, QualifiedRuntimeStyle, RuntimeCompileOutput, RuntimeOutputDescriptor,
+    RuntimeScriptBlock, RuntimeTemplateBlock, SourceMapFidelity, TemplateRenderExport,
+    VueHostRenderedMain,
 };
 
 use super::map_input::{validate_and_decode, UncomposableCode, UncomposableFamily};
@@ -2238,12 +2239,13 @@ fn mappings_map(mappings: &str) -> String {
 
 // Cases — genuine compiler output
 
-/// One real compile: the canonical id, the neutral bundle the Vue carrier
-/// produced, the parse-derived file meta, and the assembly profile.
+/// One real compile: the canonical id, the host render whose neutral bundle
+/// the Vue carrier produced, the parse-derived file meta, and the assembly
+/// profile.
 struct RealCompile {
     id: String,
     canonical_id: String,
-    compiled: RuntimeCompileOutput,
+    rendered: VueHostRenderedMain,
     meta: FileMeta,
     profile: CompileProfile,
     /// The topology the carrier actually resolved, read off the bundle rather
@@ -2254,6 +2256,13 @@ struct RealCompile {
     /// needs to branch on resolved topology again.
     #[allow(dead_code)]
     inline: bool,
+}
+
+impl RealCompile {
+    /// The runtime bundle the host render handed back for Main assembly.
+    fn compiled(&self) -> &RuntimeCompileOutput {
+        self.rendered.runtime_bundle()
+    }
 }
 
 /// The axes a real compile is driven over.
@@ -2270,15 +2279,63 @@ struct CompileAxes {
     force_vapor: bool,
 }
 
+/// Render one runtime compile the way the real host drives one: a
+/// runtime-render admission over the registered parse artifact, executed by
+/// the Vue host-integration backend over the artifact's own source bytes.
+/// JavaScript output is always forced, as in every case here.
+fn render_runtime(
+    artifact: &FrameworkParseArtifact,
+    filename: Option<String>,
+    axes: CompileAxes,
+) -> VueHostRenderedMain {
+    use oxc_allocator::Allocator;
+    use verter_compiler::compile_request::{
+        RuntimeProductRequest, VueBackendRequest, VueOptionAttempt,
+    };
+    use verter_compiler::framework_common::{
+        FrameworkHostIntegrationBackend as _, VueHostExecutionInputs, VueHostIntegrationBackend,
+        VueHostRuntimeRenderDemand,
+    };
+
+    let backend = VueHostIntegrationBackend::registered();
+    let demand = VueHostRuntimeRenderDemand {
+        runtime: RuntimeProductRequest {
+            runtime_source_map: axes.source_map,
+            inline: axes.inline,
+            ..Default::default()
+        },
+        vue_options: VueOptionAttempt {
+            backend: if axes.force_vapor {
+                VueBackendRequest::Vapor
+            } else {
+                VueBackendRequest::Inferred
+            },
+            ssr: axes.ssr,
+            ..Default::default()
+        },
+        filename,
+        is_production: axes.is_production,
+        force_js: true,
+        ..Default::default()
+    };
+    let admission = backend
+        .admit_runtime_render(artifact, demand)
+        .expect("the Vue runtime-render demand admits");
+    backend
+        .compile_runtime_render(
+            admission,
+            artifact,
+            &VueHostExecutionInputs::default(),
+            &Allocator::new(),
+        )
+        .expect("the Vue carrier produces a runtime surface; it never refuses one")
+}
+
 /// Compile a fixture through the REAL Vue pipeline: the parse snapshot supplies
 /// the authored-fragment inventory and the style/custom-block tables exactly as
-/// production derives them, and the carrier's `compile_bundle` supplies the
+/// production derives them, and the host runtime render supplies the
 /// fragments. Nothing here is hand-built.
 fn compile_fixture(fixture: &str, axes: CompileAxes) -> RealCompile {
-    use oxc_allocator::Allocator;
-    use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-    use verter_compiler::framework_common::RuntimeCompileOptions;
-
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/framework-conformance-harness/fixtures/vue")
         .join(fixture);
@@ -2305,27 +2362,7 @@ fn compile_fixture(fixture: &str, axes: CompileAxes) -> RealCompile {
     // shape the real host never produces, which is not a faithful case for a
     // suite whose whole point is comparing against how production actually
     // invokes the compiler.
-    let allocator = Allocator::new();
-    let compiled = VueCarrierCompiler
-        .compile_bundle(
-            &source,
-            &artifact,
-            &RuntimeCompileOptions {
-                filename: Some(canonical_id.clone()),
-                source_map: axes.source_map,
-                ssr: axes.ssr,
-                is_production: axes.is_production,
-                inline: axes.inline,
-                force_js: true,
-                force_vapor: axes.force_vapor,
-                want_main: false,
-                ..RuntimeCompileOptions::default()
-            },
-            &allocator,
-        )
-        .expect("the Vue carrier produces a runtime bundle for a valid fixture")
-        .into_produced()
-        .expect("the Vue carrier produces a runtime surface; it never refuses one");
+    let rendered = render_runtime(&artifact, Some(canonical_id.clone()), axes);
 
     let profile = CompileProfile {
         filename: Some(canonical_id.clone()),
@@ -2344,8 +2381,8 @@ fn compile_fixture(fixture: &str, axes: CompileAxes) -> RealCompile {
             axes.ssr, axes.force_vapor, axes.is_production, axes.source_map, axes.inline
         ),
         canonical_id,
-        inline: compiled.inline,
-        compiled,
+        inline: rendered.runtime_bundle().inline,
+        rendered,
         meta: snapshot.meta,
         profile,
     }
@@ -2365,7 +2402,7 @@ fn assert_real_compile_equality(cases: &[RealCompile]) -> Vec<ComposeOutcome> {
         .map(|case| {
             AssembleInput::from_production_inputs(
                 &case.canonical_id,
-                &case.compiled,
+                case.compiled(),
                 &case.meta,
                 &case.profile,
             )
@@ -2378,7 +2415,7 @@ fn assert_real_compile_equality(cases: &[RealCompile]) -> Vec<ComposeOutcome> {
     for (case, expected) in cases.iter().zip(reference) {
         let actual = match assemble_vue_main_module(
             &case.canonical_id,
-            &case.compiled,
+            case.compiled(),
             &case.meta,
             &case.profile,
         ) {
@@ -2405,7 +2442,7 @@ fn assert_real_compile_equality(cases: &[RealCompile]) -> Vec<ComposeOutcome> {
             Err(VueMainAssemblyFailure::InputMap(
                 AssembleMapFailure::InvalidSfcExportPlacement { reason },
             )) => {
-                // `case.compiled` is a GENUINE real-compile output (see
+                // `case.compiled()` is a GENUINE real-compile output (see
                 // `compile_fixture`) — every in-scope producer declares a
                 // consistent fact for its own bytes, so this is a real
                 // producer defect, not a normal outcome the reference-side
@@ -2516,12 +2553,12 @@ fn genuine_compiler_output_agrees_across_implementations() {
         .filter(|case| case.profile.source_map)
         .filter(|case| {
             !case
-                .compiled
+                .compiled()
                 .script
                 .as_ref()
                 .is_some_and(|script| !script.source_map.is_empty())
                 && !case
-                    .compiled
+                    .compiled()
                     .template
                     .as_ref()
                     .is_some_and(|template| !template.source_map.is_empty())
@@ -2570,18 +2607,7 @@ fn genuine_compiler_output_agrees_across_implementations() {
     // Every real compile driven the way the real host actually drives one —
     // filename always supplied, per `virtual_file_pipeline.rs`'s
     // `profile.filename.clone().or_else(|| Some(snapshot.canonical_id.clone()))`
-    // — must compose successfully on both sides. An earlier revision of this
-    // suite omitted `filename` from `compile_fixture`'s `RuntimeCompileOptions`
-    // and observed the inline topology fail closed with a `U7` (generated
-    // coordinates out of bounds): `CodeTransform`'s `Original` chunk only
-    // advances the generated cursor when `source_id` is `Some(...)`
-    // (`code_transform/source_map.rs:204`), so a `None` filename silently
-    // drops original bytes from the map's coordinate accounting while later
-    // chunks still advance, producing genuinely out-of-bounds coordinates.
-    // That defect is real (see `filename_none_is_not_a_real_host_shape` below)
-    // but is not reachable through the real host, which never supplies
-    // `filename: None`. This assertion is therefore unconditional — no
-    // topology is exempted — proving the fix, not merely documenting it.
+    // — must compose successfully on both sides. No topology is exempted.
     let unexpected_failures: Vec<&str> = cases
         .iter()
         .zip(&agreed)
@@ -2605,27 +2631,11 @@ fn genuine_compiler_output_agrees_across_implementations() {
     );
 }
 
-/// A real, narrow carrier defect — NOT reachable through the real host, which
-/// never supplies `filename: None` (`virtual_file_pipeline.rs`'s
-/// `profile.filename.clone().or_else(|| Some(snapshot.canonical_id.clone()))`
-/// always resolves to `Some`). This is a regression/documentation test for
-/// the defect itself, not a claim it affects production: with the carrier
-/// given no filename, `CodeTransform`'s `Original` chunk only advances the
-/// generated cursor when `source_id` is `Some(...)`
-/// (`code_transform/source_map.rs:204`), so original bytes silently drop out
-/// of the map's coordinate accounting while later chunks still advance,
-/// producing genuinely out-of-bounds (`U7`) coordinates on the inline
-/// topology. Both implementations agree it fails closed — this is a
-/// composition-correctness agreement, not a divergence — but the underlying
-/// carrier map/code mismatch is a real defect the emitter's true owner
-/// should fix. It is scoped here rather than filed loosely so a future fix
-/// has a discriminating test to turn green.
+/// Without a filename there are no authored source rows, but original bytes
+/// still advance the generated cursor. Both assemblers must accept the
+/// resulting inline module and agree on every generated map coordinate.
 #[test]
-fn filename_none_is_not_a_real_host_shape_and_the_carrier_defect_it_exposes_is_tracked() {
-    use oxc_allocator::Allocator;
-    use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-    use verter_compiler::framework_common::RuntimeCompileOptions;
-
+fn filename_none_preserves_generated_coordinate_accounting() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../packages/framework-conformance-harness/fixtures/vue")
         .join("basic-interpolation.vue");
@@ -2642,27 +2652,18 @@ fn filename_none_is_not_a_real_host_shape_and_the_carrier_defect_it_exposes_is_t
         &provenance,
     );
 
-    let allocator = Allocator::new();
     // `filename: None` — the shape the real host never produces.
-    let compiled = VueCarrierCompiler
-        .compile_bundle(
-            &source,
-            &artifact,
-            &RuntimeCompileOptions {
-                filename: None,
-                source_map: true,
-                ssr: false,
-                is_production: true,
-                inline: None, // resolves to `is_production` — the inline topology
-                force_js: true,
-                want_main: false,
-                ..RuntimeCompileOptions::default()
-            },
-            &allocator,
-        )
-        .expect("the Vue carrier produces a runtime bundle for a valid fixture")
-        .into_produced()
-        .expect("the Vue carrier produces a runtime surface; it never refuses one");
+    let rendered = render_runtime(
+        &artifact,
+        None,
+        CompileAxes {
+            ssr: false,
+            is_production: true,
+            source_map: true,
+            inline: None, // resolves to `is_production` — the inline topology
+            force_vapor: false,
+        },
+    );
 
     let profile = CompileProfile {
         filename: None,
@@ -2675,32 +2676,23 @@ fn filename_none_is_not_a_real_host_shape_and_the_carrier_defect_it_exposes_is_t
     };
 
     let case = RealCompile {
-        id: "basic-interpolation.vue filename=None (known carrier defect)".to_string(),
+        id: "basic-interpolation.vue filename=None".to_string(),
         canonical_id,
-        inline: compiled.inline,
-        compiled,
+        inline: rendered.runtime_bundle().inline,
+        rendered,
         meta: snapshot.meta,
         profile,
     };
 
-    // `assert_real_compile_equality` itself asserts the two implementations
-    // AGREE — which they do, both failing closed identically — and returns
-    // the agreed outcome. What this test additionally checks is that the
-    // agreed outcome really is a fail-closed one, not a successful
-    // composition (which would mean the carrier defect is fixed).
     let agreed = assert_real_compile_equality(std::slice::from_ref(&case));
-    assert!(
-        matches!(
-            agreed[0],
-            ComposeOutcome::UncomposableInputMap { .. }
-                | ComposeOutcome::MissingRequiredInputMap { .. }
-        ),
-        "expected the known `filename: None` carrier defect to still fail closed (documenting it, \
-         not asserting production behaviour — the real host never omits filename, see \
-         `genuine_compiler_output_agrees_across_implementations`) — got {:?}. If this now \
-         composes, the carrier defect is fixed: delete this test and its citation.",
-        agreed[0],
-    );
+    let ComposeOutcome::Composed { map: Some(map), .. } = &agreed[0] else {
+        panic!(
+            "the filename-free inline module must compose: {:?}",
+            agreed[0]
+        );
+    };
+    assert!(map.sources.is_empty());
+    assert!(map.segments.iter().all(|segment| segment.src_idx.is_none()));
 }
 
 // The comparator's own discrimination

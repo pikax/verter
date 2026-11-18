@@ -31,7 +31,7 @@
 //!   outer-reference analysis ([`super::flow::outer_refs`]).
 
 mod deps {
-    pub(super) use crate::code_transform::CodeTransform;
+    pub(super) use crate::code_transform::{CodeTransform, MappedTransform};
     pub(super) use oxc_allocator::Allocator;
 }
 

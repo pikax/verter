@@ -1,0 +1,78 @@
+{
+  "schema": 2,
+  "caseId": "ssr/slot-handler-statements",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/slot-handler-statements.vue",
+    "sha256": "35d7fa9a92d0279e86f85a8300b31876780269940e2fccbc6251e83943be380f"
+  },
+  "options": {
+    "sha256": "1b50fea8f9ff79e8423a3ad85d2a3cb37a59e0bb1f1a8d192c41bdd7b6a220eb",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/ssr/slot-handler-statements.vue",
+      "id": "ssr/slot-handler-statements",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/vapor/ssr/slot-handler-statements.js",
+      "sha256": "a1a0e509a3fd9ad1e310449876a1d739681add65c21f4fb3e82b577931beb28f",
+      "bytes": 936
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/vapor/ssr/slot-handler-statements.map.json",
+      "sha256": "06cc981645822393f04c7349081b3280bd52e802d3bdbeb68994288734ed3759"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createComponent",
+      "alias": "_createComponent"
+    },
+    {
+      "imported": "defineVaporComponent",
+      "alias": "_defineVaporComponent"
+    },
+    {
+      "imported": "on",
+      "alias": "_on"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    }
+  ]
+}

@@ -172,7 +172,7 @@ crate::serialized_js_union! {
 /// THROWS — there is no partial response, no `null`, and no boolean.
 #[derive(Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-#[ts(rename = "HostCompileRequestResponse")]
+#[ts(rename = "HostCompileRequestResponse", optional_fields)]
 pub struct BrowserCompileRequestResponse {
     /// The canonical id the request executed against, after alias resolution.
     pub canonical_id: String,
@@ -181,4 +181,7 @@ pub struct BrowserCompileRequestResponse {
     pub diagnostics: FfiDiagnosticsSnapshot,
     /// One row per requested product kind, in request order.
     pub products: Vec<BrowserCompiledProduct>,
+    /// The compile's complete artifact set as terminal JSON, present
+    /// exactly when the compile published one.
+    pub artifact_set: Option<String>,
 }

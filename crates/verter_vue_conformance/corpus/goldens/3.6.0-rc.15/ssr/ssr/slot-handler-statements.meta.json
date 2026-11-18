@@ -1,0 +1,75 @@
+{
+  "schema": 2,
+  "caseId": "ssr/slot-handler-statements",
+  "backend": "ssr",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/slot-handler-statements.vue",
+    "sha256": "35d7fa9a92d0279e86f85a8300b31876780269940e2fccbc6251e83943be380f"
+  },
+  "options": {
+    "sha256": "5000caf4d255916ffe6360770159dd5d367d3e04542939d8a69419bd97cf5ca6",
+    "summary": {
+      "backend": "ssr",
+      "vapor": false,
+      "ssr": true,
+      "filename": "cases/ssr/slot-handler-statements.vue",
+      "id": "ssr/slot-handler-statements",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/ssr/ssr/slot-handler-statements.js",
+      "sha256": "6b9a359ee622e74b7129256259a2c8bf61ccb706b3017bdfd81a9e5ec918bffd",
+      "bytes": 1231
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/ssr/ssr/slot-handler-statements.map.json",
+      "sha256": "e250d6116b984fe68f96d1106d0845771768d10e64924f963d1cc53f9f00ca3d"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createVNode",
+      "alias": "_createVNode"
+    },
+    {
+      "imported": "defineComponent",
+      "alias": "_defineComponent"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "withCtx",
+      "alias": "_withCtx"
+    }
+  ]
+}

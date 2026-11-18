@@ -38,8 +38,10 @@ mod checker;
 mod error_map;
 mod position;
 mod reporter;
+mod sfc_driver;
 mod tsconfig;
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::process;
 
@@ -87,8 +89,9 @@ struct Cli {
     #[arg(short = 'b', long = "build")]
     build: bool,
 
-    /// Positional tsconfig paths for build mode (e.g., `verter-tsc -b tsconfig.app.json`)
-    #[arg(value_name = "TSCONFIG", trailing_var_arg = true)]
+    /// Positional tsconfig paths for build mode (e.g., `verter-tsc -b tsconfig.app.json`).
+    /// Flags may follow them, as with `tsc -b`.
+    #[arg(value_name = "TSCONFIG")]
     build_projects: Vec<PathBuf>,
 
     /// Type check only — do not emit output [default when no emit flags are specified]
@@ -162,25 +165,311 @@ struct Cli {
     /// Force overwrite (accepted for tsc compat, ignored internally)
     #[arg(long = "force", num_args = 0..=1, default_missing_value = "true", value_name = "BOOL")]
     _force: Option<String>,
+
+    // ── projection-driver qualification (test builds only) ─────────
+    /// Check Vue carriers through the SFC projection driver.
+    #[cfg(feature = "projection-route-qualification")]
+    #[arg(long = "projection-route", hide = true)]
+    projection_route: bool,
+
+    /// Recheck on every change (projection driver only).
+    #[cfg(feature = "projection-route-qualification")]
+    #[arg(long = "watch", hide = true)]
+    watch: bool,
+
+    /// Serve the content mapper over standard input and output.
+    #[cfg(feature = "projection-route-qualification")]
+    #[arg(long = "content-mapper", hide = true)]
+    content_mapper: bool,
+}
+
+/// The request the projection driver checks for this command line: the `-p`
+/// target, or the `-b` roots (`tsconfig.json` when none is named).
+#[cfg(feature = "projection-route-qualification")]
+fn driver_request(cli: &Cli) -> sfc_driver::DriverRequest {
+    let (mode, configs) = if cli.build {
+        let roots = if cli.build_projects.is_empty() {
+            vec![PathBuf::from("tsconfig.json")]
+        } else {
+            cli.build_projects.clone()
+        };
+        (sfc_driver::BuildMode::Build, roots)
+    } else {
+        let project = cli
+            .project
+            .clone()
+            .or_else(|| cli.build_projects.first().cloned())
+            .unwrap_or_else(|| PathBuf::from("tsconfig.json"));
+        (sfc_driver::BuildMode::Project, vec![project])
+    };
+    let declaration = cli.declaration || cli.emit_declaration_only;
+    sfc_driver::DriverRequest {
+        mode,
+        configs,
+        no_emit: cli.no_emit,
+        declaration,
+        declaration_dir: cli.declaration_dir.clone().or_else(|| cli.out_dir.clone()),
+        tsgo_bin: cli.tsgo_bin.clone(),
+        force: cli._force.as_deref().is_some_and(|value| value != "false"),
+        watch: cli.watch,
+    }
+}
+
+/// The projection driver's entries: `Some(exit code)` when one of them was
+/// asked for, `None` for the existing route.
+#[cfg(feature = "projection-route-qualification")]
+fn projection_route(cli: &Cli) -> Option<i32> {
+    if cli.content_mapper {
+        let status =
+            sfc_driver::mapper_server::serve(&mut std::io::stdin(), &mut std::io::stdout());
+        return Some(status as i32);
+    }
+    if !cli.projection_route {
+        return None;
+    }
+    let request = driver_request(cli);
+    if request.watch {
+        let mut source = match sfc_driver::FileSystemChangeSource::new() {
+            Ok(source) => source,
+            Err(error) => {
+                eprintln!("verter-tsc: cannot watch for changes: {error}");
+                return Some(sfc_driver::ExitStatus::Failed as i32);
+            }
+        };
+        let status = sfc_driver::run_watch(
+            &request,
+            &mut source,
+            &std::time::Instant::now,
+            &mut std::io::stdout().lock(),
+        );
+        return Some(status as i32);
+    }
+    // The Svelte lane of the selected config. Its host is built only when a
+    // project asks for a Svelte surface, and its check runs only when a
+    // project has carriers the driver does not own.
+    let svelte_config = legacy_tsconfig_path(cli);
+    let svelte = tsconfig::load_tsconfig(&svelte_config).ok().map(|config| {
+        let lane = checker::SvelteSurfaces::new(&config.root_dir, &svelte_config);
+        (config, lane)
+    });
+    let outcome = match sfc_driver::run(
+        &request,
+        svelte
+            .as_ref()
+            .map(|(_, lane)| lane as &dyn sfc_driver::ForeignSurfaceSource),
+    ) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            eprintln!("{error}");
+            return Some(sfc_driver::ExitStatus::Failed as i32);
+        }
+    };
+    let svelte = svelte
+        .filter(|_| {
+            outcome
+                .projects
+                .iter()
+                .any(|project| !project.unowned_carriers.is_empty())
+        })
+        .map(|(mut config, lane)| {
+            config
+                .vue_files
+                .retain(|path| checker::is_svelte_carrier(path));
+            let opts = checker::EmitOptions {
+                no_emit: true,
+                declaration: false,
+                declaration_dir: None,
+            };
+            checker::run_with(
+                &lane,
+                &config,
+                &svelte_config,
+                &opts,
+                cli.tsgo_bin.as_deref(),
+                &vue_surfaces(&outcome),
+            )
+        });
+    let checked = outcome.carriers_checked
+        + svelte
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .map_or(0, |result| result.admitted_carriers);
+    report_checking(checked);
+    let mut out = std::io::stdout().lock();
+    let mut errors = match write_driver_outcome(cli, &outcome, &mut out) {
+        Ok(errors) => errors,
+        Err(message) => {
+            eprintln!("verter-tsc: {message}");
+            return Some(sfc_driver::ExitStatus::Failed as i32);
+        }
+    };
+    let mut status = sfc_driver::exit_status(&outcome) as i32;
+    match svelte {
+        Some(Ok(result)) => {
+            if let Err(message) = write_check_result(cli, &result, &mut out) {
+                eprintln!("verter-tsc: {message}");
+                return Some(sfc_driver::ExitStatus::Failed as i32);
+            }
+            errors += error_count(&result.diagnostics) + result.public_api_failures.len();
+            if !result.diagnostics.is_empty() || !result.public_api_failures.is_empty() {
+                status = status.max(sfc_driver::ExitStatus::Diagnostics as i32);
+            }
+        }
+        Some(Err(error)) => {
+            eprintln!("{error}");
+            status = sfc_driver::ExitStatus::Failed as i32;
+        }
+        None => {}
+    }
+    if errors > 0 {
+        report_found(errors, checked);
+    }
+    Some(status)
+}
+
+/// The Vue checking modules the Svelte lane serves for its `.vue` imports:
+/// every carrier of each project that has Svelte members, once per path.
+#[cfg(feature = "projection-route-qualification")]
+fn vue_surfaces(outcome: &sfc_driver::RunOutcome) -> Vec<sfc_driver::ForeignSurface> {
+    let mut surfaces: Vec<sfc_driver::ForeignSurface> = Vec::new();
+    for project in &outcome.projects {
+        if project.unowned_carriers.is_empty() {
+            continue;
+        }
+        for carrier in &project.carriers {
+            let path = carrier.result.virtual_file.to_string();
+            if surfaces.iter().all(|surface| surface.path != path) {
+                surfaces.push(sfc_driver::ForeignSurface {
+                    carrier: PathBuf::from(&*carrier.carrier),
+                    path,
+                    text: Some(carrier.result.text.clone()),
+                });
+            }
+        }
+    }
+    surfaces
+}
+
+/// Write the driver's outcome to `out` through the printing both routes
+/// share, and return its error count.
+#[cfg(feature = "projection-route-qualification")]
+fn write_driver_outcome(
+    cli: &Cli,
+    outcome: &sfc_driver::RunOutcome,
+    out: &mut dyn Write,
+) -> Result<usize, String> {
+    let diagnostics = sfc_driver::outcome_diagnostics(outcome);
+    let positions = sfc_driver::outcome_renderer(outcome, cli.position_encoding);
+    write_diagnostics(cli, &positions, &diagnostics, out)?;
+    write_emitted_files(cli, &outcome.emitted_files, out)?;
+    Ok(error_count(&diagnostics))
+}
+
+/// Write the checker's result to `out` through the printing both routes
+/// share. Public-API failures follow the diagnostics, whatever is selected.
+fn write_check_result(
+    cli: &Cli,
+    result: &checker::CheckResult,
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let positions = reporter::PositionRenderer::new(cli.position_encoding)
+        .with_virtual_sources(&result.virtual_sources);
+    write_diagnostics(cli, &positions, &result.diagnostics, out)?;
+    for failure in &result.public_api_failures {
+        writeln!(out, "{failure}").map_err(write_failure)?;
+    }
+    write_emitted_files(cli, &result.emitted_files, out)
+}
+
+/// The stderr line that opens a check.
+fn report_checking(files: usize) {
+    eprintln!("verter-tsc: checking {files} .vue file(s)...");
+}
+
+/// The stderr line that closes a check that reported something.
+fn report_found(errors: usize, files: usize) {
+    eprintln!("Found {errors} error(s) in {files} file(s).");
+}
+
+/// How many of `diagnostics` are errors.
+fn error_count(diagnostics: &[reporter::Diagnostic]) -> usize {
+    diagnostics
+        .iter()
+        .filter(|d| matches!(d.severity, reporter::Severity::Error))
+        .count()
+}
+
+/// Write each diagnostic's line to `out`, or only the lines at the `--at` /
+/// `--offset` position when one is selected. `Err` is the message for a
+/// selector that names no position in its file, or for a failed write.
+fn write_diagnostics(
+    cli: &Cli,
+    positions: &reporter::PositionRenderer,
+    diagnostics: &[reporter::Diagnostic],
+    out: &mut dyn Write,
+) -> Result<(), String> {
+    let selected = cli
+        .at
+        .as_ref()
+        .or(cli.offset.as_ref())
+        .map(|selector| {
+            positions
+                .resolve_selector(selector)
+                .map(|position| (selector.file(), position))
+        })
+        .transpose()?;
+    for diagnostic in diagnostics {
+        if let Some((file, position)) = selected {
+            if !positions.is_at(diagnostic, file, position) {
+                continue;
+            }
+        }
+        writeln!(out, "{}", positions.render(diagnostic)).map_err(write_failure)?;
+    }
+    Ok(())
+}
+
+/// The `TSFILE:` lines `--listEmittedFiles` asks for.
+fn write_emitted_files(cli: &Cli, files: &[PathBuf], out: &mut dyn Write) -> Result<(), String> {
+    if cli.list_emitted_files {
+        for file in files {
+            writeln!(out, "TSFILE: {}", file.display()).map_err(write_failure)?;
+        }
+    }
+    Ok(())
+}
+
+fn write_failure(error: std::io::Error) -> String {
+    format!("cannot write diagnostics: {error}")
+}
+
+/// The config the existing route checks: `-p`, then the first `-b`
+/// positional, then `tsconfig.json`. A directory names its `tsconfig.json`,
+/// as with `tsc`.
+fn legacy_tsconfig_path(cli: &Cli) -> PathBuf {
+    let mut path = if let Some(ref project) = cli.project {
+        project.clone()
+    } else if let Some(first) = cli.build_projects.first() {
+        first.clone()
+    } else {
+        PathBuf::from("tsconfig.json")
+    };
+    if path.is_dir() {
+        path.push("tsconfig.json");
+    }
+    path
 }
 
 fn main() {
     verter_alloc::configure();
     let cli = Cli::parse();
 
-    // Resolve project path: -p takes precedence, then -b positional, then default
-    let mut tsconfig_path = if let Some(ref p) = cli.project {
-        p.clone()
-    } else if !cli.build_projects.is_empty() {
-        cli.build_projects[0].clone()
-    } else {
-        PathBuf::from("tsconfig.json")
-    };
-
-    // tsc compatibility: if given a directory, auto-append tsconfig.json
-    if tsconfig_path.is_dir() {
-        tsconfig_path.push("tsconfig.json");
+    #[cfg(feature = "projection-route-qualification")]
+    if let Some(code) = projection_route(&cli) {
+        process::exit(code);
     }
+
+    let tsconfig_path = legacy_tsconfig_path(&cli);
 
     let config = match tsconfig::load_tsconfig(&tsconfig_path) {
         Ok(c) => c,
@@ -226,15 +515,13 @@ fn main() {
         declaration: emit_decl,
         declaration_dir: cli
             .declaration_dir
+            .clone()
             .or_else(|| cli.out_dir.clone())
             .or_else(|| config.declaration_dir.clone())
             .or_else(|| config.out_dir.clone()),
     };
 
-    eprintln!(
-        "verter-tsc: checking {} .vue file(s)...",
-        config.vue_files.len()
-    );
+    report_checking(config.vue_files.len());
 
     // The in-memory `--api` typecheck is tsgo-only with NO tsc fallback. A hard
     // failure (engine absent, connect/init/createSnapshot/protocol/project-not-found)
@@ -257,46 +544,14 @@ fn main() {
          Verter-native diagnostic instead)"
     );
 
-    let selector = cli.at.clone().or_else(|| cli.offset.clone());
-    let positions = reporter::PositionRenderer::new(cli.position_encoding)
-        .with_virtual_sources(&result.virtual_sources);
-    let selected_position = match selector.as_ref().map(|s| positions.resolve_selector(s)) {
-        None => None,
-        Some(Ok(position)) => Some(position),
-        Some(Err(message)) => {
-            eprintln!("verter-tsc: {message}");
-            process::exit(2);
-        }
-    };
-    for diagnostic in &result.diagnostics {
-        if let (Some(selector), Some(position)) = (selector.as_ref(), selected_position) {
-            if !positions.is_at(diagnostic, selector.file(), position) {
-                continue;
-            }
-        }
-        println!("{}", positions.render(diagnostic));
-    }
-    for failure in &result.public_api_failures {
-        println!("{failure}");
-    }
-
-    if cli.list_emitted_files {
-        for f in &result.emitted_files {
-            println!("TSFILE: {}", f.display());
-        }
+    if let Err(message) = write_check_result(&cli, &result, &mut std::io::stdout().lock()) {
+        eprintln!("verter-tsc: {message}");
+        process::exit(2);
     }
 
     if !result.diagnostics.is_empty() || !result.public_api_failures.is_empty() {
-        let errors = result
-            .diagnostics
-            .iter()
-            .filter(|d| matches!(d.severity, reporter::Severity::Error))
-            .count();
-        let errors = errors + result.public_api_failures.len();
-        eprintln!(
-            "Found {errors} error(s) in {} file(s).",
-            config.vue_files.len()
-        );
+        let errors = error_count(&result.diagnostics) + result.public_api_failures.len();
+        report_found(errors, config.vue_files.len());
         process::exit(1);
     }
 }
@@ -407,6 +662,93 @@ mod tests {
                 "{bad:?} must be refused"
             );
         }
+
+        #[cfg(feature = "projection-route-qualification")]
+        driver_outcome_prints_in_the_selected_encoding_at_the_selected_position();
+    }
+
+    /// The driver's outcome goes through the same printing as the existing
+    /// route: the column in the selected encoding, only the diagnostics at an
+    /// `--at` position, a refused selector, the `TSFILE:` lines, and an error
+    /// count over the whole run.
+    #[cfg(feature = "projection-route-qualification")]
+    fn driver_outcome_prints_in_the_selected_encoding_at_the_selected_position() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("App.vue");
+        // `é` is one UTF-16 unit and two UTF-8 bytes, so the `{{` after it is
+        // column 8 in UTF-16 and column 9 in UTF-8.
+        let file = path.to_string_lossy().into_owned();
+        verter_workspace::native_fs::NativeFs::new()
+            .write_file(&file, "<template>\n  <p>é {{ a }}</p>\n</template>\n")
+            .expect("write");
+        let diagnostic = |line, col, message: &str| {
+            reporter::Diagnostic::verter(
+                file.clone(),
+                line,
+                col,
+                reporter::VerterCode::CarrierSyntax,
+                message.to_string(),
+            )
+        };
+        let outcome = sfc_driver::RunOutcome {
+            projects: vec![sfc_driver::ProjectCheck {
+                config: std::sync::Arc::from("tsconfig.json"),
+                carriers: vec![],
+                unowned_carriers: vec![],
+                foreign_surfaces: vec![],
+                diagnostics: vec![diagnostic(2, 1, "line start"), diagnostic(2, 8, "brace")],
+                binding: None,
+                raw: vec![],
+                attributed: vec![],
+                engine_failure: None,
+            }],
+            graph_problems: vec![],
+            carriers_checked: 1,
+            emitted_files: vec![PathBuf::from("types").join("App.vue.d.ts")],
+        };
+        let print = |args: &[&str]| {
+            let mut argv = vec!["verter-tsc", "--projection-route"];
+            argv.extend_from_slice(args);
+            let cli = Cli::try_parse_from(argv).expect("should parse");
+            let mut out = Vec::new();
+            write_driver_outcome(&cli, &outcome, &mut out)
+                .map(|errors| (String::from_utf8(out).expect("utf-8"), errors))
+        };
+
+        let (printed, errors) = print(&[]).expect("prints");
+        assert_eq!(
+            printed,
+            format!(
+                "{file}(2,1): error VTER1004: line start\n{file}(2,8): error VTER1004: brace\n"
+            )
+        );
+        assert_eq!(errors, 2);
+
+        let at = format!("{file}:2:9");
+        let (printed, errors) = print(&[
+            "--position-encoding",
+            "utf8",
+            "--at",
+            &at,
+            "--listEmittedFiles",
+        ])
+        .expect("prints");
+        assert_eq!(
+            printed,
+            format!(
+                "{file}(2,9): error VTER1004: brace\nTSFILE: {}\n",
+                PathBuf::from("types").join("App.vue.d.ts").display()
+            ),
+            "only the diagnostic at the selected UTF-8 position, then the emitted files"
+        );
+        assert_eq!(errors, 2, "the count covers the run, not the selection");
+
+        let outside = format!("{file}:9:1");
+        let refused = print(&["--at", &outside]).expect_err("a line the file lacks");
+        assert!(
+            refused.contains("selected position"),
+            "the selector is refused, not matched against nothing: {refused}"
+        );
     }
 
     #[test]
@@ -523,6 +865,50 @@ mod tests {
             "build_projects should contain the positional path"
         );
         assert_eq!(cli.build_projects[0].to_str().unwrap(), "tsconfig.app.json");
+    }
+
+    /// `tsc -b` reads a flag after its roots as a flag (`tsc -b tsconfig.json
+    /// --verbose`), so a flag after the build roots is never another root.
+    #[test]
+    fn cli_build_flags_after_the_roots_are_flags() {
+        let cli = Cli::try_parse_from([
+            "verter-tsc",
+            "-b",
+            "tsconfig.build.json",
+            "packages/simulation",
+            "apps/web",
+            "--tsgo-bin",
+            "tools/tsgo/lib/tsc",
+        ])
+        .expect("should parse");
+        assert!(cli.build);
+        assert_eq!(
+            cli.build_projects,
+            [
+                PathBuf::from("tsconfig.build.json"),
+                PathBuf::from("packages/simulation"),
+                PathBuf::from("apps/web"),
+            ]
+        );
+        assert_eq!(cli.tsgo_bin, Some(PathBuf::from("tools/tsgo/lib/tsc")));
+
+        let cli = Cli::try_parse_from(["verter-tsc", "-b", "apps/web", "--noEmit", "apps/admin"])
+            .expect("should parse");
+        assert!(cli.no_emit);
+        assert_eq!(
+            cli.build_projects,
+            [PathBuf::from("apps/web"), PathBuf::from("apps/admin")]
+        );
+    }
+
+    /// An unknown flag after the roots is an argument error, as `tsc -b` makes
+    /// it, never a root named after the flag.
+    #[test]
+    fn cli_build_rejects_an_unknown_flag_after_the_roots() {
+        let error = Cli::try_parse_from(["verter-tsc", "-b", "apps/web", "--no-such-flag"])
+            .err()
+            .expect("an unknown flag must not parse as a root");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
     /// The binary runs on the allocator `verter_alloc` selects for it: mimalloc

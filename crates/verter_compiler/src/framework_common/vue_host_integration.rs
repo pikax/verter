@@ -15,34 +15,44 @@
 //! refusal, never a fallback onto another lane or framework.
 
 use std::sync::Arc;
-use std::sync::OnceLock;
 
+use verter_identity::encoding::CanonicalDigest;
 use verter_language::{FrameworkAdapterId, LanguageId, ParseKey};
 
+use crate::compile_request::demand::{
+    close_demand, CompileAdmission, Coverage, DemandSet, FactFamilies, FactFamily, InputDemand,
+    ParseAdmission, SemanticAdmission,
+};
+use crate::compile_request::identity::SemanticAdmissionBasis;
 use crate::compile_request::{
     unroutable_host_request_axis, AnalysisProductRequest, CompileProduct, CompileRequest,
-    CompileRequestError, FrameworkCompileRequest, ProductKind, RuntimeProductRequest,
-    UnroutableHostRequestAxis, VueOption, VueOptionAttempt,
+    CompileRequestError, FrameworkCompileRequest, ProductKind, ResolvedVueBackend,
+    RuntimeProductRequest, UnroutableHostRequestAxis, VueOption, VueOptionAttempt,
 };
-use crate::standalone::registered_runtime_for;
+use crate::framework::vue::assembly::VueArtifactSet;
+use crate::framework::vue::plan::vue_demand_seeds;
 
 use super::capability::{
-    FrameworkHostIntegrationBackend, HostEpoch, NativeHostEpoch, Present, ProductExecutionGrant,
+    FrameworkHostIntegrationBackend, NativeHostEpoch, Present, ProductExecutionGrant,
     ProductExecutionGrants,
 };
 use super::carrier_compiler::{
     CarrierCompileOutcome, CompileUnsupported, IdeOutput, RuntimeCompileOptions,
     RuntimeCompileOutput, RuntimeDiagnostic,
 };
+use super::carrier_registry::RegisteredBackend;
 use super::catalog::{
-    CatalogCapability, CatalogIdentity, CatalogRow, HostCap, ImmutableCapabilityCatalog,
+    CatalogCapability, CatalogRows, CatalogSnapshot, HostCap, ProductCapability,
     TypedCapabilityRegistration,
 };
 use super::registered_carrier_projection::{
-    registered_projection_for, registered_semantic_for, TemplateFactsProduct,
+    vue_projection_row, vue_semantic_row, TemplateFactsProduct,
 };
-use super::vue_bridge::{vue_carrier_bundle, VueCarrierCompiler};
-use super::vue_carrier_frontend::{VueCarrierFrontend, VueParseAdmission, VueSfcV3};
+use super::vue_bundle::vue_carrier_bundle;
+use super::vue_carrier_frontend::{
+    vue_carrier_frontend_registration, VueCarrierFrontend, VueParseAdmission, VueSfcV3,
+};
+use super::vue_runtime_backend::vue_runtime_backend_registration;
 use super::vue_semantic_authority::{VueSemanticAdmission, VueSemanticAuthority};
 use super::FrameworkParseArtifact;
 
@@ -247,14 +257,17 @@ static_assertions::assert_not_impl_any!(
 
 /// The sole Vue compile-admission token for the native host epoch:
 /// the admitted demand, the one canonical request, the exact parse
-/// binding, and the composed parse + semantic admissions. It is not a
-/// capability or service bag — execution re-selects capabilities from the
-/// immutable catalog.
+/// binding, the composed parse + semantic admissions, and the request's
+/// closed capability demand with its coverage. It is not a capability or
+/// service bag — execution re-selects capabilities from the immutable
+/// catalog.
 #[derive(Debug)]
 pub struct VueCompileAdmission {
     demand: VueAdmittedDemand,
     request: CompileRequest,
     parse_key: Arc<ParseKey>,
+    admission: CompileAdmission,
+    backend: Result<ResolvedVueBackend, CompileRequestError>,
     _parse: VueParseAdmission,
     _semantic: VueSemanticAdmission,
 }
@@ -270,6 +283,35 @@ impl VueCompileAdmission {
     #[must_use]
     pub fn request(&self) -> &CompileRequest {
         &self.request
+    }
+
+    /// The request's closed capability demand: fixed at issuance, so
+    /// nothing may add to it once execution starts.
+    #[must_use]
+    pub fn demand_set(&self) -> &DemandSet {
+        self.admission.demand()
+    }
+
+    /// How completely the parse and semantic evidence cover
+    /// [`Self::demand_set`]. Only [`Coverage::Complete`] proves every
+    /// demanded fact family over an error-free parse.
+    #[must_use]
+    pub fn coverage(&self) -> Coverage {
+        self.admission.coverage()
+    }
+
+    /// The backend the request resolved to against the parsed component,
+    /// or why it does not resolve (execution refuses such a request).
+    pub fn backend(&self) -> Result<ResolvedVueBackend, &CompileRequestError> {
+        self.backend.as_ref().copied()
+    }
+
+    pub(crate) fn parse_key(&self) -> &ParseKey {
+        &self.parse_key
+    }
+
+    pub(crate) fn compile_admission(&self) -> &CompileAdmission {
+        &self.admission
     }
 
     /// The admitted product set, in request order.
@@ -399,6 +441,10 @@ pub enum VueHostCompileRefusal {
         /// Non-fatal diagnostics collected before the refusal.
         diagnostics: Vec<RuntimeDiagnostic>,
     },
+    /// The compile needs inputs the host must supply first, such as a style
+    /// block at a stage only an external tool produces. Nothing publishes;
+    /// the same request resumes once every listed input is supplied.
+    NeedInputs(Vec<InputDemand>),
 }
 
 /// Per-product publication payloads of one admitted multi-product compile.
@@ -408,6 +454,7 @@ pub enum VueHostCompileRefusal {
 pub struct VueHostCompiledProducts {
     admitted: Vec<ProductKind>,
     bundle: RuntimeCompileOutput,
+    artifact_set: Option<VueArtifactSet>,
 }
 
 impl VueHostCompiledProducts {
@@ -457,6 +504,13 @@ impl VueHostCompiledProducts {
         &self.bundle.diagnostics
     }
 
+    /// The complete artifact set of the admitted runtime products, present
+    /// exactly when the compile published one.
+    #[must_use]
+    pub fn artifact_set(&self) -> Option<&VueArtifactSet> {
+        self.artifact_set.as_ref()
+    }
+
     /// Wrap an already-produced runtime bundle as an admitted product.
     /// Test/harness constructor for publication-refusal coverage.
     #[cfg(any(test, feature = "test-support"))]
@@ -464,6 +518,7 @@ impl VueHostCompiledProducts {
         Self {
             admitted: vec![kind],
             bundle,
+            artifact_set: None,
         }
     }
 }
@@ -476,6 +531,7 @@ impl VueHostCompiledProducts {
 #[derive(Debug)]
 pub struct VueHostRenderedMain {
     bundle: RuntimeCompileOutput,
+    artifact_set: Option<VueArtifactSet>,
 }
 
 impl VueHostRenderedMain {
@@ -484,19 +540,26 @@ impl VueHostRenderedMain {
     pub fn runtime_bundle(&self) -> &RuntimeCompileOutput {
         &self.bundle
     }
+
+    /// The complete artifact set of the rendered module, when the compile
+    /// published one. See [`VueHostCompiledProducts::artifact_set`].
+    #[must_use]
+    pub fn artifact_set(&self) -> Option<&VueArtifactSet> {
+        self.artifact_set.as_ref()
+    }
 }
 
 impl VueHostIntegrationBackend {
     /// Adapter this backend answers to.
     #[must_use]
     pub fn adapter_id(&self) -> FrameworkAdapterId {
-        VueCarrierCompiler.adapter_id()
+        VueCarrierFrontend.adapter_id()
     }
 
     /// Carrier language this backend integrates.
     #[must_use]
     pub fn carrier_language_id(&self) -> LanguageId {
-        VueCarrierCompiler.carrier_language_id()
+        VueCarrierFrontend.carrier_language_id()
     }
 
     /// Compose the parse + semantic admissions over the artifact — the
@@ -527,6 +590,7 @@ impl VueHostIntegrationBackend {
         hmr_strategy: crate::compile_request::RuntimeHmrStrategy,
         ssr_module_id: Option<String>,
         emit_ssr_module_registration: bool,
+        artifact: &FrameworkParseArtifact,
         parse: VueParseAdmission,
         semantic: VueSemanticAdmission,
     ) -> Result<VueCompileAdmission, VueHostAdmissionRefusal> {
@@ -544,7 +608,7 @@ impl VueHostIntegrationBackend {
         )
         .map_err(VueHostAdmissionRefusal::RequestConstructionRefused)?
         .with_host_assembly_axes(ssr_module_id, hmr_strategy, emit_ssr_module_registration);
-        self.issue_admitted(demand, request, parse, semantic)
+        self.issue_admitted(demand, request, artifact, parse, semantic)
     }
 
     /// The one issuance tail every entry point shares: producibility
@@ -558,6 +622,7 @@ impl VueHostIntegrationBackend {
         &self,
         demand: VueAdmittedDemand,
         request: CompileRequest,
+        artifact: &FrameworkParseArtifact,
         parse: VueParseAdmission,
         semantic: VueSemanticAdmission,
     ) -> Result<VueCompileAdmission, VueHostAdmissionRefusal> {
@@ -572,12 +637,18 @@ impl VueHostIntegrationBackend {
         refuse_unproducible_products(request.products(), vue.ssr)?;
         refuse_unroutable_axes(&request)?;
         refuse_unproducible_vue_options(vue)?;
+        let parsed = VueCarrierFrontend
+            .parsed_sfc(artifact)
+            .ok_or(VueHostAdmissionRefusal::NotAVueParse)?;
+        let (admission, backend) = admit_demand(&request, artifact, parsed);
         Ok(VueCompileAdmission {
             demand,
             request,
             // The binding is the parse admission's own witnessed key —
             // the exact identity `admit_registered` issued over.
             parse_key: Arc::clone(parse.parse_key()),
+            admission,
+            backend,
             _parse: parse,
             _semantic: semantic,
         })
@@ -591,32 +662,19 @@ impl VueHostIntegrationBackend {
         products: &[CompileProduct],
     ) -> Result<(), VueHostAdmissionRefusal> {
         for product in products {
-            let required = match product.kind() {
-                ProductKind::RuntimeClient | ProductKind::RuntimeServer => {
-                    registered_runtime_for(artifact.adapter_id(), artifact.epoch())
-                        .is_some()
-                        .then_some(())
-                        .ok_or(CatalogCapability::Runtime)
-                }
-                ProductKind::IdeCompanion => {
-                    registered_projection_for(artifact.adapter_id(), artifact.epoch())
-                        .is_some()
-                        .then_some(())
-                        .ok_or(CatalogCapability::Projection)
-                }
-                ProductKind::Analysis => {
-                    registered_semantic_for(artifact.adapter_id(), artifact.epoch())
-                        .is_some()
-                        .then_some(())
-                        .ok_or(CatalogCapability::Semantic)
-                }
-                kind @ (ProductKind::PublicApi | ProductKind::Declarations) => {
-                    return Err(VueHostAdmissionRefusal::UnsupportedProduct(kind));
-                }
-            };
-            if let Err(capability) = required {
+            let kind = product.kind();
+            if matches!(kind, ProductKind::PublicApi | ProductKind::Declarations) {
+                return Err(VueHostAdmissionRefusal::UnsupportedProduct(kind));
+            }
+            if let ProductCapability::Unsupported(capability) = CatalogSnapshot::built_in()
+                .product_capability(
+                    artifact.carrier_profile(),
+                    artifact.framework_profile(),
+                    kind,
+                )
+            {
                 return Err(VueHostAdmissionRefusal::CapabilityUnavailable {
-                    product: product.kind(),
+                    product: kind,
                     capability,
                 });
             }
@@ -644,7 +702,11 @@ impl VueHostIntegrationBackend {
         }
         let admitted = admission.admitted_products();
         let bundle = self.execute(admission, artifact, inputs, alloc)?;
-        Ok(VueHostCompiledProducts { admitted, bundle })
+        Ok(VueHostCompiledProducts {
+            admitted,
+            bundle,
+            artifact_set: None,
+        })
     }
 
     /// Compile a runtime-render admission: the render-only handoff for
@@ -669,7 +731,10 @@ impl VueHostIntegrationBackend {
         // already merged its producer diagnostics into the bundle's
         // channel; the fact payload never publishes on the render handoff.
         bundle.template_data = None;
-        Ok(VueHostRenderedMain { bundle })
+        Ok(VueHostRenderedMain {
+            bundle,
+            artifact_set: None,
+        })
     }
 
     /// The one execution path both entry points share: verify the exact
@@ -769,6 +834,7 @@ impl FrameworkHostIntegrationBackend<VueSfcV3, NativeHostEpoch> for VueHostInteg
             demand.hmr_strategy,
             demand.ssr_module_id,
             demand.emit_ssr_module_registration,
+            artifact,
             parse,
             semantic,
         )
@@ -782,14 +848,21 @@ impl FrameworkHostIntegrationBackend<VueSfcV3, NativeHostEpoch> for VueHostInteg
         let (parse, semantic) = self.compose_admissions(artifact)?;
         // Demand-specific validation: the render lane requires ONLY the
         // runtime capability — projection is never consulted.
-        if registered_runtime_for(artifact.adapter_id(), artifact.epoch()).is_none() {
+        let runtime_kind = if demand.vue_options.ssr {
+            ProductKind::RuntimeServer
+        } else {
+            ProductKind::RuntimeClient
+        };
+        if let ProductCapability::Unsupported(capability) = CatalogSnapshot::built_in()
+            .product_capability(
+                artifact.carrier_profile(),
+                artifact.framework_profile(),
+                runtime_kind,
+            )
+        {
             return Err(VueHostAdmissionRefusal::CapabilityUnavailable {
-                product: if demand.vue_options.ssr {
-                    ProductKind::RuntimeServer
-                } else {
-                    ProductKind::RuntimeClient
-                },
-                capability: CatalogCapability::Runtime,
+                product: runtime_kind,
+                capability,
             });
         }
         let mut products = vec![if demand.vue_options.ssr {
@@ -818,6 +891,7 @@ impl FrameworkHostIntegrationBackend<VueSfcV3, NativeHostEpoch> for VueHostInteg
             demand.hmr_strategy,
             demand.ssr_module_id,
             demand.emit_ssr_module_registration,
+            artifact,
             parse,
             semantic,
         )
@@ -843,10 +917,58 @@ impl FrameworkHostIntegrationBackend<VueSfcV3, NativeHostEpoch> for VueHostInteg
         self.issue_admitted(
             VueAdmittedDemand::HostMultiProduct,
             request,
+            artifact,
             parse,
             semantic,
         )
     }
+}
+
+/// The fact families the registered Vue semantic authority answers.
+const VUE_SEMANTIC_FAMILIES: FactFamilies = FactFamilies::empty()
+    .with(FactFamily::Bindings)
+    .with(FactFamily::Imports)
+    .with(FactFamily::Macros)
+    .with(FactFamily::Template)
+    .with(FactFamily::Reactivity)
+    .with(FactFamily::Dependencies);
+
+/// Close the admitted request's capability demand over the parsed
+/// component, at the coverage its parse and semantic evidence earn, with
+/// the backend it resolved to. A request whose backend does not resolve
+/// against the parse demands nothing and is refused coverage: its
+/// execution refuses it.
+fn admit_demand(
+    request: &CompileRequest,
+    artifact: &FrameworkParseArtifact,
+    parsed: &verter_parser::parser::types::ParsedSfc,
+) -> (
+    CompileAdmission,
+    Result<ResolvedVueBackend, CompileRequestError>,
+) {
+    // The whole carrier is the demanded region.
+    let identity = artifact.inventory().artifact_identity_token();
+    let regions = [CanonicalDigest::of_bytes(identity.as_bytes())];
+    let basis = SemanticAdmissionBasis::from_parts(&regions, &[], &[]);
+    let backend = match request.resolve_vue_backend(parsed.is_vapor()) {
+        Ok(backend) => backend,
+        Err(refusal) => return (CompileAdmission::refused(basis), Err(refusal)),
+    };
+    let seeds = vue_demand_seeds(
+        request,
+        backend,
+        parsed.template_ast().is_some(),
+        parsed.script().is_some() || parsed.script_setup().is_some(),
+        u32::try_from(parsed.style_nodes().len()).unwrap_or(u32::MAX),
+    );
+    let parse = if parsed.has_errors() {
+        ParseAdmission::recovered()
+    } else {
+        ParseAdmission::complete()
+    };
+    let semantic = SemanticAdmission::issued(VUE_SEMANTIC_FAMILIES, Coverage::Complete);
+    let admission = CompileAdmission::admit(close_demand(&seeds), &parse, &semantic, basis);
+    (admission, Ok(backend))
 }
 
 /// Reads the framework-neutral options off the ADMITTED request — the
@@ -1081,74 +1203,34 @@ pub fn vue_host_integration_registration(
         VueHostIntegrationBackend::new().carrier_language_id(),
         Present(VueHostIntegrationBackend::new()),
     )
+    .expect("the built-in Vue profile manifest is admitted")
 }
 
-/// Installed host-integration row stored in the immutable host catalog.
-///
-/// The payload is the SAME registered backend value the typed
-/// [`super::capability::FrameworkHostIntegrationBackend`] row carries —
-/// the closed set of host-integration backends, one catalog for every
-/// framework's row (mirrors the installed runtime-backend sum).
-#[derive(Debug, PartialEq, Eq)]
-pub enum InstalledHostIntegration {
-    /// Vue host-integration backend (the registered instance).
-    Vue(&'static VueHostIntegrationBackend),
-    /// Svelte host-integration backend (the registered instance).
-    Svelte(&'static super::svelte_host_integration::SvelteHostIntegrationBackend),
+impl RegisteredBackend for VueHostIntegrationBackend {
+    fn registered() -> &'static Self {
+        VueHostIntegrationBackend::registered()
+    }
 }
 
-/// Frozen host-integration catalog. Built once from the host-integration
-/// registration constructors; no insert after.
-#[must_use]
-pub fn built_in_host_integration_catalog(
-) -> &'static ImmutableCapabilityCatalog<(), (), (), (), InstalledHostIntegration> {
-    static CATALOG: OnceLock<ImmutableCapabilityCatalog<(), (), (), (), InstalledHostIntegration>> =
-        OnceLock::new();
-    CATALOG.get_or_init(|| {
-        ImmutableCapabilityCatalog::try_from_rows([
-            CatalogRow::from(vue_host_integration_registration().map_host_integration(|_| {
-                InstalledHostIntegration::Vue(VueHostIntegrationBackend::registered())
-            })),
-            CatalogRow::from(
-                super::svelte_host_integration::svelte_host_integration_registration()
-                    .map_host_integration(|_| {
-                        InstalledHostIntegration::Svelte(
-                            super::svelte_host_integration::SvelteHostIntegrationBackend::registered(),
-                        )
-                    }),
-            ),
-        ])
-        .expect("the built-in Vue and Svelte host-integration identities are unique")
-    })
-}
-
-/// Catalog lookup for a registered host-integration backend by adapter ×
-/// framework epoch × host epoch, returning the matched row's identity
-/// beside the installed backend so a consumer carries single-catalog
-/// identity and audit attribution. Unknown or mismatched identity returns
-/// `None` — no framework fallback.
-#[must_use]
-pub fn registered_host_integration_for<HostE: HostEpoch>(
-    adapter_id: &FrameworkAdapterId,
-    epoch: &super::capability::FrameworkEpochId,
-) -> Option<(&'static CatalogIdentity, &'static InstalledHostIntegration)> {
-    built_in_host_integration_catalog().iter().find_map(|row| {
-        let identity = row.identity();
-        (identity.capability() == CatalogCapability::HostIntegration
-            && identity.adapter_id() == adapter_id
-            && identity.epoch() == epoch
-            && identity
-                .host_epoch()
-                .is_some_and(|host| host.as_str() == HostE::ID))
-        .then(|| row.host_integration().map(|backend| (identity, backend)))
-        .flatten()
-    })
+/// The Vue carrier's catalog rows: its frontend, semantic authority and
+/// projection backend, and its runtime plus native-host compiler backend.
+pub fn vue_catalog_rows(
+    rows: &mut CatalogRows,
+) -> Result<(), verter_identity::successor::ReleaseDescriptorError> {
+    rows.carrier(vue_carrier_frontend_registration());
+    rows.semantic(vue_semantic_row());
+    rows.projection(vue_projection_row());
+    rows.compiler_backend(
+        vue_runtime_backend_registration(),
+        vue_host_integration_registration(),
+    );
+    Ok(())
 }
 
 #[cfg(test)]
 thread_local! {
     /// Per-thread count of host-backend executions, so tests can prove
-    /// the generic production compile route never consults this backend.
+    /// one admission drives exactly one execution.
     static HOST_BACKEND_EXECUTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -1164,21 +1246,27 @@ fn record_host_backend_execution() {
 
 #[cfg(test)]
 mod tests {
-    use super::super::registered_carrier_projection::{
-        parse_registered_source_for_tests, projection_catalog_consult_count,
-        take_projection_producer_invocations, take_template_facts_producer_invocations,
+    use super::super::carrier_registry::{
+        take_registry_dispatches, CarrierCompilerBackendRegistry,
     };
+    use super::super::registered_carrier_projection::{
+        parse_registered_source_for_tests, take_projection_producer_invocations,
+        take_template_facts_producer_invocations,
+    };
+    use super::super::vue_runtime_backend::VueRuntimeBackend;
     use super::super::HostEpochId;
     use super::*;
+    use crate::compile_request::demand::{Capability, StageKeys, TargetKind};
     use crate::compile_request::{IdeProductRequest, VueBackendRequest};
+    use crate::framework_common::capability::FrameworkEpoch;
     use crate::standalone::runtime_backend_delegation_count;
-    use verter_language::carrier_grammar::CarrierGrammarConfig;
     use verter_language::FileLanguage;
 
     fn vue_artifact(source: &str) -> Arc<FrameworkParseArtifact> {
         parse_registered_source_for_tests(
             FileLanguage::vue(),
-            CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).unwrap(),
+            crate::framework_common::vue_grammar_config("{{", "}}", std::iter::empty::<&str>())
+                .unwrap(),
             source,
         )
     }
@@ -1201,32 +1289,34 @@ mod tests {
     }
 
     #[test]
-    fn host_integration_catalog_registers_the_vue_native_row() {
-        let catalog = built_in_host_integration_catalog();
-        let identity = catalog
-            .iter()
-            .map(|row| row.identity())
-            .find(|identity| identity.adapter_id() == &FrameworkAdapterId::vue())
-            .expect("the catalog holds the Vue host-integration row");
+    fn compiler_backend_registry_registers_the_vue_native_row() {
+        let row = CarrierCompilerBackendRegistry::built_in()
+            .host_integration_for::<NativeHostEpoch>(
+                &crate::framework_common::profile::carrier_profile(&LanguageId::new("vue")),
+                &crate::framework_common::profile::framework_profile(&VueSfcV3::MANIFEST)
+                    .expect("the built-in manifest is admitted"),
+            )
+            .expect("the native Vue host row resolves");
+        let identity = row.host_identity();
         assert_eq!(identity.capability(), CatalogCapability::HostIntegration);
         assert_eq!(identity.adapter_id(), &FrameworkAdapterId::vue());
-        assert_eq!(identity.epoch().as_str(), "vue");
+        assert_eq!(identity.framework_family(), "vue");
         assert_eq!(
             identity.host_epoch(),
-            Some(&HostEpochId::new(NativeHostEpoch::ID))
+            Some(&HostEpochId::from_type::<NativeHostEpoch>())
         );
-        let (row_identity, installed) = registered_host_integration_for::<NativeHostEpoch>(
-            &FrameworkAdapterId::vue(),
-            identity.epoch(),
-        )
-        .expect("the native Vue host row resolves");
-        assert_eq!(
-            row_identity, identity,
-            "the lookup returns the matched row's own identity"
+        assert_eq!(row.identity().capability(), CatalogCapability::Runtime);
+        assert!(
+            row.native_host::<VueHostIntegrationBackend>()
+                .is_some_and(|backend| std::ptr::eq(
+                    backend,
+                    VueHostIntegrationBackend::registered()
+                )),
+            "the row hands out the registered Vue host backend"
         );
         assert!(
-            matches!(installed, InstalledHostIntegration::Vue(_)),
-            "the installed payload is the Vue arm of the one host catalog"
+            row.runtime::<VueRuntimeBackend>().is_some(),
+            "the same row carries the Vue runtime backend"
         );
     }
 
@@ -1281,7 +1371,7 @@ mod tests {
     #[test]
     fn runtime_render_admission_is_runtime_only_and_never_consults_projection() {
         let artifact = vue_artifact(SFC);
-        let before = projection_catalog_consult_count();
+        let _ = take_registry_dispatches();
         let admission = VueHostIntegrationBackend::new()
             .admit_runtime_render(&artifact, VueHostRuntimeRenderDemand::default())
             .expect("a Vue parse with a registered runtime backend admits");
@@ -1292,8 +1382,8 @@ mod tests {
             "the backend constructs the runtime-only product set itself"
         );
         assert_eq!(
-            projection_catalog_consult_count(),
-            before,
+            take_registry_dispatches().projection,
+            0,
             "a runtime-render demand must not require projection capability"
         );
 
@@ -1302,7 +1392,7 @@ mod tests {
         let _ = VueHostIntegrationBackend::new()
             .admit_host_products(&artifact, multi_demand())
             .expect("multi-product admits");
-        assert_eq!(projection_catalog_consult_count(), before + 1);
+        assert_eq!(take_registry_dispatches().projection, 1);
     }
 
     #[test]
@@ -1653,7 +1743,7 @@ mod tests {
     fn admission_is_issued_only_over_a_vue_parse() {
         let foreign = parse_registered_source_for_tests(
             FileLanguage::svelte(),
-            CarrierGrammarConfig::Svelte,
+            crate::svelte::svelte_grammar_config(),
             "<p>a</p>",
         );
         let refusal = VueHostIntegrationBackend::new()
@@ -1689,6 +1779,99 @@ mod tests {
                 CompileRequestError::SsrVaporBackendUnsupported
             )
         );
+    }
+
+    #[test]
+    fn an_admission_closes_its_request_demand() {
+        let backend = VueHostIntegrationBackend::new();
+        let artifact = vue_artifact(SFC);
+        let admission = backend
+            .admit_host_products(&artifact, multi_demand())
+            .expect("admits");
+        let client_tree = [(ProductKind::RuntimeClient, TargetKind::ClientTree)];
+        assert_eq!(admission.demand_set().targets(), client_tree);
+        assert!(admission.demand_set().contains(Capability::ParseTemplate));
+        assert_eq!(admission.coverage(), Coverage::Complete);
+        let again = backend
+            .admit_host_products(&artifact, multi_demand())
+            .expect("admits");
+        let (keys, same) = (StageKeys::derive(&admission), StageKeys::derive(&again));
+        assert_eq!(keys.structure, same.structure);
+        assert_eq!(keys.terminal, same.terminal);
+
+        let server = backend
+            .admit_runtime_render(
+                &artifact,
+                VueHostRuntimeRenderDemand {
+                    vue_options: VueOptionAttempt {
+                        ssr: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .expect("admits");
+        let server_target = [(ProductKind::RuntimeServer, TargetKind::Server)];
+        assert_eq!(server.demand_set().targets(), server_target);
+
+        let script_only = vue_artifact("<script setup>const a = 1</script>");
+        let admission = backend
+            .admit_runtime_render(&script_only, VueHostRuntimeRenderDemand::default())
+            .expect("admits");
+        assert!(!admission.demand_set().contains(Capability::ParseTemplate));
+    }
+
+    #[test]
+    fn the_source_vapor_marker_demands_the_fine_grained_target() {
+        let artifact = vue_artifact("<template vapor><div>{{ a }}</div></template>");
+        let admission = VueHostIntegrationBackend::new()
+            .admit_runtime_render(&artifact, VueHostRuntimeRenderDemand::default())
+            .expect("admits");
+        let fine_grained = [(ProductKind::RuntimeClient, TargetKind::ClientFineGrained)];
+        assert_eq!(admission.demand_set().targets(), fine_grained);
+        assert_eq!(admission.backend(), Ok(ResolvedVueBackend::Vapor));
+    }
+
+    #[test]
+    fn an_unresolvable_backend_admits_nothing_and_execution_refuses() {
+        let artifact = vue_artifact("<template vapor><div>{{ a }}</div></template>");
+        let server = VueHostRuntimeRenderDemand {
+            vue_options: VueOptionAttempt {
+                ssr: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let admission = VueHostIntegrationBackend::new()
+            .admit_runtime_render(&artifact, server)
+            .expect("the marker is read only after construction");
+        assert_eq!(admission.coverage(), Coverage::Refused);
+        assert!(admission.demand_set().targets().is_empty());
+        assert_eq!(
+            admission.backend(),
+            Err(&CompileRequestError::SsrVaporBackendUnsupported)
+        );
+
+        let alloc = oxc_allocator::Allocator::new();
+        let inputs = VueHostExecutionInputs::default();
+        let refusal = VueHostIntegrationBackend::new()
+            .compile_runtime_render(admission, &artifact, &inputs, &alloc)
+            .expect_err("execution refuses SSR with a vapor component");
+        assert!(matches!(
+            refusal,
+            VueHostCompileRefusal::Unsupported(CompileUnsupported::RequestExecutionRefused(
+                CompileRequestError::SsrVaporBackendUnsupported
+            ))
+        ));
+    }
+
+    #[test]
+    fn a_recovered_parse_admits_at_approximate_coverage() {
+        let artifact = vue_artifact("<template><div>{{ a }}</template>");
+        let admission = VueHostIntegrationBackend::new()
+            .admit_runtime_render(&artifact, VueHostRuntimeRenderDemand::default())
+            .expect("a recovered parse still admits");
+        assert_eq!(admission.coverage(), Coverage::Approximate);
     }
 
     #[test]
@@ -1892,25 +2075,10 @@ mod tests {
     }
 
     #[test]
-    fn generic_compile_route_never_consults_the_host_backend() {
+    fn one_render_admission_executes_the_host_backend_once() {
         let artifact = vue_artifact(SFC);
         let alloc = oxc_allocator::Allocator::new();
         let before = host_backend_execution_count();
-        let outcome = VueCarrierCompiler
-            .compile_bundle(
-                SFC,
-                &artifact,
-                &super::super::RuntimeCompileOptions::default(),
-                &alloc,
-            )
-            .expect("the compatibility route still compiles");
-        assert!(matches!(outcome, CarrierCompileOutcome::Produced(_)));
-        assert_eq!(
-            host_backend_execution_count(),
-            before,
-            "the generic production route must not execute the host backend"
-        );
-
         let admission = VueHostIntegrationBackend::new()
             .admit_runtime_render(&artifact, VueHostRuntimeRenderDemand::default())
             .expect("admits");
@@ -1925,6 +2093,49 @@ mod tests {
             before + 1,
             "the backend entry is what increments the execution count"
         );
+    }
+
+    /// A compile that publishes its runtime products as bundles carries no
+    /// artifact set on either handoff, so no host reads a set the compiler
+    /// did not build.
+    #[test]
+    fn the_new_accessor_is_absent_on_the_current_route() {
+        let artifact = vue_artifact(SFC);
+        let inputs = VueHostExecutionInputs {
+            canonical_id: "/src/Comp.vue".to_string(),
+            want_main: true,
+            has_script: true,
+            has_template: true,
+            ..Default::default()
+        };
+        let backend = VueHostIntegrationBackend::new();
+        let alloc = oxc_allocator::Allocator::new();
+        let admission = backend
+            .admit_host_products(
+                &artifact,
+                VueHostMultiProductDemand {
+                    products: vec![CompileProduct::RuntimeClient(
+                        RuntimeProductRequest::default(),
+                    )],
+                    ..Default::default()
+                },
+            )
+            .expect("admits");
+        let products = backend
+            .compile_host_products(admission, &artifact, &inputs, &alloc)
+            .expect("compiles");
+        assert!(products.runtime_client_bundle().is_some());
+        assert!(products.artifact_set().is_none());
+
+        let alloc = oxc_allocator::Allocator::new();
+        let admission = backend
+            .admit_runtime_render(&artifact, VueHostRuntimeRenderDemand::default())
+            .expect("admits");
+        let rendered = backend
+            .compile_runtime_render(admission, &artifact, &inputs, &alloc)
+            .expect("renders");
+        assert!(rendered.runtime_bundle().main.is_some());
+        assert!(rendered.artifact_set().is_none());
     }
 
     #[test]

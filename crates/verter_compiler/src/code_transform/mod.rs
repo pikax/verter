@@ -37,7 +37,10 @@ mod chunk;
 #[allow(clippy::module_inception)] // CodeTransform struct lives in code_transform module
 mod code_transform;
 mod fallible;
+mod freeze;
+mod mapped;
 mod mapping_product;
+mod recorder;
 mod segmented;
 mod source_map;
 
@@ -64,11 +67,13 @@ pub(crate) use code_transform::{
     reset_code_transform_build_string_call_count, reset_code_transform_construction_count,
     take_code_transform_chunk_visits,
 };
+pub use mapped::MappedTransform;
 // The typed refusal surface of the checked (`try_*`) operations, re-exported
 // alongside `CodeTransform` as this module's public error type (the inner
 // module is private, so this is its only public path).
 #[allow(unused_imports)] // consumed by tests and by out-of-module callers
 pub use fallible::CodeTransformError;
+pub(crate) use freeze::MarkedFreezeError;
 // The dual-surface mapping product. Geometry's owner is the transform that
 // emitted the bytes, so the product is minted here and nowhere else; see
 // `mapping_product`'s module doc for the totality and one-to-many contracts.
@@ -76,13 +81,17 @@ pub use mapping_product::{
     CarrierClass, CarrierRegion, InsertionAnchor, MappingProduct, MappingSpan, ProjectedClass,
     ProjectedRegion,
 };
-pub use source_map::{advance_generated_position, SourceMapOptions};
-// The additive, opt-in segmented-overwrite primitive's plain data carrier.
-// `pub` only because it rides inside otherwise-`pub` types elsewhere in the
-// crate (see `SegmentAnchor`'s own doc) — the OPERATIONS that produce a
-// `SegmentAnchor`-bearing chunk stay crate-private, reserved for the
-// authorized Vue runtime template emitters; see the static call-site guard.
-pub use segmented::SegmentAnchor;
+// Deferred edits belong to this owner: the recorder states edits, the
+// transform resolves them.
+pub use crate::emission::correspondence::advance_generated_position;
+#[cfg(test)]
+pub(crate) use recorder::ReplacementKind;
+pub use recorder::{AnchorBuf, EditRecorder, MappedGeneratedText, MappedSegment, ReservedPrepend};
+pub use source_map::SourceMapOptions;
+// The segmented-overwrite primitive's data carriers. `SegmentAnchor` is a
+// producer's claim; `SegmentedCorrespondence` is that claim after this owner
+// checked it, and has no constructor outside `check_correspondence`.
+pub use segmented::{AnchorKind, SegmentAnchor, SegmentedCorrespondence};
 
 #[cfg(test)]
 mod edit_semantics_tests;

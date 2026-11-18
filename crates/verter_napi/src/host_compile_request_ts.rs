@@ -58,6 +58,7 @@ use verter_protocol::compile_response::{
 
 pub use verter_protocol::js_union::{ArmField, ArmShape, TaggedArm, TaggedUnion};
 
+use crate::block_override_refusal::BlockOverrideRefusalCode;
 use crate::compile_request_response::{
     NapiCompileRequestFailure, NapiCompileRequestsEntry, NapiCompiledProduct,
 };
@@ -285,7 +286,10 @@ pub fn render_host_compile_request_ts() -> String {
             union_of::<NapiRequestedProduct>(NapiRequestedProduct::ts_union(&cfg)),
             union_of::<NapiHostCompileRequest>(NapiHostCompileRequest::ts_union(&cfg)),
         ],
-        |walk| walk.visit::<NapiHostCompileRequest>(),
+        |walk| {
+            walk.visit::<NapiHostCompileRequest>();
+            walk.visit::<BlockOverrideRefusalCode>();
+        },
     )
 }
 

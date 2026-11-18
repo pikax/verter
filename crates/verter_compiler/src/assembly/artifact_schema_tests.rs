@@ -117,7 +117,7 @@ fn artifact_identity_separates_language_and_slot_and_serialization_preserves_eac
             .unwrap()
             .to_json()
             .unwrap(),
-        r#"{"artifacts":[],"coordinates":"utf8-bytes","customBlocks":[],"schemaVersion":1,"sourceUnits":[]}"#
+        r#"{"artifacts":[],"coordinates":"utf8-bytes","customBlocks":[],"schemaVersion":2,"sourceUnits":[]}"#
     );
 }
 
@@ -205,7 +205,7 @@ fn terminal_order_is_independent_of_artifact_source_map_and_relation_insertion()
         "stored artifact order is the caller-supplied contribution order"
     );
     let wire: serde_json::Value = serde_json::from_str(&expected).unwrap();
-    assert_eq!(wire["schemaVersion"], 1);
+    assert_eq!(wire["schemaVersion"], 2);
     assert_eq!(wire["coordinates"], "utf8-bytes");
     let ide_wire = wire["artifacts"]
         .as_array()
@@ -516,4 +516,289 @@ fn staging_normalizes_an_empty_source_map_to_absent() {
             .expect("a produced root stages");
     assert_eq!(staged.source_map(), None);
     assert_eq!(staged.lang(), "js");
+}
+
+fn role_artifact(
+    unit: &SourceUnit,
+    name: &str,
+    language: &str,
+    role: super::artifact_graph::ArtifactRole,
+) -> CompileArtifact {
+    CompileArtifact::new(
+        unit.id().clone(),
+        crate::compile_request::ProductKind::RuntimeClient,
+        LanguageId::new(language),
+        name,
+        ArtifactProvenance {
+            input_basis: InputBasisId::from_canonical(&Tag("inputs")),
+            producer: ResultContractId::from_canonical(&Tag("vue")),
+            inputs: BTreeSet::from([unit.id().clone()]),
+        },
+        ArtifactContent::Available(format!("/* {name} */").into()),
+    )
+    .with_role(role)
+}
+
+fn style_facts(index: u32) -> super::artifact_graph::StyleArtifactFacts {
+    super::artifact_graph::StyleArtifactFacts {
+        index,
+        scoped: index == 0,
+        module: None,
+        lang: "css".to_string(),
+        stage: Some(verter_css_syntax::StyleStage::FrameworkRewritten),
+        needs_external_stage: false,
+    }
+}
+
+fn owned_by(
+    mut artifact: CompileArtifact,
+    kind: ArtifactRelationKind,
+    owner: &CompileArtifact,
+) -> CompileArtifact {
+    artifact.relations.insert(ArtifactRelation {
+        kind,
+        target: owner.id().clone(),
+    });
+    artifact
+}
+
+fn style_of(unit: &SourceUnit, module: &CompileArtifact, index: u32) -> CompileArtifact {
+    use super::artifact_graph::ArtifactRole;
+    owned_by(
+        role_artifact(unit, &format!("style/{index}"), "css", ArtifactRole::Style)
+            .with_style(style_facts(index)),
+        ArtifactRelationKind::StyleOf,
+        module,
+    )
+}
+
+fn metadata_of(unit: &SourceUnit, module: &CompileArtifact, name: &str) -> CompileArtifact {
+    use super::artifact_graph::ArtifactRole;
+    owned_by(
+        role_artifact(unit, name, "json", ArtifactRole::Metadata),
+        ArtifactRelationKind::MetadataOf,
+        module,
+    )
+}
+
+#[test]
+fn a_module_finds_its_styles_in_block_order() {
+    use super::artifact_graph::{ArtifactGraph, ArtifactRole};
+    use crate::compile_request::ProductKind;
+    let s = source("main", "one");
+    let module = role_artifact(&s.unit, "main", "javascript", ArtifactRole::Module);
+    let second = style_of(&s.unit, &module, 1);
+    let first = style_of(&s.unit, &module, 0);
+    let meta = metadata_of(&s.unit, &module, "meta");
+    let set = CompileArtifactSet::new(
+        vec![s],
+        vec![second.clone(), module.clone(), first.clone(), meta.clone()],
+    )
+    .unwrap();
+
+    assert_eq!(
+        set.module(ProductKind::RuntimeClient).map(|a| a.id()),
+        Some(module.id())
+    );
+    assert!(set.module(ProductKind::RuntimeServer).is_none());
+    assert_eq!(
+        set.styles_of(module.id())
+            .into_iter()
+            .map(|a| a.id())
+            .collect::<Vec<_>>(),
+        vec![first.id(), second.id()],
+        "styles come back by block index, not insertion order"
+    );
+    assert_eq!(
+        set.metadata_of(module.id()).map(|a| a.id()),
+        Some(meta.id())
+    );
+    assert_eq!(set.role_of(first.id()), Some(ArtifactRole::Style));
+    assert_eq!(set.role_of(meta.id()), Some(ArtifactRole::Metadata));
+    assert_eq!(set.role_of(module.id()), Some(ArtifactRole::Module));
+    assert_eq!(set.style_facts(second.id()).map(|f| f.index), Some(1));
+    assert!(set.style_facts(module.id()).is_none());
+    assert!(set.styles_of(first.id()).is_empty());
+    assert!(set.metadata_of(meta.id()).is_none());
+}
+
+#[test]
+fn a_style_without_facts_is_refused() {
+    use super::artifact_graph::ArtifactRole;
+    let s = source("main", "one");
+    let module = role_artifact(&s.unit, "main", "javascript", ArtifactRole::Module);
+    let bare = owned_by(
+        role_artifact(&s.unit, "style/0", "css", ArtifactRole::Style),
+        ArtifactRelationKind::StyleOf,
+        &module,
+    );
+    assert_eq!(
+        CompileArtifactSet::new(vec![s], vec![module, bare]).unwrap_err(),
+        ArtifactSchemaError::StyleFactsMismatch
+    );
+}
+
+#[test]
+fn a_style_relation_to_a_non_module_is_refused() {
+    use super::artifact_graph::ArtifactRole;
+    let s = source("main", "one");
+    let module = role_artifact(&s.unit, "main", "javascript", ArtifactRole::Module);
+    let meta = metadata_of(&s.unit, &module, "meta");
+    let stray = style_of(&s.unit, &meta, 0);
+    assert_eq!(
+        CompileArtifactSet::new(vec![s], vec![module, meta, stray]).unwrap_err(),
+        ArtifactSchemaError::RoleRelationTargetNotModule
+    );
+}
+
+#[test]
+fn a_second_metadata_for_one_module_is_refused() {
+    use super::artifact_graph::ArtifactRole;
+    let s = source("main", "one");
+    let module = role_artifact(&s.unit, "main", "javascript", ArtifactRole::Module);
+    let meta = metadata_of(&s.unit, &module, "meta");
+    let again = metadata_of(&s.unit, &module, "meta/again");
+    assert_eq!(
+        CompileArtifactSet::new(vec![s], vec![module, meta, again]).unwrap_err(),
+        ArtifactSchemaError::DuplicateMetadata
+    );
+}
+
+#[test]
+fn role_relations_belong_to_their_role_and_style_indexes_are_distinct() {
+    use super::artifact_graph::ArtifactRole;
+    use ArtifactSchemaError as E;
+    let s = source("main", "one");
+    let module = role_artifact(&s.unit, "main", "javascript", ArtifactRole::Module);
+    let other = role_artifact(&s.unit, "other", "javascript", ArtifactRole::Module);
+    let with_modules = |extra: Vec<CompileArtifact>| {
+        let mut artifacts = vec![module.clone(), other.clone()];
+        artifacts.extend(extra);
+        CompileArtifactSet::new(vec![s.clone()], artifacts)
+    };
+
+    let module_with_facts = role_artifact(&s.unit, "facts", "javascript", ArtifactRole::Module)
+        .with_style(style_facts(0));
+    assert_eq!(
+        with_modules(vec![module_with_facts]).unwrap_err(),
+        E::StyleFactsMismatch
+    );
+
+    let orphan_style =
+        role_artifact(&s.unit, "style/0", "css", ArtifactRole::Style).with_style(style_facts(0));
+    assert_eq!(
+        with_modules(vec![orphan_style]).unwrap_err(),
+        E::MisplacedRoleRelation
+    );
+
+    let orphan_metadata = role_artifact(&s.unit, "meta", "json", ArtifactRole::Metadata);
+    assert_eq!(
+        with_modules(vec![orphan_metadata]).unwrap_err(),
+        E::MisplacedRoleRelation
+    );
+
+    let two_owners = owned_by(
+        style_of(&s.unit, &module, 0),
+        ArtifactRelationKind::StyleOf,
+        &other,
+    );
+    assert_eq!(
+        with_modules(vec![two_owners]).unwrap_err(),
+        E::MisplacedRoleRelation
+    );
+
+    let module_claiming = owned_by(
+        role_artifact(&s.unit, "facts", "javascript", ArtifactRole::Module),
+        ArtifactRelationKind::MetadataOf,
+        &module,
+    );
+    assert_eq!(
+        with_modules(vec![module_claiming]).unwrap_err(),
+        E::MisplacedRoleRelation
+    );
+
+    let same_index = style_of(&s.unit, &module, 1).with_style(style_facts(0));
+    assert_eq!(
+        with_modules(vec![style_of(&s.unit, &module, 0), same_index]).unwrap_err(),
+        E::DuplicateStyleIndex
+    );
+
+    // The same index under two modules names two distinct blocks.
+    let other_style = owned_by(
+        role_artifact(&s.unit, "other/style/0", "css", ArtifactRole::Style)
+            .with_style(style_facts(0)),
+        ArtifactRelationKind::StyleOf,
+        &other,
+    );
+    assert!(with_modules(vec![style_of(&s.unit, &module, 0), other_style]).is_ok());
+}
+
+#[test]
+fn json_carries_role_and_style_facts() {
+    use super::artifact_graph::{ArtifactRole, StyleArtifactFacts};
+    let s = source("main", "one");
+    let module = role_artifact(&s.unit, "main", "javascript", ArtifactRole::Module);
+    let style = owned_by(
+        role_artifact(&s.unit, "style/0", "scss", ArtifactRole::Style).with_style(
+            StyleArtifactFacts {
+                index: 0,
+                scoped: true,
+                module: Some("classes".to_string()),
+                lang: "scss".to_string(),
+                stage: Some(verter_css_syntax::StyleStage::Authored),
+                needs_external_stage: true,
+            },
+        ),
+        ArtifactRelationKind::StyleOf,
+        &module,
+    );
+    let meta = metadata_of(&s.unit, &module, "meta");
+    let json = CompileArtifactSet::new(vec![s], vec![module, style, meta])
+        .unwrap()
+        .to_json()
+        .unwrap();
+    let wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(wire["schemaVersion"], 2);
+    let by_name = |name: &str| {
+        wire["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    let (module, style, meta) = (by_name("main"), by_name("style/0"), by_name("meta"));
+    assert!(
+        module.get("style").is_none() && meta.get("style").is_none(),
+        "only style artifacts carry style facts on the wire"
+    );
+    let role_fields = |a: &serde_json::Value| {
+        let relations: Vec<_> = a["relations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["kind"].clone(), r["target"] == module["id"]))
+            .collect();
+        let mut fields = serde_json::json!({
+            "role": a["role"],
+            "style": a.get("style"),
+            "relations": relations,
+        });
+        // Key order must not depend on serde_json's preserve_order feature.
+        fields.sort_all_objects();
+        serde_json::to_string(&fields).unwrap()
+    };
+    assert_eq!(
+        role_fields(&module),
+        r#"{"relations":[],"role":"module","style":null}"#
+    );
+    assert_eq!(
+        role_fields(&style),
+        r#"{"relations":[["styleOf",true]],"role":"style","style":{"index":0,"lang":"scss","module":"classes","needsExternalStage":true,"scoped":true}}"#
+    );
+    assert_eq!(
+        role_fields(&meta),
+        r#"{"relations":[["metadataOf",true]],"role":"metadata","style":null}"#
+    );
 }

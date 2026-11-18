@@ -1,21 +1,8 @@
-//! Silent-miss prevention tests for the per-macro projectors.
+//! Silent-miss prevention for macro surface publication.
 //!
-//! Each projector that resolves a macro payload through dispatch
-//! must publish a `MacroExpansionDiagnostics` envelope when
-//! `ResolveMacroPayload` or `ProjectPath` returns `Recursive` or
-//! `Error` — the analysis-wide `macro_expansion_diagnostics` stream
-//! is the consumer-visible signal that the projection failed. A
-//! projector that silently returned `Vec::new()` on
-//! `QueryResult::Error` would publish an empty surface
-//! indistinguishable from a successful empty result, breaking the
-//! contract.
-//!
-//! The tests below construct fixture SFCs whose macro payload
-//! references an undeclared / unimported type. The analyzer parses
-//! the macro and produces a `parsed_type_argument`; the projector
-//! attempts to lower + resolve through dispatch; the dispatch
-//! returns an error; the projector pushes the diagnostic to
-//! `macro_expansion_diagnostics`.
+//! A producer that cannot resolve an authored payload must retain its diagnostic
+//! on the normalized bundle. Component metadata exposes that envelope even when
+//! no members survive, and a warm bundle preserves the same diagnostics.
 
 use std::sync::Arc;
 
@@ -26,11 +13,11 @@ use crate::VerterHost;
 
 #[test]
 fn counted_emit_merge_owns_surface_without_an_enclosing_scope() {
-    use super::projectors::{resolve_payload_surface_with_scope, PayloadSurfaceScope};
-    use verter_session_query::analysis::component_meta::MacroExpansionKind;
+    use verter_type_engine::project_semantic_dispatch::one_level_surface::project_one_level_surface;
     use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     use verter_type_engine::semantic_query::{
-        DeclIdentity, LiteralValue, SemanticNodeData, SurfaceMember, SurfaceView,
+        DeclIdentity, LiteralValue, ProjectionMode, ProjectionReductionContext, SemanticNodeData,
+        SurfaceEntry, SurfaceMember, SurfaceProvenanceContext, SurfaceView,
     };
     use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
 
@@ -84,26 +71,30 @@ fn counted_emit_merge_owns_surface_without_an_enclosing_scope() {
         });
         (payload, graph.root_nodes([payload]).unwrap())
     };
-    let mut diagnostics = Vec::new();
-    let surface = resolve_payload_surface_with_scope(
+    let surface = project_one_level_surface(
+        &host,
         &dispatch,
         payload,
-        0,
-        MacroExpansionKind::DefineEmits,
-        PayloadSurfaceScope::EmitClassMacroObject,
-        &mut diagnostics,
+        Default::default(),
+        ProjectionReductionContext::macro_object_surface(
+            ProjectionMode::Shallow,
+            SurfaceProvenanceContext::Structural,
+        ),
+        None,
     );
     let owner = surface
         .recorded()
         .expect("both branches supply a complete surface");
-    let node = owner.id();
     graph.invalidate_all();
     drop(input_roots);
-    let data = graph.node_data(node).unwrap();
-    let SemanticNodeData::Object(view) = data.as_ref() else {
-        panic!("merged emit surface was reclaimed before consumption: {data:?}");
-    };
-    let members = view.closed().complete_members();
+    let members: Vec<_> = owner
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            SurfaceEntry::Member(member) => Some(member),
+            _ => None,
+        })
+        .collect();
     assert_eq!(members.len(), 2);
     assert_eq!(
         members
@@ -158,7 +149,7 @@ fn build_workspace_host_for_silent_miss(files: &[(&str, &str)]) -> Arc<VerterHos
 }
 
 /// `defineProps<T>()` where T references a type that does not
-/// resolve. The projector must publish a
+/// resolve. The producer must publish a
 /// `MacroExpansionDiagnostics` entry for `DefineProps` rather than
 /// silently returning an empty `Vec`.
 #[test]
@@ -177,10 +168,10 @@ defineProps<MissingImport>()
         .get_component_meta("/workspace/src/Comp.vue")
         .expect("component meta should resolve even with unresolved type");
 
-    // Discriminating assertion #1: the projector did NOT publish a
+    // Discriminating assertion #1: the producer did NOT publish a
     // populated `props` surface for the unresolved type. Some
     // parser-side fields may exist (e.g., from runtime-prop fields
-    // the parser captured), but the projector itself must not have
+    // the parser captured), but the producer itself must not have
     // contributed a surface from the failed resolution.
     let define_props_diags: Vec<_> = meta
         .macro_expansion_diagnostics
@@ -199,7 +190,7 @@ defineProps<MissingImport>()
     // assertion fails on a silent-miss regression.
     assert!(
         !define_props_diags.is_empty(),
-        "project_props must publish a MacroExpansionDiagnostics envelope \
+        "the macro surface producer must publish a MacroExpansionDiagnostics envelope \
          when ResolveMacroPayload or ProjectPath fails — found zero \
          DefineProps diagnostics on {} entries: {:#?}",
         meta.macro_expansion_diagnostics.len(),
@@ -208,7 +199,7 @@ defineProps<MissingImport>()
 }
 
 /// `defineEmits<T>()` where T references a type that does not
-/// resolve. The projector must publish a
+/// resolve. The producer must publish a
 /// `MacroExpansionDiagnostics` entry for `DefineEmits`.
 #[test]
 fn project_emits_unresolved_import_publishes_diagnostic() {
@@ -239,7 +230,7 @@ defineEmits<MissingEmits>()
 
     assert!(
         !define_emits_diags.is_empty(),
-        "project_emits must publish a MacroExpansionDiagnostics envelope \
+        "the macro surface producer must publish a MacroExpansionDiagnostics envelope \
          when ResolveMacroPayload or ProjectPath fails — found zero \
          DefineEmits diagnostics on {} entries: {:#?}",
         meta.macro_expansion_diagnostics.len(),
@@ -248,7 +239,7 @@ defineEmits<MissingEmits>()
 }
 
 /// `defineSlots<T>()` where T references a type that does not
-/// resolve. Either the projector (the projector decomposition §7.5) or the slot-binding
+/// resolve. Either the producer (the producer decomposition §7.5) or the slot-binding
 /// graph synthesis must publish a
 /// `MacroExpansionDiagnostics` entry for `DefineSlots`.
 #[test]
@@ -280,7 +271,7 @@ defineSlots<MissingSlots>()
 
     assert!(
         !define_slots_diags.is_empty(),
-        "project_slots / resolve_slot_bindings_graph_native must publish a \
+        "the macro surface producer and slot bindings must publish a \
          MacroExpansionDiagnostics envelope when ResolveMacroPayload or \
          ProjectPath fails — found zero DefineSlots diagnostics on {} \
          entries: {:#?}",
@@ -294,7 +285,7 @@ defineSlots<MissingSlots>()
 /// arms that resolve are not lost when a sibling arm fails).
 ///
 /// This is the discriminating §7.5 partial-intersection clause:
-/// the projector must NOT abort the entire macro projection when a
+/// the producer must NOT abort the entire macro projection when a
 /// single arm of the intersection fails to resolve. PartA's `a`
 /// prop must survive even though `PartB` cannot be loaded.
 ///
@@ -334,8 +325,50 @@ defineProps<PartA & PartB>()
     let has_a_prop = meta.props.iter().any(|p| p.name == "a");
     assert!(
         has_a_prop,
-        "project_props on `PartA & PartB` must publish PartA's members \
+        "the macro surface producer on `PartA & PartB` must publish PartA's members \
          even when PartB fails to resolve — got props: {:?}",
         meta.props.iter().map(|p| &p.name).collect::<Vec<_>>(),
     );
+}
+
+#[test]
+fn warm_macro_bundle_preserves_surface_diagnostics() {
+    let host = build_workspace_host_for_silent_miss(&[(
+        "/workspace/src/Comp.vue",
+        r#"<script setup lang="ts">
+defineProps<{ value: string } | number>()
+</script>
+<template><div /></template>"#,
+    )]);
+    assert!(host.ensure_loaded("/workspace/src/Comp.vue"));
+    host.ensure_indexed_ready("/workspace/src/Comp.vue")
+        .expect("the unchanged fixture is indexed before the bundle reads");
+    let request = crate::typeinfo::types::VueMacroSurfaceRequest {
+        owner_canonical: Arc::from("/workspace/src/Comp.vue"),
+        macro_index: 0,
+        macro_kind: verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
+        root_identity: [0; 16],
+        level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+    };
+    let cold = host.vue_macro_dtos(&request).expect("macro bundle");
+    assert!(
+        cold.diagnostics.iter().any(|envelope| envelope.diagnostics.iter().any(|diagnostic|
+            diagnostic.reason == verter_session_query::analysis::type_expand::ExpansionStopReason::EmptyUnionArm)),
+        "the non-object union arm carries its producer diagnostic: {:?}", cold.diagnostics
+    );
+    let warm = host
+        .vue_macro_dtos(&request)
+        .expect("unchanged macro bundle");
+    assert_eq!(warm.diagnostics, cold.diagnostics);
+    assert!(
+        Arc::ptr_eq(&cold, &warm),
+        "the second read must hit the stored bundle"
+    );
+    let meta = host
+        .get_component_meta("/workspace/src/Comp.vue")
+        .expect("component meta");
+    assert!(meta
+        .macro_expansion_diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic == &cold.diagnostics[0]));
 }

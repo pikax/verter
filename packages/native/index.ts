@@ -122,6 +122,31 @@ export declare function analyzeStyle(
   options: AnalyzeStyleOptions,
 ): AnalyzeStyleResult;
 
+/**
+ * The host's canonical form of a module id: forward slashes, lower-case
+ * drive letter, no extended-length prefix (`//?/UNC/server/share` keeps its
+ * server and share as `//server/share`), no query and no virtual suffix.
+ */
+export declare function canonicalizeId(raw: string): string;
+
+/**
+ * The host's content token for block code (`sha256:<hex>`): the same
+ * token a block override's content basis is compared against.
+ *
+ * @param code - Block code as a string or Buffer (UTF-8 bytes).
+ */
+/**
+ * A raw request id as the host's id grammar reads it, with no host: the node,
+ * marker, language, `scoped`, raw path and custom block type, or the typed
+ * rejection. No canonical id and no host metadata; `VerterHost.resolve` adds
+ * those.
+ */
+export declare function parseRequestId(
+  raw: string,
+): import("./host-types").HostParsedRequestId | import("./host-types").HostRejectedId;
+
+export declare function hashBlockContent(code: string | Buffer): BlockContentHashToken;
+
 // =============================================================================
 // Runtime-gated deep memory audit (instrumented binding only)
 //
@@ -456,12 +481,18 @@ export type {
   HostScriptImportInfo,
   HostModuleReference,
   HostPreprocessorRequest,
+  HostPreprocessorDiagnostic,
   HostBlockOverrideEntry,
   HostBlockOverrideRequest,
   HostExportSignature,
   HostResolvedExport,
   HostUpdateResult,
   HostResolvedId,
+  HostRequestMarker,
+  HostCarrierExtension,
+  HostIdRejection,
+  HostRejectedId,
+  HostParsedRequestId,
   HostVirtualMeta,
   HostVirtualFileResponse,
   HostVirtualQuery,
@@ -506,6 +537,7 @@ export type {
   HostVueCompileRequest,
   HostSvelteCompileRequest,
   HostCompileRequest,
+  HostBlockOverrideRefusalCode,
 } from "./host-types";
 
 import type {
@@ -513,6 +545,7 @@ import type {
   BlockContentSourceSpaceToken,
   HostBlockContentCapturedEchoFields,
   HostDiagnostic,
+  HostPreprocessorDiagnostic,
 } from "./host-types";
 
 // ---------------------------------------------------------------------------
@@ -536,6 +569,15 @@ export interface NativeBlockOverrideEntry extends HostBlockContentCapturedEchoFi
   /** Source map from the preprocessor, if available. */
   sourceMap?: string;
   sourceMapHash?: BlockContentHashToken;
+  /** Files the preprocessor read to produce this result, e.g. `@import` or `@use` targets. */
+  dependencies?: string[];
+  /** Diagnostics the preprocessor reported for this result. */
+  diagnostics?: HostPreprocessorDiagnostic[];
+  /** The tool that produced this result, e.g. `"sass"`. */
+  processorIdentity?: string;
+  processorVersion?: string;
+  /** A fingerprint of the tool options that produced this result. */
+  configFingerprint?: string;
   suppliedProvenance?: string;
 }
 
@@ -753,6 +795,11 @@ export declare class Workspace {
   isDir(path: string): Promise<boolean>;
   /** Resolve symlinks to real path. Returns null if not found. */
   realpath(path: string): Promise<string | null>;
+  /**
+   * Whether the file belongs to an installed package (a `node_modules`
+   * path the workspace does not own as a linked workspace package).
+   */
+  isPackageBacked(canonicalId: string): boolean;
 
   // ── Directory listing (async) ──
 
@@ -825,7 +872,25 @@ export declare class VerterHost {
     workspace: Workspace,
   ): VerterHost;
 
-  resolve(rawId: string): import("./host-types").HostResolvedId | null;
+  /**
+   * Whether this host reads `path` as a framework carrier: a built-in carrier
+   * extension, or one of the `carrierExtensions` it was built with.
+   */
+  isCarrierSourcePath(path: string): boolean;
+  /**
+   * The bundler id of `node` of a carrier, in `lang` (which may be dotted, as
+   * in `module.css`) when given. The marker comes from the host's metadata
+   * when it holds the carrier, else from the language it classifies the
+   * carrier as.
+   */
+  renderBundlerId(
+    canonicalId: string,
+    node: import("./host-types").HostVirtualNodeKind,
+    lang?: string,
+  ): string;
+  resolve(
+    rawId: string,
+  ): import("./host-types").HostResolvedId | import("./host-types").HostRejectedId;
   upsert(request: HostUpsertRequest): import("./host-types").HostUpdateResult;
   /** Execute one typed request against an already-registered source. */
   compileRequest(
@@ -871,14 +936,27 @@ export declare class VerterHost {
     query: import("./host-types").HostVirtualQuery,
   ): import("./host-types").HostVirtualFileResponse | null;
   listVirtualFiles(canonicalId: string): import("./host-types").HostVirtualNodeKind[];
+  /**
+   * Compute cross-file optimizations over every compiled file: which child
+   * component props are constant across all call sites. Returns JSON with
+   * `constPropOverrides`, `changedFiles` and `diagnostics`; on later calls
+   * `changedFiles` lists only the files whose constness changed.
+   */
+  computeCrossFileOptimizations(): string;
   remove(canonicalOrAlias: string): import("./host-types").HostRemoveResult | null;
   /**
    * Returns the analysis snapshot for a file as a JSON string, or null if the file
    * doesn't exist. When `analysisLevel` is not "full", computes analysis on demand.
    */
   getAnalysis(canonicalOrAlias: string): string | null;
-  /** Returns the registered content-free carrier structure as a JSON string. */
-  getDocumentStructure(canonicalOrAlias: string): string | null;
+  /**
+   * Returns the registered content-free carrier structure as a JSON string.
+   *
+   * @param encoding - unit of every range: `"utf8.v1"` (default, registered
+   *   UTF-8 bytes) or `"utf16.v1"` (JavaScript string offsets). Any other
+   *   tag throws, and so does a range that cannot be converted exactly.
+   */
+  getDocumentStructure(canonicalOrAlias: string, encoding?: "utf8.v1" | "utf16.v1"): string | null;
   /**
    * Returns all exports of a file, following re-export chains to their ultimate source.
    * For barrel files, resolves through chains to return the ultimate source file and name.
@@ -945,7 +1023,9 @@ export declare class VerterHost {
   configureProjects(projects: import("./host-types").HostIdeProjectConfig[]): void;
 
   /**
-   * Resolve an import specifier through the VFS resolution chain.
+   * Resolve an import specifier through the VFS resolution chain, under the
+   * given phase and request kind: a `"type"` request answers the declaration
+   * the workspace pairs with the specifier (`./video.js` → `video.d.ts`).
    *
    * @param phase - "codegen" (default) or "provider"
    * @param kind - "esm" (default), "type", "require", or "src"

@@ -414,6 +414,23 @@ impl NativeFs {
         Ok(())
     }
 
+    /// Create exactly one directory, failing if the path already exists.
+    /// Used to reserve staging directories without sharing another writer's files.
+    pub fn create_dir(&self, path: &str) -> Result<(), VfsError> {
+        std::fs::create_dir(to_os_path(path))?;
+        self.invalidate_realpath_under(path);
+        Ok(())
+    }
+
+    /// Rename a file or directory on the same filesystem. Parent directories
+    /// must already exist; destination replacement follows the OS semantics.
+    pub fn rename(&self, src: &str, dst: &str) -> Result<(), VfsError> {
+        std::fs::rename(to_os_path(src), to_os_path(dst))?;
+        self.invalidate_realpath_under(src);
+        self.invalidate_realpath_under(dst);
+        Ok(())
+    }
+
     /// Delete a file.
     pub fn delete_file(&self, path: &str) -> Result<(), VfsError> {
         let os_path = to_os_path(path);
@@ -1121,5 +1138,42 @@ mod tests {
         fs.copy_file(&src_canonical, &dst_canonical).unwrap();
         let content = fs.read_file(&dst_canonical);
         assert_eq!(content.as_deref(), Some("copy me"));
+    }
+    #[test]
+    fn rename_moves_a_directory_and_invalidates_source_and_destination_memos() {
+        let temp = tempfile::tempdir().unwrap();
+        let fs = NativeFs::new();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        let old = destination.join("old.txt");
+        fs.write_file(source.join("new.txt").to_str().unwrap(), "new")
+            .unwrap();
+        fs.write_file(old.to_str().unwrap(), "old").unwrap();
+        assert!(fs
+            .realpath(source.join("new.txt").to_str().unwrap())
+            .is_some());
+        assert!(fs.realpath(old.to_str().unwrap()).is_some());
+        NativeFs::new()
+            .delete_dir_all(destination.to_str().unwrap())
+            .unwrap();
+        fs.rename(source.to_str().unwrap(), destination.to_str().unwrap())
+            .unwrap();
+        assert!(fs
+            .realpath(source.join("new.txt").to_str().unwrap())
+            .is_none());
+        assert!(fs.realpath(old.to_str().unwrap()).is_none());
+        assert_eq!(
+            fs.read_file(destination.join("new.txt").to_str().unwrap())
+                .as_deref(),
+            Some("new")
+        );
+        assert!(fs
+            .rename(source.to_str().unwrap(), destination.to_str().unwrap())
+            .is_err());
+        assert_eq!(
+            fs.read_file(destination.join("new.txt").to_str().unwrap())
+                .as_deref(),
+            Some("new")
+        );
     }
 }

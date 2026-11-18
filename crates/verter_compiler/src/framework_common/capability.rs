@@ -5,10 +5,12 @@
 //! [`Present`] versus an omitted registration constructor, never a stub
 //! backend or optional method that pretends a missing product exists.
 
+use std::any::TypeId;
 use std::marker::PhantomData;
 
 use verter_language::ParseOptions;
 
+use super::profile::FrameworkProfileManifest;
 use crate::compile_request::{CompileRequest, ProductKind};
 
 /// Marker wrapping a capability implementation that is actually present.
@@ -88,71 +90,49 @@ pub struct ProductExecutionGrants {
     pub projection: Option<ProductExecutionGrant>,
 }
 
-/// Framework semantic epoch identity (catalog key component).
-///
-/// Derived from a [`FrameworkEpoch`] type. Callers do not invent this
-/// independently of the register constructor's epoch type parameter.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
-)]
-pub struct FrameworkEpochId(std::sync::Arc<str>);
-
-impl FrameworkEpochId {
-    pub(crate) fn from_type<E: FrameworkEpoch>() -> Self {
-        Self::new(E::ID)
-    }
-
-    /// Intern-free epoch id from a stable spelling.
-    ///
-    /// Catalog constructors derive identity from [`FrameworkEpoch::ID`]
-    /// through [`Self::from_type`]; they do not take this value.
-    #[must_use]
-    pub(crate) fn new(id: &str) -> Self {
-        Self(std::sync::Arc::from(id))
-    }
-
-    /// Epoch spelling.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// Typed framework epoch. The type is the authority; catalog identity is
-/// derived from [`Self::ID`].
+/// Typed framework epoch: the type is the authority, and the catalog
+/// identity it registers is the framework profile its manifest mints.
 pub trait FrameworkEpoch: Send + Sync + 'static {
-    /// Stable catalog spelling for this epoch type.
-    const ID: &'static str;
+    /// The manifest of the framework profile this epoch type registers.
+    const MANIFEST: FrameworkProfileManifest;
 }
 
 /// Host integration epoch identity (catalog key component for host rows).
 ///
-/// Derived from a [`HostEpoch`] type on host-integration registrations.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct HostEpochId(std::sync::Arc<str>);
+/// The [`HostEpoch`] type is the identity; its spelling is display only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct HostEpochId {
+    epoch: TypeId,
+    spelling: &'static str,
+}
 
 impl HostEpochId {
-    pub(crate) fn from_type<H: HostEpoch>() -> Self {
-        Self::new(H::ID)
-    }
-
-    /// Host-epoch spelling.
+    /// The identity of host epoch `H`.
     #[must_use]
-    pub(crate) fn new(id: &str) -> Self {
-        Self(std::sync::Arc::from(id))
+    pub fn from_type<H: HostEpoch>() -> Self {
+        Self {
+            epoch: TypeId::of::<H>(),
+            spelling: H::ID,
+        }
     }
 
-    /// Epoch spelling.
+    /// Whether this is the identity of host epoch `H`.
+    #[must_use]
+    pub fn is<H: HostEpoch>(&self) -> bool {
+        self.epoch == TypeId::of::<H>()
+    }
+
+    /// Display spelling. Never an identity.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.spelling
     }
 }
 
-/// Typed host epoch. The type is the authority; catalog identity is
-/// derived from [`Self::ID`].
+/// Typed host epoch. The type is the authority; [`Self::ID`] is its
+/// display spelling.
 pub trait HostEpoch: Send + Sync + 'static {
-    /// Stable catalog spelling for this host epoch type.
+    /// Display spelling for this host epoch type.
     const ID: &'static str;
 }
 

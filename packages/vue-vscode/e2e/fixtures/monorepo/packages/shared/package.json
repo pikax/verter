@@ -2,6 +2,6 @@
   "name": "@monorepo/shared",
   "private": true,
   "dependencies": {
-    "vue": "^3.5.0"
+    "vue": "^3.5.0 || ^3.6.0-0"
   }
 }

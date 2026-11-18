@@ -9,13 +9,14 @@ use crate::framework_common::projection_plan::{build_projection_plan, PlanInput}
 
 fn project(template: &str) -> super::props::PropsProjection {
     let source = format!("<template>{template}</template>");
-    let parsed = crate::compile::parse_sfc(&source, None, None);
+    let parsed = crate::framework_common::vue_bridge::parse_sfc(&source, None, None);
     let plan = build_projection_plan(PlanInput {
         canonical_id: "file:///props.vue",
         source: &source,
         parsed: &parsed,
         parse_key: None,
         syntax_profile: None,
+        custom_elements: None,
     });
     project_props(&project_attribute_operations(&plan, &parsed, &source))
 }

@@ -39,10 +39,33 @@ pub(in crate::project_semantic_dispatch) struct ReadWait {
     pub(super) checking_site: crate::semantic_query::checker_policy::TupleSplicePosition,
     /// Read under the lexical demand of the body's own file.
     pub(super) lexical: bool,
+    /// Answered inside an observation its holder adopts or discards
+    /// ([`ReadDelivery::Observed`]); only the holder marks it
+    /// ([`Self::observed`]).
+    pub(super) observed: bool,
     /// The reading operation that requested it, named in the body-read
     /// attribution of test builds.
     #[cfg(any(test, feature = "test-support"))]
     pub(super) origin: ReadOrigin,
+}
+
+impl ReadWait {
+    /// The same read, answered inside an observation of its own: what
+    /// answering it observes is held aside in the delivery
+    /// ([`ReadDelivery::Observed`]) instead of joining the build that answers
+    /// it, and its holder adopts or discards it where it consumes the answer.
+    /// A holder whose answer is consumed inside a probe the answer is made
+    /// outside of marks its wait so; the operation that requested the read
+    /// does not.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    pub(super) fn observed(mut self) -> Self {
+        verter_debug_assert!(
+            !matches!(self.shape, ReadShape::Staged),
+            "a staged read is already made inside its reader's own stage"
+        );
+        self.observed = true;
+        self
+    }
 }
 
 /// How a requested read's answer is adopted by the body that requested it.
@@ -69,6 +92,10 @@ impl ReadNesting {
 pub(in crate::project_semantic_dispatch) enum ReadShape {
     Node,
     Whole,
+    /// A whole read its reader makes inside its own stage: answering the
+    /// request hands the wait back unread ([`ReadDelivery::Staged`]), so
+    /// what the read observes lands in the stage that consumes it.
+    Staged,
 }
 
 /// The reading operation that requested an answer.
@@ -78,7 +105,9 @@ pub(in crate::project_semantic_dispatch) enum ReadOrigin {
     SignatureList,
     Awaited,
     MemberPath,
+    Carrier,
     IndexedValue,
+    Lowering,
 }
 
 impl ReadOrigin {
@@ -89,7 +118,9 @@ impl ReadOrigin {
             Self::SignatureList => "signature_list",
             Self::Awaited => "awaited_normalize",
             Self::MemberPath => "member_path",
+            Self::Carrier => "carrier",
             Self::IndexedValue => "indexed_value",
+            Self::Lowering => "lowering",
         }
     }
 }
@@ -98,10 +129,20 @@ impl ReadOrigin {
 pub(in crate::project_semantic_dispatch) enum ReadDelivery {
     /// A node read that answered no node.
     None,
-    /// A node read's type node.
-    Node(SemanticNodeId),
+    /// A node read's whole answer, as `execute_type_node` returns it: a
+    /// reader that consumes the envelope (its provenance, partiality and
+    /// delivery lease) receives it intact.
+    Node(Box<QueryResult<crate::semantic_query::SemanticQueryOutput<SemanticNodeId>>>),
     /// A whole cache read, with either nesting.
     Value(Box<CacheRead<QueryResult<SemanticQueryValue>>>),
+    /// A staged read handed back unread, and whether it is answered in
+    /// place rather than by the root read. Only its own reader makes it.
+    Staged(Box<ReadWait>, bool),
+    /// An observed read's ordinary answer, with what answering it observed
+    /// held aside; its holder opens it ([`FlowDemandDriver::adopt_observed`],
+    /// [`FlowDemandDriver::discard_observed`]) before it is consumed.
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
+    Observed(Box<crate::project_semantic_dispatch::flow_return_fact::ObservedRead<ReadDelivery>>),
 }
 
 impl ReadDelivery {
@@ -109,8 +150,13 @@ impl ReadDelivery {
     pub(super) fn node(self) -> Option<SemanticNodeId> {
         match self {
             Self::None => None,
-            Self::Node(node) => Some(node),
+            Self::Node(read) => match *read {
+                QueryResult::Value(output) => Some(output.value),
+                QueryResult::Recursive(_) | QueryResult::Error(_) => None,
+            },
             Self::Value(_) => unreachable!("a node read delivers a node"),
+            Self::Staged(..) => unreachable!("only its own reader makes a staged read"),
+            Self::Observed(_) => unreachable!("an observed read is opened by its holder"),
         }
     }
 
@@ -121,12 +167,16 @@ impl ReadDelivery {
             Self::None | Self::Node(_) => {
                 unreachable!("a whole read delivers its whole answer")
             }
+            Self::Staged(..) => unreachable!("only its own reader makes a staged read"),
+            Self::Observed(_) => unreachable!("an observed read is opened by its holder"),
         }
     }
 }
 
 static_assertions::const_assert!(std::mem::size_of::<ReadWait>() <= 16);
 static_assertions::const_assert!(std::mem::size_of::<ReadDelivery>() <= 16);
+// A delivery is held across a suspension and may resume on another thread.
+static_assertions::assert_impl_all!(ReadDelivery: Send);
 // A site waiting on a read it requested sits on the run's stack.
 static_assertions::const_assert!(std::mem::size_of::<super::ReadSite<'static>>() <= 24);
 static_assertions::const_assert!(

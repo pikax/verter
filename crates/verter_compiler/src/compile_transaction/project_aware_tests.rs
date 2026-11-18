@@ -34,6 +34,7 @@ fn published(request: &CompileRequest, code: &str) -> crate::assembly::publish::
     publish(
         &plan,
         vec![ArtifactContribution {
+            grammar: None,
             kind: ProductKind::RuntimeClient,
             fragments: Vec::new(),
             code: code.to_owned(),

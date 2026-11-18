@@ -992,14 +992,14 @@ impl VerterHost {
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
             view,
         )?;
-        resolved.into_evaluated_types()
+        super::component_meta_entry::evaluated_types_at_api_boundary(resolved)
     }
 
     /// Get the current whole_hash for a file.
     ///
     /// [`Self::get_whole_hash_in`] for a caller outside a captured or uncaptured
     /// execution unit: adopts the mode the installed request carries.
-    pub(crate) fn get_whole_hash(&self, canonical: &str) -> Option<Hash16> {
+    pub fn get_whole_hash(&self, canonical: &str) -> Option<Hash16> {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
             self.get_whole_hash_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical)
         })
@@ -3081,15 +3081,30 @@ impl VerterHost {
     /// Returns `None` if the import cannot be resolved to a known file
     /// (e.g., bare specifiers like `vue` or unregistered files).
     pub fn resolve_import(&self, parent_canonical_id: &str, import_source: &str) -> Option<String> {
+        self.resolve_import_in_context(
+            parent_canonical_id,
+            import_source,
+            verter_session_query::resolution::ResolutionContext {
+                phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
+                kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
+            },
+        )
+    }
+
+    /// [`Self::resolve_import`] under the caller's resolution phase and
+    /// request kind: a `TypeImport` request answers the declaration the
+    /// workspace resolver pairs with the specifier.
+    pub fn resolve_import_in_context(
+        &self,
+        parent_canonical_id: &str,
+        import_source: &str,
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> Option<String> {
         let canonical_parent = self.resolve_alias_or_canonical(parent_canonical_id);
         if self.is_canonical_evicted(&canonical_parent) {
             return None;
         }
-        let ctx = verter_session_query::resolution::ResolutionContext {
-            phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
-            kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
-        };
-        self.resolve_loaded_dependency_canonical(&canonical_parent, import_source, ctx.kind)
+        self.resolve_via_vfs(&canonical_parent, import_source, ctx)
             .into_delivered()
             .flatten()
     }

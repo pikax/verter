@@ -50,6 +50,125 @@ Concrete expectations:
 - Projecting `OtherType<string>['a']['foo']` through `type OtherType<T> = { a: Foo, b: T } & (T extends string ? S : N)` touches `Foo['foo']` and `S['a']['foo']`; `N` is never walked. `b` is not touched because `'a'` is the requested segment.
 - Navigating `OtherType['a']['foo']` with `T` open distributes `['a']['foo']` into both conditional branches, intersects their contributions, and leaves `b` untouched.
 
+## Stepping conditional decisions
+
+The decision is one owned, Send, non-Clone value in conditional_decision.rs.
+`begin_conditional_decision` reads nothing. Its advance returns
+`DecisionStep::Done`, `Read` or `Branch`; a whole node-domain read is
+consumed by a delivery closure inside the operation that named it, after
+re-entering every enclosing held observation. Operand preparation, the
+genericness worklist, tuple and extreme probes, selection, winner substitution
+and distribution retain their cursors and completed prefixes. A delivery never
+restarts a completed stage or consults a decision-stage answer map.
+
+Native operation helpers borrow their frame. Their small control step carries
+no result payload: completed values use one caller-owned stack slot, and
+scalar consumers borrow that slot while adopting its observation. The slot
+is transient and never enters a held decision. Only suspension moves it into
+the retained chain. The frame-only operand walk keeps its carrier and answer
+table in one `ConditionalOperandWalk` box, transferred through preparation
+and selection; those tables do not size the native operation/result carriers.
+The top-level stage dispatcher advances between separate out-of-line stage
+functions, so completed stages do not size the native frame of the stage
+that follows them. Its internal next-stage control never escapes as a
+DecisionStep and retains no additional state.
+
+Each native operation runs in its own out-of-line function until it needs a
+delivery. Only suspension retains its locals and observations in
+`ConditionalDecision.ops`, innermost
+last. A read-free in-place decision allocates no operation stack. Standalone
+genericness drives the same typed `GenericWalk` step directly, so a boolean
+query carries no full conditional decision or output. A decision starts that
+walk with native locals and retains its owned walk only after the first read;
+a read-free generic check creates no suspension box. The native
+driver answers a syntax branch inside the same operation and memoizes the
+callback result once per branch; no callback is retained by the decision. An
+external holder receives `Branch(bool)` and supplies the already-lowered node
+from its own branch memo. Abandonment releases deferred-evaluation cost scopes
+and carrier walks from the inside out, discards held probes, and preserves
+non-discardable execution aborts.
+
+Materialized Conditional queries use `FamilyBuild::Conditional` and the
+ordinary family continuation drivers. They name nested conditional, deferred,
+template and final canonical union reads as family needs; projection sugar uses
+the shared entry-admission route. Conditional resumes do not increment the
+family continuation-resume counter: the synchronous conditional did not count
+those transitions. In-place decision work counters retain their previous
+meaning. Polled frames can enter more child needs and perform fewer preparation
+or selection entries because no completed work is replayed.
+
+Before a frame relates its operands, an owned `IdentityCarrierRead` walks the
+check and then the extends operand. The walk's observation is discarded unless
+it proves a checker recovery. Its retained deliveries are installed through
+`with_operand_answers` only for the relation compute. `OperandAnswerScope`
+contains completed answers, depth and native nesting; no decision stage reads
+it. The relation remains the sole authority for a pair, including inference,
+permissive and restrictive tests. Literal members of a literal-only union still
+run as charged in-place queries under `nested_decision_query`.
+
+Every structural-fact read the decision makes is a `Fact` operation holding
+the evaluator's owned `StructuralFactRead`: the composite reduction of the
+check and extends operands, the declared alias a check or the `any` row's
+extends operand names, tuple positions and their reconstruction, the
+lattice-extreme probe's named arms, the written-arm plain-check proof, the
+distribution's carrier check, and the post-selection named-error probe. Each
+helper keeps only its pure half (`declared_operand_resolves`,
+`resolved_operand_demand` / `resolved_operand_of`, `plain_check`,
+`distributive_check` / `distribution_members_of`); the read in between is
+the operation's, so a nested cold conditional the demand reaches through an
+instantiation is a read the decision suspends on, never a native re-entry.
+The decision's carrier-intent answer is the held demand's own
+`reads_for_carrier`. Both synchronous drivers count a counted read where the
+decision makes it, even when that read is itself driven on the continuation
+runtime: the driven root enters its query without counting it, so the family
+helper (`resume_family_need_in_place`) exempts a conditional decision from
+its driven-read suppression (`FamilyBuild::counts_driven_need_intent`).
+Guards: `a_synchronous_conditional_family_counts_its_nested_conditional_intent`,
+`every_synchronous_conditional_counts_the_intents_its_in_place_driver_counts`.
+A literal member decided in place that `enter_in_place_query` refuses answers
+with that refusal as its member answer, folded and normalized like any other
+(`a_refused_in_place_member_is_folded_and_normalized_like_a_member_query`).
+
+A closed `keyof` check (one whose base names no type parameter, or names an
+interface or a class) distributes over the literal keys its base denotes.
+The distribution classification yields that base, and the `KeySet`
+operation holds the key-set walk `build.rs` owns (`KeySetRead`, through
+`begin_key_set_read` / `resume_key_set_read` / `abandon_key_set_read`). Each
+`keyof` read the walk names (`KeyOf { base, published(Expanded) }`) is a read
+the decision suspends on, delivered inside the operation, under the
+classifying stage's held observation, as a `Fact` delivery is. A delivery
+continues the walk from the carriers it has already settled and never
+restarts it. The decision's carrier-intent answer is `false` while it stands
+at a `keyof` read, because `key_set_of` never counted those reads as carrier
+reads. The walk settles a kept carrier in place between its reads
+(`resolve_signature_source_carrier`; a class expression's surface reads
+nothing), so that settle is the walk's one in-place read. Guards:
+`a_keyof_check_distributes_over_a_key_set_the_decision_reads` and
+`stepped_key_set_reads_preserve_in_place_answers_order_and_completeness`.
+
+The remaining synchronous boundary is one explicit `answer_in_place` call,
+keyed by `InPlaceRead::IntersectionWidth`: intersection width. Its owner does
+not yet expose an owned helper read. The relation's own compute and
+template construction during substitution remain their existing shared-owner
+boundaries. `build_conditional_from_lowering` is the in-place driver over the
+same operations; the type-lowering cursor does not yet hold a decision or yield
+its internal reads. The evaluator's composite read-past-gap predicate remains at
+its existing call site and answers false because no tentative decision run
+exists; the separate flow-return pending probe is removed.
+
+Declared-alias preparation therefore holds its structural demand: on a frame,
+the instantiation and declaration reads it names are frame needs, so a chain
+of conditionals each naming the alias before it is a chain of frames. The
+protected 448 KiB (200 literal / 50 alias levels) and full-size 1 MiB
+(500 / 100) conditional-chain pins guard this.
+
+The direct conditional-operand read uses the whole read's fact status:
+execute_type_node copies that status unchanged into its provenance. The
+checker/receipt/width/depth pins and conditional_read_tests exercise both drivers,
+held reads, branch memoization and abandonment. The tests register in the
+architecture dependency and characterization products beside the lowering
+cursor's tests.
+
 ## Operands A Decision Relates
 
 Conditional syntax lowering and graph-native view projection share

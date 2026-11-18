@@ -1,31 +1,8 @@
-//! Workspace-local canonical cache reuse tests (Issue #11).
+//! Workspace-local declaration cache reuse across component surfaces.
 //!
-//! When two SFCs `CompA.vue` and `CompB.vue` both import a shared
-//! workspace-local interface from `/src/types.ts`, resolving CompA
-//! first should populate the canonical materialize cache for the
-//! shared declaration; resolving CompB second should reuse the cached
-//! entry instead of re-materializing the same surface independently.
-//!
-//! Per §6.5 contract: workspace-owned direct-member interface/class
-//! refs MUST materialize canonically (cache key includes
-//! `(target_decl_id, normalized_type_args)`). Generic targets are
-//! eligible — `Container<string>` resolved by both CompA and CompB
-//! shares one canonical entry; a third caller resolving
-//! `Container<number>` gets its own canonical entry.
-//!
-//! Symbolic preservation is reserved for: package-backed refs
-//! (§6.5 disallowed shape #1), explicit shallow-preservation list
-//! entries (#2), recursion/cycle boundaries (#3), and
-//! route-preservation expressions (#4 / #5).
-//!
-//! Acceptance per §4.3A:
-//! - On `CompB` under capture: `SemanticQueryKey::Instantiate
-//!   { base: WorkspaceLocalInterface slot, args: [],
-//!     context: InstantiateContext { projection_reduction, resolve_env_hash } }`
-//!   with `context.projection_reduction.mode = Expanded`
-//!   `dispatch_misses == 0` AND
-//!   `dispatch_count >= 1`. Strict `count == 1` is forbidden; the
-//!   harness does not control exact lookup-path count.
+//! Macro roots demand a shallow surface through the shared producer; resolving
+//! a second component reuses the declaration cache without eagerly materializing
+//! nested member values. Package and recursion boundaries remain symbolic.
 
 use std::sync::Arc;
 
@@ -105,119 +82,117 @@ const SHARED_NON_GENERIC_TYPES_TS: &str = r#"export interface WorkspaceLocalInte
 
 const COMP_A_NON_GENERIC_VUE: &str = r#"<script setup lang="ts">
 import type { WorkspaceLocalInterface } from '/workspace/src/types'
-defineProps<{
-  data?: WorkspaceLocalInterface
-}>()
+defineProps<WorkspaceLocalInterface>()
 </script>
 <template><div /></template>
 "#;
 
 const COMP_B_NON_GENERIC_VUE: &str = r#"<script setup lang="ts">
 import type { WorkspaceLocalInterface } from '/workspace/src/types'
-defineProps<{
-  payload?: WorkspaceLocalInterface
-}>()
+defineProps<WorkspaceLocalInterface>()
 </script>
 <template><div /></template>
 "#;
 
-/// Positive case: two SFCs `CompA.vue` and `CompB.vue` share an
-/// import to `/workspace/src/types.ts`'s `WorkspaceLocalInterface`.
-/// After CompA's resolution warms the canonical
-/// `Instantiate { target_decl: WorkspaceLocalInterface_decl }`
-/// cache entry, CompB's resolution MUST reuse the same canonical
-/// entry — the dispatch family records hits, not misses.
+/// Two components publish the same declaration surface. The second request
+/// reuses an actual shared surface/body read, even when a warm ProjectPath
+/// returns before the walker needs an Instantiate demand.
 #[test]
 fn workspace_local_interface_canonical_cache_reuse_across_components() {
+    use verter_type_engine::semantic_query::{QueryError, SemanticNodeData, SemanticQueryKey};
+
     let host = build_workspace_host(&[
         ("/workspace/src/types.ts", SHARED_NON_GENERIC_TYPES_TS),
         ("/workspace/src/CompA.vue", COMP_A_NON_GENERIC_VUE),
         ("/workspace/src/CompB.vue", COMP_B_NON_GENERIC_VUE),
     ]);
+    let guard = CaptureToken::start_for_query("canonical_reuse_cold");
+    let first = host
+        .get_component_meta("/workspace/src/CompA.vue")
+        .expect("first component");
+    let cold = guard.end();
+    let guard = CaptureToken::start_for_query("canonical_reuse_warm");
+    let second = host
+        .get_component_meta("/workspace/src/CompB.vue")
+        .expect("second component");
+    let warm = guard.end();
+    for meta in [&first, &second] {
+        let mut names: Vec<_> = meta.props.iter().map(|prop| prop.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["count", "field"],
+            "the shared interface surface must survive"
+        );
+    }
 
-    // Warm the shared canonical entry by resolving CompA first.
-    let _ = host.get_component_meta("/workspace/src/CompA.vue");
-
-    let guard = CaptureToken::start_for_query("canonical_reuse");
-    let _ = host.get_component_meta("/workspace/src/CompB.vue");
-    let _ = host.resolve_component_meta("/workspace/src/CompB.vue", ProjectionMode::Expanded);
-    let snapshot = guard.end();
-
-    // Issue #11 acceptance — focus on the SHARED canonical entries:
-    // 1. `Instantiate { base.merged_symbol_name == "WorkspaceLocalInterface",
-    //    context.projection_reduction.mode == Expanded }`
-    //    MUST appear at least once on CompB AND have no misses (CompA
-    //    warmed it). Per §4.3A: misses == 0 AND hits >= 1.
-    // 2. `ResolveDecl { name: "WorkspaceLocalInterface" }` MUST appear
-    //    at least once and hit the cache.
-    //
-    // Note: CompB's per-component resolution (e.g., `ProjectPath` for
-    // `payload` member where CompB names its prop `payload?: ...`)
-    // legitimately misses the cache — those keys are CompB-specific
-    // and not shared with CompA. The discriminating gate is that the
-    // SHARED canonical entries (Instantiate + ResolveDecl for the
-    // workspace-local interface) hit, NOT every dispatch.
-    let instantiate_family = KeyFamily::InstantiateForResolvedName("WorkspaceLocalInterface");
-    let instantiate_count = snapshot.dispatch_count(instantiate_family.clone());
-    let instantiate_misses = snapshot.dispatch_misses(instantiate_family);
-    let resolve_decl_count = snapshot
+    let graph = host.project_type_store().semantic_graph();
+    let target = "/workspace/src/types.ts";
+    let is_shared_declaration_read = |key: &SemanticQueryKey| match key {
+        SemanticQueryKey::Instantiate(key) => {
+            key.base().defining_canonical.as_ref() == target
+                && key.base().merged_symbol_name.as_ref() == "WorkspaceLocalInterface"
+        }
+        SemanticQueryKey::ProjectPath {
+            base,
+            path,
+            context,
+        } if path.is_empty() && context.mode == ProjectionMode::Shallow => {
+            match graph.node_data(*base).as_deref() {
+                Some(SemanticNodeData::DeclRef { identity }) => {
+                    identity.canonical_id.as_ref() == target
+                        && identity.decl_name.as_ref() == "WorkspaceLocalInterface"
+                }
+                Some(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+                    canonical_id,
+                    name,
+                    ..
+                })) => {
+                    canonical_id.as_ref() == target && name.as_ref() == "WorkspaceLocalInterface"
+                }
+                Some(SemanticNodeData::Object(view)) => view
+                    .closed()
+                    .complete_members()
+                    .iter()
+                    .any(|member| member.declaration_origin.as_deref() == Some(target)),
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+    // Only an identical semantic question can be reused. Component-specific
+    // root reads may legitimately miss and are not shared declaration reads.
+    let shared: Vec<_> = warm
         .dispatch_log
         .iter()
         .filter(|entry| {
-            matches!(
-                &entry.key,
-                verter_type_engine::semantic_query::SemanticQueryKey::ResolveDecl(key)
-                    if key.name.as_ref() == "WorkspaceLocalInterface"
-            )
+            is_shared_declaration_read(&entry.key)
+                && cold.dispatch_log.iter().any(|first| first.key == entry.key)
         })
-        .count();
-    let resolve_decl_misses = snapshot
-        .dispatch_log
-        .iter()
-        .filter(|entry| {
-            !entry.hit
-                && matches!(
-                    &entry.key,
-                    verter_type_engine::semantic_query::SemanticQueryKey::ResolveDecl(key)
-                        if key.name.as_ref() == "WorkspaceLocalInterface"
-                )
-        })
-        .count();
-
+        .collect();
     assert!(
-        instantiate_count >= 1,
-        "Issue #11: on CompB after CompA warmed the canonical entry, \
-         `Instantiate {{ base.merged_symbol_name == \"WorkspaceLocalInterface\", \
-         context.projection_reduction.mode == Expanded }}` \
-         MUST appear at least once in the dispatch log; got \
-         {instantiate_count}. A count of 0 indicates the workspace-local \
-         ref still preserves symbolic — the helper's \
-         must_materialize_canonically gate was bypassed.",
-    );
-    assert_eq!(
-        instantiate_misses, 0,
-        "Issue #11: on CompB, the canonical \
-         `Instantiate {{ WorkspaceLocalInterface }}` entry MUST hit the \
-         cache (CompA warmed it). Got {instantiate_misses} misses across \
-         {instantiate_count} matching dispatches. Strict `hits == 1` is \
-         forbidden; the gate is the absence of misses + presence of hits.",
+        !shared.is_empty(),
+        "the second component must demand the shared declaration: {:?}",
+        warm.dispatch_log
     );
     assert!(
-        resolve_decl_count >= 1,
-        "Issue #11: on CompB, ResolveDecl for `WorkspaceLocalInterface` \
-         MUST appear in the dispatch log at least once; got \
-         {resolve_decl_count}.",
+        shared.iter().all(|entry| entry.hit),
+        "every shared declaration read must hit: {shared:?}"
+    );
+    assert!(
+        cold.dispatch_log
+            .iter()
+            .any(|entry| !entry.hit && shared.iter().any(|warm| warm.key == entry.key)),
+        "the first component must seed at least one of those same cache entries"
     );
     assert_eq!(
-        resolve_decl_misses, 0,
-        "Issue #11: on CompB, the import-route ResolveDecl for \
-         `WorkspaceLocalInterface` MUST hit the cache (CompA warmed it). \
-         Got {resolve_decl_misses} misses across {resolve_decl_count} \
-         matching dispatches.",
+        warm.dispatch_count(KeyFamily::InstantiateExpandedForResolvedName(
+            "WorkspaceLocalInterface"
+        )),
+        0,
+        "publishing a shallow macro surface must not eagerly expand the declaration"
     );
 }
-
-// ── Positive #2: workspace-local generic interface canonical reuse ──
 
 const SHARED_GENERIC_TYPES_TS: &str = r#"export interface Container<T> {
   payload: T

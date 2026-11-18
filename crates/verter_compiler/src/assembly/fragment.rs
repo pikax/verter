@@ -34,6 +34,7 @@ use verter_parser::oxc_parse::Parser;
 
 use crate::compile_request::ProductKind;
 
+use super::artifact_graph::{ArtifactRole, StyleArtifactFacts};
 pub use super::source_space::{FragmentRange, SourceSpaceKind};
 use super::source_unit::SourceUnitId;
 
@@ -92,6 +93,10 @@ pub enum ArtifactRelationKind {
     DependsOn,
     CompanionOf,
     DeclarationOf,
+    /// From a style artifact to the module whose component authored it.
+    StyleOf,
+    /// From a metadata artifact to the module it describes.
+    MetadataOf,
 }
 
 /// A directed, typed edge to another artifact in the same set.
@@ -122,6 +127,11 @@ pub struct CompileArtifact {
     /// C2 cutover paths that never stage one — per-product dialect reads
     /// then report absence instead of inferring a dialect.
     dialect: Option<FragmentDialect>,
+    /// What this artifact is to its host; a module unless the producer
+    /// declares otherwise.
+    role: ArtifactRole,
+    /// Present exactly on style artifacts; the set refuses any other pairing.
+    style: Option<StyleArtifactFacts>,
 }
 
 impl CompileArtifact {
@@ -145,7 +155,32 @@ impl CompileArtifact {
             relations: Default::default(),
             maps: Vec::new(),
             dialect: None,
+            role: ArtifactRole::Module,
+            style: None,
         }
+    }
+
+    /// Declare what this artifact is to its host.
+    #[must_use]
+    pub fn with_role(mut self, role: ArtifactRole) -> Self {
+        self.role = role;
+        self
+    }
+
+    /// Attach the facts of a style artifact.
+    #[must_use]
+    pub fn with_style(mut self, facts: StyleArtifactFacts) -> Self {
+        self.style = Some(facts);
+        self
+    }
+
+    pub const fn role(&self) -> ArtifactRole {
+        self.role
+    }
+
+    /// The style facts, present on style artifacts only.
+    pub fn style(&self) -> Option<&StyleArtifactFacts> {
+        self.style.as_ref()
     }
 
     /// Declare the exact dialect this artifact's bytes are written in —
@@ -419,7 +454,101 @@ pub struct ValidatedFragment(Fragment);
 /// permissive default — a JS artifact must reject TypeScript-only syntax,
 /// not silently accept it under a TSX parse.
 pub(crate) fn final_module_parse_errors(code: &str, dialect: FragmentDialect) -> Option<String> {
+    #[cfg(test)]
+    FINAL_MODULE_PARSES.with(|parses| parses.set(parses.get() + 1));
     oxc_parse_errors(code, dialect.base_source_type())
+}
+
+/// Validate a terminal module unless its producer witnessed the complete
+/// module in the declared dialect. Shared by both publication forms.
+pub(crate) fn module_parse_errors(
+    code: &str,
+    dialect: FragmentDialect,
+    grammar: Option<GrammarWitness>,
+) -> Option<String> {
+    if grammar.is_some_and(|grammar| {
+        grammar.contract() == SyntacticContract::CompleteModule && grammar.dialect() == dialect
+    }) {
+        None
+    } else {
+        final_module_parse_errors(code, dialect)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static FINAL_MODULE_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Final-module parses run on this thread since the last call; resets the
+/// count.
+#[cfg(test)]
+pub(crate) fn take_final_module_parses() -> usize {
+    FINAL_MODULE_PARSES.with(|parses| parses.replace(0))
+}
+
+/// Proof that one of the compiler's own producers wrote a fragment in one
+/// grammar context and dialect. Bytes carrying it need no parse to be
+/// trusted. Only a [`GrammarProducer`] mints one; there is no constructor
+/// from text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrammarWitness {
+    contract: SyntacticContract,
+    dialect: FragmentDialect,
+}
+
+impl GrammarWitness {
+    /// The grammar context the fragment was written in.
+    pub const fn contract(self) -> SyntacticContract {
+        self.contract
+    }
+
+    /// The dialect the fragment was written in.
+    pub const fn dialect(self) -> FragmentDialect {
+        self.dialect
+    }
+}
+
+mod sealed {
+    /// Implemented only by this crate's producers.
+    pub trait Sealed {}
+}
+
+/// A compiler producer whose output is well formed, by construction, in
+/// the grammar context it declares.
+pub trait GrammarProducer: sealed::Sealed {
+    /// The grammar context every fragment this producer writes is in.
+    const CONTRACT: SyntacticContract;
+
+    /// The witness for one fragment this producer wrote in `dialect`.
+    fn witness(&self, dialect: FragmentDialect) -> GrammarWitness {
+        GrammarWitness {
+            contract: Self::CONTRACT,
+            dialect,
+        }
+    }
+}
+
+/// Script lowering writes one complete module.
+impl sealed::Sealed for crate::script::ScriptCodeGenResult<'_> {}
+impl GrammarProducer for crate::script::ScriptCodeGenResult<'_> {
+    const CONTRACT: SyntacticContract = SyntacticContract::CompleteModule;
+}
+
+/// The main-module decoration writes the module around its slots: imports,
+/// the component object and its export.
+impl sealed::Sealed for super::vue_module::VueMainDecoration {}
+impl GrammarProducer for super::vue_module::VueMainDecoration {
+    const CONTRACT: SyntacticContract = SyntacticContract::CompleteModule;
+}
+
+/// A witness for tests of the placement and publication rules themselves.
+#[cfg(test)]
+pub(crate) fn test_witness(
+    contract: SyntacticContract,
+    dialect: FragmentDialect,
+) -> GrammarWitness {
+    GrammarWitness { contract, dialect }
 }
 
 fn oxc_parse_errors(code: &str, source_type: SourceType) -> Option<String> {

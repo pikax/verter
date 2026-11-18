@@ -106,6 +106,7 @@ pub(crate) fn compile_request_response_to_wasm(
         canonical_id,
         diagnostics,
         products,
+        artifact_set,
     } = response;
     let products = products
         .into_iter()
@@ -115,6 +116,7 @@ pub(crate) fn compile_request_response_to_wasm(
         canonical_id,
         diagnostics: host_diagnostics_to_ffi(&diagnostics, sfc_source),
         products,
+        artifact_set,
     })
 }
 

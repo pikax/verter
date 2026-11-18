@@ -458,7 +458,9 @@ export interface AnalysisBinding {
 export type AnalysisBindingInitializer =
   | { FunctionCall: { callee: string; calleeImportSource: string | null; vueApi: string | null } }
   | { Literal: { kind: string } }
+  | { MemberCall: { object: string; property: string } }
   | { Reference: { name: string } }
+  | { MemberReference: { object: string; property: string } }
   | "Other";
 
 export interface AnalysisMacro {

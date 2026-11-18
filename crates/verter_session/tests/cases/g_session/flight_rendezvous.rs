@@ -37,6 +37,18 @@ fn host() -> VerterHost {
     host
 }
 
+/// Asserts that no execution task or wait-for edge remains once the schedule
+/// has ended. A background owner, such as the setup upsert's indexing stage,
+/// can release its task after the work it held has answered, so this first
+/// waits for the registry's retirement event. The bound only stops a leaked
+/// task from hanging the test; the count assertion then reports it.
+fn assert_no_task_or_wait_remains(graph: &SemanticGraphStore, message: &str) {
+    graph
+        .task_registry_for_tests()
+        .wait_for_no_active_tasks_for_tests(HANG_BOUND);
+    assert_eq!(graph.wait_graph_counts_for_tests(), (0, 0), "{message}");
+}
+
 /// The memo key a public named-symbol request for `name` claims first.
 fn resolve_decl(name: &str) -> SemanticQueryKey {
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
@@ -140,11 +152,7 @@ fn a_held_cold_producer_is_joined_by_a_real_subscriber() {
         held_flight.upgrade().is_none(),
         "the flight is destroyed once the requests end, not merely off the table"
     );
-    assert_eq!(
-        graph.wait_graph_counts_for_tests(),
-        (0, 0),
-        "no task or wait registration outlives the requests"
-    );
+    assert_no_task_or_wait_remains(graph, "no task or wait registration outlives the requests");
 }
 
 #[test]
@@ -215,11 +223,7 @@ fn a_failed_assertion_while_the_producer_is_held_releases_it_and_retains_nothing
         held_flight.upgrade().is_none(),
         "the flight the unwound schedule held is destroyed"
     );
-    assert_eq!(
-        graph.wait_graph_counts_for_tests(),
-        (0, 0),
-        "no task or wait registration outlives the unwind"
-    );
+    assert_no_task_or_wait_remains(graph, "no task or wait registration outlives the unwind");
     request_icon_box(&host);
 }
 
@@ -247,10 +251,9 @@ fn an_abandoned_rendezvous_releases_its_parked_producer() {
         held_flight.upgrade().is_none(),
         "the abandoned flight is destroyed once its producer answers"
     );
-    assert_eq!(
-        graph.wait_graph_counts_for_tests(),
-        (0, 0),
-        "no task or wait registration outlives the abandoned schedule"
+    assert_no_task_or_wait_remains(
+        graph,
+        "no task or wait registration outlives the abandoned schedule",
     );
     assert_eq!(request_icon_box(&host), answer);
 }
@@ -401,10 +404,9 @@ fn cancelling_the_parked_producer_and_its_subscriber_returns_both() {
         held_flight.upgrade().is_none(),
         "the cancelled schedule's flight retires"
     );
-    assert_eq!(
-        graph.wait_graph_counts_for_tests(),
-        (0, 0),
-        "no task or wait registration outlives the cancelled schedule"
+    assert_no_task_or_wait_remains(
+        graph,
+        "no task or wait registration outlives the cancelled schedule",
     );
     // The store still answers after the cancelled schedule.
     request_icon_box(&host);

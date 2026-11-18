@@ -1,6 +1,6 @@
 //! Vue runtime `RuntimeCompilerBackend`: parse-artifact emit, catalog
 //! identity, byte/map/diagnostic parity with the parsed core, runtime-only
-//! refusal, option preservation, and production `compile_bundle` isolation.
+//! refusal, option preservation, and host-route runtime composition.
 
 use std::fs;
 use std::path::Path;
@@ -13,17 +13,16 @@ use verter_compiler::compile_request::{
     FrameworkCompileRequest, IdeProductRequest, ProductKind, RuntimeProductRequest,
     SvelteCompileRequest, VueBackendRequest, VueCompileRequest,
 };
-use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
 use verter_compiler::framework_common::{
-    vue_runtime_backend_registration, CatalogCapability, CatalogRow, FrameworkEpoch,
-    FrameworkParseArtifact, ImmutableCapabilityCatalog, RuntimeBlockContentInput,
-    RuntimeBlockContentInputs, RuntimeCompileOptions, RuntimeCompilerBackend, VueRuntimeBackend,
-    VueRuntimeError, VueRuntimeExecutionFacts, VueRuntimeInputs, VueSfcV3,
+    vue_runtime_backend_registration, CatalogCapability, CatalogTable, FrameworkEpoch,
+    FrameworkHostIntegrationBackend, FrameworkParseArtifact, RuntimeBlockContentInput,
+    RuntimeBlockContentInputs, RuntimeCompilerBackend, VueHostCompiledProducts,
+    VueHostExecutionInputs, VueHostIntegrationBackend, VueHostMultiProductDemand,
+    VueRuntimeBackend, VueRuntimeError, VueRuntimeExecutionFacts, VueRuntimeInputs, VueSfcV3,
 };
 use verter_compiler::standalone::{BatchCompileItem, DirectExecutionInputs, StandaloneCompiler};
 use verter_language::carrier_grammar::{
-    CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
-    FrameworkAdapterSemanticVersion,
+    CarrierGrammarAuthority, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
 };
 use verter_language::registered_source_authority::{
     CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
@@ -86,7 +85,9 @@ fn registered_artifact_with_grammar(
         )
         .expect("registered source");
     let grammar_authority = CarrierGrammarAuthority::new().expect("grammar authority");
-    let config = CarrierGrammarConfig::vue(open, close, custom_elements).expect("vue grammar");
+    let config =
+        verter_compiler::framework_common::vue_grammar_config(open, close, custom_elements)
+            .expect("vue grammar");
     grammar_authority
         .register_carrier_grammar(
             language,
@@ -171,6 +172,30 @@ fn compile_via_backend_with_inputs(
         request,
         inputs,
     )
+}
+
+/// Admit and compile `demand` through the registered Vue host integration
+/// over the artifact's own registered bytes.
+fn host_products(
+    artifact: &FrameworkParseArtifact,
+    demand: VueHostMultiProductDemand,
+    block_content: RuntimeBlockContentInputs,
+) -> VueHostCompiledProducts {
+    let backend = VueHostIntegrationBackend::registered();
+    let admission = backend
+        .admit_host_products(artifact, demand)
+        .expect("the demand admits");
+    backend
+        .compile_host_products(
+            admission,
+            artifact,
+            &VueHostExecutionInputs {
+                block_content,
+                ..Default::default()
+            },
+            &oxc_allocator::Allocator::new(),
+        )
+        .expect("the admitted demand produces")
 }
 
 /// A genuine consume-once runtime grant matching the request's demanded
@@ -407,13 +432,10 @@ fn vue_runtime_catalog_row_binds_vue_adapter_identity() {
     );
     assert_eq!(row.identity().capability(), CatalogCapability::Runtime);
     assert!(row.identity().host_epoch().is_none());
-    assert_eq!(row.identity().epoch().as_str(), VueSfcV3::ID);
-    assert_eq!(row.identity().epoch().as_str(), "vue");
+    assert_eq!(row.identity().framework_family(), VueSfcV3::MANIFEST.family);
+    assert_eq!(row.identity().framework_family(), "vue");
     let _backend: &VueRuntimeBackend = row.runtime();
-    let catalog = ImmutableCapabilityCatalog::<(), (), (), VueRuntimeBackend, ()>::try_from_rows([
-        CatalogRow::Runtime(row),
-    ])
-    .expect("single Vue runtime row");
+    let catalog = CatalogTable::try_from_rows([row]).expect("single Vue runtime row");
     assert_eq!(catalog.len(), 1);
 }
 
@@ -615,7 +637,7 @@ fn vue_runtime_backend_refuses_a_foreign_artifact() {
             )
             .expect("registered source");
         let grammar_authority = CarrierGrammarAuthority::new().expect("grammar authority");
-        let config = CarrierGrammarConfig::Svelte;
+        let config = verter_compiler::svelte::svelte_grammar_config();
         grammar_authority
             .register_carrier_grammar(
                 language,
@@ -840,35 +862,34 @@ fn explicit_vapor_plus_server_is_refused_at_request_construction() {
 }
 
 #[test]
-fn compile_bundle_still_emits_runtime_when_an_ide_product_is_also_requested() {
+fn host_route_still_emits_runtime_when_an_ide_product_is_also_requested() {
     let artifact = registered_artifact("file:///bundle.vue", SIMPLE);
-    let mixed = VueCarrierCompiler
-        .compile_bundle(
-            SIMPLE,
-            &artifact,
-            &RuntimeCompileOptions {
-                filename: Some("Bundle.vue".to_string()),
-                want_runtime: true,
-                want_ide: true,
-                source_map: true,
-                ..Default::default()
-            },
-            &oxc_allocator::Allocator::new(),
-        )
-        .expect("production compile_bundle still serves runtime");
-    match mixed {
-        verter_compiler::framework_common::CarrierCompileOutcome::Produced(bundle) => {
-            assert!(
-                bundle.script.is_some() || bundle.template.is_some(),
-                "production compile_bundle must still emit a runtime product"
-            );
-            assert!(
-                bundle.tsx.is_some(),
-                "production compile_bundle must still emit the IDE product on the combined path"
-            );
-        }
-        other => panic!("expected produced runtime+IDE bundle, got {other:?}"),
-    }
+    let mixed = host_products(
+        &artifact,
+        VueHostMultiProductDemand {
+            products: vec![
+                client_product(true, None),
+                CompileProduct::IdeCompanion(IdeProductRequest {
+                    want_source_map: true,
+                    ..Default::default()
+                }),
+            ],
+            filename: Some("Bundle.vue".to_string()),
+            ..Default::default()
+        },
+        RuntimeBlockContentInputs::default(),
+    );
+    let bundle = mixed
+        .runtime_client_bundle()
+        .expect("the host route still serves runtime");
+    assert!(
+        bundle.script.is_some() || bundle.template.is_some(),
+        "the host route must still emit a runtime product"
+    );
+    assert!(
+        mixed.ide_companion().is_some(),
+        "the host route must still emit the IDE product on the combined path"
+    );
 
     let request = CompileRequest::new(
         vec![
@@ -1188,7 +1209,7 @@ fn javascript_syntax_gate_proves_execution_and_rejects_invalid_output() {
 }
 
 #[test]
-fn projected_setup_runtime_matches_compile_bundle_and_passes_node_check() {
+fn projected_setup_runtime_reaches_the_composed_module_and_passes_node_check() {
     let source = concat!(
         "<script setup src=\"./logic.js\"></script>",
         "<template><div>{{ count }}</div></template>"
@@ -1672,29 +1693,25 @@ fn inline_selected_template_helper_imports_are_declared_on_the_script() {
         "inline selected-template helpers must appear in the composed module:\n{client}"
     );
 
-    let bundle = VueCarrierCompiler
-        .compile_bundle(
-            source,
-            &artifact,
-            &RuntimeCompileOptions {
-                filename: Some("InlineImports.vue".to_string()),
-                is_production: true,
-                source_map: true,
-                block_content: RuntimeBlockContentInputs {
-                    template: Some(selected_template("<div>{{ count }}</div>")),
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            &oxc_allocator::Allocator::new(),
-        )
-        .expect("compile_bundle shares the parsed-runtime core");
-    let script = match bundle {
-        verter_compiler::framework_common::CarrierCompileOutcome::Produced(bundle) => {
-            bundle.script.expect("composed runtime script")
-        }
-        other => panic!("expected produced runtime bundle, got {other:?}"),
-    };
+    let products = host_products(
+        &artifact,
+        VueHostMultiProductDemand {
+            products: vec![client_product(true, None)],
+            filename: Some("InlineImports.vue".to_string()),
+            is_production: true,
+            ..Default::default()
+        },
+        RuntimeBlockContentInputs {
+            template: Some(selected_template("<div>{{ count }}</div>")),
+            ..Default::default()
+        },
+    );
+    let script = products
+        .runtime_client_bundle()
+        .expect("the host route shares the parsed-runtime core")
+        .script
+        .as_ref()
+        .expect("composed runtime script");
     assert!(
         script
             .runtime_imports

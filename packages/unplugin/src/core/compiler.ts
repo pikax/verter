@@ -1,76 +1,15 @@
 import { createHash } from "crypto";
-import { createRequire } from "module";
 import type {
   VerterHost,
   Workspace,
-  TransformVueStyleOptions,
-  TransformVueStyleResult,
   HostCompileRequest,
   HostCompileResponse,
   HostRuntimeCompiledProduct,
   HostCompileVirtualNode,
 } from "@verter/native";
 
-const require = createRequire(import.meta.url);
-
-type NativeModule = typeof import("@verter/native");
-
-let native: NativeModule | null = null;
-let host: VerterHost | null = null;
-let workspace: Workspace | null = null;
-
-function loadNative(): NativeModule {
-  if (native) return native;
-  native = require("@verter/native") as NativeModule;
-  return native;
-}
-
-export function loadWorkspace(roots: string[]): Workspace {
-  if (workspace) return workspace;
-  const n = loadNative();
-  workspace = new n.Workspace(roots);
-  return workspace;
-}
-
-export function getWorkspace(): Workspace | null {
-  return workspace;
-}
-
-export function resetWorkspace(): void {
-  // `Workspace` holds no process-lifetime resources (unlike `VerterHost`), so
-  // dropping the reference is sufficient; GC reclaims the native handle.
-  workspace = null;
-}
-
-export function loadHost(config?: { devMode?: boolean }): VerterHost {
-  if (host) return host;
-  const n = loadNative();
-  const hostConfig = { devMode: config?.devMode ?? true };
-  host = workspace
-    ? n.VerterHost.withWorkspace(hostConfig, workspace)
-    : new n.VerterHost(hostConfig);
-  return host;
-}
-
-/**
- * The already-created host, if any — never creates one. Watcher paths use
- * this so an unrelated file event cannot lazily construct a host.
- */
-export function peekHost(): VerterHost | null {
-  return host;
-}
-
-export function resetHost(): void {
-  host?.close();
-  host = null;
-}
-
-export function transformVueStyle(
-  css: string,
-  options: TransformVueStyleOptions,
-): TransformVueStyleResult {
-  return loadNative().transformVueStyle(css, options);
-}
+/** The live native style transform: scoping and CSS `v-bind()` rewriting. */
+export { transformVueStyle } from "@verter/native";
 
 export function getHash(text: string): string {
   return createHash("sha256").update(text).digest("hex").substring(0, 8);

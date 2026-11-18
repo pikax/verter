@@ -24,6 +24,33 @@ pub enum ProductKind {
 }
 
 impl ProductKind {
+    /// Every product, in declaration order.
+    pub const ALL: [ProductKind; 6] = [
+        ProductKind::RuntimeClient,
+        ProductKind::RuntimeServer,
+        ProductKind::IdeCompanion,
+        ProductKind::PublicApi,
+        ProductKind::Declarations,
+        ProductKind::Analysis,
+    ];
+
+    /// Fixed, `Debug`-independent position of this product in [`Self::ALL`]:
+    /// a stable numeric identity to hash in the direct compile output digest,
+    /// so the digest does not depend on `Debug` output. It does NOT order the
+    /// artifact walk: that walk follows publication order, which is
+    /// observable. Never used to compare kinds for equality (that stays
+    /// `==`).
+    pub const fn ordinal(self) -> u8 {
+        match self {
+            ProductKind::RuntimeClient => 0,
+            ProductKind::RuntimeServer => 1,
+            ProductKind::IdeCompanion => 2,
+            ProductKind::PublicApi => 3,
+            ProductKind::Declarations => 4,
+            ProductKind::Analysis => 5,
+        }
+    }
+
     /// The product's tag in the vocabulary the REQUEST spells it with —
     /// the `kind` a caller writes and a response row answers with.
     ///
@@ -333,4 +360,16 @@ pub fn unroutable_host_request_axis(
         .semantic_profile()
         .is_some()
         .then_some(UnroutableHostRequestAxis::SemanticProfile)
+}
+
+#[cfg(test)]
+mod ordinal_tests {
+    use super::ProductKind;
+
+    #[test]
+    fn ordinal_is_the_position_in_all() {
+        for (index, kind) in ProductKind::ALL.iter().enumerate() {
+            assert_eq!(usize::from(kind.ordinal()), index);
+        }
+    }
 }

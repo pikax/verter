@@ -14,9 +14,20 @@ pub struct WorkspaceAlias {
     pub replacement: String,
 }
 
+/// Resolved options controlling a project's output, separate from type meaning.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProjectEmitOptions {
+    pub no_emit: bool,
+    pub composite: bool,
+    /// Absolute output directory, relative to the config that declared it.
+    pub out_dir: Option<String>,
+}
+
 /// Compiler options extracted from a tsconfig for resolution.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IdeProjectCompilerOptions {
+    /// Output policy, inherited per declared key. Does not enter env hashes.
+    pub emit: ProjectEmitOptions,
     pub base_url: Option<String>,
     pub paths: Vec<(String, Vec<String>)>,
     /// `compilerOptions.allowJs` — when set (or `checkJs`), `.js`/`.jsx`/

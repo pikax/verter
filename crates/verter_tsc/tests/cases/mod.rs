@@ -6,6 +6,7 @@
 //! `CARGO_MANIFEST_DIR`-relative paths from the entries, not declared here.
 
 mod config_diagnostics;
+mod content_mapper_protocol;
 mod declaration_fail_closed;
 mod diagnostic_set_parity;
 mod diagnostics;
@@ -13,3 +14,4 @@ mod exclude_selection;
 mod fallthrough;
 mod js_carrier_script_kind;
 mod typecheck_fail_closed;
+mod vue_declarations;

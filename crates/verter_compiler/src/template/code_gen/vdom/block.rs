@@ -173,6 +173,17 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         } else {
             prefix.push_str("(_openBlock(), _createElementBlock(_Fragment, null, [\n");
         }
+        // Build close tag replacement: ], 64 /* STABLE_FRAGMENT */))
+        let suffix = if self.options.is_production {
+            "\n], 64))"
+        } else {
+            "\n], 64 /* STABLE_FRAGMENT */))"
+        };
+        // A self-closing `<template />` has no close tag to carry the suffix:
+        // the single open-tag overwrite emits the whole empty fragment.
+        if el.tag_close.is_none() {
+            prefix.push_str(suffix);
+        }
         out.overwrite(el.tag_open.start, el.tag_open.end, &prefix);
 
         // Add child separators for array mode
@@ -185,12 +196,6 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
             el_children,
         );
 
-        // Build close tag replacement: ], 64 /* STABLE_FRAGMENT */))
-        let suffix = if self.options.is_production {
-            "\n], 64))"
-        } else {
-            "\n], 64 /* STABLE_FRAGMENT */))"
-        };
         if let Some(tag_close) = &el.tag_close {
             out.overwrite(tag_close.start, tag_close.end, suffix);
         }

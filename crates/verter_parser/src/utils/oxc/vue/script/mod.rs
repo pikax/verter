@@ -10,7 +10,7 @@
 //!     parse_script, ScriptMode, ScriptParseResult,
 //! };
 //!
-//! let result = parse_script(program, ScriptMode::Setup, base_offset, source);
+//! let result = parse_script(program, ScriptMode::Setup, base_offset, source, &[]);
 //! ```
 
 pub mod bindings;
@@ -89,6 +89,10 @@ use shared::{try_process_export, try_process_import};
 ///   In the `syntax` pipeline this is `content_start` (where script content begins in the SFC).
 ///   In direct parsing (tests), this is 0 since spans are already local.
 /// * `source` - The source text of the script content
+/// * `companion_items` - For a `<script setup>` block, the parsed items of the
+///   component's companion `<script>` block (empty when it has none, and for
+///   an Options block). Its imports register before the setup imports in the
+///   Vue import aliases that decide which calls create refs, as in Vue.
 ///
 /// # Returns
 ///
@@ -98,6 +102,7 @@ pub fn parse_script<'a>(
     mode: ScriptMode,
     content_offset: u32,
     source: &'a str,
+    companion_items: &[ScriptItem<'_>],
 ) -> ScriptParseResult<'a> {
     let ctx = ScriptParseContext::new(content_offset, source.as_bytes());
     let mut items = Vec::new();
@@ -121,7 +126,18 @@ pub fn parse_script<'a>(
             process_setup_statements(&program.body, &ctx, &mut setup_ctx, &mut items, &mut errors);
             is_async = setup_ctx.is_async;
 
-            bindings::extract_bindings(program, &ctx)
+            let mut aliases = bindings::VueImportAliases::default();
+            for item in companion_items {
+                if let ScriptItem::Import(import) = item {
+                    aliases.register_companion_import(import);
+                }
+            }
+            for item in &items {
+                if let ScriptItem::Import(import) = item {
+                    aliases.register_setup_import(import);
+                }
+            }
+            bindings::extract_bindings(program, &ctx, &aliases)
         }
         ScriptMode::Options => {
             let mut options_ctx = OptionsContext::new();

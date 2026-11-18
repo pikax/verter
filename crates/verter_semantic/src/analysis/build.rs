@@ -1533,8 +1533,69 @@ fn extract_destructured_bindings(
             async_component_source: async_component_source.clone(),
             binds_whole_call_result: false,
         },
+        BindingInitializer::MemberCall {
+            object, property, ..
+        } => BindingInitializer::MemberCall {
+            object: object.clone(),
+            property: property.clone(),
+            binds_whole_call_result: false,
+        },
+        // A member of a referenced value is not that value.
+        BindingInitializer::Reference { .. } => BindingInitializer::Other,
         other => other.clone(),
     });
+    // `const { b: c } = ns` reads property `b` of `ns` into `c`. A nested,
+    // defaulted, computed or rest member is not named by one property.
+    if let (
+        BindingPattern::ObjectPattern(object_pattern),
+        Some(BindingInitializer::Reference { name: object }),
+    ) = (pattern, initializer)
+    {
+        for property in &object_pattern.properties {
+            let key = if property.computed {
+                None
+            } else {
+                property.key.static_name()
+            };
+            match (&property.value, key) {
+                (BindingPattern::BindingIdentifier(id), Some(key)) => {
+                    bindings.push(AnalyzedBinding {
+                        name: id.name.to_string(),
+                        kind,
+                        is_reactive,
+                        reactivity_kind,
+                        type_annotation: None,
+                        initializer: Some(BindingInitializer::MemberReference {
+                            object: object.clone(),
+                            property: key.into_owned(),
+                        }),
+                        span: verter_span::Span::new(id.span.start, id.span.end),
+                        used_in_script: false,
+                        used_in_style: false,
+                    });
+                }
+                (value, _) => extract_destructured_binding_leaves(
+                    value,
+                    kind,
+                    is_reactive,
+                    reactivity_kind,
+                    &member_initializer,
+                    bindings,
+                ),
+            }
+        }
+        if let Some(rest) = &object_pattern.rest {
+            extract_destructured_binding_leaves(
+                &rest.argument,
+                kind,
+                is_reactive,
+                reactivity_kind,
+                &member_initializer,
+                bindings,
+            );
+        }
+        return;
+    }
     extract_destructured_binding_leaves(
         pattern,
         kind,
@@ -1595,9 +1656,12 @@ fn classify_initializer(
     imports: &[AnalyzedImport],
     import_map: &ImportBindingMap,
 ) -> (Option<BindingInitializer>, bool, ReactivityKind) {
-    match expr {
+    // `x as T`, `x satisfies T`, `x!` and parentheses wrap the value
+    // without changing it.
+    match expr.get_inner_expression() {
         Expression::CallExpression(call) => {
-            if let Some(callee_name) = call_callee_name(&call.callee) {
+            let callee = call.callee.get_inner_expression();
+            if let Some(callee_name) = call_callee_name(callee) {
                 let callee_import_source = import_map
                     .source(imports, callee_name)
                     .map(|s| s.to_string());
@@ -1655,6 +1719,19 @@ fn classify_initializer(
                     is_reactive,
                     reactivity_kind,
                 );
+            }
+            if let Expression::StaticMemberExpression(member) = callee {
+                if let Expression::Identifier(object) = member.object.get_inner_expression() {
+                    return (
+                        Some(BindingInitializer::MemberCall {
+                            object: object.name.to_string(),
+                            property: member.property.name.to_string(),
+                            binds_whole_call_result: true,
+                        }),
+                        false,
+                        ReactivityKind::None,
+                    );
+                }
             }
             (Some(BindingInitializer::Other), false, ReactivityKind::None)
         }

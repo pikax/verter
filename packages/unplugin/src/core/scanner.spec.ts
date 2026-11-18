@@ -8,7 +8,12 @@ import { mkdirSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 import { scanCarrierFiles } from "./scanner";
-import { loadWorkspace, resetWorkspace } from "./compiler";
+import { createRequire } from "node:module";
+import type { Workspace } from "@verter/native";
+
+const nativeModule = createRequire(import.meta.url)(
+  "@verter/native",
+) as typeof import("@verter/native");
 
 function createTempDir(): string {
   const dir = join(
@@ -35,7 +40,7 @@ describe("scanCarrierFiles", () => {
     mkdirSync(join(tempDir, "components"), { recursive: true });
     writeFileSync(join(tempDir, "components", "Btn.vue"), "<template><button/></template>");
 
-    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"), null);
 
     expect(files.size).toBe(2);
     // Keys should be forward-slash normalized absolute paths
@@ -49,7 +54,7 @@ describe("scanCarrierFiles", () => {
     mkdirSync(join(tempDir, "node_modules", "some-lib"), { recursive: true });
     writeFileSync(join(tempDir, "node_modules", "some-lib", "Comp.vue"), "<template/>");
 
-    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"), null);
 
     expect(files.size).toBe(1);
     const keys = [...files.keys()];
@@ -63,7 +68,7 @@ describe("scanCarrierFiles", () => {
     mkdirSync(join(tempDir, ".vite"), { recursive: true });
     writeFileSync(join(tempDir, ".vite", "cached.vue"), "<template/>");
 
-    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"), null);
 
     expect(files.size).toBe(1);
     const keys = [...files.keys()];
@@ -80,6 +85,7 @@ describe("scanCarrierFiles", () => {
     const files = await scanCarrierFiles(
       tempDir,
       (f) => f.endsWith(".vue") && f.endsWith("/App.vue"),
+      null,
     );
 
     expect(files.size).toBe(1);
@@ -91,7 +97,7 @@ describe("scanCarrierFiles", () => {
     const content = "<template><div>hello</div></template>";
     writeFileSync(join(tempDir, "App.vue"), content);
 
-    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"), null);
 
     expect(files.size).toBe(1);
     const value = [...files.values()][0];
@@ -99,7 +105,7 @@ describe("scanCarrierFiles", () => {
   });
 
   it("returns empty map for empty directory", async () => {
-    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"), null);
     expect(files.size).toBe(0);
   });
 
@@ -107,7 +113,7 @@ describe("scanCarrierFiles", () => {
     mkdirSync(join(tempDir, "src", "views"), { recursive: true });
     writeFileSync(join(tempDir, "src", "views", "Home.vue"), "<template/>");
 
-    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"), null);
 
     const keys = [...files.keys()];
     for (const key of keys) {
@@ -130,7 +136,6 @@ describe("scanCarrierFiles through a loaded Workspace (async FS)", () => {
   });
 
   afterEach(() => {
-    resetWorkspace();
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -142,9 +147,9 @@ describe("scanCarrierFiles through a loaded Workspace (async FS)", () => {
     writeFileSync(join(tempDir, "components", "Btn.vue"), nestedContent);
 
     // Load a real native Workspace so the scanner takes its async FS branch.
-    loadWorkspace([tempDir]);
+    const workspace: Workspace = new nativeModule.Workspace([tempDir]);
 
-    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"));
+    const files = await scanCarrierFiles(tempDir, (f) => f.endsWith(".vue"), workspace);
 
     expect(files.size).toBe(2);
     const appKey = [...files.keys()].find((k) => k.endsWith("/App.vue"));

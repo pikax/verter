@@ -54,8 +54,8 @@ pub fn process_text<'a>(
         if helpers::has_consecutive_ws(content) {
             // Condensation implies escaping (single-pass).
             buf.push_str(&helpers::condense_and_escape_js(content));
-        } else if helpers::needs_js_escaping(content) {
-            helpers::escape_js_string_into(&mut buf, content);
+        } else if crate::template::vue_syntax::needs_js_escaping(content) {
+            crate::template::vue_syntax::escape_js_string_into(&mut buf, content);
         } else {
             buf.push_str(content);
         }

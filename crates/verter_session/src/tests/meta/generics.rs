@@ -2583,22 +2583,21 @@ defineProps<{
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
         )
         .expect("resolved component meta should exist");
+    // The `defineProps` shape is the publication authority for the macro's
+    // members; the flat `props` lane is evaluator metadata.
     let groups_field = resolved
         .evaluated_types
         .as_ref()
-        .and_then(|types| types.props.iter().find(|field| field.name == "groups"))
-        .expect("expanded evaluated types should keep the groups prop");
+        .into_iter()
+        .flat_map(|types| types.define_props.iter())
+        .flat_map(|shape| shape.result.value.properties.iter())
+        .find(|property| property.name == "groups")
+        .expect("the defineProps shape should publish the `groups` prop");
 
     let groups_field_ty = shallow_published_type(
         project.host(),
         "/src/App.vue",
-        Some(
-            groups_field
-                .authority
-                .source_position()
-                .present()
-                .expect("present source"),
-        ),
+        Some(groups_field.ty.present().expect("present source")),
         "groups prop",
     );
     assert!(
@@ -2666,22 +2665,21 @@ defineProps<{
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
         )
         .expect("resolved component meta should exist");
+    // The `defineProps` shape is the publication authority for the macro's
+    // members; the flat `props` lane is evaluator metadata.
     let tooltip_field = resolved
         .evaluated_types
         .as_ref()
-        .and_then(|types| types.props.iter().find(|field| field.name == "tooltip"))
-        .expect("expanded evaluated types should keep the tooltip prop");
+        .into_iter()
+        .flat_map(|types| types.define_props.iter())
+        .flat_map(|shape| shape.result.value.properties.iter())
+        .find(|property| property.name == "tooltip")
+        .expect("the defineProps shape should publish the `tooltip` prop");
 
     let tooltip_field_ty = shallow_published_type(
         project.host(),
         "/src/App.vue",
-        Some(
-            tooltip_field
-                .authority
-                .source_position()
-                .present()
-                .expect("present source"),
-        ),
+        Some(tooltip_field.ty.present().expect("present source")),
         "tooltip prop",
     );
     let has_symbolic_tooltip = match &tooltip_field_ty {
@@ -2780,22 +2778,21 @@ defineProps<{
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
         )
         .expect("resolved component meta should exist");
+    // The `defineProps` shape is the publication authority for the macro's
+    // members; the flat `props` lane is evaluator metadata.
     let tooltip_field = resolved
         .evaluated_types
         .as_ref()
-        .and_then(|types| types.props.iter().find(|field| field.name == "tooltip"))
-        .expect("expanded evaluated types should keep the tooltip prop");
+        .into_iter()
+        .flat_map(|types| types.define_props.iter())
+        .flat_map(|shape| shape.result.value.properties.iter())
+        .find(|property| property.name == "tooltip")
+        .expect("the defineProps shape should publish the `tooltip` prop");
 
     let tooltip_field_ty = shallow_published_type(
         project.host(),
         "/App.vue",
-        Some(
-            tooltip_field
-                .authority
-                .source_position()
-                .present()
-                .expect("present source"),
-        ),
+        Some(tooltip_field.ty.present().expect("present source")),
         "tooltip prop",
     );
     let has_symbolic_tooltip = match &tooltip_field_ty {
@@ -2898,11 +2895,16 @@ defineProps<{
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
         )
         .expect("resolved component meta should exist");
+    // The `defineProps` shape is the publication authority for the macro's
+    // members; the flat `props` lane is evaluator metadata.
     let title_field = resolved
         .evaluated_types
         .as_ref()
-        .and_then(|types| types.props.iter().find(|field| field.name == "title"))
-        .expect("expanded evaluated types should keep the title prop");
+        .into_iter()
+        .flat_map(|types| types.define_props.iter())
+        .flat_map(|shape| shape.result.value.properties.iter())
+        .find(|property| property.name == "title")
+        .expect("the defineProps shape should publish the `title` prop");
 
     // The projector publishes the `title` field via
     // `dispatch.execute_read` + `raise_node_to_type_expr`. Two
@@ -2923,13 +2925,7 @@ defineProps<{
     let title_field_ty = shallow_published_type(
         project.host(),
         "/src/App.vue",
-        Some(
-            title_field
-                .authority
-                .source_position()
-                .present()
-                .expect("present source"),
-        ),
+        Some(title_field.ty.present().expect("present source")),
         "title prop",
     );
     let preserves_package_symbolic = match &title_field_ty {

@@ -15,14 +15,15 @@ use oxc_allocator::Allocator;
 use verter_span::{RelativeSpan, SourceByteOffset, SourceByteRange};
 
 use crate::ast::types::{ElementNode, ElementNodeConditionKind};
+use crate::code_transform::EditRecorder;
+use crate::code_transform::MappedGeneratedText;
 use crate::ide::template::emit::{
     emit_op, emit_relocated_value, trim_span, EmitOp, EmitText, ExprOptions,
 };
-use crate::template::code_gen::binding::BindingResolver;
-use crate::template::code_gen::expression::{
+use crate::template::binding::prefixed_expr::{
     build_prefixed_expr_segments, resolve_simple_expr_segments,
 };
-use crate::template::code_gen::types::{CodeGenOutput, MappedGeneratedText};
+use crate::template::binding::BindingResolver;
 use crate::template::oxc::types::{OxcParsedElement, OxcParsedExpression};
 use crate::utils::oxc::{Binding, BindingExtractionResult, Dynamism};
 
@@ -45,7 +46,7 @@ pub fn emit_v_if_open<'alloc>(
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
     source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     resolver: &BindingResolver<'alloc>,
 ) -> bool {
     let Some(condition) = &el.v_condition else {
@@ -81,7 +82,7 @@ pub fn emit_v_if_open<'alloc>(
 /// - v-if / v-else-if: close the branch with `}` (the chain walk closes the
 ///   block after the last branch)
 /// - v-else: close the branch and the block: `}})()}`
-pub fn emit_v_if_close(el: &ElementNode, out: &mut CodeGenOutput<'_>) {
+pub fn emit_v_if_close(el: &ElementNode, out: &mut EditRecorder<'_>) {
     let Some(condition) = &el.v_condition else {
         return;
     };
@@ -121,7 +122,7 @@ pub fn emit_v_for_open<'alloc>(
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
     source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     resolver: &BindingResolver<'alloc>,
     bare: bool,
     source_name: &str,
@@ -209,7 +210,7 @@ pub(crate) fn alias_arity(aliases: &str) -> usize {
 /// iterable identifiers carry their source offsets.
 #[allow(clippy::too_many_arguments)]
 fn emit_mapped_v_for_iterable<'alloc>(
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     target_pos: u32,
     iterable: &str,
     v_for_value_start: u32,
@@ -291,7 +292,9 @@ pub(crate) fn resolve_iterable_segments(
             ),
             pos: s.start,
             ignore: false,
+            is_expression_local: false,
             is_shorthand: false,
+            usage: crate::utils::oxc::ReferenceUse::Read,
         })
         .collect();
     let parsed = OxcParsedExpression {
@@ -311,7 +314,7 @@ pub(crate) fn resolve_iterable_segments(
 }
 
 /// Close a `v-for` frame: `); } })()}` (`bare`: `); } })()`).
-pub fn emit_v_for_close(el: &ElementNode, out: &mut CodeGenOutput<'_>, bare: bool) {
+pub fn emit_v_for_close(el: &ElementNode, out: &mut EditRecorder<'_>, bare: bool) {
     let el_end = el
         .tag_close
         .as_ref()
@@ -325,11 +328,7 @@ pub fn emit_v_for_close(el: &ElementNode, out: &mut CodeGenOutput<'_>, bare: boo
 /// Emit unmapped synthetic text at `at` (an `Inserted` chunk → maps to `None`),
 /// order-preserving so it interleaves with adjacent mapped value emissions.
 #[inline]
-fn emit_unmapped<'alloc>(
-    out: &mut CodeGenOutput<'alloc>,
-    at: SourceByteOffset,
-    text: &'static str,
-) {
+fn emit_unmapped<'alloc>(out: &mut EditRecorder<'alloc>, at: SourceByteOffset, text: &'static str) {
     emit_op(
         out,
         &EmitOp::InsertUnmapped {
@@ -344,7 +343,7 @@ pub fn emit_v_show<'alloc>(
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
     source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     _alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
 ) {
@@ -469,7 +468,7 @@ pub fn emit_v_show<'alloc>(
 /// same position, which would break the interleaved order.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_mapped_condition_expr<'alloc>(
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     target_pos: u32,
     prefix: &str,
     suffix: &str,
@@ -480,7 +479,7 @@ pub fn emit_mapped_condition_expr<'alloc>(
     resolver: &BindingResolver<'alloc>,
 ) {
     // The condition resolves through the shared expression producer
-    // (`code_gen::expression`) for both the OXC-binding (compound) and
+    // (`template::binding::prefixed_expr`) for both the OXC-binding (compound) and
     // resolver-only (simple) cases. Every authored identifier and verbatim run
     // maps to its source span; resolver-injected scaffolding — binding prefixes
     // (`__props.`/`_ctx.`/`$setup.`), the `.value` suffix, keyword brackets,
@@ -591,18 +590,19 @@ mod tests {
         let source = "xx true yy";
         let resolver = BindingResolver::new(rustc_hash::FxHashMap::default(), false);
 
-        let mut out = CodeGenOutput::new(&alloc);
+        let mut out = EditRecorder::new(&alloc);
         // target_pos 0, prefix `if(`, suffix `){`, vs 3, ve 7 (`true`), no oxc element.
         emit_mapped_condition_expr(&mut out, 0, "if(", "){", 3, 7, source, None, &resolver);
 
         let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-        out.apply_to(&mut ct);
+        out.apply(&mut ct).expect("recorded edits apply");
 
         // `true` is left unchanged by the empty resolver; bytes are unchanged.
         assert_eq!(ct.build_string(), "if(true){xx true yy");
 
-        let map =
-            ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"));
+        let map = ct
+            .generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"))
+            .expect("mapped transform");
         let tokens: Vec<_> = map.get_tokens().collect();
         let dump: Vec<_> = tokens
             .iter()
@@ -651,23 +651,24 @@ mod tests {
         let mut map = rustc_hash::FxHashMap::default();
         map.insert(
             "title" as &str,
-            crate::template::code_gen::binding::BindingType::Props,
+            crate::template::binding::BindingType::Props,
         );
         // Inline mode → props resolve with the `__props.` prefix.
         let resolver = BindingResolver::new(map, true);
 
-        let mut out = CodeGenOutput::new(&alloc);
+        let mut out = EditRecorder::new(&alloc);
         // prefix `if(`, suffix `){`, vs 3, ve 8 (`title`), no oxc element.
         emit_mapped_condition_expr(&mut out, 0, "if(", "){", 3, 8, source, None, &resolver);
 
         let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-        out.apply_to(&mut ct);
+        out.apply(&mut ct).expect("recorded edits apply");
 
         // Resolver injects the synthetic `__props.` prefix.
         assert_eq!(ct.build_string(), "if(__props.title){xx title yy");
 
-        let map =
-            ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"));
+        let map = ct
+            .generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"))
+            .expect("mapped transform");
         let tokens: Vec<_> = map.get_tokens().collect();
         let dump: Vec<_> = tokens
             .iter()
@@ -723,7 +724,9 @@ mod tests {
                     span: RelativeSpan::new(0, name.len() as u32),
                     pos,
                     ignore: false,
+                    is_expression_local: false,
                     is_shorthand: false,
+                    usage: crate::utils::oxc::ReferenceUse::Read,
                 }],
                 functions: vec![],
                 literals: vec![],
@@ -760,25 +763,26 @@ mod tests {
         let mut map = rustc_hash::FxHashMap::default();
         map.insert(
             "count" as &str,
-            crate::template::code_gen::binding::BindingType::SetupRef,
+            crate::template::binding::BindingType::SetupRef,
         );
         // Inline mode → a setup ref resolves with the `.value` suffix.
         let resolver = BindingResolver::new(map, true);
 
         let el = single_ident_cond_element("count", 3);
 
-        let mut out = CodeGenOutput::new(&alloc);
+        let mut out = EditRecorder::new(&alloc);
         // prefix `if(`, suffix `){`, vs 3, ve 8 (`count`), with the OXC element.
         emit_mapped_condition_expr(&mut out, 0, "if(", "){", 3, 8, source, Some(&el), &resolver);
 
         let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-        out.apply_to(&mut ct);
+        out.apply(&mut ct).expect("recorded edits apply");
 
         // Resolver injects the synthetic `.value`; the source bytes are unchanged.
         assert_eq!(ct.build_string(), "if(count.value){xx count yy");
 
-        let map =
-            ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"));
+        let map = ct
+            .generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"))
+            .expect("mapped transform");
         let tokens: Vec<_> = map.get_tokens().collect();
         let dump: Vec<_> = tokens
             .iter()
@@ -837,6 +841,7 @@ mod tests {
         OxcParsedElement {
             condition: None,
             v_for: Some(OxcParsedVFor {
+                source_bindings: None,
                 parsed: VForWithBindings {
                     result: VForParseResult {
                         left: None,
@@ -874,12 +879,12 @@ mod tests {
         let mut map = rustc_hash::FxHashMap::default();
         map.insert(
             "items" as &str,
-            crate::template::code_gen::binding::BindingType::Props,
+            crate::template::binding::BindingType::Props,
         );
         // Inline mode → props resolve with the `__props.` prefix.
         let resolver = BindingResolver::new(map, true);
 
-        let mut out = CodeGenOutput::new(&alloc);
+        let mut out = EditRecorder::new(&alloc);
         // v-for value `item in items` spans [3, 16); iterable `items` is at 11.
         emit_mapped_v_for_iterable(
             &mut out,
@@ -893,7 +898,7 @@ mod tests {
         );
 
         let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-        out.apply_to(&mut ct);
+        out.apply(&mut ct).expect("recorded edits apply");
 
         // Iterable head bytes: `(__props.items)`.
         assert!(
@@ -902,8 +907,9 @@ mod tests {
             ct.build_string()
         );
 
-        let map =
-            ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"));
+        let map = ct
+            .generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"))
+            .expect("mapped transform");
         let tokens: Vec<_> = map.get_tokens().collect();
         let dump: Vec<_> = tokens
             .iter()
@@ -948,6 +954,7 @@ mod tests {
         OxcParsedElement {
             condition: None,
             v_for: Some(OxcParsedVFor {
+                source_bindings: None,
                 parsed: VForWithBindings {
                     result: VForParseResult {
                         left: None,
@@ -987,7 +994,7 @@ mod tests {
         let mut map = rustc_hash::FxHashMap::default();
         map.insert(
             "items" as &str,
-            crate::template::code_gen::binding::BindingType::Props,
+            crate::template::binding::BindingType::Props,
         );
         // Inline mode → a prop would resolve with the `__props.` prefix IF routed
         // through the resolver-only path.
@@ -996,7 +1003,7 @@ mod tests {
         // OXC v-for present but carrying zero references (loop-local-shadowing shape).
         let el = no_ref_v_for_element();
 
-        let mut out = CodeGenOutput::new(&alloc);
+        let mut out = EditRecorder::new(&alloc);
         emit_mapped_v_for_iterable(
             &mut out,
             0,
@@ -1009,7 +1016,7 @@ mod tests {
         );
 
         let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-        out.apply_to(&mut ct);
+        out.apply(&mut ct).expect("recorded edits apply");
 
         // Iterable head bytes must be VERBATIM `(items)` — no `__props.` prefix.
         let built = ct.build_string();
@@ -1022,8 +1029,9 @@ mod tests {
             "zero-ref v-for iterable must carry no resolver prefix, got: {built}"
         );
 
-        let map =
-            ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"));
+        let map = ct
+            .generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"))
+            .expect("mapped transform");
         let tokens: Vec<_> = map.get_tokens().collect();
         let dump: Vec<_> = tokens
             .iter()
@@ -1062,7 +1070,7 @@ mod tests {
         let mut map = rustc_hash::FxHashMap::default();
         map.insert(
             "todos" as &str,
-            crate::template::code_gen::binding::BindingType::SetupRef,
+            crate::template::binding::BindingType::SetupRef,
         );
         // Inline mode → a setup ref resolves with the `.value` suffix.
         let resolver = BindingResolver::new(map, true);
@@ -1070,7 +1078,7 @@ mod tests {
         // v-for OXC element carrying one external reference span over `todos` [11, 16).
         let el = single_ref_v_for_element(11, 16);
 
-        let mut out = CodeGenOutput::new(&alloc);
+        let mut out = EditRecorder::new(&alloc);
         emit_mapped_v_for_iterable(
             &mut out,
             0,
@@ -1083,7 +1091,7 @@ mod tests {
         );
 
         let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-        out.apply_to(&mut ct);
+        out.apply(&mut ct).expect("recorded edits apply");
 
         // `.value` injected; iterable head bytes: `(todos.value)`.
         assert!(
@@ -1092,8 +1100,9 @@ mod tests {
             ct.build_string()
         );
 
-        let map =
-            ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"));
+        let map = ct
+            .generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"))
+            .expect("mapped transform");
         let tokens: Vec<_> = map.get_tokens().collect();
         let dump: Vec<_> = tokens
             .iter()

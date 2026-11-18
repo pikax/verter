@@ -10,8 +10,10 @@
 
 use crate::ast::types::CommentNode;
 
-use super::super::shared::helpers::{escape_js_string_into, needs_js_escaping, VdomHelper};
+use super::super::shared::helpers::VdomHelper;
+
 use super::super::types::CodeGenOutput;
+use crate::template::vue_syntax::{escape_js_string_into, needs_js_escaping};
 
 /// Outcome of [`process_comment`].
 ///
@@ -98,7 +100,7 @@ mod tests {
     /// Apply accumulated output to the source and return the final string.
     fn apply_to_string<'a>(source: &str, out: CodeGenOutput<'a>, alloc: &'a Allocator) -> String {
         let mut ct = CodeTransform::new(source, alloc);
-        out.apply_to(&mut ct);
+        out.apply_to(&mut ct).expect("recorded edits apply");
         ct.build_string()
     }
 
@@ -118,10 +120,10 @@ mod tests {
         assert!(matches!(outcome, CommentOutcome::Kept));
 
         // Two overwrites: prefix and suffix; no prepends
-        assert_eq!(out.overwrites.len(), 2);
-        assert_eq!(out.prepends.len(), 0);
-        assert_eq!(out.overwrites[0], (0, 5, "_createCommentVNode(\""));
-        assert_eq!(out.overwrites[1], (10, 14, "\")"));
+        assert_eq!(out.overwrites().len(), 2);
+        assert_eq!(out.edits.prepends.len(), 0);
+        assert_eq!(out.overwrites()[0], (0, 5, "_createCommentVNode(\""));
+        assert_eq!(out.overwrites()[1], (10, 14, "\")"));
     }
 
     #[test]
@@ -148,10 +150,10 @@ mod tests {
         let outcome = process_comment(&comment, source, true, &mut out);
 
         assert!(matches!(outcome, CommentOutcome::Kept));
-        assert_eq!(out.overwrites.len(), 2);
-        assert_eq!(out.prepends.len(), 0);
-        assert_eq!(out.overwrites[0], (0, 4, "_createCommentVNode(\""));
-        assert_eq!(out.overwrites[1], (4, 7, "\")"));
+        assert_eq!(out.overwrites().len(), 2);
+        assert_eq!(out.edits.prepends.len(), 0);
+        assert_eq!(out.overwrites()[0], (0, 4, "_createCommentVNode(\""));
+        assert_eq!(out.overwrites()[1], (4, 7, "\")"));
     }
 
     #[test]
@@ -183,12 +185,12 @@ mod tests {
 
         assert!(matches!(outcome, CommentOutcome::Kept));
         // Three overwrites: prefix, suffix, delete-original; one prepend with escaped content
-        assert_eq!(out.overwrites.len(), 3);
-        assert_eq!(out.prepends.len(), 1);
-        assert_eq!(out.overwrites[0], (0, 5, "_createCommentVNode(\""));
-        assert_eq!(out.overwrites[1], (13, 17, "\")"));
-        assert_eq!(out.overwrites[2], (5, 13, ""));
-        assert_eq!(out.prepends[0], (5, "say \\\"hi\\\""));
+        assert_eq!(out.overwrites().len(), 3);
+        assert_eq!(out.edits.prepends.len(), 1);
+        assert_eq!(out.overwrites()[0], (0, 5, "_createCommentVNode(\""));
+        assert_eq!(out.overwrites()[1], (13, 17, "\")"));
+        assert_eq!(out.overwrites()[2], (5, 13, ""));
+        assert_eq!(out.edits.prepends[0], (5, "say \\\"hi\\\""));
     }
 
     #[test]
@@ -213,10 +215,10 @@ mod tests {
 
         process_comment(&comment, source, true, &mut out);
 
-        assert_eq!(out.overwrites.len(), 3);
-        assert_eq!(out.prepends.len(), 1);
-        assert_eq!(out.prepends[0], (4, "line1\\nline2"));
-        assert_eq!(out.overwrites[2], (4, 15, ""));
+        assert_eq!(out.overwrites().len(), 3);
+        assert_eq!(out.edits.prepends.len(), 1);
+        assert_eq!(out.edits.prepends[0], (4, "line1\\nline2"));
+        assert_eq!(out.overwrites()[2], (4, 15, ""));
     }
 
     #[test]
@@ -241,10 +243,10 @@ mod tests {
 
         process_comment(&comment, source, true, &mut out);
 
-        assert_eq!(out.overwrites.len(), 3);
-        assert_eq!(out.prepends.len(), 1);
-        assert_eq!(out.prepends[0], (4, "a\\\\b"));
-        assert_eq!(out.overwrites[2], (4, 7, ""));
+        assert_eq!(out.overwrites().len(), 3);
+        assert_eq!(out.edits.prepends.len(), 1);
+        assert_eq!(out.edits.prepends[0], (4, "a\\\\b"));
+        assert_eq!(out.overwrites()[2], (4, 7, ""));
     }
 
     #[test]
@@ -282,7 +284,7 @@ mod tests {
             }
             CommentOutcome::Kept => panic!("expected CommentOutcome::Dropped"),
         }
-        assert_eq!(out.overwrites.len(), 0);
+        assert_eq!(out.overwrites().len(), 0);
     }
 
     // ==================== Offset handling ====================
@@ -298,9 +300,9 @@ mod tests {
         let outcome = process_comment(&comment, source, true, &mut out);
 
         assert!(matches!(outcome, CommentOutcome::Kept));
-        assert_eq!(out.overwrites[0], (5, 10, "_createCommentVNode(\""));
-        assert_eq!(out.overwrites[1], (13, 16, "\")"));
-        assert_eq!(out.prepends.len(), 0);
+        assert_eq!(out.overwrites()[0], (5, 10, "_createCommentVNode(\""));
+        assert_eq!(out.overwrites()[1], (13, 16, "\")"));
+        assert_eq!(out.edits.prepends.len(), 0);
     }
 
     #[test]

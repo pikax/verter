@@ -1,0 +1,74 @@
+{
+  "schema": 2,
+  "caseId": "ssr/css-vars-root",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/css-vars-root.vue",
+    "sha256": "42a2bc2c07a66090a2eef06ac82cd9c028443f873fd627aa3a6b8cdf22e85a47"
+  },
+  "options": {
+    "sha256": "439d164a745dc40c98ff4a7c676e5a3c1e6119519cce64d520f1364562087c20",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/ssr/css-vars-root.vue",
+      "id": "ssr/css-vars-root",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/vapor/ssr/css-vars-root.js",
+      "sha256": "591412a7f4b98aafe5f3e8669d67197bc8ffd02206b90bd4383cfa06e1cc2e82",
+      "bytes": 777
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/vapor/ssr/css-vars-root.map.json",
+      "sha256": "d233b248db22ef4c59d96e78830a15bbe2b32e1650374bfe8faab744a4aee87b"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "defineVaporComponent",
+      "alias": "_defineVaporComponent"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    },
+    {
+      "imported": "useVaporCssVars",
+      "alias": "_useVaporCssVars"
+    }
+  ]
+}

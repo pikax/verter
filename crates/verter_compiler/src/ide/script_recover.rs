@@ -120,6 +120,29 @@ pub enum RecoveryInsert {
     ExpressionHole { at: u32 },
 }
 
+impl RecoveryInsert {
+    /// SFC-absolute offset the placeholder is inserted at.
+    #[must_use]
+    pub fn at(self) -> u32 {
+        match self {
+            Self::MemberHole { at } | Self::ExpressionHole { at } => at,
+        }
+    }
+
+    /// The OUTPUT-ONLY checking text that fills the hole. A member hole fills a
+    /// dangling `a.` / `a?.` with a universal member (`valueOf`), so the dot
+    /// cannot absorb the following token and the receiver keeps its type; an
+    /// expression hole completes a trailing operator / assignment / arm with a
+    /// parenthesised `undefined` operand. Neither becomes a source fact.
+    #[must_use]
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            Self::MemberHole { .. } => "valueOf",
+            Self::ExpressionHole { .. } => "(undefined)",
+        }
+    }
+}
+
 /// Structured, original-span tolerant recovery plan for a `<script setup>` block
 /// whose content does NOT parse cleanly with OXC.
 ///
@@ -141,6 +164,21 @@ pub struct ScriptSetupRecoveryPlan<'a> {
     /// was left empty carries a placeholder operand before its closer (`undefined)`,
     /// `undefined]`). OUTPUT-ONLY.
     pub scope_closers: String,
+}
+
+impl ScriptSetupRecoveryPlan<'_> {
+    /// The OUTPUT-ONLY recovery boundary emitted right after the user's body:
+    /// first the closers for every bracket the user left open, then a `;` that
+    /// terminates the now-complete trailing statement, so whatever follows
+    /// starts at a clean statement boundary instead of being absorbed by a
+    /// dangling expression. Never a source fact.
+    #[must_use]
+    pub fn boundary_completion(&self) -> String {
+        let mut completion = String::with_capacity(self.scope_closers.len() + 1);
+        completion.push_str(&self.scope_closers);
+        completion.push(';');
+        completion
+    }
 }
 
 /// The kind of REQUIRED `(...)` header a control/condition keyword introduces.

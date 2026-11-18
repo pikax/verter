@@ -341,10 +341,10 @@ pub(crate) fn utf16_offset_to_bytes(
     column: u32,
 ) -> Option<u32> {
     let start = *line_starts.get(line as usize)? as usize;
-    let end = line_starts
-        .get(line as usize + 1)
-        .map(|next| *next as usize)
-        .unwrap_or(code.len());
+    let end = match line_starts.get(line as usize + 1) {
+        Some(next) => next.checked_sub(1)? as usize,
+        None => code.len(),
+    };
     let line_bytes = code.get(start..end)?;
     let mut utf16 = 0u32;
     for (byte_off, ch) in line_bytes.char_indices() {
@@ -377,6 +377,16 @@ pub(crate) fn next_char_end(code: &str, start: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utf16_offsets_stop_at_the_addressed_line_end() {
+        for (code, column, offset) in [("a\nb", 1, 1), ("😀\nb", 2, 4), ("a\r\nb", 2, 2)] {
+            let lines = generated_line_starts(code);
+            assert_eq!(utf16_offset_to_bytes(code, &lines, 0, column), Some(offset));
+            assert_eq!(utf16_offset_to_bytes(code, &lines, 0, column + 1), None);
+            assert_eq!(utf16_offset_to_bytes(code, &lines, 1, 0), Some(offset + 1));
+        }
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn request<'a>(

@@ -719,6 +719,64 @@ fn materialize_walks_filesystem_and_finds_matching_files() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn materialize_parent_and_sibling_includes_keeps_excludes_and_explicit_files() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fs = crate::native_fs::NativeFs::new();
+    for name in [
+        ".nuxt/local/Local.vue",
+        "app/View.vue",
+        "app/nested/Deep.vue",
+        "app/Skip.vue",
+        "app/Excluded.vue",
+        "shared/Shared.vue",
+        "outside/Other.vue",
+    ] {
+        fs.write_file(tmp.path().join(name).to_str().unwrap(), "")
+            .unwrap();
+    }
+    fs.write_file(tmp.path().join(".nuxt/tsconfig.json").to_str().unwrap(), r#"{"include":["local/**/*.vue","../app/**/*.vue","../app/nested/**/*.vue","../shared/**/*.vue"],"exclude":["../app/Skip.vue","../app/Excluded.vue"],"files":["../app/Skip.vue"]}"#).unwrap();
+    let config = fs
+        .realpath(tmp.path().join(".nuxt/tsconfig.json").to_str().unwrap())
+        .unwrap();
+    let root = CanonicalPath::new(
+        std::path::Path::new(&config)
+            .parent()
+            .unwrap()
+            .to_str()
+            .unwrap(),
+    );
+    let ws = crate::FilesystemWorkspace::new(crate::FilesystemOptions::default());
+    let project = configured_project(&ws, &config, root.as_str(), &root, ProjectId(0));
+    let ProjectPayload::Configured { membership, .. } = project.payload else {
+        panic!("configured project")
+    };
+    let mut actual: Vec<_> = membership.materialized_files.iter().cloned().collect();
+    actual.sort();
+    let mut expected: Vec<_> = [
+        ".nuxt/local/Local.vue",
+        "app/View.vue",
+        "app/nested/Deep.vue",
+        "app/Skip.vue",
+        "shared/Shared.vue",
+    ]
+    .into_iter()
+    .map(|name| {
+        CanonicalPath::new(
+            &fs.realpath(tmp.path().join(name).to_str().unwrap())
+                .unwrap(),
+        )
+    })
+    .collect();
+    expected.sort();
+    assert_eq!(actual, expected);
+    assert!(!membership.contains(&CanonicalPath::new(
+        &fs.realpath(tmp.path().join("outside/Other.vue").to_str().unwrap())
+            .unwrap()
+    )));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 fn materialize_excludes_node_modules_via_default_excludes() {
     let tmp = tempfile::TempDir::new().unwrap();
     let project = tmp.path().join("project");
@@ -1296,5 +1354,85 @@ fn extends_only_alternate_config_is_not_registered_as_file_owner_and_package_win
         other => panic!(
             "Note.vue must have a unique package owner, got {other:?} (configured={configured_tsconfigs:?})"
         ),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod selected_projects_tests {
+    use super::*;
+    use crate::{FilesystemOptions, FilesystemWorkspace, PublishedRoot};
+    use std::sync::Arc;
+
+    #[test]
+    fn selected_configs_share_one_snapshot_without_discovering_siblings() {
+        let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+        for (path, text) in [
+            ("/workspace/one.json", r#"{"files":[]}"#),
+            ("/workspace/two.json", r#"{"files":[]}"#),
+            ("/workspace/tsconfig.json", r#"{"include":["**/*"]}"#),
+        ] {
+            ws.inject_file(path.into(), Arc::from(text));
+        }
+        let snapshot = build_selected_projects_snapshot(
+            &ws,
+            &["/workspace/two.json".into(), "/workspace/one.json".into()],
+            "/workspace",
+            SnapshotGeneration(7),
+        );
+        assert_eq!(snapshot.projects.len(), 3);
+        assert_eq!(snapshot.generation, SnapshotGeneration(7));
+        let configs = snapshot
+            .projects
+            .iter()
+            .filter_map(|p| match &p.payload {
+                ProjectPayload::Configured { tsconfig_path, .. } => Some(tsconfig_path.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(configs, vec!["/workspace/one.json", "/workspace/two.json"]);
+        for (i, project) in snapshot.projects.iter().enumerate() {
+            assert_eq!(project.id, ProjectId(i as u32));
+        }
+        let singular = build_selected_project_snapshot(
+            &ws,
+            "/workspace/one.json",
+            "/workspace",
+            SnapshotGeneration(7),
+        );
+        assert_eq!(singular.projects.len(), 2);
+        assert_eq!(
+            singular.tsconfig_path(ProjectId(0)).unwrap().as_str(),
+            "/workspace/one.json"
+        );
+    }
+
+    #[test]
+    fn no_emit_changes_do_not_change_published_env_hash_arrays() {
+        fn hashes(no_emit: bool) -> crate::ProjectEnvHashArray {
+            let ws = FilesystemWorkspace::new(FilesystemOptions::default());
+            ws.inject_file(
+                "/workspace/tsconfig.json".into(),
+                Arc::from(format!(
+                    r#"{{"files":[],"compilerOptions":{{"noEmit":{no_emit}}}}}"#
+                )),
+            );
+            let snapshot = build_selected_project_snapshot(
+                &ws,
+                "/workspace/tsconfig.json",
+                "/workspace",
+                SnapshotGeneration(1),
+            );
+            let id = snapshot
+                .projects
+                .iter()
+                .find(|p| matches!(p.payload, ProjectPayload::Configured { .. }))
+                .unwrap()
+                .id;
+            let mut root = PublishedRoot::new_vfs_only(Arc::new(snapshot));
+            root.ownership_ready = true;
+            ws.publish_snapshot(root);
+            ws.load_published().unwrap().env_hashes_by_project[&id]
+        }
+        assert_eq!(hashes(false), hashes(true));
     }
 }

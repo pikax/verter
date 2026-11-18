@@ -22,8 +22,8 @@ use crate::typeinfo::surface::TypeInfoSurfaceMember;
 /// callback parameter typed against a same-module `interface Row`) resolves in
 /// the file whose OXC parse produced the value expression. A `None` scope paired
 /// with a `Some` `*_expr` is a pairing-invariant violation (the consumer cannot
-/// resolve the payload's named refs) — see the `surface_member_to_expanded_field`
-/// `debug_assert_eq!` pairing guard.
+/// resolve the payload's named refs). Each normalizer preserves this pairing
+/// on its published rows.
 ///
 /// The value-node scope (NOT the member's declaration_origin) is the file whose
 /// OXC parse produced the typed value expression, which is where its nested

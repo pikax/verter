@@ -37,7 +37,8 @@ pub(in crate::project_semantic_dispatch) enum ArgumentReadLiterals {
     Unmodeled,
 }
 
-/// The type of one regular contributor to an argument position.
+/// The type of one regular contributor to an argument position, as the
+/// walk over the position's arms meets it.
 enum RegularContributor {
     /// An authored type, lowered in the owner scope.
     Authored(verter_type_expr::TypeExpr),
@@ -45,6 +46,78 @@ enum RegularContributor {
     Resolved(SemanticNodeId),
     /// A const-context composite, which holds no literal at its own level.
     Composite,
+}
+
+/// The literal provenance of a call argument up to the lowering of its
+/// authored types: everything the walk over its positions and arms decides
+/// on its own, and the authored type expressions whose lowered types the
+/// remaining decisions read, in the order and multiplicity the walk first
+/// uses them. Each lowering runs in [`Self::owner_scope`] under
+/// [`Self::context`]; [`ProjectSemanticDispatch::provenance_from`] finishes
+/// the provenance from their nodes.
+pub(in crate::project_semantic_dispatch) struct ProvenancePlan {
+    canonical: Box<str>,
+    owner: verter_type_expr::TopLevelOwnerId,
+    lowerings: Vec<verter_type_expr::TypeExpr>,
+    positions: Vec<PlannedPosition>,
+    fresh_reads: Vec<Arc<[ArgumentPathStep]>>,
+}
+
+impl ProvenancePlan {
+    /// The owner scope every lowering runs in.
+    pub(in crate::project_semantic_dispatch) fn owner_scope(
+        &self,
+    ) -> (&str, verter_type_expr::TopLevelOwnerId) {
+        (&self.canonical, self.owner)
+    }
+
+    /// The reduction context every lowering runs under: structural transit.
+    pub(in crate::project_semantic_dispatch) fn context(
+        &self,
+    ) -> crate::semantic_query::ProjectionReductionContext {
+        crate::semantic_query::ProjectionReductionContext::structural_transit()
+    }
+
+    /// The authored type expressions to lower, in the order the walk first
+    /// uses them; empty when no decision reads a lowered type.
+    pub(in crate::project_semantic_dispatch) fn lowerings(&self) -> &[verter_type_expr::TypeExpr] {
+        &self.lowerings
+    }
+}
+
+/// A position a plan lists.
+struct PlannedPosition {
+    path: Arc<[ArgumentPathStep]>,
+    /// The arms of a position another contributor writes too, whose regular
+    /// literals the finish lists; None when every literal at the position is
+    /// regular.
+    mixed: Option<Vec<PlannedArm>>,
+}
+
+/// One arm of a mixed position.
+struct PlannedArm {
+    regular: Vec<PlannedContributor>,
+    /// The fresh literals the arm writes where another arm can hold them
+    /// regular.
+    fresh: Vec<PlannedFresh>,
+}
+
+/// A regular contributor of a planned arm.
+enum PlannedContributor {
+    /// The authored type the plan's lowering at this index lowers.
+    Lowered(usize),
+    /// A frame binding's type.
+    Resolved(SemanticNodeId),
+    /// A const-context composite, which holds no literal at its own level.
+    Composite,
+}
+
+/// A fresh contribution of a planned arm.
+enum PlannedFresh {
+    Literal(SemanticNodeId),
+    /// The literal members of the type the plan's lowering at this index
+    /// lowers: a read whose binding keeps a widening literal.
+    LiteralsOf(usize),
 }
 
 /// A primitive kind a literal context is decided by.
@@ -716,7 +789,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// [`Self::resolve_argument_literal_provenance`] for a call whose
     /// argument reads may name bindings of an enclosing function body:
     /// `reads` resolves each read, by its value path and the span of the
-    /// identifier it starts from, in the call's own scope.
+    /// identifier it starts from, in the call's own scope. The plan's
+    /// authored types lower here, in place, in the order it lists them.
     pub(in crate::project_semantic_dispatch) fn resolve_scoped_argument_literal_provenance(
         &self,
         canonical: &str,
@@ -724,22 +798,41 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
         reads: &dyn Fn(&verter_type_expr::ValueRef, verter_span::Span) -> ArgumentReadLiterals,
     ) -> Option<Arc<ArgumentLiteralProvenance>> {
+        let plan = self.provenance_plan(canonical, owner, authored, reads)?;
+        let (scope, scope_owner) = plan.owner_scope();
+        let lowered: Vec<SemanticNodeId> = plan
+            .lowerings()
+            .iter()
+            .map(|ty| {
+                self.lower_type_expr_in_owner_scope_with_context(
+                    scope,
+                    scope_owner,
+                    ty,
+                    plan.context(),
+                )
+                .expect("an owner-scope lowering always yields a node")
+            })
+            .collect();
+        self.provenance_from(plan, &lowered)
+    }
+
+    /// The literal provenance `authored` records for a call argument, up to
+    /// the lowering of its authored types: the walk of
+    /// [`Self::resolve_scoped_argument_literal_provenance`] over the
+    /// argument's positions and arms, with each authored type it reads
+    /// listed for lowering where the walk first uses it. None when the
+    /// argument records no authored provenance.
+    pub(in crate::project_semantic_dispatch) fn provenance_plan(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
+        reads: &dyn Fn(&verter_type_expr::ValueRef, verter_span::Span) -> ArgumentReadLiterals,
+    ) -> Option<ProvenancePlan> {
         use verter_type_expr::{IndexedLiteralStep, IndexedRegularLiteralSource, TypeExpr};
         let authored = authored?;
         let graph = self.graph();
-        let lower = |ty: &TypeExpr| {
-            self.lower_type_expr_in_owner_scope_with_context(
-                canonical,
-                owner,
-                ty,
-                crate::semantic_query::ProjectionReductionContext::structural_transit(),
-            )
-        };
-        let type_of = |contributor: &RegularContributor| match contributor {
-            RegularContributor::Authored(ty) => lower(ty),
-            RegularContributor::Resolved(node) => Some(*node),
-            RegularContributor::Composite => None,
-        };
+        let mut lowerings: Vec<TypeExpr> = Vec::new();
         let mut positions = Vec::new();
         let mut fresh_reads: Vec<Arc<[ArgumentPathStep]>> = Vec::new();
         'positions: for position in authored.positions.iter() {
@@ -758,9 +851,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let separate = position.arms.len() > 1;
             let mut mixed = false;
             let mut reads_fresh = false;
-            // Each arm's regular contributors' types, and the fresh
-            // literals it writes when another arm can hold them regular.
-            let mut arms: Vec<(Vec<RegularContributor>, Vec<SemanticNodeId>)> =
+            // Each arm's regular contributors, and the fresh literals it
+            // writes when another arm can hold them regular.
+            let mut arms: Vec<(Vec<RegularContributor>, Vec<PlannedFresh>)> =
                 Vec::with_capacity(position.arms.len());
             for arm in position.arms.iter() {
                 mixed |= arm.mixed;
@@ -768,7 +861,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let mut fresh = Vec::new();
                 if separate {
                     fresh.extend(arm.fresh.iter().map(|literal| {
-                        graph.intern_node(SemanticNodeData::Literal(literal.clone()))
+                        PlannedFresh::Literal(
+                            graph.intern_node(SemanticNodeData::Literal(literal.clone())),
+                        )
                     }));
                 }
                 for source in arm.regular.iter() {
@@ -799,7 +894,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                                     mixed = true;
                                                     reads_fresh = true;
                                                     if separate {
-                                                        fresh.push(literal);
+                                                        fresh.push(PlannedFresh::Literal(literal));
                                                     }
                                                 } else {
                                                     regular.push(RegularContributor::Resolved(
@@ -824,8 +919,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 mixed = true;
                                 reads_fresh = true;
                                 if separate {
-                                    if let Some(node) = type_of(&contributor) {
-                                        fresh.extend(literal_members(graph.store(), node));
+                                    match contributor {
+                                        RegularContributor::Authored(ty) => {
+                                            fresh.push(PlannedFresh::LiteralsOf(lowerings.len()));
+                                            lowerings.push(ty);
+                                        }
+                                        RegularContributor::Resolved(node) => fresh.extend(
+                                            literal_members(graph.store(), node)
+                                                .into_iter()
+                                                .map(PlannedFresh::Literal),
+                                        ),
+                                        RegularContributor::Composite => {}
                                     }
                                 }
                             } else {
@@ -842,37 +946,116 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             if arms.iter().all(|(regular, _)| regular.is_empty()) {
                 continue;
             }
-            let literals = if mixed {
-                let mut literals = Vec::new();
-                for (index, (regular, _)) in arms.iter().enumerate() {
-                    for node in regular.iter().filter_map(&type_of) {
-                        for literal in constituent_members(graph.store(), node) {
-                            let fresh_elsewhere = arms.iter().enumerate().any(|(other, arm)| {
-                                other != index
-                                    && arm
-                                        .1
-                                        .iter()
-                                        .any(|&fresh| same_literal(graph.store(), fresh, literal))
-                            });
-                            if !fresh_elsewhere && !literals.contains(&literal) {
-                                literals.push(literal);
+            // Only a mixed position reads its regular contributors' types,
+            // arm by arm in source order.
+            let mixed = mixed.then(|| {
+                arms.into_iter()
+                    .map(|(regular, fresh)| PlannedArm {
+                        regular: regular
+                            .into_iter()
+                            .map(|contributor| match contributor {
+                                RegularContributor::Authored(ty) => {
+                                    lowerings.push(ty);
+                                    PlannedContributor::Lowered(lowerings.len() - 1)
+                                }
+                                RegularContributor::Resolved(node) => {
+                                    PlannedContributor::Resolved(node)
+                                }
+                                RegularContributor::Composite => PlannedContributor::Composite,
+                            })
+                            .collect(),
+                        fresh,
+                    })
+                    .collect()
+            });
+            positions.push(PlannedPosition { path, mixed });
+        }
+        Some(ProvenancePlan {
+            canonical: Box::from(canonical),
+            owner,
+            lowerings,
+            positions,
+            fresh_reads,
+        })
+    }
+
+    /// The literal provenance `plan` describes once its authored types are
+    /// lowered: `lowered[i]` is the type of `plan.lowerings()[i]`. A
+    /// position another contributor writes too lists the literals its
+    /// regular contributors' types hold, except those another arm of the
+    /// position writes fresh.
+    pub(in crate::project_semantic_dispatch) fn provenance_from(
+        &self,
+        plan: ProvenancePlan,
+        lowered: &[SemanticNodeId],
+    ) -> Option<Arc<ArgumentLiteralProvenance>> {
+        assert_eq!(
+            lowered.len(),
+            plan.lowerings.len(),
+            "one lowered type answers each planned lowering"
+        );
+        let graph = self.graph();
+        let mut positions = Vec::with_capacity(plan.positions.len());
+        for position in plan.positions {
+            let literals = match position.mixed {
+                None => None,
+                Some(arms) => {
+                    let fresh: Vec<Vec<SemanticNodeId>> =
+                        arms.iter()
+                            .map(|arm| {
+                                let mut fresh = Vec::with_capacity(arm.fresh.len());
+                                for contribution in &arm.fresh {
+                                    match *contribution {
+                                        PlannedFresh::Literal(literal) => fresh.push(literal),
+                                        PlannedFresh::LiteralsOf(index) => fresh
+                                            .extend(literal_members(graph.store(), lowered[index])),
+                                    }
+                                }
+                                fresh
+                            })
+                            .collect();
+                    let mut literals = Vec::new();
+                    for (index, arm) in arms.iter().enumerate() {
+                        let types =
+                            arm.regular
+                                .iter()
+                                .filter_map(|contributor| match *contributor {
+                                    PlannedContributor::Lowered(lowering) => {
+                                        Some(lowered[lowering])
+                                    }
+                                    PlannedContributor::Resolved(node) => Some(node),
+                                    PlannedContributor::Composite => None,
+                                });
+                        for node in types {
+                            for literal in constituent_members(graph.store(), node) {
+                                let fresh_elsewhere =
+                                    fresh.iter().enumerate().any(|(other, fresh)| {
+                                        other != index
+                                            && fresh.iter().any(|&fresh| {
+                                                same_literal(graph.store(), fresh, literal)
+                                            })
+                                    });
+                                if !fresh_elsewhere && !literals.contains(&literal) {
+                                    literals.push(literal);
+                                }
                             }
                         }
                     }
+                    if literals.is_empty() {
+                        continue;
+                    }
+                    Some(Arc::from(literals.into_boxed_slice()))
                 }
-                if literals.is_empty() {
-                    continue;
-                }
-                Some(Arc::from(literals.into_boxed_slice()))
-            } else {
-                None
             };
-            positions.push(ArgumentRegularPosition { path, literals });
+            positions.push(ArgumentRegularPosition {
+                path: position.path,
+                literals,
+            });
         }
-        (!positions.is_empty() || !fresh_reads.is_empty()).then(|| {
+        (!positions.is_empty() || !plan.fresh_reads.is_empty()).then(|| {
             Arc::new(ArgumentLiteralProvenance {
                 positions: Arc::from(positions.into_boxed_slice()),
-                fresh_reads: Arc::from(fresh_reads.into_boxed_slice()),
+                fresh_reads: Arc::from(plan.fresh_reads.into_boxed_slice()),
             })
         })
     }
@@ -2582,4 +2765,165 @@ pub(super) fn same_property_key(a: &AuthoredPropertyKey, b: &AuthoredPropertyKey
         || a.as_known()
             .zip(b.as_known())
             .is_some_and(|(a, b)| a.element_access_collides(&b))
+}
+
+/// The split of an argument's literal provenance into its plan, the plan's
+/// lowerings and its finish, checked against the in-place composition by
+/// the host's call suites.
+#[cfg(any(test, feature = "test-support"))]
+pub mod provenance_plan_tests {
+    use std::sync::Arc;
+
+    use verter_type_expr::{
+        IndexedLiteralArm, IndexedLiteralPosition, IndexedLiteralProvenance, IndexedLiteralStep,
+        IndexedRegularLiteralSource, LiteralValue, TopLevelOwnerId, TypeExpr, TypePropertyKey,
+        ValueRef,
+    };
+
+    use super::super::super::ProjectSemanticDispatch;
+    use super::ArgumentReadLiterals;
+
+    fn literal(text: &str) -> TypeExpr {
+        TypeExpr::Literal(LiteralValue::String(text.to_owned()))
+    }
+
+    fn arm(
+        regular: Vec<IndexedRegularLiteralSource>,
+        mixed: bool,
+        fresh: &[&str],
+    ) -> IndexedLiteralArm {
+        IndexedLiteralArm {
+            regular: Arc::from(regular),
+            mixed,
+            fresh: fresh
+                .iter()
+                .map(|text| LiteralValue::String((*text).to_owned()))
+                .collect(),
+        }
+    }
+
+    /// A call argument over `canonical`, whose owner scope declares the
+    /// widening binding `const read = "r"`, with three positions: one
+    /// written by two arms (the first reading `read` beside a pinned `"x"`,
+    /// the second a pinned `"y"` beside a fresh `"x"`), a mixed one holding
+    /// a pinned `"z"` and a const-context composite, and one whose only
+    /// contributor is a pinned `"w"`. The plan lists the widening read's
+    /// type where the walk first meets it, then each mixed position's
+    /// authored contributors arm by arm, and nothing for the position whose
+    /// literals are all regular; its finish over those lowerings is the
+    /// in-place answer.
+    pub fn plan_lists_authored_contributors_in_first_use_order<
+        C: crate::resolver_core::ResolverCapabilities,
+    >(
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+        canonical: &str,
+    ) {
+        let read = ValueRef {
+            path: vec!["read".to_owned()],
+            type_args: Vec::new(),
+        };
+        let authored = IndexedLiteralProvenance {
+            positions: Arc::from([
+                IndexedLiteralPosition {
+                    path: Arc::from([IndexedLiteralStep::Member(TypePropertyKey::identifier("a"))]),
+                    arms: Arc::from([
+                        arm(
+                            vec![
+                                IndexedRegularLiteralSource::Read {
+                                    value: read.clone(),
+                                    root: verter_span::Span::new(0, 4),
+                                },
+                                IndexedRegularLiteralSource::Pinned(literal("x")),
+                            ],
+                            false,
+                            &[],
+                        ),
+                        arm(
+                            vec![IndexedRegularLiteralSource::Pinned(literal("y"))],
+                            false,
+                            &["x"],
+                        ),
+                    ]),
+                },
+                IndexedLiteralPosition {
+                    path: Arc::from([IndexedLiteralStep::Element(0)]),
+                    arms: Arc::from([arm(
+                        vec![
+                            IndexedRegularLiteralSource::Pinned(literal("z")),
+                            IndexedRegularLiteralSource::PinnedComposite,
+                        ],
+                        true,
+                        &[],
+                    )]),
+                },
+                IndexedLiteralPosition {
+                    path: Arc::from([IndexedLiteralStep::Element(1)]),
+                    arms: Arc::from([arm(
+                        vec![IndexedRegularLiteralSource::Pinned(literal("w"))],
+                        false,
+                        &[],
+                    )]),
+                },
+            ]),
+        };
+        let owner = TopLevelOwnerId::ordinary_file();
+        let owner_scope = &|_: &ValueRef, _: verter_span::Span| ArgumentReadLiterals::OwnerScope;
+
+        let plan = dispatch
+            .provenance_plan(canonical, owner, Some(&authored), owner_scope)
+            .expect("authored provenance plans");
+        assert_eq!(
+            plan.lowerings(),
+            [
+                TypeExpr::TypeOf(read),
+                literal("x"),
+                literal("y"),
+                literal("z"),
+            ],
+            "the widening read first, then each mixed position's authored types arm by arm"
+        );
+        assert_eq!(plan.owner_scope(), (canonical, owner));
+        let lowered: Vec<_> = plan
+            .lowerings()
+            .iter()
+            .map(|ty| {
+                dispatch
+                    .lower_type_expr_in_owner_scope_with_context(
+                        canonical,
+                        owner,
+                        ty,
+                        plan.context(),
+                    )
+                    .expect("an owner-scope lowering yields a node")
+            })
+            .collect();
+        let finished = dispatch
+            .provenance_from(plan, &lowered)
+            .expect("the argument lists regular positions");
+
+        let in_place = dispatch
+            .resolve_scoped_argument_literal_provenance(
+                canonical,
+                owner,
+                Some(&authored),
+                owner_scope,
+            )
+            .expect("the argument lists regular positions");
+        assert_eq!(finished, in_place);
+        assert_eq!(
+            finished.positions.len(),
+            3,
+            "every position holding a regular contributor is listed: {finished:?}"
+        );
+        assert!(
+            finished.positions[2].literals.is_none(),
+            "a position whose literals are all regular lists none"
+        );
+        assert!(
+            dispatch
+                .provenance_plan(canonical, owner, None, owner_scope)
+                .is_none(),
+            "an argument without authored provenance plans nothing"
+        );
+    }
 }

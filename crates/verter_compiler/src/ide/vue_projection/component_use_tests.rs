@@ -4,7 +4,9 @@ use super::generic_interop::USE_COMPONENT;
 use super::public_constructor::project_public_constructor;
 use super::script_setup::ScriptBlockInput;
 use crate::cursor::ScriptLanguage;
-use crate::framework_common::projection_plan::{build_projection_plan, PlanInput};
+use crate::framework_common::projection_plan::{
+    build_projection_plan, AdmittedExpressionId, PlanInput,
+};
 
 const TABLE_GENERIC: &str = "T, U";
 
@@ -41,13 +43,14 @@ fn sfc(template: &str) -> String {
 
 fn project(template: &str) -> ComponentUseProjection {
     let source = sfc(template);
-    let parsed = crate::compile::parse_sfc(&source, None, None);
+    let parsed = crate::framework_common::vue_bridge::parse_sfc(&source, None, None);
     let plan = build_projection_plan(PlanInput {
         canonical_id: "file:///uses.vue",
         source: &source,
         parsed: &parsed,
         parse_key: None,
         syntax_profile: None,
+        custom_elements: None,
     });
     let attributes = project_attribute_operations(&plan, &parsed, &source);
     project_component_uses(&plan, &attributes)
@@ -197,7 +200,7 @@ fn component_use_contextual_callbacks_stay_in_the_construction() {
         MemberValue::InlineHandler { spelling, statements: false, .. } if spelling == "total += $event"
     ));
     assert!(witness.render().ends_with(&format!(
-        "const {b}_check0: __VerterUseListener<typeof {b}, \"onChange\"> = ($event) => (total += $event);\n",
+        "const {b}_check0: __VerterUseListener<typeof {b}, \"onChange\"> = ($event) => (void $event, total += $event);\n",
         b = witness.binding
     )));
 }
@@ -269,8 +272,8 @@ fn component_use_listener_contracts_follow_the_runtime_listener_key() {
         format!("const {b}_check1: __VerterUseListener<typeof {b}, \"onChangeCapturePassive\"> = ((v) => v);\n"),
         format!("const {b}_check2: __VerterUseListener<typeof {b}, \"onChangeOnceCapture\"> = (count);\n"),
         format!("const {b}_check3: __VerterUseListener<typeof {b}, \"onChangeCaptureOnce\", \"onChangeCapture\"> = (count);\n"),
-        format!("const {b}_check4: __VerterUseListener<typeof {b}, \"onChange\"> = ($event) => (flag === true);\n"),
-        format!("const {b}_check5: __VerterUseListener<typeof {b}, \"onClose\"> = ($event) => {{ a = 1; b = 2;\n}};\n"),
+        format!("const {b}_check4: __VerterUseListener<typeof {b}, \"onChange\"> = ($event) => (void $event, flag === true);\n"),
+        format!("const {b}_check5: __VerterUseListener<typeof {b}, \"onClose\"> = ($event) => {{ void $event;\na = 1; b = 2;\n}};\n"),
     ] {
         assert!(rendered.contains(&line), "missing {line} in {rendered}");
     }
@@ -350,6 +353,95 @@ fn component_use_static_discriminant_stays_a_literal() {
     assert!(bound_kind.render().contains("\"kind\": ('grid')"));
     let escaped = witness_of("  <Table title='a\"b' />");
     assert!(escaped.render().contains("\"title\": \"a\\\"b\""));
+}
+
+/// A kebab-case attribute is constructed under the camel-case prop it
+/// reaches (`:initial-count` satisfies a declared `initialCount`), and its
+/// direct-key check also accepts the authored spelling, under which an
+/// undeclared attribute falls through; an unknown `bogus-attr` is rejected as
+/// `bogusAttr`. `data-*` / `aria-*` attributes keep their spelling. The
+/// runtime key plan keeps the authored key.
+#[test]
+fn component_use_kebab_attributes_use_the_camel_case_prop_spelling() {
+    let template =
+        "  <Table :initial-count=\"n\" bogus-attr=\"x\" data-testid=\"t\" aria-label=\"l\" />";
+    let projection = project(template);
+    let witness = only(&projection);
+    assert_eq!(
+        member_keys(witness),
+        vec![
+            Some("initial-count"),
+            Some("bogus-attr"),
+            Some("data-testid"),
+            Some("aria-label"),
+        ]
+    );
+    let rendered = witness.render();
+    assert!(
+        rendered.contains(
+            "({ \"initialCount\": (n), \"bogusAttr\": \"x\", \"data-testid\": \"t\", \"aria-label\": \"l\" });"
+        ),
+        "{rendered}"
+    );
+    for keys in [
+        "\"initialCount\", \"initial-count\"",
+        "\"bogusAttr\", \"bogus-attr\"",
+        "\"data-testid\"",
+        "\"aria-label\"",
+    ] {
+        let direct = format!("{USE_DIRECT}(Table, {}, {keys});", witness.binding);
+        assert!(rendered.contains(&direct), "{direct}\n{rendered}");
+    }
+    assert!(!rendered.contains("\"initial-count\": "), "{rendered}");
+    assert!(!rendered.contains("\"bogus-attr\": "), "{rendered}");
+}
+
+/// A listener-shaped key is constructed camel-case too, as the runtime's
+/// declared-prop lookup and vue-tsc read it, so `:onCustom-event` satisfies
+/// a declared `onCustomEvent` prop; a `@` listener key is already
+/// camel-case.
+#[test]
+fn component_use_listener_keys_use_the_camel_case_prop_spelling() {
+    let witness =
+        project("  <Table :onCustom-event=\"handle\" @save-all=\"save\" />").witnesses[0].clone();
+    let rendered = witness.render();
+    assert!(
+        rendered.contains("({ \"onCustomEvent\": (handle), \"onSaveAll\": (save) });"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(&format!(
+            "{USE_DIRECT}(Table, {}, \"onCustomEvent\", \"onCustom-event\");",
+            witness.binding
+        )),
+        "{rendered}"
+    );
+}
+
+/// Two runtime keys with one camel-case spelling are one construction
+/// member, the first, and a validation of the later value against that
+/// prop, never a duplicate member. Each authored key keeps its own
+/// direct-key check, so an alias the surface does not declare
+/// (`strokeWidth` beside an `<svg>`'s `stroke-width`) is still rejected.
+#[test]
+fn component_use_keys_naming_one_prop_construct_it_once() {
+    let witness = only(&project("  <Table :foo-bar=\"a\" :fooBar=\"b\" />")).clone();
+    let rendered = witness.render();
+    assert_eq!(rendered.matches("\"fooBar\": ").count(), 1, "{rendered}");
+    assert!(rendered.contains("({ \"fooBar\": (a) });"), "{rendered}");
+    assert_eq!(witness.transaction.validations.len(), 1);
+    assert_eq!(
+        witness.transaction.validations[0].contract,
+        CheckContract::Prop
+    );
+    let binding = &witness.binding;
+    for statement in [
+        format!("const {binding}_check0: {USE_PROP}<typeof {binding}, \"fooBar\"> = (b);"),
+        format!("{USE_DIRECT}(Table, {binding}, \"fooBar\", \"foo-bar\");"),
+        format!("{USE_DIRECT}(Table, {binding}, \"fooBar\");"),
+    ] {
+        assert!(rendered.contains(&statement), "{statement}\n{rendered}");
+    }
 }
 
 /// A listener key accumulates: its first handler reaches the construction
@@ -580,5 +672,114 @@ fn probe_fixtures_are_the_rendered_products() {
         NEGATIVE.replace("\r\n", "\n").contains(&negative.render()),
         "negative probe must contain the rendered projection:\n{}",
         negative.render()
+    );
+}
+
+/// The fragments of a witness, flattened with each expression spelled as
+/// the witness renders it.
+fn flattened(witness: &ComponentUseWitness, component: WitnessComponent) -> String {
+    use crate::ide::vue_projection::callback_reentry::CallbackReentryPlan;
+    use crate::ide::vue_projection::checking_fragment::StatementPhase;
+
+    let mut spellings: Vec<(&AdmittedExpressionId, String)> = Vec::new();
+    let values = witness
+        .transaction
+        .members
+        .iter()
+        .map(|member| match member {
+            TransactionMember::Property { value, .. } | TransactionMember::Spread { value, .. } => {
+                value
+            }
+        })
+        .chain(
+            witness
+                .transaction
+                .validations
+                .iter()
+                .map(|check| &check.value),
+        );
+    for value in values {
+        match value {
+            MemberValue::Expression { id, spelling } => spellings.push((id, spelling.clone())),
+            MemberValue::InlineHandler {
+                id,
+                spelling,
+                statements,
+            } => spellings.push((
+                id,
+                if *statements {
+                    spelling.clone()
+                } else {
+                    crate::template::vue_syntax::trim_handler_body(spelling).to_string()
+                },
+            )),
+            MemberValue::StaticText(_) => {}
+        }
+    }
+    if let Some(inner) = witness
+        .component
+        .strip_prefix('(')
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        spellings.push((&witness.component_expression, inner.to_string()));
+    }
+    let spelling = |id: &AdmittedExpressionId| {
+        spellings
+            .iter()
+            .find(|(known, _)| *known == id)
+            .map(|(_, spelling)| spelling.clone())
+            .expect("every fragment expression is a witness value")
+    };
+    let reentry = CallbackReentryPlan::pending(
+        crate::framework_common::projection_plan::plan_from_source("file:///uses.vue", "").snapshot,
+    );
+    let statements = witness.statement_fragments_over(&reentry, component);
+    let mut phases = statements.iter().map(|(phase, _)| *phase);
+    assert_eq!(phases.next(), Some(StatementPhase::Main));
+    assert!(phases.all(|phase| phase == StatementPhase::After));
+    statements
+        .iter()
+        .map(|(_, fragment)| fragment.flatten("", &spelling))
+        .collect()
+}
+
+#[test]
+fn component_use_fragments_flatten_to_the_rendered_witness() {
+    let fixtures = [
+        POSITIVE_TEMPLATE,
+        NEGATIVE_TEMPLATE,
+        "  <Table :rows=\"rows\" :project=\"(row) => row.name\" kind=\"list\" v-model=\"selected\" @change=\"log\">\n    <template #default=\"{ row }\">{{ row.id }}</template>\n  </Table>",
+        "  <Table :rows=\"rows\" :project=\"(row) => row.name\" @change=\"(value) => log(value)\" v-on:change=\"total += $event\" />",
+        concat!(
+            "  <Table @change.once=\"count\" @change.capture.passive=\"(v) => v\"",
+            " @change.once.capture=\"count\" @change.capture.once=\"count\" :onSave=\"save\"",
+            " @change=\"props?.onChange\" v-on:change=\"flag === true\" @vue:foo=\"hook\"",
+            " @vue:mounted=\"hook\" @close=\"a = 1; b = 2\" />",
+        ),
+        "  <Table @close=\"a = 1; b = 2 // reset\" />\n  <Table @change=\"log\" />",
+        "  <Table @change=\"log\" v-bind=\"attrs\" :onChange=\"count\" v-on:change=\"(value) => log(value)\" />",
+        "  <Table title=\"a\" :title=\"t\" :[k]=\"v\" v-on=\"handlers\" :key=\"id\" .value=\"x\" v-model.trim=\"text\" v-focus />",
+        r#"  <Child v-bind="{ title: 1 }" :title="ok" v-bind="rest" />"#,
+        "  <data-table :rows=\"ids\" />",
+        "  <Table :initial-count=\"n\" bogus-attr=\"x\" data-testid=\"t\" />",
+        "  <Table :foo-bar=\"a\" :fooBar=\"b\" :onCustom-event=\"handle\" />",
+    ];
+    for fixture in fixtures {
+        let projection = project(fixture);
+        assert!(!projection.witnesses.is_empty(), "{fixture}");
+        for witness in &projection.witnesses {
+            assert_eq!(
+                flattened(witness, WitnessComponent::Named { tag: None }),
+                witness.render(),
+                "{fixture}"
+            );
+        }
+    }
+    let dynamic = project("  <component :is=\"current\" :rows=\"ids\" />");
+    let witness = &dynamic.witnesses[0];
+    assert_eq!(
+        flattened(witness, WitnessComponent::Authored),
+        witness.render(),
+        "an authored component reads the same text"
     );
 }

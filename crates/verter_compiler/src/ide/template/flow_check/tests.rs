@@ -10,7 +10,7 @@ use super::seam::{
     Branch, BranchKind, Callback, CallbackFunction, CheckPlan, FrameBinding, GeneratedCheck,
     GuardSite, Item, Mapping, Piece, PlanError, ResolvedExpr, ScopeKey, Span,
 };
-use crate::template::code_gen::binding::BindingType;
+use crate::template::binding::BindingType;
 
 /// The deepest fixtures nest a few hundred template levels; the template
 /// parse recurses per level, so they run on a thread with room for it.

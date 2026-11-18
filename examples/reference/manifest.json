@@ -3,7 +3,7 @@
   "pin": {
     "node": ">=22",
     "typescript": "7.1.0-beta",
-    "vue": "3.6.0-rc.5"
+    "vue": "3.6.0-rc.15"
   },
   "sdkGuides": {
     "index": "sdk/README.md"

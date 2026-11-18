@@ -13,35 +13,78 @@ use oxc_ast::ast::{
 
 use crate::common::Span;
 
-/// Collect every identifier bound by `pattern`, in declaration order.
+/// Where an identifier sits in the destructuring pattern that binds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternBindingPosition {
+    /// The pattern itself, or a property, element or default of the
+    /// outermost object/array pattern.
+    Outer,
+    /// Inside an object or array pattern nested in the outermost one.
+    Nested,
+    /// The argument of a rest element, at any depth.
+    Rest,
+}
+
+/// Visit every identifier bound by `pattern`, in declaration order, with its
+/// position in the pattern.
 ///
 /// Walks object patterns (properties, then rest), array patterns (elements,
-/// then rest), and assignment defaults (the bound left side).
-pub fn collect_pattern_binding_spans(pattern: &BindingPattern<'_>, out: &mut Vec<Span>) {
-    match pattern {
-        BindingPattern::BindingIdentifier(ident) => {
-            out.push(Span::new(ident.span.start, ident.span.end));
-        }
-        BindingPattern::ObjectPattern(obj) => {
-            for prop in &obj.properties {
-                collect_pattern_binding_spans(&prop.value, out);
+/// then rest), and assignment defaults (the bound left side), from an
+/// explicit stack.
+pub fn visit_pattern_bindings(
+    pattern: &BindingPattern<'_>,
+    mut visit: impl FnMut(Span, PatternBindingPosition),
+) {
+    /// An identifier reached through `child` keeps `position`; a nested
+    /// object or array pattern puts its own identifiers in `Nested`.
+    fn child_position(
+        child: &BindingPattern<'_>,
+        position: PatternBindingPosition,
+    ) -> PatternBindingPosition {
+        match child {
+            BindingPattern::ObjectPattern(_) | BindingPattern::ArrayPattern(_) => {
+                PatternBindingPosition::Nested
             }
-            if let Some(rest) = &obj.rest {
-                collect_pattern_binding_spans(&rest.argument, out);
-            }
-        }
-        BindingPattern::ArrayPattern(arr) => {
-            for elem in arr.elements.iter().flatten() {
-                collect_pattern_binding_spans(elem, out);
-            }
-            if let Some(rest) = &arr.rest {
-                collect_pattern_binding_spans(&rest.argument, out);
-            }
-        }
-        BindingPattern::AssignmentPattern(assign) => {
-            collect_pattern_binding_spans(&assign.left, out);
+            _ => position,
         }
     }
+
+    let mut stack = vec![(pattern, PatternBindingPosition::Outer)];
+    while let Some((pattern, position)) = stack.pop() {
+        match pattern {
+            BindingPattern::BindingIdentifier(ident) => {
+                visit(Span::new(ident.span.start, ident.span.end), position);
+            }
+            BindingPattern::ObjectPattern(obj) => {
+                if let Some(rest) = &obj.rest {
+                    let rest_position =
+                        child_position(&rest.argument, PatternBindingPosition::Rest);
+                    stack.push((&rest.argument, rest_position));
+                }
+                for prop in obj.properties.iter().rev() {
+                    stack.push((&prop.value, child_position(&prop.value, position)));
+                }
+            }
+            BindingPattern::ArrayPattern(arr) => {
+                if let Some(rest) = &arr.rest {
+                    let rest_position =
+                        child_position(&rest.argument, PatternBindingPosition::Rest);
+                    stack.push((&rest.argument, rest_position));
+                }
+                for elem in arr.elements.iter().rev().flatten() {
+                    stack.push((elem, child_position(elem, position)));
+                }
+            }
+            BindingPattern::AssignmentPattern(assign) => {
+                stack.push((&assign.left, child_position(&assign.left, position)));
+            }
+        }
+    }
+}
+
+/// Collect every identifier bound by `pattern`, in declaration order.
+pub fn collect_pattern_binding_spans(pattern: &BindingPattern<'_>, out: &mut Vec<Span>) {
+    visit_pattern_bindings(pattern, |span, _| out.push(span));
 }
 
 /// Collect the local binding spans a (runtime) import declaration introduces,
@@ -143,6 +186,39 @@ mod tests {
                     names(source, &all),
                     vec!["a", "c", "rest", "d", "e", "more"]
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn pattern_bindings_report_their_position() {
+        parse_and(
+            "const { a, b: { c }, d = 1, ...rest } = x; const [e, [f], ...more] = y;",
+            |program, source| {
+                let mut all = Vec::new();
+                for stmt in &program.body {
+                    if let Statement::VariableDeclaration(decl) = stmt {
+                        for d in &decl.declarations {
+                            visit_pattern_bindings(&d.id, |span, position| {
+                                all.push((
+                                    source[span.start as usize..span.end as usize].to_string(),
+                                    position,
+                                ));
+                            });
+                        }
+                    }
+                }
+                let expected = [
+                    ("a", PatternBindingPosition::Outer),
+                    ("c", PatternBindingPosition::Nested),
+                    ("d", PatternBindingPosition::Outer),
+                    ("rest", PatternBindingPosition::Rest),
+                    ("e", PatternBindingPosition::Outer),
+                    ("f", PatternBindingPosition::Nested),
+                    ("more", PatternBindingPosition::Rest),
+                ]
+                .map(|(name, position)| (name.to_string(), position));
+                assert_eq!(all, expected);
             },
         );
     }

@@ -5,17 +5,43 @@
  * Note: NAPI-RS converts snake_case Rust fields to camelCase at JS runtime,
  * so we use camelCase for all object properties despite the TS types showing snake_case.
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { createHash } from "node:crypto";
-import { loadHost, resetHost, generateComponentId, getHash } from "./compiler";
+import type { VerterHost } from "@verter/native";
+import { generateComponentId, getHash } from "./compiler";
+import { BundlerHostSession } from "./host-session/session";
 
-describe("loadHost", () => {
-  beforeEach(() => {
-    resetHost();
+const sessions: BundlerHostSession[] = [];
+
+/** A host owned by a freshly bound session, closed by `closeHosts`. */
+function openHost(): VerterHost {
+  const session = BundlerHostSession.bind({
+    adapter: "vite",
+    root: "/test",
+    mode: "dev",
+    defaultTarget: "client",
+    frameworkSelection: "auto",
+    options: {},
+    hostCssPipeline: true,
+    hostStripsTypeScript: true,
+    hostConfig: null,
+    nuxtFileRoles: false,
   });
+  sessions.push(session);
+  return session.host();
+}
 
-  it("returns a VerterHost instance with expected methods", () => {
-    const host = loadHost();
+function closeHosts(): void {
+  for (const session of sessions.splice(0)) session.close();
+}
+
+afterEach(() => {
+  closeHosts();
+});
+
+describe("a bound session's host", () => {
+  it("is a VerterHost with the expected methods", () => {
+    const host = openHost();
     expect(host).toBeDefined();
     expect(typeof host.upsert).toBe("function");
     expect(typeof host.resolve).toBe("function");
@@ -25,17 +51,8 @@ describe("loadHost", () => {
     expect(typeof host.remove).toBe("function");
   });
 
-  it("returns the same instance on subsequent calls", () => {
-    const host1 = loadHost();
-    const host2 = loadHost();
-    expect(host1).toBe(host2);
-  });
-
-  it("returns a fresh instance after resetHost", () => {
-    const host1 = loadHost();
-    resetHost();
-    const host2 = loadHost();
-    expect(host1).not.toBe(host2);
+  it("is distinct for every session", () => {
+    expect(openHost()).not.toBe(openHost());
   });
 });
 
@@ -119,11 +136,11 @@ describe("style wrappers", () => {
 
 describe("host: upsert + getVirtualFile", () => {
   beforeEach(() => {
-    resetHost();
+    closeHosts();
   });
 
   it("compiles a simple SFC and returns main module code", () => {
-    const host = loadHost();
+    const host = openHost();
     const sfc = [
       "<script setup>",
       "const msg = 'hello'",
@@ -145,7 +162,7 @@ describe("host: upsert + getVirtualFile", () => {
   });
 
   it("main module imports styles as virtual modules", () => {
-    const host = loadHost();
+    const host = openHost();
     const sfc = [
       "<script setup>const x = 1</script>",
       "<template><div>{{ x }}</div></template>",
@@ -166,7 +183,7 @@ describe("host: upsert + getVirtualFile", () => {
   });
 
   it("returns style virtual file content", () => {
-    const host = loadHost();
+    const host = openHost();
     const sfc = [
       "<script setup>const x = 1</script>",
       "<template><div>{{ x }}</div></template>",
@@ -187,7 +204,7 @@ describe("host: upsert + getVirtualFile", () => {
   });
 
   it("returns scoped style with scope attribute", () => {
-    const host = loadHost();
+    const host = openHost();
     const sfc = [
       "<script setup>const x = 1</script>",
       "<template><div>{{ x }}</div></template>",
@@ -209,7 +226,7 @@ describe("host: upsert + getVirtualFile", () => {
 
   // @ai-generated - Verifies caching: same file upserted twice, second reports no change
   it("caching: unchanged re-upsert reports no change", () => {
-    const host = loadHost();
+    const host = openHost();
     const sfc = "<script setup>const x = 1</script>\n<template><div>{{ x }}</div></template>";
     const first = host.upsert({
       inputId: "/test/App.vue",
@@ -226,7 +243,7 @@ describe("host: upsert + getVirtualFile", () => {
 
   // @ai-generated - Verifies compile cache: getVirtualFile returns same code on repeated calls
   it("getVirtualFile returns identical code on repeated calls (compile cache)", () => {
-    const host = loadHost();
+    const host = openHost();
     const sfc = "<script setup>const x = 1</script>\n<template><div>{{ x }}</div></template>";
     host.upsert({
       inputId: "/test/App.vue",
@@ -240,7 +257,7 @@ describe("host: upsert + getVirtualFile", () => {
   });
 
   it("production and development identities produce different output", () => {
-    const host = loadHost();
+    const host = openHost();
     const sfc = "<script setup>const x = 1</script>\n<template><div>{{ x }}</div></template>";
 
     host.upsert({
@@ -270,7 +287,7 @@ describe("host: upsert + getVirtualFile", () => {
   });
 
   it("custom block virtual files are served", () => {
-    const host = loadHost();
+    const host = openHost();
     const sfc = [
       "<script setup>const x = 1</script>",
       "<template><div>{{ x }}</div></template>",
@@ -292,11 +309,11 @@ describe("host: upsert + getVirtualFile", () => {
 
 describe("host: resolve", () => {
   beforeEach(() => {
-    resetHost();
+    closeHosts();
   });
 
   it("resolves a style virtual module ID", () => {
-    const host = loadHost();
+    const host = openHost();
     const resolved = host.resolve("/test/App.vue?vue&type=style&index=0");
     expect(resolved).not.toBeNull();
     expect(resolved!.nodeKind.kind).toBe("style");
@@ -304,35 +321,35 @@ describe("host: resolve", () => {
   });
 
   it("resolves a template virtual module ID", () => {
-    const host = loadHost();
+    const host = openHost();
     const resolved = host.resolve("/test/App.vue?vue&type=template");
     expect(resolved).not.toBeNull();
     expect(resolved!.nodeKind.kind).toBe("template");
   });
 
   it("resolves a script virtual module ID", () => {
-    const host = loadHost();
+    const host = openHost();
     const resolved = host.resolve("/test/App.vue?vue&type=script");
     expect(resolved).not.toBeNull();
     expect(resolved!.nodeKind.kind).toBe("script");
   });
 
   it("resolves a plain .vue file as main", () => {
-    const host = loadHost();
+    const host = openHost();
     const resolved = host.resolve("/test/App.vue");
     expect(resolved).not.toBeNull();
     expect(resolved!.nodeKind.kind).toBe("main");
   });
 
   it("resolves with existsInHost=false for unregistered files", () => {
-    const host = loadHost();
+    const host = openHost();
     const resolved = host.resolve("/test/Unknown.vue");
     expect(resolved).not.toBeNull();
     expect(resolved!.existsInHost).toBe(false);
   });
 
   it("resolves with existsInHost=true after upsert", () => {
-    const host = loadHost();
+    const host = openHost();
     host.upsert({
       inputId: "/test/App.vue",
       source: "<template><div>hi</div></template>",
@@ -346,11 +363,11 @@ describe("host: resolve", () => {
 
 describe("host: remove", () => {
   beforeEach(() => {
-    resetHost();
+    closeHosts();
   });
 
   it("removes a registered file", () => {
-    const host = loadHost();
+    const host = openHost();
     host.upsert({
       inputId: "/test/App.vue",
       source: "<template><div>hi</div></template>",
@@ -362,7 +379,7 @@ describe("host: remove", () => {
   });
 
   it("getVirtualFile throws after removal", () => {
-    const host = loadHost();
+    const host = openHost();
     host.upsert({
       inputId: "/test/App.vue",
       source: "<template><div>hi</div></template>",
@@ -378,7 +395,7 @@ describe("host: remove", () => {
   });
 
   it("returns null for unregistered file", () => {
-    const host = loadHost();
+    const host = openHost();
     const result = host.remove("/test/Unknown.vue");
     expect(result).toBeNull();
   });
@@ -386,11 +403,11 @@ describe("host: remove", () => {
 
 describe("host: listVirtualFiles", () => {
   beforeEach(() => {
-    resetHost();
+    closeHosts();
   });
 
   it("lists all virtual nodes for a file with script, template, and style", () => {
-    const host = loadHost();
+    const host = openHost();
     const sfc = [
       "<script setup>const x = 1</script>",
       "<template><div>{{ x }}</div></template>",
@@ -414,12 +431,12 @@ describe("host: listVirtualFiles", () => {
 
 describe("host: applyBlockOverrides", () => {
   beforeEach(() => {
-    resetHost();
+    closeHosts();
   });
 
   // @ai-generated - A sealed, stamped result replaces one processed block without re-upsert.
   it("admits one stamped result and rejects correlation replay", () => {
-    const host = loadHost();
+    const host = openHost();
     const authoredPreprocessorSyntax = "$authored-color: red";
     const sfc = [
       "<script setup>const x = 1</script>",
@@ -586,13 +603,13 @@ describe("typed render request assembly axes", () => {
 
 describe("typed response readers", () => {
   beforeEach(() => {
-    resetHost();
+    closeHosts();
   });
 
   it("one typed compile publishes the Main node and indexed style artifacts", async () => {
     const { typedRenderRequest, runtimeMainNode, runtimeStyleArtifacts } =
       await import("./compiler");
-    const host = loadHost();
+    const host = openHost();
     host.upsert({
       inputId: "/test/TypedReader.vue",
       source: [

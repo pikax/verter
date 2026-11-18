@@ -11,10 +11,21 @@
 //!
 //! - in place ([`ProjectSemanticDispatch::apply_typeof_instantiation_args`]),
 //!   through the public substitution entry, which reads where it stands;
-//! - inside an overload set's continuation, on the walk the machine holds
-//!   ([`ProjectSemanticDispatch::begin_explicit_instantiation`]): a template
-//!   reduction the walk reads is the set's read, and the machine resumes
-//!   from what it retained with its delivery.
+//! - inside an overload set's continuation or a type lowering, on the walk
+//!   the machine holds ([`ProjectSemanticDispatch::begin_explicit_instantiation`]):
+//!   a template reduction the walk reads is its holder's read, and the
+//!   machine resumes from what it retained with its delivery.
+//!
+//! A walk standing at a read keeps its levels' cost recordings open on the
+//! connected demand, so the demand must stay open until the walk answers:
+//! a root demand the read entered would clear them, and the completed
+//! substitution could not publish its priced memo entry. Its holder says who
+//! keeps it ([`InstantiationDemand`]); the machine itself never keeps a guard
+//! across a read.
+//!
+//! A signature-bearing object retains the shared signature-list continuation
+//! for each bucket, call then construct, before instantiating its candidates.
+//! Both drivers consume those same list steps and their original value domain.
 //!
 //! [`ProjectSemanticDispatch::explicit_clause_fit`] is the read-free half of
 //! the drop authority: whether a candidate's clause binds a given number of
@@ -24,7 +35,7 @@
 use std::sync::Arc;
 
 use super::continuation_stages::{
-    unsettled_overload_set, ListProgress, OverloadSetBuild, OverloadSetStage,
+    unsettled_overload_set, ListProgress, OverloadSetBuild, OverloadSetStage, SignatureListRead,
 };
 use super::family_continuation::{FamilyBuild, FamilyStep};
 use super::substitute::{SubstitutionStep, SubstitutionWalk};
@@ -66,9 +77,9 @@ fn clause_fit(clause: &[TypeParamDecl], supplied: usize) -> ClauseFit {
     }
 }
 
-/// One explicit instantiation between its steps: the bindings fixed so far
-/// in declaration order, where the clause stands, and the substitution walk
-/// it stands in, empty between substitutions.
+/// One explicit instantiation between its steps: its retained signature
+/// bucket or clause, the bindings fixed in declaration order, and the
+/// substitution walk it stands in, empty between substitutions.
 pub(super) struct ExplicitInstantiation {
     bound: Vec<(SemanticNodeId, SemanticNodeId)>,
     stage: InstantiationStage,
@@ -91,7 +102,18 @@ impl ExplicitInstantiation {
 enum InstantiationStage {
     Signature(Box<SignatureClause>),
     Callable(Box<CallableClause>),
+    Object(Box<ObjectSignatures>),
     Finished,
+}
+
+/// The object's call list, then its construct list. A settled call bucket
+/// stays owned while the construct list settles; candidate instantiation
+/// starts only after both buckets are complete.
+struct ObjectSignatures {
+    node: SemanticNodeId,
+    surface: crate::semantic_query::SurfaceView,
+    calls: Option<Vec<SemanticNodeId>>,
+    list: SignatureListRead,
 }
 
 /// A generic signature's clause being bound, `result` the signature
@@ -155,7 +177,56 @@ enum CallableStep {
 /// result.
 enum InstantiationNeed {
     Substitute(SemanticNodeId, SemanticNodeId, SemanticNodeId),
+    Read(SemanticQueryKey),
     Done(SemanticNodeId),
+}
+
+/// Who keeps the connected demand an instantiation's substitution walk
+/// records into open while the walk stands at a read.
+pub(super) enum InstantiationDemand<'s, 'g> {
+    /// The holder keeps the enclosing connected demand open across every
+    /// read the instantiation yields, for its whole extent: an overload
+    /// set's stage, a suspending lowering.
+    Held,
+    /// An in-place driver's slot, over the span the public substitution
+    /// entry holds: a substitution begun while it is empty enters the
+    /// connected demand into it, and leaves it with its answer.
+    InPlace(&'s mut Option<super::connected_demand::ConnectedDemandGuard<'g>>),
+}
+
+impl<'g> InstantiationDemand<'_, 'g> {
+    /// The same holder, for one more step.
+    pub(super) fn reborrow(&mut self) -> InstantiationDemand<'_, 'g> {
+        match self {
+            Self::Held => InstantiationDemand::Held,
+            Self::InPlace(slot) => InstantiationDemand::InPlace(slot),
+        }
+    }
+
+    /// Before a substitution begins: an in-place driver's slot enters the
+    /// demand unless an earlier substitution still holds it.
+    fn enter<C: crate::resolver_core::ResolverCapabilities>(
+        &mut self,
+        dispatch: &'g ProjectSemanticDispatch<'_, C>,
+    ) {
+        if let Self::InPlace(slot) = self {
+            if slot.is_none() {
+                **slot = Some(dispatch.enter_connected_demand(false).0);
+            }
+        }
+    }
+
+    /// Once a substitution answers: the slot leaves the demand it entered.
+    fn leave(&mut self) {
+        if let Self::InPlace(slot) = self {
+            **slot = None;
+        }
+    }
+
+    /// Whether the slot holds the demand a suspended walk records into.
+    fn holds(&self) -> bool {
+        matches!(self, Self::InPlace(slot) if slot.is_some())
+    }
 }
 
 /// Where an instantiation driven as a continuation stands after its latest
@@ -163,8 +234,8 @@ enum InstantiationNeed {
 pub(super) enum InstantiationStep {
     /// The instantiated candidate, or the `Opaque(Miss)` a dropped one is.
     Done(SemanticNodeId),
-    /// It reads this template reduction next, holding everything it
-    /// computed.
+    /// It reads this signature list, composite result or template reduction
+    /// next, holding everything it computed.
     Read(SemanticQueryKey),
 }
 
@@ -291,55 +362,72 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let value = self.substitute_semantic_type_param(node, parameter, arg);
                     need = self.step_instantiation_need(&mut instantiation, args, value);
                 }
+                InstantiationNeed::Read(key) => {
+                    let read = self.execute_via_cold_build_helper(key);
+                    need = self.resume_object_signatures(&mut instantiation, args, read);
+                }
             }
         }
     }
 
-    /// Begin instantiating `node` with `args` as a continuation, on the
-    /// walk `instantiation` holds: its result, or the template read a
-    /// substitution stands at. Its caller holds the connected demand the
-    /// walk's recordings belong to.
-    pub(super) fn begin_explicit_instantiation(
-        &self,
+    /// Begin instantiating `node` with `args` as a continuation: its result,
+    /// or the read its signature list or substitution walk stands at.
+    /// `demand` keeps the connected demand the walk's recordings belong to
+    /// open while the walk stands at a read.
+    pub(super) fn begin_explicit_instantiation<'g>(
+        &'g self,
         instantiation: &mut ExplicitInstantiation,
         node: SemanticNodeId,
         args: &[SemanticNodeId],
+        demand: InstantiationDemand<'_, 'g>,
     ) -> InstantiationStep {
         let need = self.begin_instantiation_need(instantiation, node, args);
-        self.drive_explicit_instantiation(instantiation, args, need)
+        self.drive_explicit_instantiation(instantiation, args, need, demand)
     }
 
-    /// Resume `instantiation`, standing at its walk's template read, with
-    /// `deliver`, that read: the substitution it stood in goes on from what
-    /// it retained, and the instantiation from the step that named it.
-    pub(super) fn advance_explicit_instantiation(
-        &self,
+    /// Resume the retained signature list or substitution walk with its
+    /// original query-value delivery. Only a substitution narrows to a node.
+    pub(super) fn advance_explicit_instantiation<'g>(
+        &'g self,
         instantiation: &mut ExplicitInstantiation,
         args: &[SemanticNodeId],
-        deliver: &mut dyn FnMut() -> CacheRead<QueryResult<SemanticNodeId>>,
+        deliver: &mut dyn FnMut() -> CacheRead<QueryResult<SemanticQueryValue>>,
+        mut demand: InstantiationDemand<'_, 'g>,
     ) -> InstantiationStep {
-        match self.resume_substitution(&mut instantiation.walk, deliver) {
-            SubstitutionStep::Read(key) => InstantiationStep::Read(key),
+        if matches!(instantiation.stage, InstantiationStage::Object(_)) {
+            let need = self.resume_object_signatures(instantiation, args, deliver());
+            return self.drive_explicit_instantiation(instantiation, args, need, demand);
+        }
+        let mut narrowed = || super::narrow_value_cache_read(deliver());
+        match self.resume_substitution(&mut instantiation.walk, &mut narrowed) {
+            SubstitutionStep::Read(key) => self.substitution_read(key, &demand),
             SubstitutionStep::Done(value) => {
+                demand.leave();
                 let need = self.step_instantiation_need(instantiation, args, value);
-                self.drive_explicit_instantiation(instantiation, args, need)
+                self.drive_explicit_instantiation(instantiation, args, need, demand)
             }
         }
     }
 
-    fn drive_explicit_instantiation(
-        &self,
+    fn drive_explicit_instantiation<'g>(
+        &'g self,
         instantiation: &mut ExplicitInstantiation,
         args: &[SemanticNodeId],
         mut need: InstantiationNeed,
+        mut demand: InstantiationDemand<'_, 'g>,
     ) -> InstantiationStep {
         loop {
             match need {
                 InstantiationNeed::Done(result) => return InstantiationStep::Done(result),
+                InstantiationNeed::Read(key) => return InstantiationStep::Read(key),
                 InstantiationNeed::Substitute(node, parameter, arg) => {
+                    demand.enter(self);
                     match self.begin_substitution(&mut instantiation.walk, node, parameter, arg) {
-                        SubstitutionStep::Read(key) => return InstantiationStep::Read(key),
+                        SubstitutionStep::Read(key) => {
+                            return self.substitution_read(key, &demand);
+                        }
                         SubstitutionStep::Done(value) => {
+                            demand.leave();
                             need = self.step_instantiation_need(instantiation, args, value);
                         }
                     }
@@ -348,10 +436,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The read a substitution walk stands at, its levels' recordings open
+    /// on the connected demand its holder keeps.
+    fn substitution_read(
+        &self,
+        key: SemanticQueryKey,
+        demand: &InstantiationDemand<'_, '_>,
+    ) -> InstantiationStep {
+        verter_debug_assert!(
+            demand.holds() || self.connected_demand.is_active(),
+            "a substitution walk suspends only inside a connected demand its holder keeps"
+        );
+        InstantiationStep::Read(key)
+    }
+
     /// The first step of instantiating `node` with `args`: an honest miss
     /// for a node with no clause that admits them, a signature-bearing
-    /// object's buckets instantiated in place, or the clause's first
-    /// substitution.
+    /// object's first signature-list read, or the clause's first substitution.
     fn begin_instantiation_need(
         &self,
         instantiation: &mut ExplicitInstantiation,
@@ -385,9 +486,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let SemanticNodeData::Object(surface) = &*data {
             let surface = surface.clone();
             drop(data);
-            return InstantiationNeed::Done(
-                self.instantiate_object_signatures(node, &surface, args),
-            );
+            let (list, key) =
+                SignatureListRead::begin(node, crate::semantic_query::SignatureKind::Call, false);
+            instantiation.stage = InstantiationStage::Object(Box::new(ObjectSignatures {
+                node,
+                surface,
+                calls: None,
+                list,
+            }));
+            return InstantiationNeed::Read(key);
         }
         let SemanticNodeData::Signature {
             type_parameters, ..
@@ -407,6 +514,57 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             at: ClauseStep::Argument,
         }));
         self.next_instantiation_need(instantiation, args)
+    }
+
+    /// Consume one bucket's delivery through the shared list owner. An
+    /// unsettled call bucket stops before a construct read. Composite result
+    /// reads retain the list's current-epoch refusal and rebind policy.
+    fn resume_object_signatures(
+        &self,
+        instantiation: &mut ExplicitInstantiation,
+        args: &[SemanticNodeId],
+        read: CacheRead<QueryResult<SemanticQueryValue>>,
+    ) -> InstantiationNeed {
+        let InstantiationStage::Object(object) = &mut instantiation.stage else {
+            unreachable!("only an object's signature list awaits a bucket delivery")
+        };
+        match self
+            .continuation_stage()
+            .advance_signature_list(&mut object.list, read)
+        {
+            ListProgress::Read(key) => InstantiationNeed::Read(key),
+            ListProgress::Nodes(nodes) if object.calls.is_none() => {
+                object.calls = Some(nodes);
+                let (list, key) = SignatureListRead::begin(
+                    object.node,
+                    crate::semantic_query::SignatureKind::Construct,
+                    false,
+                );
+                object.list = list;
+                InstantiationNeed::Read(key)
+            }
+            progress => {
+                let InstantiationStage::Object(object) =
+                    std::mem::replace(&mut instantiation.stage, InstantiationStage::Finished)
+                else {
+                    unreachable!("the object retains both buckets until completion")
+                };
+                InstantiationNeed::Done(match progress {
+                    ListProgress::Nodes(constructs) => self.instantiate_object_signatures(
+                        object.node,
+                        &object.surface,
+                        object
+                            .calls
+                            .as_deref()
+                            .expect("the call bucket settled first"),
+                        &constructs,
+                        args,
+                    ),
+                    ListProgress::Unsettled => self.opaque(QueryError::Miss),
+                    ListProgress::Read(_) => unreachable!("a pending list stays retained"),
+                })
+            }
+        }
     }
 
     /// Take `value`, the substitution the instantiation named last, and
@@ -458,7 +616,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     unreachable!("an argument is chosen without a substitution")
                 }
             },
-            InstantiationStage::Finished => unreachable!("a finished instantiation names nothing"),
+            InstantiationStage::Object(_) | InstantiationStage::Finished => {
+                unreachable!("only a clause names a substitution")
+            }
         }
         self.next_instantiation_need(instantiation, args)
     }
@@ -473,7 +633,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let need = match stage {
             InstantiationStage::Signature(clause) => self.next_signature_need(clause, bound, args),
             InstantiationStage::Callable(clause) => self.next_callable_need(clause, bound, args),
-            InstantiationStage::Finished => unreachable!("a finished instantiation names nothing"),
+            InstantiationStage::Object(_) | InstantiationStage::Finished => {
+                unreachable!("only a clause names a substitution")
+            }
         };
         match need {
             InstantiationNeed::Substitute(..) => {
@@ -483,6 +645,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 *stage = InstantiationStage::Finished;
                 bound.clear();
             }
+            InstantiationNeed::Read(_) => unreachable!("a clause names no signature-list read"),
         }
         need
     }
@@ -767,10 +930,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             OverloadSetStage::Candidates(candidates) => {
-                let mut narrowed = || super::narrow_value_cache_read(deliver());
-                let read: &mut dyn FnMut() -> CacheRead<QueryResult<SemanticNodeId>> =
-                    &mut narrowed;
-                self.advance_explicit_candidates(callee, kind, type_args, candidates, Some(read))
+                self.advance_explicit_candidates(callee, kind, type_args, candidates, Some(deliver))
             }
         }
     }
@@ -787,7 +947,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         kind: crate::semantic_query::SignatureKind,
         type_args: Arc<[SemanticNodeId]>,
         mut candidates: Box<ExplicitCandidates>,
-        deliver: Option<&mut dyn FnMut() -> CacheRead<QueryResult<SemanticNodeId>>>,
+        deliver: Option<&mut dyn FnMut() -> CacheRead<QueryResult<SemanticQueryValue>>>,
     ) -> FamilyStep {
         let (demand, _) = self.enter_connected_demand(false);
         let mut step = if let Some(deliver) = deliver {
@@ -795,7 +955,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .current
                 .as_mut()
                 .expect("a set is delivered a read when a candidate stands at it");
-            Some(self.advance_explicit_instantiation(current, &type_args, deliver))
+            Some(self.advance_explicit_instantiation(
+                current,
+                &type_args,
+                deliver,
+                InstantiationDemand::Held,
+            ))
         } else {
             verter_debug_assert!(
                 candidates.current.is_none(),
@@ -859,7 +1024,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let candidate = *candidates.raw.get(candidates.next)?;
         self.graph().record_explicit_candidate();
         let current = candidates.current.insert(ExplicitInstantiation::new());
-        Some(self.begin_explicit_instantiation(current, candidate, type_args))
+        Some(self.begin_explicit_instantiation(
+            current,
+            candidate,
+            type_args,
+            InstantiationDemand::Held,
+        ))
     }
 
     /// Whether `node`'s clause binds `supplied` explicit type arguments

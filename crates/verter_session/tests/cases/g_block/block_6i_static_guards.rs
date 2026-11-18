@@ -212,49 +212,6 @@ fn shape_cache_db_replaces_split_caches() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Guard B.2 — `member_shape_peek_or_compute`'s gate-short-circuit arms
-//             admit to the universal cache.
-//
-// Universal-caching invariant: every successful shape compute admits,
-// regardless of how cheap the compute was. The gate-short-circuit arms in
-// `member_shape_peek_or_compute` MUST route through
-// `admit_member_shape_if_possible`. (The TypeExpr-side helper
-// `admit_type_expr_shape_if_possible` was retired together with the
-// `reduce_field_type_expr_with_mode` TypeExpr reducer when the per-field
-// reduce was reworked onto node-domain sources; the member-shape helper is
-// the sole sink-side admission path.)
-// ---------------------------------------------------------------------------
-#[test]
-fn peek_primitive_arms_admit_to_cache() {
-    // The admission helper + the boundary-consuming function that calls it
-    // (`member_shape_peek_or_compute`) live in the terminal `output_sink`
-    // sink module.
-    let src =
-        read_workspace_file("crates/verter_session/src/meta_resolve/projectors/output_sink.rs");
-
-    // The admission helper must exist.
-    assert!(
-        src.contains("fn admit_member_shape_if_possible"),
-        "guard B.2: `meta_resolve::projectors::output_sink` MUST define \
-         `admit_member_shape_if_possible` — the universal-caching admission \
-         helper for `member_shape_peek_or_compute`'s gate-short-circuit arms.",
-    );
-
-    // Every successful shape outcome must be wrapped in the admission
-    // helper, not returned bare. Source-text grep on the call count
-    // gives a coarse but discriminating signal. Exclude the definition
-    // itself from the count.
-    let admit_member_calls = src.matches("admit_member_shape_if_possible(").count()
-        - src.matches("fn admit_member_shape_if_possible(").count();
-    assert!(
-        admit_member_calls >= 3,
-        "guard B.2: `admit_member_shape_if_possible` MUST be called at least three times \
-         (package-backed gate arm, cycle-gate arm, non-reducible stable-shape arm) inside \
-         `member_shape_peek_or_compute`. Observed call count: {admit_member_calls}.",
-    );
-}
-
 /// G4.4 — the `IndexKey::Number` bounded integer convention is
 /// enforced at the LANGUAGE level, not by a textual classifier.
 ///
@@ -482,165 +439,6 @@ fn extract_fn_body(src: &str, anchor: &str) -> String {
     src[body_start..end].to_string()
 }
 
-/// The cursor-threaded production functions that must be made
-/// load-bearing. `(label, rel_path, signature_anchor)`.
-///
-/// The retired macro-object materialiser cluster
-/// (`produce_one_macro_object_shape` / `project_named_ref_*_shape` in
-/// `materialize/macro_shapes.rs`) is DELETED — `define_*` shapes are
-/// produced by the dispatch projectors below. The surviving
-/// cursor-threading authority is the projector set; their absence is
-/// guarded by `no_legacy_walker.rs::RETIRED_SYMBOLS`.
-fn ax_cursor_target_set() -> Vec<(&'static str, &'static str, &'static str)> {
-    vec![
-        (
-            "project_props",
-            "crates/verter_session/src/meta_resolve/projectors/props.rs",
-            "pub(crate) fn project_props<",
-        ),
-        (
-            "project_emits",
-            "crates/verter_session/src/meta_resolve/projectors/emits.rs",
-            "pub(crate) fn project_emits(",
-        ),
-        (
-            "project_slots",
-            "crates/verter_session/src/meta_resolve/projectors/slots.rs",
-            "pub(crate) fn project_slots(",
-        ),
-        (
-            "project_exposed",
-            "crates/verter_session/src/meta_resolve/projectors/exposed.rs",
-            "pub(crate) fn project_exposed(",
-        ),
-        (
-            "project_options",
-            "crates/verter_session/src/meta_resolve/projectors/options.rs",
-            "pub(crate) fn project_options(",
-        ),
-        (
-            // `project_model` relocated into the terminal `output_sink` sink
-            // module (it raises a payload through the module-private boundary
-            // primitive); the cursor-descent invariant is anchored there.
-            "project_model",
-            "crates/verter_session/src/meta_resolve/projectors/output_sink.rs",
-            "pub(crate) fn project_model(",
-        ),
-    ]
-}
-
-// ---------------------------------------------------------------------------
-// Cursor-consumption guard — the cursor is CONSUMED, not `let _ = cursor;`-discarded.
-//
-// Discriminating: a threaded-but-discarded cursor (`let _ = cursor;`
-// in every body) FAILS this guard.
-// ---------------------------------------------------------------------------
-#[test]
-fn ax_cursor_is_consumed_not_discarded() {
-    for (label, rel, anchor) in ax_cursor_target_set() {
-        let src = read_workspace_file(rel);
-        let body = extract_fn_body(&src, anchor);
-
-        assert!(
-            !body.contains("let _ = cursor;"),
-            "cursor-consumption guard ({label}): `cursor` MUST NOT be discarded with \
-             `let _ = cursor;`. The cursor MUST gate per-member \
-             publication — an inert cursor \
-             leaves the Rule-5 `outputSchema`/`execute` depth leak open."
-        );
-
-        // The cursor must be consumed in a load-bearing position:
-        // either descended (`descend_published_member` /
-        // `descend`), queried, or forwarded to a callee.
-        let used = body.contains("cursor.descend_published_member(")
-            || body.contains("cursor.descend(")
-            || body.contains("cursor.admits_key(")
-            || body.contains("cursor.terminal_publication_mode(")
-            || body.contains("cursor.terminal_mode(")
-            || body.contains("cursor.is_terminal(")
-            || body.contains(", cursor)")
-            || body.contains(", cursor,")
-            || body.contains("(cursor)")
-            || body.contains("(cursor,");
-        assert!(
-            used,
-            "cursor-consumption guard ({label}): `cursor` MUST be consumed — \
-             descended via `descend_published_member`, queried, or \
-             forwarded to a callee. Observed an unused parameter."
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Member-descent guard — every macro projector gates published members through
-// `cursor.descend_published_member`.
-//
-// The retired macro-shape materialiser (`finalize_macro_shape_through_cursor`
-// in `materialize/macro_shapes.rs`) is DELETED; the per-member breadth
-// gate now lives ONLY in the dispatch projectors. Each projector
-// admits a surface member by descending the publication cursor
-// (`cursor.descend_published_member(name)`); a member the cursor does
-// not admit (`None`) is dropped from the surface. This is the live
-// Rule-5 per-member descent — if a projector stops calling
-// `descend_published_member`, the `outputSchema`/`execute` depth leak
-// re-opens. (Retired-materialiser ABSENCE is covered by
-// `no_legacy_walker.rs`; this guard covers projector PRESENCE.)
-// ---------------------------------------------------------------------------
-#[test]
-fn ax_projectors_descend_published_member() {
-    // Each surviving macro projector and the body anchor whose
-    // surface-member loop MUST descend the publication cursor.
-    let projector_set: &[(&str, &str, &str)] = &[
-        (
-            "project_props",
-            "crates/verter_session/src/meta_resolve/projectors/props.rs",
-            "pub(crate) fn project_props<",
-        ),
-        (
-            "project_emits",
-            "crates/verter_session/src/meta_resolve/projectors/emits.rs",
-            "pub(crate) fn project_emits(",
-        ),
-        (
-            "project_slots",
-            "crates/verter_session/src/meta_resolve/projectors/slots.rs",
-            "pub(crate) fn project_slots(",
-        ),
-        (
-            "project_exposed",
-            "crates/verter_session/src/meta_resolve/projectors/exposed.rs",
-            "pub(crate) fn project_exposed(",
-        ),
-        (
-            "project_options",
-            "crates/verter_session/src/meta_resolve/projectors/options.rs",
-            "pub(crate) fn project_options(",
-        ),
-        (
-            // `project_model` relocated into the terminal `output_sink` sink
-            // module (it raises a payload through the module-private boundary
-            // primitive); the cursor-descent invariant is anchored there.
-            "project_model",
-            "crates/verter_session/src/meta_resolve/projectors/output_sink.rs",
-            "pub(crate) fn project_model(",
-        ),
-    ];
-
-    for (label, rel, anchor) in projector_set {
-        let src = read_workspace_file(rel);
-        let body = extract_fn_body(&src, anchor);
-        assert!(
-            body.contains("cursor.descend_published_member("),
-            "member-descent guard ({label}): the projector MUST descend each \
-             admitted surface member through \
-             `cursor.descend_published_member(` — that is the live \
-             per-member breadth gate. Dropping it re-opens the Rule-5 \
-             `outputSchema`/`execute` depth leak the macro-shape \
-             materialiser used to close."
-        );
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Publication-mode guard — the projector pipeline publishes members at the
 // cursor's `terminal_publication_mode()`, NOT a hard-coded
@@ -660,23 +458,6 @@ fn ax_projector_uses_terminal_publication_mode() {
     // touches the reverse-materialization boundary).
     let src =
         read_workspace_file("crates/verter_session/src/meta_resolve/projectors/output_sink.rs");
-    let body = extract_fn_body(&src, "pub(crate) fn surface_member_to_expanded_field<");
-    assert!(
-        body.contains("admitted.cursor().terminal_publication_mode()"),
-        "publication-mode guard: `surface_member_to_expanded_field` MUST derive \
-         the per-member publication mode from \
-         `admitted.cursor().terminal_publication_mode()` — publishing a \
-         macro member at a carrier (`Navigate`) mode is the Rule-5 \
-         depth-leak fix."
-    );
-    assert!(
-        !body.contains("ProjectionMode::Expanded"),
-        "publication-mode guard: `surface_member_to_expanded_field` MUST NOT \
-         hard-code `ProjectionMode::Expanded` for the per-member \
-         materialise — that re-opens the `outputSchema`/`execute` \
-         depth leak. Use the cursor's publication mode."
-    );
-
     // The node-domain per-field reducer must exist (SINK-PRIVATE in
     // `output_sink`; successor of the retired TypeExpr reducer
     // `reduce_field_type_expr_with_mode` after the publication reduce was
@@ -703,37 +484,6 @@ fn ax_projector_uses_terminal_publication_mode() {
          (carrier) mode so the second pass does not re-expand \
          generic instantiations the projector kept shallow."
     );
-}
-
-// ---------------------------------------------------------------------------
-// Cursor-threading guard — the cursor-threaded production functions still carry
-// the `ProjectionCursor` parameter (threading must not regress).
-// ---------------------------------------------------------------------------
-#[test]
-fn ax_cursor_threaded_functions_keep_parameter() {
-    for (label, rel, anchor) in ax_cursor_target_set() {
-        let src = read_workspace_file(rel);
-        let header_start = find_fn_anchor(&src, anchor).unwrap_or_else(|| {
-            panic!("cursor-threading guard ({label}): anchor `{anchor}` must exist")
-        });
-        // Bound the header by the body's opening brace — the
-        // signature `) ->` can appear inside an `impl Fn(..) -> ..`
-        // parameter type, so a `find(") ->")` is unsafe. Everything
-        // between the anchor and the first `{` is the signature.
-        let body_open = src[header_start..]
-            .find('{')
-            .map(|n| header_start + n)
-            .unwrap_or_else(|| {
-                panic!("cursor-threading guard ({label}): function body brace not found")
-            });
-        let header = &src[header_start..body_open];
-        assert!(
-            header.contains("ProjectionCursor"),
-            "cursor-threading guard ({label}): the production function MUST keep \
-             its `ProjectionCursor` parameter. \
-             Header observed:\n{header}"
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------

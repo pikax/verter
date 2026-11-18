@@ -16,6 +16,7 @@
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { withTemporaryRepository } from "../temporary-repository.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -342,6 +343,10 @@ export function assertRustCases(run) {
 }
 
 export function assertDirtyTwinsRejected(repoRoot = REPO_ROOT) {
+  return withTemporaryRepository(repoRoot, (temporary) => assertDirtyTwinsInCopy(temporary));
+}
+
+function assertDirtyTwinsInCopy(repoRoot) {
   const errors = [];
   const abs = path.join(repoRoot, PUBLIC_CONSTRUCTOR_RS);
   let original = null;

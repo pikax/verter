@@ -9,7 +9,7 @@ use rustc_hash::FxHashMap;
 use super::super::generate_ide_script;
 use crate::code_transform::CodeTransform;
 use crate::ide::{CssModuleInfo, IdeScriptOptions};
-use crate::template::code_gen::binding::BindingType;
+use crate::template::binding::BindingType;
 
 /// Generate TSX script and return (code, bindings, type_constructs).
 pub fn gen_tsx_script_full(source: &str) -> (String, FxHashMap<String, BindingType>, String) {
@@ -144,7 +144,8 @@ pub fn gen_tsx_script_unwrap(source: &str) -> (String, FxHashMap<String, Binding
         &alloc,
         &options,
         template_end,
-    );
+    )
+    .expect("recorded script edits apply");
 
     if let (Some(return_close), Some(pos)) = (&result.return_close, result.return_close_pos) {
         ct.prepend_left(pos, return_close);
@@ -253,7 +254,8 @@ fn gen_tsx_script_full_with_opts_and_runtime(
         &alloc,
         &options,
         template_end,
-    );
+    )
+    .expect("recorded script edits apply");
 
     // Apply deferred return+close after template (same as compile.rs)
     if let (Some(return_close), Some(pos)) = (&result.return_close, result.return_close_pos) {
@@ -363,7 +365,8 @@ pub fn gen_tsx_script_with_sourcemap(source: &str) -> (String, String) {
         &alloc,
         &options,
         template_end,
-    );
+    )
+    .expect("recorded script edits apply");
 
     if let (Some(return_close), Some(pos)) = (&result.return_close, result.return_close_pos) {
         ct.prepend_left(pos, return_close);
@@ -395,11 +398,13 @@ pub fn gen_tsx_script_with_sourcemap(source: &str) -> (String, String) {
     }
 
     let code = ct.build_string();
-    let json = ct.generate_map_json_with_preamble(crate::code_transform::SourceMapOptions {
-        source: Some("App.vue"),
-        file: Some("App.vue"),
-        include_content: true,
-    });
+    let json = ct
+        .generate_map_json_with_preamble(crate::code_transform::SourceMapOptions {
+            source: Some("App.vue"),
+            file: Some("App.vue"),
+            include_content: true,
+        })
+        .expect("mapped transform");
     (code, json)
 }
 
@@ -473,7 +478,8 @@ fn gen_tsx_script_narrowing_with_optional_runtime(
         &alloc,
         &options,
         template_end,
-    );
+    )
+    .expect("recorded script edits apply");
 
     if let (Some(return_close), Some(pos)) = (&result.return_close, result.return_close_pos) {
         ct.prepend_left(pos, return_close);
@@ -542,7 +548,8 @@ pub fn gen_tsx_script_full_with_options(
         &alloc,
         &options,
         template_end,
-    );
+    )
+    .expect("recorded script edits apply");
 
     // Apply deferred return+close after template (same as compile.rs)
     if let (Some(return_close), Some(pos)) = (&result.return_close, result.return_close_pos) {
@@ -635,7 +642,8 @@ pub fn gen_jsx_script(source: &str) -> (String, String) {
         &alloc,
         &options,
         template_end,
-    );
+    )
+    .expect("recorded script edits apply");
 
     if let (Some(return_close), Some(pos)) = (&result.return_close, result.return_close_pos) {
         ct.prepend_left(pos, return_close);

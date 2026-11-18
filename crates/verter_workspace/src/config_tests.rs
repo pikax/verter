@@ -1,5 +1,107 @@
 use super::*;
 
+#[test]
+fn config_dependencies_capture_existing_reads_and_realpath_reference_targets() {
+    use std::sync::{Arc, Mutex};
+    struct Reader {
+        files: std::collections::BTreeMap<&'static str, &'static str>,
+        reads: Mutex<Vec<String>>,
+    }
+    impl WorkspaceRead for Reader {
+        fn read_file(&self, path: &str) -> Option<Arc<str>> {
+            self.reads.lock().unwrap().push(path.to_string());
+            self.files.get(path).map(|text| Arc::from(*text))
+        }
+        fn file_exists(&self, path: &str) -> bool {
+            self.files.contains_key(path)
+        }
+        fn is_dir(&self, _: &str) -> bool {
+            false
+        }
+        fn realpath(&self, path: &str) -> Option<String> {
+            self.file_exists(path).then(|| {
+                if path == "/ws/link.json" {
+                    "/ws/base.json".into()
+                } else {
+                    path.into()
+                }
+            })
+        }
+        fn reverse_deps_for(&self, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn forward_deps_for(&self, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+        fn dependency_snapshot(&self, _: &str) -> Option<crate::DependencySnapshotView> {
+            None
+        }
+    }
+    let ws = Reader {
+        files: std::collections::BTreeMap::from([
+            (
+                "/ws/tsconfig.json",
+                r#"{"extends":["./link.json","./other.json","./broken.json","pkg-config"],"references":[{"path":"./ref.json"},{"path":"../shared/./missing.json"},{"path":"./new"}]}"#,
+            ),
+            (
+                "/ws/link.json",
+                r#"{"include":["app/**/*.vue"],"compilerOptions":{"strict":true}}"#,
+            ),
+            (
+                "/ws/other.json",
+                r#"{"extends":"./leaf.json","compilerOptions":{"noEmit":true}}"#,
+            ),
+            ("/ws/leaf.json", r#"{"exclude":["app/skip/**"]}"#),
+            ("/ws/broken.json", "{broken"),
+            ("/ws/ref.json", r#"{"files":[]}"#),
+            (
+                "/ws/node_modules/pkg-config/package.json",
+                r#"{"tsconfig":"./strict.json"}"#,
+            ),
+            (
+                "/ws/node_modules/pkg-config/strict.json",
+                r#"{"compilerOptions":{"strict":true}}"#,
+            ),
+        ]),
+        reads: Mutex::default(),
+    };
+    let plain = parse_tsconfig_json(&ws, "/ws/tsconfig.json").unwrap();
+    let plain_reads = std::mem::take(&mut *ws.reads.lock().unwrap());
+    let (parsed, dependencies) = parse_tsconfig_json_with_dependencies(&ws, "/ws/tsconfig.json");
+    let parsed = parsed.unwrap();
+    assert_eq!(parsed.compiler_options, plain.compiler_options);
+    assert_eq!(parsed.membership, plain.membership);
+    assert_eq!(parsed.references, plain.references);
+    assert_eq!(
+        *ws.reads.lock().unwrap(),
+        plain_reads,
+        "dependency capture must not add config reads"
+    );
+    assert_eq!(
+        dependencies.realpaths,
+        [
+            "/ws/tsconfig.json",
+            "/ws/base.json",
+            "/ws/other.json",
+            "/ws/leaf.json",
+            "/ws/broken.json",
+            "/ws/ref.json",
+            "/ws/node_modules/pkg-config/package.json",
+            "/ws/node_modules/pkg-config/strict.json"
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    );
+    assert_eq!(
+        dependencies.missing_probes,
+        ["/shared/missing.json", "/ws/new", "/ws/new.json"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // strip_json_comments
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1780,4 +1882,114 @@ fn resolve_tsconfig_extends_does_not_return_package_directory() {
         Some("/ws/node_modules/pkg-config/configs/strict.json"),
         "package directory must not be returned as a tsconfig file, got {resolved:?}"
     );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod project_options_tests {
+    use super::*;
+    use crate::memory::{MemoryOptions, MemoryWorkspace};
+    use std::sync::Arc;
+
+    fn workspace(files: &[(&str, &str)]) -> MemoryWorkspace {
+        let ws = MemoryWorkspace::new(MemoryOptions {
+            roots: vec!["/workspace".into()],
+            default_resolve_extensions: None,
+        });
+        for (path, text) in files {
+            ws.inject_file((*path).into(), Arc::from(*text));
+        }
+        ws
+    }
+
+    #[test]
+    fn unreadable_or_malformed_configs_do_not_parse() {
+        let ws = workspace(&[
+            ("/workspace/bad.json", "{broken"),
+            ("/workspace/null.json", "null"),
+        ]);
+        for path in [
+            "/workspace/missing.json",
+            "/workspace/bad.json",
+            "/workspace/null.json",
+        ] {
+            assert!(parse_tsconfig_json(&ws, path).is_none());
+        }
+    }
+
+    #[test]
+    fn reference_targets_keep_authored_missing_paths_and_resolved_order() {
+        let ws = workspace(&[
+            (
+                "/workspace/tsconfig.json",
+                r#"{"references":[{"path":"./missing"},{"path":"./second.json"},{"path":"./first.json"}]}"#,
+            ),
+            ("/workspace/first.json", "{}"),
+            ("/workspace/second.json", "{}"),
+        ]);
+        let targets = load_project_reference_targets(&ws, "/workspace/tsconfig.json");
+        assert_eq!(
+            targets
+                .iter()
+                .map(|t| (t.authored.as_str(), t.resolved.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("./missing", None),
+                ("./second.json", Some("/workspace/second.json")),
+                ("./first.json", Some("/workspace/first.json")),
+            ]
+        );
+        assert_eq!(
+            load_project_references(&ws, "/workspace/tsconfig.json"),
+            vec!["/workspace/second.json", "/workspace/first.json"]
+        );
+    }
+
+    #[test]
+    fn selected_targets_and_references_share_directory_and_file_normalization() {
+        let ws = workspace(&[
+            ("/workspace/app/tsconfig.json", "{}"),
+            ("/workspace/options.json", "{}"),
+        ]);
+        for (target, expected) in [
+            ("./app", Some("/workspace/app/tsconfig.json")),
+            ("./app/tsconfig.json", Some("/workspace/app/tsconfig.json")),
+            ("./options", Some("/workspace/options.json")),
+            ("./missing", None),
+        ] {
+            assert_eq!(
+                resolve_tsconfig_reference(&ws, "/workspace", target).as_deref(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn emit_options_layer_only_declared_keys_across_array_extends() {
+        let ws = workspace(&[
+            (
+                "/workspace/base.json",
+                r#"{"compilerOptions":{"noEmit":true,"composite":true,"outDir":"dist"}}"#,
+            ),
+            (
+                "/workspace/empty.json",
+                r#"{"compilerOptions":{"allowJs":true}}"#,
+            ),
+            (
+                "/workspace/inherited.json",
+                r#"{"extends":["./base.json","./empty.json"]}"#,
+            ),
+            (
+                "/workspace/override.json",
+                r#"{"extends":"./inherited.json","compilerOptions":{"noEmit":false,"composite":false,"outDir":"other"}}"#,
+            ),
+        ]);
+        let inherited = load_compiler_options(&ws, "/workspace/inherited.json").emit;
+        assert!(inherited.no_emit);
+        assert!(inherited.composite);
+        assert_eq!(inherited.out_dir.as_deref(), Some("/workspace/dist"));
+        let overridden = load_compiler_options(&ws, "/workspace/override.json").emit;
+        assert!(!overridden.no_emit);
+        assert!(!overridden.composite);
+        assert_eq!(overridden.out_dir.as_deref(), Some("/workspace/other"));
+    }
 }

@@ -62,6 +62,9 @@ pub mod method {
     /// value). These are program-wide diagnostics NOT covered by the per-file
     /// semantic/syntactic getters (sync/api.js:2459).
     pub const GET_CONFIG_FILE_PARSING_DIAGNOSTICS: &str = "getConfigFileParsingDiagnostics";
+    /// `"getProgramDiagnostics"` — program-wide validation, including compiler
+    /// options diagnostics, separate from config parsing (sync/api.js:2421).
+    pub const GET_PROGRAM_DIAGNOSTICS: &str = "getProgramDiagnostics";
     /// `"getTypeAtPosition"` (sync/api.js:3120).
     pub const GET_TYPE_AT_POSITION: &str = "getTypeAtPosition";
     /// `"getSymbolAtPosition"` (sync/api.js:2864).
@@ -453,7 +456,7 @@ pub struct TypeResponse {
 /// One diagnostic. Mirrors the load-bearing fields of `DiagnosticResponse`
 /// (proto.generated.d.ts:909-940): `{ code, category, text, pos, end,
 /// fileName?, ... }`; the rendering helpers (`startPosition`, `sourceLines`,
-/// `messageChain`, …) are ignored on decode.
+/// …) are ignored on decode. The typed client folds `messageChain` into `text`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Diagnostic {
     /// The TS diagnostic code (e.g. 2345).
@@ -473,6 +476,35 @@ pub struct Diagnostic {
     /// The file the diagnostic belongs to, when present.
     #[serde(rename = "fileName", default, skip_serializing_if = "Option::is_none")]
     pub file_name: Option<String>,
+}
+
+/// The wire response additionally carries ordered child messages
+/// (proto.generated.d.ts:935). Keep that wire structure private: consumers use
+/// the complete rendered text and the root diagnostic's location and category.
+#[derive(Deserialize)]
+pub(crate) struct DiagnosticResponse {
+    #[serde(flatten)]
+    diagnostic: Diagnostic,
+    #[serde(rename = "messageChain", default)]
+    message_chain: Option<Vec<DiagnosticResponse>>,
+}
+
+impl DiagnosticResponse {
+    pub(crate) fn into_diagnostic(mut self) -> Diagnostic {
+        for child in self.message_chain.into_iter().flatten() {
+            child.append_message(&mut self.diagnostic.text, 2);
+        }
+        self.diagnostic
+    }
+
+    fn append_message(self, text: &mut String, indent: usize) {
+        text.push('\n');
+        text.extend(std::iter::repeat_n(' ', indent));
+        text.push_str(&self.diagnostic.text);
+        for child in self.message_chain.into_iter().flatten() {
+            child.append_message(text, indent + 2);
+        }
+    }
 }
 
 /// Decode a diagnostic offset. The engine reports `-1` for a diagnostic that
@@ -786,6 +818,48 @@ mod tests {
         assert_eq!(d.pos, 120);
         assert_eq!(d.end, 123);
         assert_eq!(d.file_name.as_deref(), Some("/repo/src/a.ts"));
+    }
+
+    #[test]
+    fn diagnostic_message_chains_keep_order_indentation_and_root_metadata() {
+        let json = serde_json::json!({
+            "fileName": "/repo/a.ts", "pos": 12, "end": 15,
+            "code": 2345, "category": 1, "text": "root",
+            "messageChain": [
+                {"pos": -1, "end": -1, "code": 1, "category": 3, "text": "first",
+                 "messageChain": [
+                     {"pos": -1, "end": -1, "code": 2, "category": 3, "text": "nested"}
+                 ]},
+                {"pos": -1, "end": -1, "code": 3, "category": 3, "text": "second"}
+            ],
+            "relatedInformation": [
+                {"pos": 0, "end": 1, "code": 4, "category": 3, "text": "separate location"}
+            ]
+        });
+        let d = serde_json::from_value::<DiagnosticResponse>(json)
+            .unwrap()
+            .into_diagnostic();
+        assert_eq!(d.text, "root\n  first\n    nested\n  second");
+        assert_eq!((d.code, d.category, d.pos, d.end), (2345, 1, 12, 15));
+        assert_eq!(d.file_name.as_deref(), Some("/repo/a.ts"));
+
+        for chain in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!([])),
+        ] {
+            let mut json = serde_json::json!({
+                "pos": -1, "end": -1, "code": 5102, "category": 1, "text": "unchanged"
+            });
+            if let Some(chain) = chain {
+                json["messageChain"] = chain;
+            }
+            let d = serde_json::from_value::<DiagnosticResponse>(json)
+                .unwrap()
+                .into_diagnostic();
+            assert_eq!(d.text, "unchanged");
+            assert_eq!((d.pos, d.end, d.file_name), (0, 0, None));
+        }
     }
 
     // ── DISCRIMINATING: a wrong wire key must NOT silently decode ───────────

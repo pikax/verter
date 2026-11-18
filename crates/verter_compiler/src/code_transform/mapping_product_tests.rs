@@ -9,8 +9,7 @@
 use oxc_allocator::Allocator;
 
 use super::mapping_product::{CarrierClass, MappingProduct, ProjectedClass};
-use super::{CodeTransform, SegmentAnchor};
-use crate::template::code_gen::types::SegmentedOverwriteAuthority;
+use super::{AnchorKind, CodeTransform, SegmentAnchor};
 
 /// Every chunk kind in one transform, so the partitions are exercised against a
 /// mixed emission record rather than a single-edit toy.
@@ -74,7 +73,7 @@ fn both_surfaces_are_partitioned_end_to_end() {
     let allocator = Allocator::default();
     let ct = kitchen_sink(&allocator);
     let output = ct.build_string();
-    let product = MappingProduct::of(&ct);
+    let product = MappingProduct::of(&ct).expect("mapped transform");
     assert_partitions_are_total(&product, output.len() as u32, ct.original().len() as u32);
 }
 
@@ -82,7 +81,7 @@ fn both_surfaces_are_partitioned_end_to_end() {
 fn an_untouched_source_is_one_identity_region_on_each_side() {
     let allocator = Allocator::default();
     let ct = CodeTransform::new("const a = 1;", &allocator);
-    let product = MappingProduct::of(&ct);
+    let product = MappingProduct::of(&ct).expect("mapped transform");
     // Compactness: an unedited transform publishes ONE region per surface, not
     // one per internal chunk.
     assert_eq!(product.projected().len(), 1);
@@ -96,7 +95,7 @@ fn an_untouched_source_is_one_identity_region_on_each_side() {
 fn a_missing_carrier_preimage_is_exactly_the_synthesized_class() {
     let allocator = Allocator::default();
     let ct = kitchen_sink(&allocator);
-    let product = MappingProduct::of(&ct);
+    let product = MappingProduct::of(&ct).expect("mapped transform");
     let mut synthesized = 0usize;
     for region in product.projected() {
         assert_eq!(
@@ -129,7 +128,7 @@ fn wholly_synthetic_replacement_text_elides_the_source_it_stands_in_for() {
     // the mis-mapping the elided class refuses, so the region must still report
     // no correlate.
     ct.batch_prepend_left_with_source_map(&[(0, Some((start, 0)), "/* anchored */")]);
-    let product = MappingProduct::of(&ct);
+    let product = MappingProduct::of(&ct).expect("mapped transform");
 
     let elided = product
         .carrier_at(start)
@@ -164,7 +163,7 @@ fn a_carrier_region_answers_with_every_projection_derived_from_it() {
     // The same authored expression emitted a second time at a source-anchored
     // position — the read/assignment-target shape a `v-model` lowering emits.
     ct.batch_prepend_left_with_source_map(&[(0, Some((0, 2)), "__(count)")]);
-    let product = MappingProduct::of(&ct);
+    let product = MappingProduct::of(&ct).expect("mapped transform");
 
     let region = product.carrier_at(0).expect("the source has a region at 0");
     assert_eq!(
@@ -206,7 +205,7 @@ fn a_declared_zero_width_insertion_anchor_is_part_of_the_product() {
     ct.batch_prepend_left_static(&[(8, preamble)]);
     ct.set_helper_preamble_content_at(preamble, 8);
 
-    let product = MappingProduct::of(&ct);
+    let product = MappingProduct::of(&ct).expect("mapped transform");
     assert_eq!(
         product.insertion_anchors(),
         &[super::mapping_product::InsertionAnchor {
@@ -227,7 +226,7 @@ fn moving_a_slice_backwards_relocates_it_instead_of_claiming_identity() {
     let mut ct = CodeTransform::new("ABCDEF", &allocator);
     ct.move_slice(2, 4, 0);
     assert_eq!(ct.build_string(), "CDABEF");
-    let product = MappingProduct::of(&ct);
+    let product = MappingProduct::of(&ct).expect("mapped transform");
     assert_partitions_are_total(&product, 6, 6);
 
     let moved = product
@@ -253,27 +252,26 @@ fn moving_a_slice_backwards_relocates_it_instead_of_claiming_identity() {
 }
 
 #[test]
-fn segmented_scaffolding_is_synthesized_around_relocated_authored_lexemes() {
+fn segmented_scaffolding_is_synthesized_around_exact_authored_lexemes() {
     let allocator = Allocator::default();
     let source = "{{ name }}";
     let mut ct = CodeTransform::new(source, &allocator);
     let content = "_toDisplayString(name)";
-    let anchors = [SegmentAnchor::new(17, 4, 3)];
-    ct.try_overwrite_segmented(
-        0,
-        source.len() as u32,
-        content,
-        &anchors,
-        SegmentedOverwriteAuthority::new_for_test(),
-    )
-    .expect("the fixture range is one live original chunk");
-    let product = MappingProduct::of(&ct);
+    let anchors = [SegmentAnchor::new(17, 4, 3, AnchorKind::Exact)];
+    let correspondence = ct
+        .check_correspondence(content, &anchors)
+        .expect("the anchor copies the authored lexeme");
+    ct.try_overwrite_segmented(0, source.len() as u32, correspondence)
+        .expect("the fixture range is one live original chunk");
+    let product = MappingProduct::of(&ct).expect("mapped transform");
     assert_partitions_are_total(&product, content.len() as u32, source.len() as u32);
 
     let lexeme = product
         .projected_at(17)
         .expect("the authored lexeme is projected");
-    assert_eq!(lexeme.class, ProjectedClass::Relocated);
+    // The lexeme is the authored bytes, emitted in source order: an identity
+    // correspondence, like any other exact run.
+    assert_eq!(lexeme.class, ProjectedClass::Identity);
     assert_eq!(
         lexeme.carrier.map(|span| (span.start, span.end)),
         Some((3, 7))
@@ -293,7 +291,7 @@ fn segmented_scaffolding_is_synthesized_around_relocated_authored_lexemes() {
     );
     assert_eq!(
         product.carrier_at(3).expect("carrier region").class,
-        CarrierClass::Relocated
+        CarrierClass::Identity
     );
 }
 
@@ -329,25 +327,25 @@ fn the_product_preserves_the_pre_change_source_range_geometry() {
     anchored.batch_prepend_left_with_source_map(&[(0, Some((0, 2)), "__(count)")]);
 
     let mut segmented = CodeTransform::new("{{ name }}", &allocator);
+    let segmented_anchors = [SegmentAnchor::new(17, 4, 3, AnchorKind::Exact)];
+    let correspondence = segmented
+        .check_correspondence("_toDisplayString(name)", &segmented_anchors)
+        .expect("the anchor copies the authored lexeme");
     segmented
-        .try_overwrite_segmented(
-            0,
-            10,
-            "_toDisplayString(name)",
-            &[SegmentAnchor::new(17, 4, 3)],
-            SegmentedOverwriteAuthority::new_for_test(),
-        )
+        .try_overwrite_segmented(0, 10, correspondence)
         .expect("the fixture range is one live original chunk");
 
     let untouched = CodeTransform::new("const a = 1;", &allocator);
 
     for ct in [&replaced, &relocated, &anchored, &segmented, &untouched] {
-        let (_, reference) = ct.build_string_with_source_ranges();
+        let (_, reference) = ct
+            .build_string_with_source_ranges()
+            .expect("mapped transform");
         assert!(
             !reference.is_empty(),
             "each fixture must publish reference geometry to compare against"
         );
-        let product = MappingProduct::of(ct);
+        let product = MappingProduct::of(ct).expect("mapped transform");
         for range in &reference {
             let region = product
                 .projected_at(range.generated_start)
@@ -380,16 +378,11 @@ fn the_product_preserves_the_pre_change_source_range_geometry() {
     }
 }
 
-/// The one recorded divergence from the reference, and its direction.
-///
-/// The reference geometry attributes an authored preimage to wholly synthetic
-/// replacement text, while `generate_map` — the transform's own source-map
-/// authority — deliberately emits no token for it. The product sides with the
-/// map: those bytes are Synthesized and the span they stand in for is Elided.
-/// Recording the divergence is the comparison rule; leaving it unstated would
-/// make the reference and the product disagree silently.
+/// Wholly synthetic replacement text has no authored preimage in any
+/// product: the source ranges leave it out, and the mapping product calls its
+/// bytes Synthesized and the span they stand in for Elided.
 #[test]
-fn the_product_sides_with_the_source_map_where_the_reference_over_claims() {
+fn every_product_leaves_synthetic_replacement_text_unclaimed() {
     let allocator = Allocator::default();
     let source = "keep <script setup>gone</script> keep";
     let mut ct = CodeTransform::new(source, &allocator);
@@ -397,15 +390,19 @@ fn the_product_sides_with_the_source_map_where_the_reference_over_claims() {
     let end = source.find("</script>").expect("fixture anchor") as u32 + 9;
     ct.overwrite_unmapped(start, end, "const __sfc__ = {};");
 
-    let (_, reference) = ct.build_string_with_source_ranges();
-    let over_claimed = reference
-        .iter()
-        .find(|range| range.source_start == start && range.source_end == end)
-        .expect("the reference geometry attributes the synthetic text to the span");
+    let (_, reference) = ct
+        .build_string_with_source_ranges()
+        .expect("mapped transform");
+    assert!(
+        !reference
+            .iter()
+            .any(|range| range.source_start == start && range.source_end == end),
+        "no range attributes the synthetic text to the span it replaced"
+    );
 
-    let product = MappingProduct::of(&ct);
+    let product = MappingProduct::of(&ct).expect("mapped transform");
     let region = product
-        .projected_at(over_claimed.generated_start)
+        .projected_at(start)
         .expect("the synthetic bytes are projected");
     assert_eq!(region.class, ProjectedClass::Synthesized);
     assert!(region.carrier.is_none());
@@ -414,11 +411,246 @@ fn the_product_sides_with_the_source_map_where_the_reference_over_claims() {
 #[test]
 fn the_product_is_a_deterministic_function_of_the_emission_record() {
     let allocator = Allocator::default();
-    let first = MappingProduct::of(&kitchen_sink(&allocator));
-    let second = MappingProduct::of(&kitchen_sink(&allocator));
+    let first = MappingProduct::of(&kitchen_sink(&allocator)).expect("mapped transform");
+    let second = MappingProduct::of(&kitchen_sink(&allocator)).expect("mapped transform");
     assert_eq!(
         first, second,
         "two transforms with the same edits must publish the same geometry, \
          byte for byte and index for index"
     );
+}
+
+/// Generated columns that carry a source position in the transform's map.
+fn mapped_columns(ct: &CodeTransform<'_>) -> Vec<(u32, u32, u32)> {
+    let map = ct
+        .generate_map(super::SourceMapOptions::new().with_source("a.ts"))
+        .expect("mapped transform");
+    map.get_tokens()
+        .filter(|token| token.get_source_id().is_some())
+        .map(|token| {
+            (
+                token.get_dst_col(),
+                token.get_src_line(),
+                token.get_src_col(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_relocated_mapped_insertion_keeps_its_source() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("abcdef", &allocator);
+    // A mapped insertion at 3 that stands for source offset 0.
+    ct.batch_prepend_left_with_source_map(&[(3, Some((0, 0)), "XY")]);
+    ct.move_slice(2, 4, 6);
+    assert_eq!(ct.build_string(), "abefcXYd");
+
+    assert!(
+        mapped_columns(&ct).contains(&(5, 0, 0)),
+        "the relocated insertion still names its authored position"
+    );
+    let product = MappingProduct::of(&ct).expect("mapped transform");
+    let region = product.projected_at(5).expect("the insertion is projected");
+    assert_eq!(region.class, ProjectedClass::Rewritten);
+    assert_eq!(
+        region.carrier.map(|span| (span.start, span.end)),
+        Some((0, 0))
+    );
+}
+
+#[test]
+fn a_relocated_segmented_lexeme_keeps_its_anchor() {
+    let allocator = Allocator::default();
+    let source = "{{ name }} tail";
+    let mut ct = CodeTransform::new(source, &allocator);
+    let anchors = [SegmentAnchor::new(17, 4, 3, AnchorKind::Exact)];
+    let correspondence = ct
+        .check_correspondence("_toDisplayString(name)", &anchors)
+        .expect("the anchor copies the authored lexeme");
+    ct.try_overwrite_segmented(0, 10, correspondence)
+        .expect("one live original chunk");
+    ct.move_slice(0, 10, 15);
+    assert_eq!(ct.build_string(), " tail_toDisplayString(name)");
+
+    // `name` sits at generated column 5 + 17.
+    assert!(
+        mapped_columns(&ct).contains(&(22, 0, 3)),
+        "the relocated lexeme keeps its own anchor"
+    );
+    let product = MappingProduct::of(&ct).expect("mapped transform");
+    let lexeme = product.projected_at(22).expect("the lexeme is projected");
+    assert_eq!(lexeme.class, ProjectedClass::Relocated);
+    assert_eq!(
+        lexeme.carrier.map(|span| (span.start, span.end)),
+        Some((3, 7))
+    );
+}
+
+#[test]
+fn a_relocated_synthetic_overwrite_stays_unmapped() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("abcdef", &allocator);
+    ct.overwrite_unmapped(2, 4, "ZZ");
+    ct.move_slice(2, 4, 6);
+    assert_eq!(ct.build_string(), "abefZZ");
+
+    assert!(
+        !mapped_columns(&ct).iter().any(|(column, ..)| *column == 4),
+        "synthetic text gains no authored position by moving"
+    );
+    let product = MappingProduct::of(&ct).expect("mapped transform");
+    assert_eq!(
+        product.projected_at(4).expect("projected").class,
+        ProjectedClass::Synthesized
+    );
+}
+
+/// What one generated byte stands for, as one product reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ByteKind {
+    Exact,
+    Rewritten,
+    Anchored,
+    Unmapped,
+}
+
+/// Per generated byte: the kind the source ranges report, the kind the
+/// mapping product reports, and whether the V3 map maps the byte.
+fn products_by_byte(ct: &CodeTransform<'_>) -> Vec<(ByteKind, ByteKind, bool)> {
+    let (text, ranges) = ct
+        .build_string_with_source_ranges()
+        .expect("mapped transform");
+    let product = MappingProduct::of(ct).expect("mapped transform");
+    let map = ct
+        .generate_map(super::SourceMapOptions::new().with_source("a.ts"))
+        .expect("mapped transform");
+    let tokens: Vec<_> = map.get_tokens().collect();
+    let mut line = 0u32;
+    let mut column = 0u32;
+    let mut out = Vec::with_capacity(text.len());
+    for (offset, ch) in text.char_indices() {
+        let offset = offset as u32;
+        let from_ranges = ranges
+            .iter()
+            .find(|range| range.generated_start <= offset && offset < range.generated_end)
+            .map_or(ByteKind::Unmapped, |range| match range.replacement {
+                false => ByteKind::Exact,
+                true if range.source_end > range.source_start => ByteKind::Rewritten,
+                true => ByteKind::Anchored,
+            });
+        let region = product.projected_at(offset).expect("total partition");
+        let from_product = match region.class {
+            ProjectedClass::Identity | ProjectedClass::Relocated => ByteKind::Exact,
+            ProjectedClass::Rewritten
+                if region.carrier.is_some_and(|span| span.end > span.start) =>
+            {
+                ByteKind::Rewritten
+            }
+            ProjectedClass::Rewritten => ByteKind::Anchored,
+            ProjectedClass::Synthesized => ByteKind::Unmapped,
+        };
+        // The token in force at this position: the last at or before it on
+        // the same line.
+        let mapped = tokens
+            .iter()
+            .rfind(|token| token.get_dst_line() == line && token.get_dst_col() <= column)
+            .is_some_and(|token| token.get_source_id().is_some());
+        for _ in 0..ch.len_utf8() {
+            out.push((from_ranges, from_product, mapped));
+        }
+        super::advance_generated_position(ch.encode_utf8(&mut [0; 4]), &mut line, &mut column);
+    }
+    out
+}
+
+#[test]
+fn every_product_reads_one_emission_walk() {
+    type Edit = fn(&mut CodeTransform<'_>);
+    let rows: [(&str, Edit); 9] = [
+        ("authored source", |_| {}),
+        ("insertion", |ct| {
+            ct.prepend_left(3, "ins");
+        }),
+        ("anchored insertion", |ct| {
+            ct.try_append_left(3, "anc").expect("in range");
+        }),
+        ("replacement", |ct| {
+            ct.overwrite(2, 5, "réplacé");
+        }),
+        ("synthetic replacement", |ct| {
+            ct.overwrite_unmapped(2, 5, "synth");
+        }),
+        ("mapped insertion", |ct| {
+            ct.batch_prepend_left_with_source_map(&[(3, Some((1, 2)), "__x")]);
+        }),
+        ("segmented overwrite", |ct| {
+            let anchors = [
+                SegmentAnchor::new(2, 2, 6, AnchorKind::Exact),
+                SegmentAnchor::new(5, 1, 0, AnchorKind::Point),
+            ];
+            let correspondence = ct
+                .check_correspondence("<(gh)!>", &anchors)
+                .expect("the exact anchor copies the source");
+            ct.try_overwrite_segmented(6, 8, correspondence)
+                .expect("one live chunk");
+        }),
+        ("relocated run", |ct| {
+            ct.overwrite(4, 5, "E");
+            ct.move_slice(3, 6, 9);
+        }),
+        ("extracted source", |ct| {
+            ct.overwrite(1, 3, "");
+            ct.extract_original(1, 3, 9, "[", "]");
+        }),
+    ];
+    for (name, edit) in rows {
+        let allocator = Allocator::default();
+        let mut ct = CodeTransform::new("abcdefghi", &allocator);
+        edit(&mut ct);
+        for (offset, (ranges, product, mapped)) in products_by_byte(&ct).into_iter().enumerate() {
+            assert_eq!(ranges, product, "{name}: byte {offset}");
+            assert_eq!(
+                mapped,
+                ranges != ByteKind::Unmapped,
+                "{name}: byte {offset}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_synthetic_overwrite_never_reaches_a_range_consumer() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("<script setup>x</script>", &allocator);
+    ct.overwrite_unmapped(0, 14, "const __sfc__ = {");
+    let (text, ranges) = ct
+        .build_string_with_source_ranges()
+        .expect("mapped transform");
+    let synthetic_end = "const __sfc__ = {".len() as u32;
+    assert!(text.starts_with("const __sfc__ = {"));
+    assert!(
+        ranges
+            .iter()
+            .all(|range| range.generated_start >= synthetic_end),
+        "no range covers the synthetic wrapper: {ranges:?}"
+    );
+}
+
+#[test]
+fn text_and_ranges_come_from_one_pass() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("let a = 1;\nlet b = 2;", &allocator);
+    ct.overwrite(4, 5, "x");
+    ct.prepend_left(11, "// b\n");
+    let chunks = ct.chunk_count();
+    super::code_transform::take_code_transform_chunk_visits();
+    let (text, _) = ct
+        .build_string_with_source_ranges()
+        .expect("mapped transform");
+    assert_eq!(
+        super::code_transform::take_code_transform_chunk_visits(),
+        chunks
+    );
+    assert_eq!(text, ct.build_string());
 }

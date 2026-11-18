@@ -8,7 +8,7 @@ use crate::registered_source_authority::{
     random_bytes, sha256, RegisteredSourceAuthority, RegisteredSourceSnapshot,
     SourceValidationError,
 };
-use crate::{FileLanguage, FrameworkAdapterId, LanguageId};
+use crate::{FileLanguage, FrameworkAdapterId, LanguageId, ParseOptions};
 
 macro_rules! nonzero_version {
     ($name:ident) => {
@@ -59,115 +59,86 @@ impl CarrierGrammarFingerprint {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DelimiterPair {
-    open: Arc<str>,
-    close: Arc<str>,
+/// One carrier's canonical grammar configuration.
+///
+/// The carrier's owner builds it — the language crate names no framework:
+/// the owning carrier language, the owner's canonical encoding (the bytes the
+/// grammar fingerprint covers) and the parse options the owner's frontend
+/// parses under. Equality is the owner and the canonical bytes; the parse
+/// options are the same input seen by the parser, built in the same owner
+/// function.
+#[derive(Debug, Clone)]
+pub struct CarrierGrammarConfig {
+    owner: FileLanguage,
+    canonical: Arc<[u8]>,
+    parse_options: ParseOptions,
 }
 
-impl DelimiterPair {
-    pub fn open(&self) -> &str {
-        &self.open
-    }
-
-    pub fn close(&self) -> &str {
-        &self.close
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct NormalizedElementName(Arc<str>);
-
-impl NormalizedElementName {
-    pub fn as_str(&self) -> &str {
-        &self.0
+impl PartialEq for CarrierGrammarConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.owner == other.owner && self.canonical == other.canonical
     }
 }
 
-/// Closed canonical grammar configuration for the current carrier set.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum CarrierGrammarConfig {
-    Vue {
-        delimiters: DelimiterPair,
-        custom_elements: Arc<[NormalizedElementName]>,
-    },
-    Svelte,
+impl Eq for CarrierGrammarConfig {}
+
+impl std::hash::Hash for CarrierGrammarConfig {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.owner.hash(state);
+        self.canonical.hash(state);
+    }
 }
 
 impl CarrierGrammarConfig {
-    pub fn vue<I, S>(
-        open: impl Into<Arc<str>>,
-        close: impl Into<Arc<str>>,
-        custom_elements: I,
-    ) -> Result<Self, CarrierGrammarConfigError>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let open = open.into();
-        let close = close.into();
-        if open.is_empty() || close.is_empty() {
-            return Err(CarrierGrammarConfigError::EmptyVueDelimiter);
-        }
-        let custom_elements = custom_elements
-            .into_iter()
-            .map(|name| NormalizedElementName(Arc::from(name.as_ref())))
-            .collect::<Vec<_>>();
-        Ok(Self::Vue {
-            delimiters: DelimiterPair { open, close },
-            custom_elements: canonical_element_names(custom_elements),
-        })
-    }
-
-    pub fn delimiters(&self) -> Option<&DelimiterPair> {
-        match self {
-            Self::Vue { delimiters, .. } => Some(delimiters),
-            Self::Svelte => None,
+    /// A configuration built by the carrier's owner: its canonical encoding
+    /// and the parse options its frontend uses.
+    #[must_use]
+    pub fn from_owner(
+        owner: FileLanguage,
+        canonical: CarrierGrammarEncoder,
+        parse_options: ParseOptions,
+    ) -> Self {
+        Self {
+            owner,
+            canonical: canonical.0.into(),
+            parse_options,
         }
     }
 
-    pub fn custom_elements(&self) -> &[NormalizedElementName] {
-        match self {
-            Self::Vue {
-                custom_elements, ..
-            } => custom_elements,
-            Self::Svelte => &[],
-        }
+    /// The carrier language the configuration belongs to.
+    #[must_use]
+    pub fn owner(&self) -> &FileLanguage {
+        &self.owner
     }
 
-    pub fn custom_element_names(&self) -> Vec<&str> {
-        self.custom_elements()
-            .iter()
-            .map(NormalizedElementName::as_str)
-            .collect()
-    }
-
-    fn canonicalized(&self) -> Result<Self, CarrierGrammarConfigError> {
-        match self {
-            Self::Vue {
-                delimiters,
-                custom_elements,
-            } => Self::vue(
-                Arc::clone(&delimiters.open),
-                Arc::clone(&delimiters.close),
-                custom_elements.iter().map(NormalizedElementName::as_str),
-            ),
-            Self::Svelte => Ok(Self::Svelte),
-        }
+    /// The parse options the owner's frontend parses this carrier under.
+    #[must_use]
+    pub fn parse_options(&self) -> &ParseOptions {
+        &self.parse_options
     }
 }
 
-fn canonical_element_names(mut names: Vec<NormalizedElementName>) -> Arc<[NormalizedElementName]> {
-    // Vue's registered custom-element matcher is byte-exact `starts_with`, so
-    // its comparison normalization preserves authored bytes.
-    names.sort_unstable();
-    names.dedup();
-    names.into()
-}
+/// The canonical encoding an owner writes for its grammar configuration:
+/// a tag byte, then length-prefixed strings and counts.
+#[derive(Debug, Clone)]
+pub struct CarrierGrammarEncoder(Vec<u8>);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CarrierGrammarConfigError {
-    EmptyVueDelimiter,
+impl CarrierGrammarEncoder {
+    /// Start an encoding with the owner's configuration tag.
+    #[must_use]
+    pub fn new(tag: u8) -> Self {
+        Self(vec![tag])
+    }
+
+    /// Append one length-prefixed string.
+    pub fn string(&mut self, value: &str) {
+        push_string(&mut self.0, value);
+    }
+
+    /// Append one length prefix (the count of the items that follow).
+    pub fn count(&mut self, len: usize) {
+        push_len(&mut self.0, len);
+    }
 }
 
 /// Authority-minted canonical registration. All fields remain private.
@@ -234,7 +205,6 @@ pub enum GrammarRegistrationError {
     AuthorityUnavailable,
     UnsupportedCarrierLanguage,
     ConfigLanguageMismatch,
-    InvalidConfig(CarrierGrammarConfigError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,9 +246,7 @@ impl CarrierGrammarAuthority {
         config: CarrierGrammarConfig,
     ) -> Result<CanonicalCarrierGrammar, GrammarRegistrationError> {
         let (adapter_id, language_id) = carrier_identity(&resolved_file_language, &config)?;
-        let canonical_config = config
-            .canonicalized()
-            .map_err(GrammarRegistrationError::InvalidConfig)?;
+        let canonical_config = config;
         let fingerprint = grammar_fingerprint(
             &adapter_id,
             adapter_semantic_version,
@@ -360,10 +328,7 @@ impl CarrierGrammarAuthority {
         if grammar.adapter_id != adapter_id || grammar.language_id != language_id {
             return Err(CarrierAcceptanceError::GrammarLanguageMismatch);
         }
-        let canonical_config = config
-            .canonicalized()
-            .map_err(|_| CarrierAcceptanceError::GrammarConfigMismatch)?;
-        if grammar.canonical_config != canonical_config {
+        if grammar.canonical_config != *config {
             return Err(CarrierAcceptanceError::GrammarConfigMismatch);
         }
         let expected_fingerprint = grammar_fingerprint(
@@ -394,9 +359,7 @@ fn carrier_identity(
         } => (adapter_id.clone(), language_id.clone()),
         _ => return Err(GrammarRegistrationError::UnsupportedCarrierLanguage),
     };
-    let config_matches = (language.is_vue() && matches!(config, CarrierGrammarConfig::Vue { .. }))
-        || (language.is_svelte() && matches!(config, CarrierGrammarConfig::Svelte));
-    if !config_matches {
+    if config.owner() != language {
         return Err(GrammarRegistrationError::ConfigLanguageMismatch);
     }
     Ok((adapter_id, language_id))
@@ -420,21 +383,7 @@ fn grammar_fingerprint(
     encoding.extend_from_slice(&adapter_semantic_version.get().to_be_bytes());
     push_string(&mut encoding, language_id.as_str());
     encoding.extend_from_slice(&parser_grammar_version.get().to_be_bytes());
-    match config {
-        CarrierGrammarConfig::Vue {
-            delimiters,
-            custom_elements,
-        } => {
-            encoding.push(1);
-            push_string(&mut encoding, delimiters.open());
-            push_string(&mut encoding, delimiters.close());
-            push_len(&mut encoding, custom_elements.len());
-            for name in custom_elements.iter() {
-                push_string(&mut encoding, name.as_str());
-            }
-        }
-        CarrierGrammarConfig::Svelte => encoding.push(2),
-    }
+    encoding.extend_from_slice(&config.canonical);
     CarrierGrammarFingerprint(sha256(&[&encoding]))
 }
 
@@ -466,9 +415,34 @@ mod tests {
         FrameworkAdapterSemanticVersion::new(value).expect("nonzero adapter version")
     }
 
+    /// A fixture configuration for the `.vue` carrier, shaped like its
+    /// owner's: the language crate builds none of its own.
     fn vue_config(open: &str, close: &str, custom_elements: &[&str]) -> CarrierGrammarConfig {
-        CarrierGrammarConfig::vue(open, close, custom_elements.iter().copied())
-            .expect("valid Vue grammar")
+        let mut canonical = CarrierGrammarEncoder::new(1);
+        canonical.string(open);
+        canonical.string(close);
+        canonical.count(custom_elements.len());
+        for name in custom_elements {
+            canonical.string(name);
+        }
+        CarrierGrammarConfig::from_owner(
+            crate::FileLanguage::vue(),
+            canonical,
+            ParseOptions {
+                delimiters: (open.to_string(), close.to_string()),
+                custom_elements: custom_elements.iter().map(ToString::to_string).collect(),
+                svelte_loose: false,
+            },
+        )
+    }
+
+    /// A fixture configuration for the `.svelte` carrier.
+    fn svelte_config() -> CarrierGrammarConfig {
+        CarrierGrammarConfig::from_owner(
+            crate::FileLanguage::svelte(),
+            CarrierGrammarEncoder::new(2),
+            ParseOptions::default(),
+        )
     }
 
     fn source() -> (RegisteredSourceAuthority, RegisteredSourceSnapshot) {
@@ -541,7 +515,7 @@ mod tests {
                 crate::FileLanguage::svelte(),
                 adapter_version(1),
                 version(1),
-                CarrierGrammarConfig::Svelte,
+                svelte_config(),
             )
             .expect("Svelte grammar")
             .fingerprint();
@@ -552,7 +526,7 @@ mod tests {
     fn adapter_and_language_ids_are_independent_fingerprint_inputs() {
         let adapter_version = adapter_version(1);
         let parser_version = version(1);
-        let config = CarrierGrammarConfig::Svelte;
+        let config = svelte_config();
         let base = grammar_fingerprint(
             &crate::FrameworkAdapterId::new("adapter-a"),
             adapter_version,
@@ -579,62 +553,25 @@ mod tests {
     }
 
     #[test]
-    fn canonical_vue_fingerprint_encoding_matches_the_v1_golden() {
-        let fingerprint = grammar_fingerprint(
-            &crate::FrameworkAdapterId::vue(),
-            adapter_version(1),
-            &crate::LanguageId::new("vue"),
-            version(1),
-            &vue_config("{{", "}}", &[]),
-        );
-        assert_eq!(
-            fingerprint.as_bytes(),
-            &[
-                0x7c, 0x27, 0x8e, 0x6e, 0xa2, 0x7c, 0x54, 0x34, 0xe9, 0x30, 0x09, 0x9e, 0x69, 0xf7,
-                0x44, 0xbc, 0xe6, 0xf6, 0x3d, 0x39, 0xb8, 0xc7, 0xf6, 0x23, 0xf8, 0x9f, 0x13, 0x66,
-                0x8d, 0xe6, 0xcb, 0x31,
-            ]
-        );
-    }
-
-    #[test]
-    fn vue_custom_elements_are_sorted_and_deduplicated_before_fingerprinting() {
+    fn a_config_registered_under_another_owners_language_is_refused() {
         let authority = CarrierGrammarAuthority::new().expect("grammar authority");
-        let unordered = vue_config("{{", "}}", &["z-", "a-", "z-"]);
-        let ordered = vue_config("{{", "}}", &["a-", "z-"]);
-        let first = authority
-            .register_carrier_grammar(
+        assert_eq!(
+            authority.register_carrier_grammar(
+                crate::FileLanguage::svelte(),
+                adapter_version(1),
+                version(1),
+                vue_config("{{", "}}", &[]),
+            ),
+            Err(GrammarRegistrationError::ConfigLanguageMismatch)
+        );
+        assert_eq!(
+            authority.register_carrier_grammar(
                 crate::FileLanguage::vue(),
                 adapter_version(1),
                 version(1),
-                unordered,
-            )
-            .expect("unordered registration");
-        let second = authority
-            .register_carrier_grammar(
-                crate::FileLanguage::vue(),
-                adapter_version(1),
-                version(1),
-                ordered,
-            )
-            .expect("ordered registration");
-
-        assert_eq!(first.fingerprint(), second.fingerprint());
-        assert_eq!(
-            second.canonical_config().custom_element_names(),
-            ["a-", "z-"]
-        );
-    }
-
-    #[test]
-    fn empty_vue_delimiters_are_rejected() {
-        assert_eq!(
-            CarrierGrammarConfig::vue("", "}}", std::iter::empty::<&str>()),
-            Err(CarrierGrammarConfigError::EmptyVueDelimiter)
-        );
-        assert_eq!(
-            CarrierGrammarConfig::vue("{{", "", std::iter::empty::<&str>()),
-            Err(CarrierGrammarConfigError::EmptyVueDelimiter)
+                svelte_config(),
+            ),
+            Err(GrammarRegistrationError::ConfigLanguageMismatch)
         );
     }
 
@@ -678,20 +615,17 @@ mod tests {
                 crate::FileLanguage::svelte(),
                 adapter_version(1),
                 version(1),
-                CarrierGrammarConfig::Svelte,
+                svelte_config(),
             )
             .expect("Svelte grammar registration");
         let accepted = grammar_authority
-            .accept_registered_source(&source_authority, &snapshot, &CarrierGrammarConfig::Svelte)
+            .accept_registered_source(&source_authority, &snapshot, &svelte_config())
             .expect("accepted Svelte source");
         assert_eq!(
             accepted.source().resolved_file_language(),
             &crate::FileLanguage::svelte()
         );
-        assert_eq!(
-            accepted.grammar().canonical_config(),
-            &CarrierGrammarConfig::Svelte
-        );
+        assert_eq!(accepted.grammar().canonical_config(), &svelte_config());
     }
 
     #[test]
@@ -733,7 +667,7 @@ mod tests {
             grammar_authority.accept_registered_source(
                 &source_authority,
                 &snapshot,
-                &CarrierGrammarConfig::Svelte,
+                &svelte_config(),
             ),
             Err(CarrierAcceptanceError::NoRegisteredGrammar)
         );

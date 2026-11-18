@@ -865,10 +865,10 @@ jobs:
           NODE_OPTIONS: --test-skip-pattern=${{ env.SFC_SHARD_1 }}
         run: CARGO_INCREMENTAL=1 pnpm run test:sfc-projection
 
-  # The ARH0/ARH1/ARH2/ARH4/ARH5/ARH7 verifiers join their products to the
+  # The ARH0/ARH1/ARH2/ARH4/ARH7 verifiers join their products to the
   # live tree (hotspot sources, crate manifests, the cross-crate consumer
-  # population derived from every crate, the host lifecycle cutover, the
-  # compiler-facade cutover, and the VS Code activation composition), so this lane — not the js-filtered
+  # population derived from every crate, the host lifecycle cutover, and the
+  # VS Code activation composition), so this lane — not the js-filtered
   # test:scripts job — is what runs the guards when a Rust dependency or
   # surface change moves a ratified population, and when the products or
   # the verifier themselves change.
@@ -904,10 +904,6 @@ jobs:
         run: node tests/architecture-health/ARH4/verify.mjs
       - name: ARH4 dirty twins
         run: node --test tests/architecture-health/ARH4/arh4.test.mjs
-      - name: ARH5 verify (compiler facade cutover)
-        run: node tests/architecture-health/ARH5/verify.mjs
-      - name: ARH5 dirty twins
-        run: node --test tests/architecture-health/ARH5/arh5.test.mjs
       - name: ARH7 verify (VS Code activation cutover)
         run: node tests/architecture-health/ARH7/verify.mjs
       - name: ARH7 dirty twins
@@ -1680,6 +1676,7 @@ jobs:
           --filter @verter/framework-conformance-harness
           --filter @verter/language-shared
           --filter @verter/lsp-test-client
+          --filter @verter/nuxt
           --filter @verter/proto
           --filter @verter/svelte-runtime-tests
           --filter @verter/type-ir

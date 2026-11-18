@@ -9,8 +9,7 @@ pub(crate) fn publish_carrier_fixture(
     provenance: &crate::meta_provenance::MetaProvenance,
 ) -> Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>> {
     use verter_language::carrier_grammar::{
-        CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
-        FrameworkAdapterSemanticVersion,
+        CarrierGrammarAuthority, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
     };
     use verter_language::registered_source_authority::{
         CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
@@ -18,9 +17,14 @@ pub(crate) fn publish_carrier_fixture(
     let source_authority = Arc::new(RegisteredSourceAuthority::new().ok()?);
     let grammar_authority = Arc::new(CarrierGrammarAuthority::new().ok()?);
     let config = if file_language.adapter_id().is_some_and(|id| id.is_vue()) {
-        CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).ok()?
+        verter_compiler::framework_common::vue_grammar_config(
+            "{{",
+            "}}",
+            std::iter::empty::<&str>(),
+        )
+        .ok()?
     } else {
-        CarrierGrammarConfig::Svelte
+        verter_compiler::svelte::svelte_grammar_config()
     };
     grammar_authority
         .register_carrier_grammar(

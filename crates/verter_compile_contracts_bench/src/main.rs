@@ -6,13 +6,8 @@ fn main() {
         .and_then(Path::parent)
         .expect("compile-contract crate must live below the workspace root");
     let tests = trybuild::TestCases::new();
-    for fixture in [
-        "pending_nav_request_unreachable.rs",
-        "segmented_overwrite_authority_unreachable.rs",
-    ] {
-        tests.compile_fail(
-            root.join("crates/verter_compiler/tests/cases/compile-fail")
-                .join(fixture),
-        );
-    }
+    tests.compile_fail(
+        root.join("crates/verter_compiler/tests/cases/compile-fail")
+            .join("pending_nav_request_unreachable.rs"),
+    );
 }

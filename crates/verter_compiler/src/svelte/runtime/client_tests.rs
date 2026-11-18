@@ -722,7 +722,6 @@ fn emit_with_after_update_ranks_cleared(source: &str) -> String {
             &topology,
             opts.filename.as_deref(),
             false,
-            &alloc,
         )
         .expect("a valid emitter state produces a module")
         .code

@@ -397,14 +397,16 @@ function handleClick(event) {}
         &alloc,
         &options,
         template_end,
-    );
+    )
+    .expect("recorded script edits apply");
 
     if let (Some(return_close), Some(pos)) = (&result.return_close, result.return_close_pos) {
         ct.prepend_left(pos, return_close);
     }
 
-    let map =
-        ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("App.vue"));
+    let map = ct
+        .generate_map(crate::code_transform::SourceMapOptions::new().with_source("App.vue"))
+        .expect("mapped transform");
     let output = ct.build_string();
 
     // Positive: the output should contain the tuple-param annotation

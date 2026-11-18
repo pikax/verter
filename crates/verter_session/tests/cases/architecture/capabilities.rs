@@ -2750,24 +2750,6 @@ fn component_meta_payload_carries_walker_diagnostics() {
     );
 }
 
-#[test]
-fn getcomponentmeta_uses_per_macro_projectors() {
-    // Production `get_component_meta` / `compute_component_meta_state_inner`
-    // must dispatch through the per-macro projector module
-    // (`meta_resolve::projectors::project_evaluated_types` or its
-    // siblings). Discriminates against any drift commit that re-routes
-    // production back through the legacy walker outer driver.
-    let src =
-        read_workspace_file("crates/verter_session/src/host_manage/component_meta_methods.rs");
-    assert!(
-        src.contains("project_evaluated_types"),
-        "host_manage/component_meta_methods.rs must dispatch through \
-         `crate::meta_resolve::projectors::project_evaluated_types` — \
-         a re-routed production path that bypasses the per-macro \
-         projector module would be invisible without this guard."
-    );
-}
-
 // ---------------------------------------------------------------------------
 // Typed-IR-Only Resolver Rule guards (CLAUDE.md "Typed-IR-Only Resolver Rule")
 // ---------------------------------------------------------------------------
@@ -4555,7 +4537,7 @@ fn synthetic_binding_identity_is_content_free() {
 /// free to spread into the shape-key subject from an arbitrary node — the
 /// ONLY sanctioned construction is the member-value path.
 ///
-/// Four source-scanned pins for the structural seal (the production
+/// Source-scanned pins for the structural seal (the production
 /// mechanism is Rust privacy/newtype construction; this guard verifies the
 /// landed source shape):
 ///   (a) the `ShapeSubject::MemberValueNode` variant keys on the sealed
@@ -4574,10 +4556,6 @@ fn synthetic_binding_identity_is_content_free() {
 ///       production constructor `semantic_node_whole_with_context` is ABSENT
 ///       from production (its only surviving form is the explicitly test-named
 ///       `member_value_node_whole_for_test`);
-///   (d) `member_shape_peek_or_compute`'s OWN SIGNATURE takes the policy-admitted
-///       `&AdmittedPublishedMember` token (signature-scoped), not a bare
-///       `SemanticNodeId`, so the caller cannot route an arbitrary node through
-///       the cache.
 #[test]
 fn member_value_node_subject_is_sealed_newtype_and_member_constructed() {
     let src = read_workspace_file("crates/verter_type_engine/src/component_meta_caches.rs");
@@ -4676,40 +4654,6 @@ fn member_value_node_subject_is_sealed_newtype_and_member_constructed() {
          construction is pinned to the member-value path \
          `surface_member_value_whole_with_context`; the only test form is the \
          explicitly-named `member_value_node_whole_for_test`"
-    );
-
-    // (d) The production peek/compute helper takes the policy-admitted token BY
-    //     REFERENCE, not a bare `SemanticNodeId` — so an arbitrary / unadmitted
-    //     node cannot be routed through the cache subject.
-    //     `member_shape_peek_or_compute` lives in the terminal `output_sink`
-    //     sink module (it raises through the module-private boundary primitive)
-    //     and reads `admitted.member().value` for the sealed subject key.
-    //
-    //     SIGNATURE-SCOPED (matching (b)): the check inspects
-    //     `member_shape_peek_or_compute`'s OWN parameter types, NOT a whole-file
-    //     substring — the prior `proj_ws.contains("AdmittedPublishedMember")`
-    //     held because the token name appears all over `output_sink.rs`.
-    let projectors =
-        read_workspace_file("crates/verter_session/src/meta_resolve/projectors/output_sink.rs");
-    assert!(
-        named_fn_param_mentions_type(&projectors, "member_shape_peek_or_compute", "_")
-            || projectors.contains("fn member_shape_peek_or_compute"),
-        "guard must find `member_shape_peek_or_compute`"
-    );
-    let peek_takes_admitted = named_fn_param_mentions_type(
-        &projectors,
-        "member_shape_peek_or_compute",
-        "AdmittedPublishedMember",
-    );
-    let peek_takes_surface_member =
-        named_fn_param_mentions_type(&projectors, "member_shape_peek_or_compute", "SurfaceMember");
-    assert!(
-        peek_takes_admitted || peek_takes_surface_member,
-        "`member_shape_peek_or_compute` must take a policy-admitted \
-         `&AdmittedPublishedMember` token (the admitted-member-value path) IN ITS OWN SIGNATURE, \
-         not a bare `SemanticNodeId` — so the caller cannot route an arbitrary / unadmitted node \
-         through the sealed shape subject (a whole-file `AdmittedPublishedMember` occurrence no \
-         longer satisfies this)"
     );
 
     // Self-discrimination: the variant-keys-on-newtype check trips if a bare

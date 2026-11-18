@@ -6,10 +6,10 @@ fn code_gen_output_overwrite_pushes_to_vec() {
     let alloc = Allocator::default();
     let mut out = CodeGenOutput::new(&alloc);
     out.overwrite(0, 5, "hello");
-    assert_eq!(out.overwrites.len(), 1);
-    assert_eq!(out.overwrites[0].0, 0);
-    assert_eq!(out.overwrites[0].1, 5);
-    assert_eq!(out.overwrites[0].2, "hello");
+    assert_eq!(out.overwrites().len(), 1);
+    assert_eq!(out.overwrites()[0].0, 0);
+    assert_eq!(out.overwrites()[0].1, 5);
+    assert_eq!(out.overwrites()[0].2, "hello");
 }
 
 #[test]
@@ -17,9 +17,9 @@ fn code_gen_output_prepend_static_pushes_to_vec() {
     let alloc = Allocator::default();
     let mut out = CodeGenOutput::new(&alloc);
     out.prepend_static(10, "_ctx.");
-    assert_eq!(out.prepends.len(), 1);
-    assert_eq!(out.prepends[0].0, 10);
-    assert_eq!(out.prepends[0].1, "_ctx.");
+    assert_eq!(out.edits.prepends.len(), 1);
+    assert_eq!(out.edits.prepends[0].0, 10);
+    assert_eq!(out.edits.prepends[0].1, "_ctx.");
 }
 
 #[test]
@@ -27,9 +27,9 @@ fn code_gen_output_prepend_alloc_pushes_to_vec() {
     let alloc = Allocator::default();
     let mut out = CodeGenOutput::new(&alloc);
     out.prepend_alloc(5, "dynamic");
-    assert_eq!(out.prepends.len(), 1);
-    assert_eq!(out.prepends[0].0, 5);
-    assert_eq!(out.prepends[0].1, "dynamic");
+    assert_eq!(out.edits.prepends.len(), 1);
+    assert_eq!(out.edits.prepends[0].0, 5);
+    assert_eq!(out.edits.prepends[0].1, "dynamic");
 }
 
 #[test]
@@ -41,7 +41,7 @@ fn apply_to_sorts_overwrites_by_start() {
     out.overwrite(0, 5, "a");
 
     let mut ct = crate::code_transform::CodeTransform::new("0123456789ABCDE", &alloc);
-    out.apply_to(&mut ct);
+    out.apply_to(&mut ct).expect("recorded edits apply");
     let result = ct.build_string();
     assert_eq!(result, "a56789b");
 }
@@ -55,7 +55,7 @@ fn apply_to_sorts_prepends_by_position() {
     out.prepend_static(2, "X");
 
     let mut ct = crate::code_transform::CodeTransform::new("ABCDEFGH", &alloc);
-    out.apply_to(&mut ct);
+    out.apply_to(&mut ct).expect("recorded edits apply");
     let result = ct.build_string();
     assert_eq!(result, "ABXCDEYFGH");
 }
@@ -93,7 +93,7 @@ fn apply_to_preserves_same_position_prepend_order() {
 
     let source = &"_".repeat(200);
     let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-    out.apply_to(&mut ct);
+    out.apply_to(&mut ct).expect("recorded edits apply");
     let result = ct.build_string();
 
     // The two same-position prepends must appear in insertion order
@@ -129,12 +129,13 @@ fn overwrite_or_root_prefix_nonzero_width_emits_no_source_token() {
     out.overwrite_or_root_prefix(0, 15, "const _sfc_main = {\n");
 
     let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-    out.apply_to(&mut ct);
+    out.apply_to(&mut ct).expect("recorded edits apply");
     let result = ct.build_string();
     assert_eq!(result, "const _sfc_main = {\nbody\n</script>");
 
-    let map =
-        ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("comp.vue"));
+    let map = ct
+        .generate_map(crate::code_transform::SourceMapOptions::new().with_source("comp.vue"))
+        .expect("mapped transform");
     // dst_line 0 is entirely the synthetic wrapper text ("const _sfc_main =
     // {"); it must carry no SOURCE-BEARING token (the surviving original
     // "body\n</script>" tail on later lines legitimately keeps its own
@@ -157,12 +158,13 @@ fn overwrite_or_root_suffix_nonzero_width_emits_no_source_token() {
     out.overwrite_or_root_suffix(5, 14, "}}");
 
     let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-    out.apply_to(&mut ct);
+    out.apply_to(&mut ct).expect("recorded edits apply");
     let result = ct.build_string();
     assert_eq!(result, "body\n}}");
 
-    let map =
-        ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("comp.vue"));
+    let map = ct
+        .generate_map(crate::code_transform::SourceMapOptions::new().with_source("comp.vue"))
+        .expect("mapped transform");
     // dst_line 1 is entirely the synthetic "}}" close text; it must carry no
     // source-bearing token (dst_line 0's "body" is genuine original text and
     // legitimately keeps its truthful mapping).
@@ -185,7 +187,7 @@ fn overwrite_or_root_prefix_zero_width_still_inserts_unmapped_at_start() {
     out.overwrite_or_root_prefix(0, 0, "<root>");
 
     let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-    out.apply_to(&mut ct);
+    out.apply_to(&mut ct).expect("recorded edits apply");
     assert_eq!(ct.build_string(), "<root>rest");
 }
 
@@ -207,9 +209,10 @@ fn add_sourcemap_location_produces_a_mid_line_token_at_the_declaration_name() {
     out.add_sourcemap_location(count_offset);
 
     let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-    out.apply_to(&mut ct);
-    let map =
-        ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("comp.vue"));
+    out.apply_to(&mut ct).expect("recorded edits apply");
+    let map = ct
+        .generate_map(crate::code_transform::SourceMapOptions::new().with_source("comp.vue"))
+        .expect("mapped transform");
 
     let token = map
         .get_tokens()
@@ -248,7 +251,7 @@ fn apply_to_returns_vdom_imports() {
     out.add_vdom_import(VdomHelper::ToDisplayString);
 
     let mut ct = crate::code_transform::CodeTransform::new("hello", &alloc);
-    let imports = out.apply_to(&mut ct);
+    let imports = out.apply_to(&mut ct).expect("recorded edits apply");
     assert_eq!(imports.vue.len(), 2);
     assert!(imports.vue.contains(&"_createCommentVNode"));
     assert!(imports.vue.contains(&"_toDisplayString"));
@@ -263,7 +266,7 @@ fn apply_to_returns_vapor_imports() {
     out.add_vapor_import(VaporHelper::RenderEffect);
 
     let mut ct = crate::code_transform::CodeTransform::new("hello", &alloc);
-    let imports = out.apply_to(&mut ct);
+    let imports = out.apply_to(&mut ct).expect("recorded edits apply");
     assert_eq!(imports.vue.len(), 2);
     assert!(imports.vue.contains(&"_template"));
     assert!(imports.vue.contains(&"_renderEffect"));
@@ -276,7 +279,7 @@ fn empty_output_returns_empty_imports() {
     let out = CodeGenOutput::new(&alloc);
 
     let mut ct = crate::code_transform::CodeTransform::new("hello", &alloc);
-    let imports = out.apply_to(&mut ct);
+    let imports = out.apply_to(&mut ct).expect("recorded edits apply");
     assert!(imports.is_empty());
 }
 
@@ -515,11 +518,11 @@ fn prepend_alloc_mapped_pushes_to_vec() {
     let alloc = Allocator::default();
     let mut out = CodeGenOutput::new(&alloc);
     out.prepend_alloc_mapped(10, 20, "(show) ? ");
-    assert_eq!(out.mapped_prepends.len(), 1);
-    assert_eq!(out.mapped_prepends[0].0, 10); // insertion pos
-    assert_eq!(out.mapped_prepends[0].1, 20); // source pos
-    assert_eq!(out.mapped_prepends[0].2, 0); // content_offset
-    assert_eq!(out.mapped_prepends[0].3, "(show) ? ");
+    assert_eq!(out.edits.mapped_prepends.len(), 1);
+    assert_eq!(out.edits.mapped_prepends[0].0, 10); // insertion pos
+    assert_eq!(out.edits.mapped_prepends[0].1, 20); // source pos
+    assert_eq!(out.edits.mapped_prepends[0].2, 0); // content_offset
+    assert_eq!(out.edits.mapped_prepends[0].3, "(show) ? ");
 }
 
 /// @ai-generated — apply_to merges mapped and regular prepends correctly
@@ -529,12 +532,12 @@ fn apply_to_merges_mapped_and_regular_prepends() {
     let mut out = CodeGenOutput::new(&alloc);
     // Regular prepend at position 5
     out.prepend_static(5, "_ctx.");
-    // Mapped prepend at position 3
-    out.prepend_alloc_mapped(3, 100, "(show) ? ");
+    // Mapped prepend at position 3, standing for source position 8
+    out.prepend_alloc_mapped(3, 8, "(show) ? ");
 
     let source = "ABCDEFGHIJ";
     let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-    out.apply_to(&mut ct);
+    out.apply_to(&mut ct).expect("recorded edits apply");
     let result = ct.build_string();
     // Position 3: "(show) ? " inserted, position 5: "_ctx." inserted
     assert_eq!(result, "ABC(show) ? DE_ctx.FGHIJ");
@@ -550,10 +553,11 @@ fn apply_to_mapped_prepend_produces_source_map_token() {
 
     let source = "0123456789ABCDEFGHIJKLMNOP";
     let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-    out.apply_to(&mut ct);
+    out.apply_to(&mut ct).expect("recorded edits apply");
 
-    let map =
-        ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("test.vue"));
+    let map = ct
+        .generate_map(crate::code_transform::SourceMapOptions::new().with_source("test.vue"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
 
     // Find token mapping to source col 20
@@ -585,13 +589,15 @@ fn overwrite_fmt_matches_overwrite_with_format() {
     via_fmt.overwrite_fmt(0, 5, format_args!("x{}y{}", 1, "z"));
 
     // Same recorded operation (range + content bytes).
-    assert_eq!(via_format.overwrites, via_fmt.overwrites);
+    assert_eq!(via_format.overwrites(), via_fmt.overwrites());
 
     // Same built output.
     let mut ct_a = crate::code_transform::CodeTransform::new(source, &alloc);
-    via_format.apply_to(&mut ct_a);
+    via_format
+        .apply_to(&mut ct_a)
+        .expect("recorded edits apply");
     let mut ct_b = crate::code_transform::CodeTransform::new(source, &alloc);
-    via_fmt.apply_to(&mut ct_b);
+    via_fmt.apply_to(&mut ct_b).expect("recorded edits apply");
     assert_eq!(ct_a.build_string(), ct_b.build_string());
     assert_eq!(ct_b.build_string(), "x1yz56789ABCDE");
 }
@@ -609,12 +615,14 @@ fn prepend_fmt_matches_prepend_alloc_with_format() {
     let mut via_fmt = CodeGenOutput::new(&alloc);
     via_fmt.prepend_fmt(5, format_args!("{}: ", "foo"));
 
-    assert_eq!(via_format.prepends, via_fmt.prepends);
+    assert_eq!(via_format.edits.prepends, via_fmt.edits.prepends);
 
     let mut ct_a = crate::code_transform::CodeTransform::new(source, &alloc);
-    via_format.apply_to(&mut ct_a);
+    via_format
+        .apply_to(&mut ct_a)
+        .expect("recorded edits apply");
     let mut ct_b = crate::code_transform::CodeTransform::new(source, &alloc);
-    via_fmt.apply_to(&mut ct_b);
+    via_fmt.apply_to(&mut ct_b).expect("recorded edits apply");
     assert_eq!(ct_a.build_string(), ct_b.build_string());
     assert_eq!(ct_b.build_string(), "ABCDEfoo: FGHIJ");
 }
@@ -634,14 +642,19 @@ fn prepend_fmt_mapped_matches_prepend_alloc_mapped() {
     via_fmt.prepend_fmt_mapped(10, 20, format_args!("({}) ? ", "show"));
 
     // Same recorded operation (mapped-prepend vec, content_offset 0).
-    assert_eq!(via_alloc.mapped_prepends, via_fmt.mapped_prepends);
-    assert_eq!(via_fmt.mapped_prepends[0].2, 0); // content_offset
+    assert_eq!(
+        via_alloc.edits.mapped_prepends,
+        via_fmt.edits.mapped_prepends
+    );
+    assert_eq!(via_fmt.edits.mapped_prepends[0].2, 0); // content_offset
 
     // Both paths build byte-identical output.
     let mut ct_alloc = crate::code_transform::CodeTransform::new(source, &alloc);
-    via_alloc.apply_to(&mut ct_alloc);
+    via_alloc
+        .apply_to(&mut ct_alloc)
+        .expect("recorded edits apply");
     let mut ct_fmt = crate::code_transform::CodeTransform::new(source, &alloc);
-    via_fmt.apply_to(&mut ct_fmt);
+    via_fmt.apply_to(&mut ct_fmt).expect("recorded edits apply");
     assert_eq!(ct_alloc.build_string(), ct_fmt.build_string());
     assert_eq!(ct_fmt.build_string(), "0123456789(show) ? ABCDEFGHIJ");
 }
@@ -663,19 +676,25 @@ fn prepend_fmt_mapped_with_offset_matches_and_maps() {
     via_fmt.prepend_fmt_mapped_with_offset(5, 20, 1, format_args!("({}", "show"));
 
     // Same recorded operation.
-    assert_eq!(via_alloc.mapped_prepends, via_fmt.mapped_prepends);
+    assert_eq!(
+        via_alloc.edits.mapped_prepends,
+        via_fmt.edits.mapped_prepends
+    );
 
     // Both paths build byte-identical output.
     let mut ct_alloc = crate::code_transform::CodeTransform::new(source, &alloc);
-    via_alloc.apply_to(&mut ct_alloc);
+    via_alloc
+        .apply_to(&mut ct_alloc)
+        .expect("recorded edits apply");
     let mut ct_fmt = crate::code_transform::CodeTransform::new(source, &alloc);
-    via_fmt.apply_to(&mut ct_fmt);
+    via_fmt.apply_to(&mut ct_fmt).expect("recorded edits apply");
     assert_eq!(ct_alloc.build_string(), ct_fmt.build_string());
     assert_eq!(ct_fmt.build_string(), "01234(show56789ABCDEFGHIJKLMNOP");
 
     // The format-sink path emits a source-mapped token at src col 20.
-    let map =
-        ct_fmt.generate_map(crate::code_transform::SourceMapOptions::new().with_source("test.vue"));
+    let map = ct_fmt
+        .generate_map(crate::code_transform::SourceMapOptions::new().with_source("test.vue"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
     let mapped = tokens
         .iter()
@@ -721,8 +740,8 @@ fn format_sinks_reuse_one_scratch_buffer() {
     );
 
     // The operations were still recorded correctly (1 overwrite + 1000 prepends).
-    assert_eq!(out.overwrites.len(), 1);
-    assert_eq!(out.prepends.len(), 1000);
+    assert_eq!(out.overwrites().len(), 1);
+    assert_eq!(out.edits.prepends.len(), 1000);
 }
 
 // ==================== merged prepend channels ====================
@@ -747,12 +766,14 @@ fn apply_to_merges_colliding_plain_and_mapped_prepends_in_channel_order() {
     out.prepend_static(3, "P2"); // unmapped
 
     let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-    out.apply_to(&mut ct);
+    out.apply_to(&mut ct).expect("recorded edits apply");
 
     // Exact bytes: plain (P1,P2 in insertion order) THEN mapped (M1,M2).
     assert_eq!(ct.build_string(), "abcP1P2M1M2def");
 
-    let map = ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"));
+    let map = ct
+        .generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
     let dump: Vec<_> = tokens
         .iter()
@@ -813,21 +834,21 @@ fn prepend_mapped_generated_text_records_one_entry_per_segment() {
     let mgt = mgt_from(&[("(__props.", None), ("count", Some(4)), (" + 1)", None)]);
     out.prepend_mapped_generated_text(10, &mgt);
 
-    assert_eq!(out.mapped_prepends.len(), 3);
+    assert_eq!(out.edits.mapped_prepends.len(), 3);
     // Synthetic prefix: source_pos 0, content_offset == len (9).
-    assert_eq!(out.mapped_prepends[0], (10, 0, 9, "(__props."));
+    assert_eq!(out.edits.mapped_prepends[0], (10, 0, 9, "(__props."));
     // Source segment: source_pos 4, content_offset 0.
-    assert_eq!(out.mapped_prepends[1], (10, 4, 0, "count"));
+    assert_eq!(out.edits.mapped_prepends[1], (10, 4, 0, "count"));
     // Synthetic suffix: source_pos 0, content_offset == len (5).
-    assert_eq!(out.mapped_prepends[2], (10, 0, 5, " + 1)"));
+    assert_eq!(out.edits.mapped_prepends[2], (10, 0, 5, " + 1)"));
     // Nothing leaks into the unmapped fast-path channel.
-    assert!(out.prepends.is_empty());
+    assert!(out.edits.prepends.is_empty());
     // The segmented insertion touches ONLY the mapped-prepend channel and
     // queues NO overwrite, so it never interacts with the overwrite
     // containment filter — a segmented insertion can never leave ghost
     // content the way a range-removal-plus-independent-prepend composition
     // would when the filter drops the contained removal.
-    assert!(out.overwrites.is_empty());
+    assert!(out.overwrites().is_empty());
 }
 
 /// Empty segments are never carried by the plan, so none are recorded.
@@ -839,8 +860,8 @@ fn mapped_generated_text_skips_empty_segments() {
     // The carrier itself drops empty pushes.
     assert_eq!(mgt.segments.len(), 1);
     out.prepend_mapped_generated_text(5, &mgt);
-    assert_eq!(out.mapped_prepends.len(), 1);
-    assert_eq!(out.mapped_prepends[0], (5, 0, 0, "x"));
+    assert_eq!(out.edits.mapped_prepends.len(), 1);
+    assert_eq!(out.edits.mapped_prepends[0], (5, 0, 0, "x"));
 }
 
 /// Discriminating — a mapped-text insertion mixing a synthetic
@@ -861,11 +882,13 @@ fn prepend_mapped_generated_text_places_one_token_per_source_segment() {
     out.prepend_mapped_generated_text(10, &mgt);
 
     let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-    out.apply_to(&mut ct);
+    out.apply_to(&mut ct).expect("recorded edits apply");
 
     assert_eq!(ct.build_string(), "abc count (__props.count + 1)def");
 
-    let map = ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"));
+    let map = ct
+        .generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
     let dump: Vec<_> = tokens
         .iter()
@@ -950,25 +973,4 @@ fn mapped_generated_text_wrapped_shifts_inner_and_keeps_wrapper_unmapped() {
     );
     // The inner `count` segment shifted right by one byte (the `(`).
     assert_eq!(wrapped.segments[1].generated_start, 1);
-}
-
-/// `SegmentedOverwriteAuthority::new()` — the production constructor,
-/// `pub(in crate::template::code_gen)` — must compile and construct from
-/// WITHIN `template::code_gen` (this test file is a descendant module of
-/// it). This is the positive half of the static call-site guard: if the
-/// constructor's visibility were ever tightened past this module (breaking
-/// the legitimate VDOM/Vapor/SSR callers this primitive exists to serve),
-/// this test — and every VDOM/Vapor/SSR interpolation/attribute test that
-/// exercises `CodeGenOutput::apply_to`'s call to it — would stop compiling.
-/// See `SegmentedOverwriteAuthority`'s own doc comment for why the negative
-/// half (excluding `crate::ide`/`crate::svelte`) has no automated test:
-/// Rust's privacy model gives no way to write one that discriminates this
-/// token's narrower restriction from the crate's own pre-existing
-/// `pub(crate) mod template`/`ide` boundary, and it is enforced
-/// unconditionally by every `cargo build` regardless.
-#[test]
-fn segmented_overwrite_authority_constructs_from_within_template_code_gen() {
-    let _authority = SegmentedOverwriteAuthority::new();
-    // Purely a compile-time capability proof — zero runtime footprint.
-    assert_eq!(std::mem::size_of::<SegmentedOverwriteAuthority>(), 0);
 }

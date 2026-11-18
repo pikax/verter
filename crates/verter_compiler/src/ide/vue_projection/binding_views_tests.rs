@@ -1,6 +1,10 @@
+use verter_parser::types::BindingType;
+
 use super::binding_views::*;
+use super::checking_module::setup_binding_kinds;
 use super::script_setup::ScriptBlockInput;
 use crate::cursor::ScriptLanguage;
+use crate::framework_common::vue_bridge::parse_sfc;
 
 fn block(content: &str) -> ScriptBlockInput<'_> {
     ScriptBlockInput {
@@ -10,8 +14,14 @@ fn block(content: &str) -> ScriptBlockInput<'_> {
     }
 }
 
+/// The parser's classification of a setup block, read as the composer reads it.
+fn kinds_of(content: &str) -> Vec<(String, BindingType)> {
+    let source = format!("<script setup lang=\"ts\">\n{content}</script>\n");
+    setup_binding_kinds(&source, &parse_sfc(&source, None, None))
+}
+
 fn project_setup(content: &str) -> BindingViewsProjection {
-    project_binding_views(None, Some(block(content)), None).expect("projects")
+    project_binding_views(None, Some(block(content)), None, &kinds_of(content)).expect("projects")
 }
 
 fn read_names(projection: &BindingViewsProjection) -> Vec<&str> {
@@ -239,7 +249,7 @@ fn stp15_destructured_reactive_props_read_directly() {
 fn stp15_setup_row_wins_over_options_prop() {
     let normal = block("export default { props: ['count'] };");
     let setup = block("import { ref } from 'vue';\nconst count = ref(0);\n");
-    let projection = project_binding_views(Some(normal), Some(setup), None).expect("projects");
+    let projection = project_binding_views(Some(normal), Some(setup), None, &[]).expect("projects");
     let count = projection.read.lookup("count").expect("count");
     assert_eq!(
         count.kind,
@@ -490,7 +500,7 @@ fn stp15_renamed_prop_with_default_binds_local() {
 #[test]
 fn stp15_options_methods_are_reads_not_write_targets() {
     let normal = block("export default { methods: { increment() {} } };");
-    let projection = project_binding_views(Some(normal), None, None).expect("projects");
+    let projection = project_binding_views(Some(normal), None, None, &[]).expect("projects");
     assert!(
         projection.read.lookup("increment").is_some(),
         "an Options method stays a template-visible read"
@@ -694,7 +704,7 @@ fn stp15_options_writable_computed_uses_declared_setter_domain() {
     let normal = block(
         "export default { computed: { label: { get(): number { return 1; }, set(v: string) {} } } };\n",
     );
-    let projection = project_binding_views(Some(normal), None, None).expect("projects");
+    let projection = project_binding_views(Some(normal), None, None, &[]).expect("projects");
     let label = projection.read.lookup("label").expect("label");
     assert_eq!(
         label.kind,
@@ -987,4 +997,30 @@ fn stp15_destructured_computed_result_is_a_plain_binding() {
             "the `const` destructured value refuses template reassignment"
         );
     }
+}
+
+#[test]
+fn a_const_holding_a_call_result_is_written_through_the_ref() {
+    let projection = project_setup(concat!(
+        "import { queryField } from './query';\n",
+        "const search = queryField('q', '');\n",
+        "const { page } = useRouteState();\n",
+        "const alias = search;\n",
+        "const limit = 5;\n",
+    ));
+    for name in ["search", "page", "alias"] {
+        assert_eq!(
+            projection.write.write_target(name).map(|row| &row.domain),
+            Ok(&WriteDomain::RefValue),
+            "{name} may hold a ref, so the template writes through it"
+        );
+        let read = projection.read.lookup(name).expect(name);
+        assert_eq!(read.kind, BindingKind::Plain);
+        assert!(!read.unwrapped);
+    }
+    assert_eq!(
+        projection.write.write_target("limit"),
+        Err(WriteRejection::ConstBinding),
+        "a literal constant is never a ref"
+    );
 }

@@ -3,9 +3,13 @@ use std::cell::OnceCell;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 
-use super::chunk::Chunk;
+use super::chunk::{Chunk, LeafChunks};
+use super::fallible::CodeTransformError;
+use super::freeze::chunk_content;
 use crate::cursor::position::PositionResolver;
+use crate::emission::{note_map_capture, MapMode, Piece, Provenance};
 use oxc_allocator::Allocator;
+use verter_span::Span;
 
 #[cfg(test)]
 thread_local! {
@@ -99,10 +103,17 @@ pub struct CodeTransform<
     /// allocating a new Vec on each batch call — after the first batch op,
     /// both Vecs retain their capacity.
     pub(super) scratch: Vec<Chunk<'a>>,
-    /// Content to prepend before everything
-    intro: &'a str,
-    /// Content to append after everything
-    outro: &'a str,
+    /// Content to prepend before everything, one piece per call, in REVERSE
+    /// output order (the latest prepend renders first). Each call allocates
+    /// only its own content.
+    intro: Vec<&'a str>,
+    /// Total bytes of `intro`.
+    intro_len: usize,
+    /// Content to append after everything, one piece per call, in output
+    /// order.
+    outro: Vec<&'a str>,
+    /// Total bytes of `outro`.
+    outro_len: usize,
     /// The bump allocator for string allocations
     pub(super) allocator: &'a Allocator,
     /// Cursor hint: last known chunk index for a given position.
@@ -140,7 +151,7 @@ pub struct CodeTransform<
     #[cfg(test)]
     last_reserved_token_capacity: std::cell::Cell<usize>,
     /// The exact content reference of the leading helper-import preamble insertion, when one was
-    /// recorded (IDE script codegen, via `CodeGenOutput::prepend_helper_preamble`). Identity is by
+    /// recorded (IDE script codegen, via `EditRecorder::prepend_helper_preamble`). Identity is by
     /// bump-allocated pointer: the same `&'a str` flows from the insertion into its `Inserted`
     /// chunk, so source-map generation can locate it and report the generated-TSX position
     /// immediately AFTER it — the typed helper-import-preamble end boundary. `None` when no
@@ -158,6 +169,16 @@ pub struct CodeTransform<
     /// Optional audit tally of this transform's public operations, published
     /// once when the transform is dropped (see [`AuditOpTally`]).
     audit_ops: AuditOpTally<M>,
+    /// Whether map-only facts are captured. Chosen at construction, before any
+    /// edit; under [`MapMode::NoMap`] every map product is
+    /// [`CodeTransformError::MapNotCaptured`].
+    map_mode: MapMode,
+}
+
+/// A source length as the `u32` every offset uses, refused before any
+/// narrowing.
+pub(super) fn check_source_len(len: usize) -> Result<u32, CodeTransformError> {
+    u32::try_from(len).map_err(|_| CodeTransformError::Capacity { len })
 }
 
 /// Optional per-transform count of `CodeTransform` operations.
@@ -306,19 +327,61 @@ impl<'a> CodeTransform<'a> {
         allocator: &'a Allocator,
         estimated_chunks: usize,
     ) -> Self {
-        Self::with_chunk_capacity_in(source, allocator, estimated_chunks)
+        Self::with_chunk_capacity_in(source, allocator, estimated_chunks, MapMode::Map)
     }
 }
 
 impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     /// Create a transform compiled for `M`. The compiler passes its selected
     /// execution mode through code generation and source-map construction.
+    /// Map facts are captured.
     pub fn new_in(source: &'a str, allocator: &'a Allocator) -> Self {
+        Self::with_mode_in(source, allocator, MapMode::Map)
+    }
+
+    /// Like [`new_in`](Self::new_in), with the map policy chosen here, before
+    /// any edit. Under [`MapMode::NoMap`] no map-only fact is captured.
+    pub fn with_mode_in(source: &'a str, allocator: &'a Allocator, mode: MapMode) -> Self {
         let len = source.len();
         // Empirically, kitchen-sink.vue (27370 bytes) produces ~2098 final chunks.
         // Using /13 avoids a Vec reallocation for typical large files.
         let estimated_chunks = if len > 0 { (len / 13).max(64) } else { 0 };
-        Self::with_chunk_capacity_in(source, allocator, estimated_chunks)
+        Self::with_chunk_capacity_in(source, allocator, estimated_chunks, mode)
+    }
+
+    /// A transform over `window` of `source`: only the window renders, and
+    /// every offset stays absolute in `source`. The chunk buffer is sized
+    /// from `edit_hint`, the number of edits the caller expects.
+    pub fn for_window_in(
+        source: &'a str,
+        window: Span,
+        edit_hint: usize,
+        allocator: &'a Allocator,
+        mode: MapMode,
+    ) -> Result<Self, CodeTransformError> {
+        let len = check_source_len(source.len())?;
+        if window.start > window.end {
+            return Err(CodeTransformError::ReversedRange {
+                start: window.start,
+                end: window.end,
+            });
+        }
+        if window.end > len {
+            return Err(CodeTransformError::OutOfRange {
+                offset: window.end,
+                len,
+            });
+        }
+        for offset in [window.start, window.end] {
+            if !source.is_char_boundary(offset as usize) {
+                return Err(CodeTransformError::MidChar { offset });
+            }
+        }
+        let capacity = edit_hint.saturating_mul(2).saturating_add(1);
+        let mut transform = Self::from_chunks(source, allocator, capacity, mode, window);
+        // Only the window renders: the bytes outside it are not output.
+        transform.output_delta = i64::from(window.end - window.start) - i64::from(len);
+        Ok(transform)
     }
 
     /// Like [`new_in`](Self::new_in) but with an explicit chunk-buffer size. Style
@@ -328,22 +391,43 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
         source: &'a str,
         allocator: &'a Allocator,
         estimated_chunks: usize,
+        mode: MapMode,
+    ) -> Self {
+        // A source past `u32` offsets is refused by the checked window
+        // constructor; the whole-source constructors serve sources a compiler
+        // can hold.
+        verter_debug_assert!(
+            check_source_len(source.len()).is_ok(),
+            "a source longer than u32 offsets needs CodeTransform::for_window_in"
+        );
+        let len = source.len() as u32;
+        Self::from_chunks(source, allocator, estimated_chunks, mode, Span::new(0, len))
+    }
+
+    /// A transform whose one unedited chunk covers `window`.
+    fn from_chunks(
+        source: &'a str,
+        allocator: &'a Allocator,
+        estimated_chunks: usize,
+        mode: MapMode,
+        window: Span,
     ) -> Self {
         #[cfg(test)]
         CODE_TRANSFORM_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
 
-        let len = source.len() as u32;
         let mut chunks = Vec::with_capacity(estimated_chunks);
-        if len > 0 {
-            chunks.push(Chunk::from_source(0, len));
+        if window.start < window.end {
+            chunks.push(Chunk::from_source(window.start, window.end));
         }
 
         Self {
             original: source,
             chunks,
             scratch: Vec::with_capacity(estimated_chunks),
-            intro: "",
-            outro: "",
+            intro: Vec::new(),
+            intro_len: 0,
+            outro: Vec::new(),
+            outro_len: 0,
             allocator,
             cursor_hint: 0,
             output_delta: 0,
@@ -357,12 +441,49 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
             helper_preamble_carrier_anchor: None,
             anchored_present: false,
             audit_ops: AuditOpTally::default(),
+            map_mode: mode,
+        }
+    }
+
+    /// The map policy chosen at construction.
+    pub fn map_mode(&self) -> MapMode {
+        self.map_mode
+    }
+
+    /// Test accessor: entries in the map-only side tables (explicit map
+    /// locations, unmapped boundaries, synthetic overwrites, the helper
+    /// preamble) and whether a position resolver was built.
+    #[cfg(test)]
+    pub(crate) fn captured_map_facts(&self) -> (usize, bool) {
+        let entries = self.sourcemap_locations.len()
+            + self.generated_unmapped_boundaries.len()
+            + self.unmapped_overwrite_contents.len()
+            + usize::from(self.helper_preamble_content.is_some());
+        (entries, self.resolver.get().is_some())
+    }
+
+    /// Whether map-only facts are captured; every capture point asks first.
+    #[inline]
+    pub(super) fn captures_map(&self) -> bool {
+        if self.map_mode == MapMode::Map {
+            note_map_capture();
+            true
+        } else {
+            false
         }
     }
 
     /// Get the original source text
     pub fn original(&self) -> &str {
         self.original
+    }
+
+    /// Refuse a map product of a transform that captured no map facts.
+    pub(super) fn require_map(&self) -> Result<(), CodeTransformError> {
+        match self.map_mode {
+            MapMode::Map => Ok(()),
+            MapMode::NoMap => Err(CodeTransformError::MapNotCaptured),
+        }
     }
 
     /// Whether `content` is the replacement text of an
@@ -413,11 +534,17 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     /// chunk, so [`generate_map_with_preamble`](Self::generate_map_with_preamble) can locate it by
     /// pointer identity and report the generated-TSX position immediately after it.
     pub fn set_helper_preamble_content(&mut self, content: &'a str) {
+        if !self.captures_map() {
+            return;
+        }
         self.helper_preamble_content = Some(content);
     }
 
     /// Record the helper preamble and its authored zero-width insertion point.
     pub fn set_helper_preamble_content_at(&mut self, content: &'a str, carrier_anchor: u32) {
+        if !self.captures_map() {
+            return;
+        }
         self.helper_preamble_content = Some(content);
         self.helper_preamble_carrier_anchor =
             (carrier_anchor <= self.original.len() as u32).then_some(carrier_anchor);
@@ -431,6 +558,14 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
 
     pub(super) fn helper_preamble_carrier_anchor(&self) -> Option<u32> {
         self.helper_preamble_carrier_anchor
+    }
+
+    /// The unmapped transitions recorded inside generated `content`, as
+    /// offsets relative to it.
+    pub(super) fn unmapped_boundaries_in(&self, content: &str) -> &[u32] {
+        self.generated_unmapped_boundaries
+            .get(&(content.as_ptr() as usize, content.len()))
+            .map_or(&[], |offsets| offsets.as_slice())
     }
 
     /// Allocate a string in the bump allocator, returning a reference with the
@@ -456,10 +591,8 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     pub fn prepend(&mut self, content: &str) -> &mut Self {
         self.record_audit_op();
         if !content.is_empty() {
-            let mut buf = String::with_capacity(content.len() + self.intro.len());
-            buf.push_str(content);
-            buf.push_str(self.intro);
-            self.intro = self.allocator.alloc_str(&buf);
+            self.intro.push(self.allocator.alloc_str(content));
+            self.intro_len += content.len();
         }
         self
     }
@@ -471,30 +604,29 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     ///
     /// This is the single-prepend, empty-intro contract: the boundary "end of intro" equals "end
     /// of helper preamble" ONLY when the intro IS exactly the preamble, so an EMPTY intro is
-    /// required (debug-asserted). It records the STORED intro pointer — NOT the `content` argument
-    /// — because [`prepend`](Self::prepend) re-allocates the intro as `alloc_str(content + old_intro)`,
-    /// so the bump-allocated `&'a str` source-map generation reads via `self.intro()` is a fresh
-    /// pointer that pointer-matches the recorded preamble only when read back from the field. The
-    /// Svelte IDE projector uses this to keep its `@jsxImportSource`-led prelude as the leading
-    /// output bytes while still publishing the typed preamble-end boundary.
+    /// required (debug-asserted). It records the STORED intro piece — NOT the `content` argument
+    /// — because [`prepend`](Self::prepend) bump-allocates its own copy, which is the pointer
+    /// source-map generation matches. The Svelte IDE projector uses this to keep its
+    /// `@jsxImportSource`-led prelude as the leading output bytes while still publishing the typed
+    /// preamble-end boundary.
     pub fn prepend_helper_preamble_content(&mut self, content: &str) -> &mut Self {
         // The boundary "end of intro" equals "end of helper preamble" ONLY when the intro IS exactly
         // the preamble — i.e. the intro was empty before this prepend. The debug-assert catches a
         // contract violation loudly in test/CI builds; the runtime check makes release builds FAIL
         // CLOSED (degrade to boundary-absent, which `generate_map_with_preamble`'s consumers already
-        // handle) rather than record a combined `content + old_intro` pointer that would publish a
-        // WRONG boundary after the whole combined intro.
+        // handle) rather than record a preamble that is not the whole intro.
         let intro_was_empty = self.intro.is_empty();
         verter_debug_assert!(
             intro_was_empty,
             "prepend_helper_preamble_content requires an empty intro (single-prepend contract)"
         );
         self.prepend(content);
-        if intro_was_empty {
+        let sole_piece = self.intro.last().copied().filter(|_| intro_was_empty);
+        if let Some(piece) = sole_piece {
             // The intro now IS exactly `content` (a fresh bump alloc; old intro empty). Record that
-            // STORED pointer — NOT the `content` argument — because `prepend` re-allocated it, and
-            // `generate_map_with_preamble` matches the preamble by `self.intro()` pointer identity.
-            self.set_helper_preamble_content(self.intro);
+            // STORED piece — NOT the `content` argument — because `generate_map_with_preamble`
+            // matches the preamble by pointer identity.
+            self.set_helper_preamble_content(piece);
         }
         self
     }
@@ -503,10 +635,8 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     pub fn append(&mut self, content: &str) -> &mut Self {
         self.record_audit_op();
         if !content.is_empty() {
-            let mut buf = String::with_capacity(self.outro.len() + content.len());
-            buf.push_str(self.outro);
-            buf.push_str(content);
-            self.outro = self.allocator.alloc_str(&buf);
+            self.outro.push(self.allocator.alloc_str(content));
+            self.outro_len += content.len();
         }
         self
     }
@@ -614,7 +744,7 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
             | Chunk::Overwritten { start, .. }
             | Chunk::OverwrittenSegmented { start, .. } => Some(*start),
             Chunk::Inserted { .. }
-            | Chunk::Moved { .. }
+            | Chunk::Relocated { .. }
             | Chunk::InsertedMapped { .. }
             | Chunk::InsertedAnchored { .. } => None,
         }
@@ -703,7 +833,7 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
                     }
                 }
                 Chunk::Inserted { .. }
-                | Chunk::Moved { .. }
+                | Chunk::Relocated { .. }
                 | Chunk::InsertedMapped { .. }
                 | Chunk::InsertedAnchored { .. } => {}
             }
@@ -833,7 +963,7 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
                     }
                 }
                 Chunk::Inserted { .. }
-                | Chunk::Moved { .. }
+                | Chunk::Relocated { .. }
                 | Chunk::InsertedMapped { .. }
                 | Chunk::InsertedAnchored { .. } => {}
             }
@@ -890,7 +1020,7 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
         } else {
             self.allocator.alloc_str(content)
         };
-        if !content_ref.is_empty() {
+        if !content_ref.is_empty() && self.captures_map() {
             self.unmapped_overwrite_contents
                 .insert((content_ref.as_ptr() as usize, content_ref.len()));
         }
@@ -921,7 +1051,7 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
             return self;
         }
 
-        if !content.is_empty() {
+        if !content.is_empty() && self.captures_map() {
             self.unmapped_overwrite_contents
                 .insert((content.as_ptr() as usize, content.len()));
         }
@@ -978,6 +1108,9 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     }
 
     fn record_generated_unmapped_boundaries(&mut self, content: &'a str, boundaries: &[u32]) {
+        if boundaries.is_empty() || !self.captures_map() {
+            return;
+        }
         let offsets = boundaries
             .iter()
             .copied()
@@ -1146,8 +1279,8 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
                         handled = true;
                     }
                 }
-                // Moved and pure-insertion chunks don't participate in overwrite resolution
-                Chunk::Moved { .. }
+                // Relocated runs and pure-insertion chunks don't participate in overwrite resolution
+                Chunk::Relocated { .. }
                 | Chunk::Inserted { .. }
                 | Chunk::InsertedMapped { .. }
                 | Chunk::InsertedAnchored { .. } => {
@@ -1161,11 +1294,11 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
             // are spliced out with them — their content leaves the output.
             for chunk in &self.chunks[first..=last] {
                 match chunk {
-                    Chunk::Moved { content, .. }
-                    | Chunk::Inserted { content }
-                    | Chunk::InsertedMapped { content, .. }
-                    | Chunk::InsertedAnchored { content, .. } => {
-                        removed_output += content.len() as i64;
+                    Chunk::Relocated { .. }
+                    | Chunk::Inserted { .. }
+                    | Chunk::InsertedMapped { .. }
+                    | Chunk::InsertedAnchored { .. } => {
+                        removed_output += i64::from(chunk.output_len());
                     }
                     Chunk::Original { .. }
                     | Chunk::Overwritten { .. }
@@ -1175,10 +1308,20 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
             self.chunks.splice(first..=last, replacement_chunks);
             self.cursor_hint = first;
         } else if !handled {
+            verter_debug_assert!(
+                false,
+                "replacement of [{start}, {end}) found no live chunk: the range was relocated \
+                 (use try_overwrite for a typed refusal)"
+            );
             self.chunks
                 .push(Chunk::overwritten(start, end, content_ref));
             self.cursor_hint = self.chunks.len() - 1;
         } else {
+            verter_debug_assert!(
+                false,
+                "replacement of [{start}, {end}) found no live chunk: the range was relocated \
+                 (use try_overwrite for a typed refusal)"
+            );
             let insert_at = first_affected.unwrap_or(self.chunks.len());
             let num = replacement_chunks.len();
             self.chunks.splice(insert_at..insert_at, replacement_chunks);
@@ -1311,7 +1454,7 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
         self.move_wrapped_allocated(start, end, target_index, prefix, suffix)
     }
 
-    fn move_wrapped_allocated(
+    pub(super) fn move_wrapped_allocated(
         &mut self,
         start: u32,
         end: u32,
@@ -1324,14 +1467,11 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
             return self;
         }
 
-        // Moves are net-zero for existing content, but prefix/suffix are new insertions
-        self.output_delta += prefix.map_or(0, str::len) as i64 + suffix.map_or(0, str::len) as i64;
-
         // Single-pass: split at boundaries + collect indices in one forward scan
         // (replaces ensure_split_at(start) + ensure_split_at(end) + identification loop)
         let mut indices_to_move: SmallVec<[usize; 8]> = SmallVec::new();
         // Position watermark: tracks the end of the last positioned chunk we've
-        // seen. Used to decide whether unpositioned chunks (Inserted/Moved) fall
+        // seen. Used to decide whether unpositioned chunks (insertions, relocated runs) fall
         // within the [start, end) move range — they belong to the range if the
         // watermark has entered it.
         let mut current_pos = 0u32;
@@ -1412,7 +1552,7 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
                     current_pos = oe;
                     i += 1;
                 }
-                Chunk::Moved { .. }
+                Chunk::Relocated { .. }
                 | Chunk::Inserted { .. }
                 | Chunk::InsertedMapped { .. }
                 | Chunk::InsertedAnchored { .. } => {
@@ -1427,73 +1567,20 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
         if indices_to_move.is_empty() {
             return self;
         }
+        // Moves are net-zero for existing content, but prefix/suffix are new insertions
+        self.output_delta += prefix.map_or(0, str::len) as i64 + suffix.map_or(0, str::len) as i64;
 
-        let mut chunks_to_move: SmallVec<[Chunk<'a>; 8]> = SmallVec::new();
-
+        // The run keeps the chunks the range holds NOW, by reference: what a
+        // move carries is fixed when the move is called, and every member
+        // keeps its own correspondence. No text is copied.
+        let members: SmallVec<[Chunk<'a>; 8]> =
+            indices_to_move.iter().map(|&i| self.chunks[i]).collect();
+        let members: &'a [Chunk<'a>] = self.allocator.alloc_slice_copy(members.as_slice());
+        let mut chunks_to_move: SmallVec<[Chunk<'a>; 3]> = SmallVec::new();
         if let Some(prefix) = prefix {
             chunks_to_move.push(Chunk::inserted(prefix));
         }
-
-        for &i in &indices_to_move {
-            let chunk = self.chunks[i];
-            match chunk {
-                Chunk::Original { start: cs, end: ce } => {
-                    let content = self
-                        .allocator
-                        .alloc_str(&self.original[cs as usize..ce as usize]);
-                    chunks_to_move.push(Chunk::moved(cs, ce, content));
-                }
-                Chunk::Overwritten {
-                    start,
-                    end,
-                    content,
-                    ..
-                } => {
-                    chunks_to_move.push(Chunk::moved_replacement(start, end, content));
-                }
-                Chunk::OverwrittenSegmented {
-                    start,
-                    end,
-                    content,
-                    ..
-                } => {
-                    // Moved content loses its fine-grained anchor mapping
-                    // (the anchors were relative to the original replacement
-                    // site) and travels as a plain replacement move, matching
-                    // `InsertedMapped`/`InsertedAnchored`'s own moved-content
-                    // degradation below.
-                    chunks_to_move.push(Chunk::moved_replacement(start, end, content));
-                }
-                Chunk::Moved {
-                    start,
-                    end,
-                    content,
-                    replacement,
-                    ..
-                } => {
-                    chunks_to_move.push(if replacement {
-                        Chunk::moved_replacement(start, end, content)
-                    } else {
-                        Chunk::moved(start, end, content)
-                    });
-                }
-                Chunk::Inserted { content } => {
-                    chunks_to_move.push(Chunk::inserted(content));
-                }
-                Chunk::InsertedMapped { content, .. } => {
-                    // When moved, InsertedMapped loses its source mapping
-                    // (the mapping was relative to the original insertion site)
-                    chunks_to_move.push(Chunk::inserted(content));
-                }
-                Chunk::InsertedAnchored { content, .. } => {
-                    // When moved, an anchored insertion loses its boundary
-                    // attachment (the anchor was relative to the original
-                    // insertion site) and travels as a plain insertion.
-                    chunks_to_move.push(Chunk::inserted(content));
-                }
-            }
-        }
-
+        chunks_to_move.push(Chunk::Relocated { members });
         if let Some(suffix) = suffix {
             chunks_to_move.push(Chunk::inserted(suffix));
         }
@@ -1529,6 +1616,41 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
         self
     }
 
+    /// Emit the AUTHORED bytes of `[start, end)` at `target_index`, wrapped
+    /// in unmapped `prefix` and `suffix`, whatever other edits do to the
+    /// range: the extracted run reads the source, not the chunk list, and the
+    /// range itself is left in place. The run maps to the source like any
+    /// relocated authored text.
+    pub fn extract_original(
+        &mut self,
+        start: u32,
+        end: u32,
+        target_index: u32,
+        prefix: &str,
+        suffix: &str,
+    ) -> &mut Self {
+        self.record_audit_op();
+        if start >= end {
+            return self;
+        }
+        let members: &'a [Chunk<'a>] = self
+            .allocator
+            .alloc_slice_copy(&[Chunk::from_source(start, end)]);
+        let mut run: SmallVec<[Chunk<'a>; 3]> = SmallVec::new();
+        if !prefix.is_empty() {
+            run.push(Chunk::inserted(self.allocator.alloc_str(prefix)));
+        }
+        run.push(Chunk::Relocated { members });
+        if !suffix.is_empty() {
+            run.push(Chunk::inserted(self.allocator.alloc_str(suffix)));
+        }
+        self.output_delta += i64::from(end - start) + prefix.len() as i64 + suffix.len() as i64;
+        let insert_idx = self.find_insert_position_for_append(target_index, false);
+        let insert_pos = insert_idx.min(self.chunks.len());
+        self.chunks.splice(insert_pos..insert_pos, run);
+        self
+    }
+
     /// Where a move of a range starting at `start` may begin its scan: the
     /// cursor hint, or the chunk before it, when that chunk is positioned
     /// strictly before `start`; otherwise the beginning.
@@ -1552,9 +1674,7 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
 
     /// Check if the content has been modified
     pub fn is_modified(&self) -> bool {
-        !self.intro.is_empty()
-            || !self.outro.is_empty()
-            || self.chunks.iter().any(|c| !c.is_original())
+        self.intro_len != 0 || self.outro_len != 0 || self.chunks.iter().any(|c| !c.is_original())
     }
 
     /// Get read-only access to chunks (useful for source map generation)
@@ -1578,14 +1698,33 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
         self.output_delta
     }
 
-    /// Get the intro text
-    pub(super) fn intro(&self) -> &str {
-        self.intro
+    /// The intro pieces, in output order.
+    pub(super) fn intro(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.intro.iter().rev().copied()
     }
 
-    /// Get the outro text
-    pub(super) fn outro(&self) -> &str {
-        self.outro
+    /// Total bytes of the intro.
+    pub(super) fn intro_len(&self) -> usize {
+        self.intro_len
+    }
+
+    /// The intro when it is exactly one piece — the only shape in which the
+    /// intro can be the recorded helper preamble.
+    pub(super) fn sole_intro_piece(&self) -> Option<&'a str> {
+        match self.intro.as_slice() {
+            [piece] => Some(piece),
+            _ => None,
+        }
+    }
+
+    /// The outro pieces, in output order.
+    pub(super) fn outro(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.outro.iter().copied()
+    }
+
+    /// Total bytes of the outro.
+    pub(super) fn outro_len(&self) -> usize {
+        self.outro_len
     }
 
     // Batch chunk-rebuild operations (`batch_prepend_left_static`,
@@ -1603,29 +1742,35 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
 
         // Capacity from tracked delta — avoids a full scan of all chunks.
         let capacity = (self.original.len() as i64 + self.output_delta) as usize
-            + self.intro.len()
-            + self.outro.len();
+            + self.intro_len
+            + self.outro_len;
 
         verter_audit::attribute_n!(CodeTransformRender, capacity);
         let mut out = String::with_capacity(capacity);
-        out.push_str(self.intro);
-        for chunk in &self.chunks {
-            match chunk {
-                Chunk::Original { start, end } => {
-                    out.push_str(&self.original[*start as usize..*end as usize]);
-                }
-                Chunk::Inserted { content }
-                | Chunk::Overwritten { content, .. }
-                | Chunk::OverwrittenSegmented { content, .. }
-                | Chunk::Moved { content, .. }
-                | Chunk::InsertedMapped { content, .. }
-                | Chunk::InsertedAnchored { content, .. } => {
-                    out.push_str(content);
-                }
+        self.write_output_to(&mut out)
+            .expect("writing to a String cannot fail");
+        out
+    }
+
+    /// The text of one leaf chunk (never a relocated run).
+    fn leaf_text<'s>(&'s self, chunk: &'s Chunk<'a>) -> &'s str {
+        match chunk {
+            Chunk::Original { start, end } => &self.original[*start as usize..*end as usize],
+            Chunk::Inserted { content }
+            | Chunk::Overwritten { content, .. }
+            | Chunk::OverwrittenSegmented { content, .. }
+            | Chunk::InsertedMapped { content, .. }
+            | Chunk::InsertedAnchored { content, .. } => content,
+            Chunk::Relocated { .. } => {
+                unreachable!("the leaf walk expands relocated runs into their members")
             }
         }
-        out.push_str(self.outro);
-        out
+    }
+
+    /// Every chunk in output order with relocated runs expanded, each with
+    /// whether it was relocated.
+    pub(super) fn leaf_chunks(&self) -> LeafChunks<'_, 'a> {
+        LeafChunks::new(&self.chunks)
     }
 
     /// Build the output and retain the source-bearing range geometry.
@@ -1636,9 +1781,16 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     /// through one ordinary `CodeTransform` map. Synthesized insertions are not
     /// represented; callers therefore cannot accidentally assign them authored
     /// provenance.
-    pub fn build_string_with_source_ranges(&self) -> (String, Vec<GeneratedSourceRange>) {
-        let (output, ranges, _) = self.build_string_with_source_ranges_and_unmapped_boundaries();
-        (output, ranges)
+    ///
+    /// # Errors
+    ///
+    /// [`CodeTransformError::MapNotCaptured`] for a transform created without
+    /// map capture.
+    pub fn build_string_with_source_ranges(
+        &self,
+    ) -> Result<(String, Vec<GeneratedSourceRange>), CodeTransformError> {
+        let (output, ranges, _) = self.build_string_with_source_ranges_and_unmapped_boundaries()?;
+        Ok((output, ranges))
     }
 
     /// Resolve a registered generated-content marker into built-output bytes.
@@ -1647,9 +1799,9 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
         &self,
         marker: GeneratedContentMarker<'a>,
     ) -> Option<std::ops::Range<u32>> {
-        let mut generated = self.intro.len() as u32;
+        let mut generated = self.intro_len as u32;
         let mut found = None;
-        for chunk in &self.chunks {
+        for (chunk, _) in self.leaf_chunks() {
             let content = match chunk {
                 Chunk::Original { start, end } => {
                     generated += end - start;
@@ -1658,9 +1810,9 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
                 Chunk::Inserted { content }
                 | Chunk::Overwritten { content, .. }
                 | Chunk::OverwrittenSegmented { content, .. }
-                | Chunk::Moved { content, .. }
                 | Chunk::InsertedMapped { content, .. }
                 | Chunk::InsertedAnchored { content, .. } => *content,
+                Chunk::Relocated { .. } => unreachable!("leaf walk"),
             };
             if std::ptr::eq(content.as_ptr(), marker.content.as_ptr())
                 && content.len() == marker.content.len()
@@ -1707,144 +1859,83 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
 
     /// Build the output, authored range geometry, and explicit ownership
     /// transitions inside generated chunks.
+    #[allow(clippy::type_complexity)]
     pub(crate) fn build_string_with_source_ranges_and_unmapped_boundaries(
         &self,
-    ) -> (String, Vec<GeneratedSourceRange>, Vec<u32>) {
-        let output = self.build_string();
-        let mut generated = self.intro.len() as u32;
+    ) -> Result<(String, Vec<GeneratedSourceRange>, Vec<u32>), CodeTransformError> {
+        self.require_map()?;
+        Ok(self.captured_source_ranges())
+    }
+
+    /// Output, authored range geometry and unmapped transitions of a
+    /// transform that captured map facts.
+    pub(super) fn captured_source_ranges(&self) -> (String, Vec<GeneratedSourceRange>, Vec<u32>) {
+        // Text and ranges in one pass over the pieces each chunk becomes.
+        let capacity = (self.original.len() as i64 + self.output_delta) as usize
+            + self.intro_len
+            + self.outro_len;
+        let mut output = String::with_capacity(capacity);
+        for piece in self.intro() {
+            output.push_str(piece);
+        }
         let mut ranges = Vec::with_capacity(self.chunks.len());
         let mut unmapped_boundaries = Vec::new();
         let mut locations = self.sourcemap_locations.clone();
         locations.sort_unstable();
         locations.dedup();
-        for chunk in &self.chunks {
-            let content = match chunk {
-                Chunk::Original { .. } => None,
-                Chunk::Inserted { content }
-                | Chunk::Overwritten { content, .. }
-                | Chunk::OverwrittenSegmented { content, .. }
-                | Chunk::Moved { content, .. }
-                | Chunk::InsertedMapped { content, .. }
-                | Chunk::InsertedAnchored { content, .. } => Some(*content),
-            };
-            if let Some(content) = content {
-                if let Some(boundaries) = self
-                    .generated_unmapped_boundaries
-                    .get(&(content.as_ptr() as usize, content.len()))
-                {
-                    unmapped_boundaries.extend(boundaries.iter().map(|offset| generated + offset));
-                }
+        let mut pieces: SmallVec<[Piece<'a>; 4]> = SmallVec::new();
+        for (chunk, relocated) in self.leaf_chunks() {
+            count_chunk_visit();
+            if let Some(content) = chunk_content(chunk) {
+                let generated = output.len() as u32;
+                unmapped_boundaries.extend(
+                    self.unmapped_boundaries_in(content)
+                        .iter()
+                        .map(|offset| generated + offset),
+                );
             }
-            match chunk {
-                Chunk::Original { start, end } => {
-                    let len = end - start;
-                    if len > 0 {
-                        push_preserved_source_ranges(
+            pieces.clear();
+            self.leaf_pieces(chunk, relocated, &mut |piece| pieces.push(piece));
+            for piece in &pieces {
+                let text = self.piece_text(piece);
+                let generated = output.len() as u32;
+                let len = text.len() as u32;
+                if len > 0 {
+                    match piece.provenance() {
+                        Provenance::Exact { source_start } => push_preserved_source_ranges(
                             &mut ranges,
                             &locations,
                             generated,
-                            *start,
+                            source_start,
                             len,
-                        );
-                    }
-                    generated += len;
-                }
-                Chunk::Moved {
-                    start,
-                    end,
-                    content,
-                    replacement,
-                } => {
-                    let len = content.len() as u32;
-                    if len > 0 {
-                        if *replacement {
+                        ),
+                        Provenance::Rewritten { source } => ranges.push(GeneratedSourceRange {
+                            generated_start: generated,
+                            generated_end: generated + len,
+                            source_start: source.start,
+                            source_end: source.end,
+                            replacement: true,
+                        }),
+                        // A point accounts for no authored extent.
+                        Provenance::Anchor { source_offset } => {
                             ranges.push(GeneratedSourceRange {
                                 generated_start: generated,
                                 generated_end: generated + len,
-                                source_start: *start,
-                                source_end: *end,
+                                source_start: source_offset,
+                                source_end: source_offset,
                                 replacement: true,
                             });
-                        } else {
-                            push_preserved_source_ranges(
-                                &mut ranges,
-                                &locations,
-                                generated,
-                                *start,
-                                len,
-                            );
                         }
+                        // Synthetic text never reaches a range consumer.
+                        Provenance::Unmapped | Provenance::External(_) => {}
                     }
-                    generated += len;
                 }
-                Chunk::Overwritten {
-                    start,
-                    end,
-                    content,
-                } => {
-                    let len = content.len() as u32;
-                    if len > 0 {
-                        ranges.push(GeneratedSourceRange {
-                            generated_start: generated,
-                            generated_end: generated + len,
-                            source_start: *start,
-                            source_end: *end,
-                            replacement: true,
-                        });
-                    }
-                    generated += len;
-                }
-                Chunk::InsertedMapped {
-                    content,
-                    source_start,
-                    content_offset,
-                } => {
-                    let len = content.len() as u32;
-                    let offset = (*content_offset).min(len);
-                    if offset < len {
-                        ranges.push(GeneratedSourceRange {
-                            generated_start: generated + offset,
-                            generated_end: generated + len,
-                            source_start: *source_start,
-                            // A mapped insertion stands at a source POINT — it
-                            // accounts for no authored extent.
-                            source_end: *source_start,
-                            replacement: true,
-                        });
-                    }
-                    generated += len;
-                }
-                Chunk::OverwrittenSegmented {
-                    content, anchors, ..
-                } => {
-                    // One `GeneratedSourceRange` per authored anchor — bytes
-                    // outside every anchor are synthetic scaffolding and
-                    // contribute no range, matching `OverwrittenSegmented`'s
-                    // own contract (see `segmented.rs`'s module doc).
-                    for anchor in *anchors {
-                        if anchor.length == 0 {
-                            continue;
-                        }
-                        ranges.push(GeneratedSourceRange {
-                            generated_start: generated + anchor.content_offset,
-                            generated_end: generated + anchor.content_offset + anchor.length,
-                            source_start: anchor.source_pos,
-                            source_end: anchor.source_pos + anchor.length,
-                            replacement: true,
-                        });
-                    }
-                    generated += content.len() as u32;
-                }
-                Chunk::Inserted { content } | Chunk::InsertedAnchored { content, .. } => {
-                    generated += content.len() as u32;
-                }
+                output.push_str(text);
             }
         }
-        verter_debug_assert_eq!(
-            generated as usize + self.outro.len(),
-            output.len(),
-            "source-range geometry must cover the built output bytes"
-        );
+        for piece in self.outro() {
+            output.push_str(piece);
+        }
         unmapped_boundaries.sort_unstable();
         unmapped_boundaries.dedup();
         (output, ranges, unmapped_boundaries)
@@ -1854,23 +1945,16 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
 impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     /// Write the full output to any `fmt::Write` sink.
     fn write_output_to(&self, w: &mut impl std::fmt::Write) -> std::fmt::Result {
-        w.write_str(self.intro)?;
-        for chunk in &self.chunks {
-            match chunk {
-                Chunk::Original { start, end } => {
-                    w.write_str(&self.original[*start as usize..*end as usize])?;
-                }
-                Chunk::Inserted { content }
-                | Chunk::Overwritten { content, .. }
-                | Chunk::OverwrittenSegmented { content, .. }
-                | Chunk::Moved { content, .. }
-                | Chunk::InsertedMapped { content, .. }
-                | Chunk::InsertedAnchored { content, .. } => {
-                    w.write_str(content)?;
-                }
-            }
+        for piece in self.intro() {
+            w.write_str(piece)?;
         }
-        w.write_str(self.outro)
+        for (chunk, _) in self.leaf_chunks() {
+            w.write_str(self.leaf_text(chunk))?;
+        }
+        for piece in self.outro() {
+            w.write_str(piece)?;
+        }
+        Ok(())
     }
 }
 

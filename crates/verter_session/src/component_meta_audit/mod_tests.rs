@@ -460,7 +460,7 @@ fn chat_messages_attribution_sheet_has_dominant_cost_arm_and_bridge_max_depth_re
 /// publication boundary (`defineProps` / `defineEmits` / `defineSlots`
 /// / `defineExpose` / `defineModel`) and return its
 /// `RequestAuditRecord`.
-fn run_macro_surface_probe_request() -> RequestAuditRecord {
+fn macro_surface_probe_project() -> Arc<crate::meta::MetaProject> {
     let host = crate::VerterHost::new_standalone(crate::types::HostConfig {
         analysis_level: crate::types::AnalysisLevel::Full,
         audit_enabled: true,
@@ -481,14 +481,97 @@ defineModel<string>()
 <template><div /></template>"#,
         )
         .unwrap();
+    project
+}
 
+fn run_macro_surface_probe_request() -> RequestAuditRecord {
+    let project = macro_surface_probe_project();
     let host = project.host();
+    let before = host
+        .provenance_snapshot()
+        .component_meta_resolved_state_recomputes;
+    let capture =
+        verter_type_engine::capture_token::CaptureToken::start_for_query("macro_surface_cold");
     let (_analysis, resolution) = host
         .get_component_meta_with_resolution("/Surfaces.vue")
         .expect("resolver must produce metadata for the surfaces fixture");
-    host.host_audit_runtime()
+    let cold = capture.end();
+    let record = host
+        .host_audit_runtime()
         .take_record(resolution.request_id)
-        .expect("audit record must publish for the surfaces fixture")
+        .expect("audit record must publish for the surfaces fixture");
+    let after_cold = host
+        .provenance_snapshot()
+        .component_meta_resolved_state_recomputes;
+    let capture =
+        verter_type_engine::capture_token::CaptureToken::start_for_query("macro_surface_warm");
+    let (_, warm_resolution) = host
+        .get_component_meta_with_resolution("/Surfaces.vue")
+        .expect("unchanged metadata");
+    let warm = capture.end();
+    let warm_record = host
+        .host_audit_runtime()
+        .take_record(warm_resolution.request_id)
+        .expect("warm audit record");
+    let after_warm = host
+        .provenance_snapshot()
+        .component_meta_resolved_state_recomputes;
+    let mut redundant_demands = Vec::new();
+    for (label, snapshot) in [("cold", &cold), ("warm", &warm)] {
+        for kind in [
+            verter_session_query::analysis::types::AnalyzedMacroKind::DefineProps,
+            verter_session_query::analysis::types::AnalyzedMacroKind::DefineEmits,
+            verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots,
+            verter_session_query::analysis::types::AnalyzedMacroKind::DefineExpose,
+            verter_session_query::analysis::types::AnalyzedMacroKind::DefineModel,
+        ] {
+            let reads: Vec<_> = snapshot.dispatch_log.iter().filter(|entry| matches!(&entry.key,
+                verter_type_engine::semantic_query::SemanticQueryKey::ResolveMacroPayload { macro_kind, .. } if *macro_kind == kind
+            )).collect();
+            let executions = reads.iter().filter(|entry| !entry.hit).count();
+            eprintln!(
+                "MACRO_COUNTER {label} {kind:?} demands={} executions={executions}",
+                reads.len()
+            );
+            if label == "warm"
+                || kind != verter_session_query::analysis::types::AnalyzedMacroKind::DefineSlots
+            {
+                if !reads.is_empty() {
+                    redundant_demands.push(format!("{label} {kind:?}: {}", reads.len()));
+                }
+            } else if reads.len() > 2 || executions > 1 {
+                redundant_demands.push(format!(
+                    "{label} slot binding demands={} executions={executions}",
+                    reads.len()
+                ));
+            }
+        }
+    }
+    eprintln!(
+        "MACRO_COUNTER recomputes cold={} warm={} bare_engines cold={} warm={}",
+        after_cold - before,
+        after_warm - after_cold,
+        record.store.bypass_diagnostics.bare_engine_constructions,
+        warm_record
+            .store
+            .bypass_diagnostics
+            .bare_engine_constructions
+    );
+    assert_eq!(after_cold - before, 1);
+    assert_eq!(after_warm - after_cold, 0);
+    assert_eq!(record.store.bypass_diagnostics.bare_engine_constructions, 0);
+    assert_eq!(
+        warm_record
+            .store
+            .bypass_diagnostics
+            .bare_engine_constructions,
+        0
+    );
+    assert!(
+        redundant_demands.is_empty(),
+        "publication must consume the resolved surface rows: {redundant_demands:?}"
+    );
+    record
 }
 
 /// PublishedField non-vacuity gate (DISCRIMINATING).
@@ -559,12 +642,11 @@ fn audit_publishes_member_edge_with_published_field_provenance_at_macro_boundari
          tagged `MemberEdgeProvenance::PublishedField` for every \
          declared surface field. Missing names: {missing:?}. Observed \
          PublishedField edge names: {published_field_names:?}. If this \
-         test fails, the final-surface emit at \
-         `record_published_field_edges_for_meta_surface` in \
-         `crates/verter_session/src/host_manage/component_meta_extract.rs` \
+         test fails, the admission in `component_meta_published_macros` \
+         (`crates/verter_session/src/resolver_core/component_meta/mod.rs`) \
          was either skipped (production caller dropped the call) or \
-         a new macro kind was added to `meta.{{props,events,slots,exposed,models}}` \
-         without extending the helper's per-kind surface-resolution match.",
+         a new macro kind was added without extending the per-kind row \
+         match in `vue_exec::admit_published_macro_rows`.",
     );
 
     // Discriminator: the validator branch must be live. Assert at
@@ -575,5 +657,124 @@ fn audit_publishes_member_edge_with_published_field_provenance_at_macro_boundari
          publication boundary. Zero observed — the Rule-5 validator's \
          `PublishedField` discriminating branch is dead code, \
          reverting the PublishedField wiring.",
+    );
+}
+
+/// Every `PublishedField` edge of a request footprint: the published member
+/// key plus the content identity of the edge's result and source nodes.
+/// Sorted, not deduplicated, so a missing or repeated admission shows.
+fn published_field_edges(record: &RequestAuditRecord) -> Vec<String> {
+    let subgraph = &record
+        .footprint
+        .as_ref()
+        .expect("footprint must publish when HostConfig::footprint_capture is enabled")
+        .derivation_subgraph;
+    let node = |id: &NodeId| {
+        let node = &subgraph.nodes[id.0 as usize];
+        format!(
+            "{:?}/{:?}/{:?}",
+            node.kind, node.structural_hash, node.named_identity
+        )
+    };
+    let mut edges: Vec<String> = subgraph
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == OriginEdgeKind::ProjectMember)
+        .filter_map(|edge| match &edge.meta {
+            OriginEdgeMetaDto::ProjectMember {
+                member_key,
+                provenance: verter_audit::MemberEdgeProvenance::PublishedField,
+            } => Some(format!(
+                "{member_key:?} {} <- {:?}",
+                node(&edge.result),
+                edge.sources.iter().map(node).collect::<Vec<_>>()
+            )),
+            _ => None,
+        })
+        .collect();
+    edges.sort();
+    edges
+}
+
+/// A cold component-meta compute publishes the same `PublishedField` edges
+/// when another request already cached its macro bundles: here a
+/// framework-surface request warms them first, and the component-meta request
+/// then consumes the cached bundles instead of recomputing them.
+#[test]
+fn published_field_edges_do_not_depend_on_which_request_warmed_the_macro_bundles() {
+    use verter_session_query::analysis::types::AnalyzedMacroKind;
+
+    let request = |host: &crate::VerterHost| {
+        let (_, resolution) = host
+            .get_component_meta_with_resolution("/Surfaces.vue")
+            .expect("resolver must produce metadata for the surfaces fixture");
+        host.host_audit_runtime()
+            .take_record(resolution.request_id)
+            .expect("audit record must publish for the surfaces fixture")
+    };
+    let bundles = |host: &crate::VerterHost| {
+        [
+            AnalyzedMacroKind::DefineProps,
+            AnalyzedMacroKind::DefineEmits,
+            AnalyzedMacroKind::DefineSlots,
+            AnalyzedMacroKind::DefineExpose,
+            AnalyzedMacroKind::DefineModel,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(macro_index, macro_kind)| {
+            host.vue_macro_dtos(&crate::typeinfo::types::VueMacroSurfaceRequest {
+                owner_canonical: Arc::from("/Surfaces.vue"),
+                macro_index,
+                macro_kind,
+                root_identity: [0; 16],
+                level: crate::typeinfo::types::TypeInfoQueryLevel::FullMetadata,
+            })
+            .expect("macro bundle")
+        })
+        .collect::<Vec<_>>()
+    };
+
+    let cold_project = macro_surface_probe_project();
+    let cold = published_field_edges(&request(cold_project.host()));
+
+    let warmed_project = macro_surface_probe_project();
+    let host = warmed_project.host();
+    let served =
+        crate::typeinfo::typeinfo_tests::vue_adapter::vue_surface_members_via_audited_entry(
+            host,
+            "/Surfaces.vue",
+            verter_protocol::typeinfo::graph::FrameworkSurfaceKind::Props,
+        );
+    assert!(
+        served.iter().any(|name| name == "foo"),
+        "the framework-surface request must serve the props surface: {served:?}"
+    );
+    let cached = bundles(host);
+    let recomputes = host
+        .provenance_snapshot()
+        .component_meta_resolved_state_recomputes;
+    let warmed = published_field_edges(&request(host));
+    assert_eq!(
+        host.provenance_snapshot()
+            .component_meta_resolved_state_recomputes
+            - recomputes,
+        1,
+        "the component-meta compute itself must run cold"
+    );
+    for (before, after) in cached.iter().zip(bundles(host)) {
+        assert!(
+            Arc::ptr_eq(before, &after),
+            "the component-meta compute must consume the cached bundles"
+        );
+    }
+
+    assert!(
+        cold.iter().any(|edge| edge.contains("\"foo\"")),
+        "the fully cold request publishes its props: {cold:?}"
+    );
+    assert_eq!(
+        warmed, cold,
+        "PublishedField edges must not depend on which request cached the bundles"
     );
 }

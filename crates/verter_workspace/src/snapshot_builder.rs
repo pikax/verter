@@ -220,32 +220,45 @@ pub fn build_selected_project_snapshot(
     workspace_root: &str,
     generation: SnapshotGeneration,
 ) -> WorkspaceSnapshot {
-    let canonical_root = CanonicalPath::new(workspace_root);
-    let project_root = tsconfig_path
-        .rsplit_once('/')
-        .map(|(dir, _)| dir.to_string())
-        .unwrap_or_else(|| canonical_root.as_str().to_string());
+    build_selected_projects_snapshot(ws, &[tsconfig_path.to_string()], workspace_root, generation)
+}
 
-    let mut projects = vec![
-        configured_project(
+/// Build one snapshot for an explicitly selected set of configs and the
+/// workspace-root fallback. No discovery walk admits unselected siblings.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn build_selected_projects_snapshot(
+    ws: &dyn crate::traits::WorkspaceAccess,
+    tsconfig_paths: &[String],
+    workspace_root: &str,
+    generation: SnapshotGeneration,
+) -> WorkspaceSnapshot {
+    let canonical_root = CanonicalPath::new(workspace_root);
+    let mut projects = Vec::with_capacity(tsconfig_paths.len() + 1);
+    for tsconfig_path in tsconfig_paths {
+        let project_root = std::path::Path::new(tsconfig_path)
+            .parent()
+            .and_then(std::path::Path::to_str)
+            .filter(|dir| !dir.is_empty())
+            .unwrap_or(canonical_root.as_str());
+        projects.push(configured_project(
             ws,
             tsconfig_path,
-            &project_root,
+            project_root,
             &canonical_root,
-            ProjectId(0),
-        ),
-        OwnershipProject {
-            id: ProjectId(1),
-            root: canonical_root.clone(),
-            workspace_root: canonical_root.clone(),
-            payload: ProjectPayload::Fallback {
-                membership: FallbackMembership {
-                    root: canonical_root.clone(),
-                    exclude: typescript_default_excludes(&canonical_root),
-                },
+            ProjectId(projects.len() as u32),
+        ));
+    }
+    projects.push(OwnershipProject {
+        id: ProjectId(projects.len() as u32),
+        root: canonical_root.clone(),
+        workspace_root: canonical_root.clone(),
+        payload: ProjectPayload::Fallback {
+            membership: FallbackMembership {
+                root: canonical_root.clone(),
+                exclude: typescript_default_excludes(&canonical_root),
             },
         },
-    ];
+    });
 
     projects.sort_by(compare_project_precedence);
     for (i, project) in projects.iter_mut().enumerate() {
@@ -379,7 +392,7 @@ pub fn configured_membership_from_raw(
 /// The [`IdeProjectConfig`] of a project configured by `tsconfig_path`,
 /// read through `ws`: its compiler options and its `files` / `include` /
 /// `exclude` membership — the program's root files and their order. The
-/// `include` matches are materialized by walking the project root through
+/// `include` matches are materialized by walking their static roots through
 /// `ws`, as TypeScript enumerates them, so a workspace that has not read a
 /// matching file yet still lists it; a workspace that cannot walk leaves the
 /// set to the `files` entries and the spec (see [`materialize_from_spec`]).
@@ -411,7 +424,7 @@ pub fn configured_ide_project(
 /// Materialize the configured file set from a static membership spec.
 ///
 /// When `ws` is `Some` and the workspace supports `walk()`, walks the
-/// project root directory to expand `include` patterns (minus `exclude`).
+/// minimal static include directories to expand patterns (minus `exclude`).
 /// `files` entries are always included — they are immune to `exclude`.
 ///
 /// When `ws` is `None` or `walk()` returns `UnsupportedOperation` (a
@@ -421,7 +434,7 @@ pub fn configured_ide_project(
 #[cfg(not(target_arch = "wasm32"))]
 fn materialize_from_spec(
     spec: &StaticMembershipSpec,
-    project_root: &CanonicalPath,
+    _project_root: &CanonicalPath,
     ws: Option<&dyn crate::traits::WorkspaceRead>,
 ) -> FxHashSet<CanonicalPath> {
     let mut result = FxHashSet::default();
@@ -431,36 +444,38 @@ fn materialize_from_spec(
         result.insert(file.clone());
     }
 
-    // Walk the project root and check each file against include - exclude
+    // Walk include roots and check each file against include - exclude.
     if !spec.include.is_empty() {
         if let Some(ws) = ws {
             // Skip entire directories during the walk: those an exclude glob
             // covers (dist/, …) and those no include glob can reach — the
             // package and dot-prefixed folders TypeScript's include wildcards
             // never descend into, whatever `exclude` says.
-            let exclude_globs = &spec.exclude;
-            let filter_dir = |dir: &str| {
-                let dir_cp = CanonicalPath::new(dir);
-                if !spec
-                    .include
-                    .iter()
-                    .any(|glob| glob.may_match_below(&dir_cp))
-                {
-                    return false;
-                }
-                // If any exclude glob matches this directory (as a prefix),
-                // prune the entire subtree. We check by appending a dummy
-                // file name to see if the directory itself is excluded.
-                !exclude_globs.iter().any(|glob| {
-                    glob.matches(&CanonicalPath::new(&format!("{}/x", dir_cp.as_str())))
-                })
-            };
+            let filter_dir = |dir: &str| spec.descends_into(&CanonicalPath::new(dir));
 
-            if let Ok(entries) = ws.walk(project_root.as_str(), &filter_dir, &|_| true) {
-                for entry_path in entries {
-                    let cp = CanonicalPath::new(&entry_path);
-                    if spec.matches(&cp) {
-                        result.insert(cp);
+            let mut roots: Vec<_> = spec
+                .include
+                .iter()
+                .filter_map(|glob| glob.walk_root())
+                .collect();
+            roots.sort();
+            roots.dedup();
+            let mut minimal_roots: Vec<CanonicalPath> = Vec::new();
+            for root in roots {
+                if !minimal_roots
+                    .iter()
+                    .any(|parent| std::path::Path::new(root.as_str()).starts_with(parent.as_str()))
+                {
+                    minimal_roots.push(root);
+                }
+            }
+            for root in minimal_roots {
+                if let Ok(entries) = ws.walk(root.as_str(), &filter_dir, &|_| true) {
+                    for entry_path in entries {
+                        let cp = CanonicalPath::new(&entry_path);
+                        if spec.matches(&cp) {
+                            result.insert(cp);
+                        }
                     }
                 }
             }

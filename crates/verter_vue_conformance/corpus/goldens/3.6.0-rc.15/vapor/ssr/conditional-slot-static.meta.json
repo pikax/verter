@@ -1,0 +1,70 @@
+{
+  "schema": 2,
+  "caseId": "ssr/conditional-slot-static",
+  "backend": "vapor",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/conditional-slot-static.vue",
+    "sha256": "ea6840d458d7a7feb5585193ab1320acaf7ba4ce78eabe080de9ffda7250f32b"
+  },
+  "options": {
+    "sha256": "7106074e83f805856f39466a1e2354882c0fc7d0c604af17f56567dbca1dcd67",
+    "summary": {
+      "backend": "vapor",
+      "vapor": true,
+      "filename": "cases/ssr/conditional-slot-static.vue",
+      "id": "ssr/conditional-slot-static",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/vapor/ssr/conditional-slot-static.js",
+      "sha256": "64c4205853ef54f7744aa35127046541803963d5b9d318b93643c998117d5554",
+      "bytes": 945
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/vapor/ssr/conditional-slot-static.map.json",
+      "sha256": "ffcde5d9003c847f42d0ce99e7e16634914a4099f5e04840dda6f8cf9719d1c3"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createComponent",
+      "alias": "_createComponent"
+    },
+    {
+      "imported": "defineVaporComponent",
+      "alias": "_defineVaporComponent"
+    },
+    {
+      "imported": "template",
+      "alias": "_template"
+    }
+  ]
+}

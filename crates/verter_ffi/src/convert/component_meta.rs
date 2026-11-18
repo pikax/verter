@@ -12,8 +12,10 @@
 //! to `analysis.type_registry` before the envelope was sealed.
 
 use crate::types::*;
+use verter_span::CoordError;
 
 use super::fallthrough::{fallthrough_surface_to_ffi, root_info_to_ffi, root_reachability_to_ffi};
+use super::offset::{source_range, OffsetEncoding, OffsetIndex};
 use super::string_helpers::{
     accepted_event_to_ffi, accepted_prop_to_ffi, accepted_surface_completeness_to_ffi,
     binding_kind_to_string, component_prop_constness_to_string, expansion_exactness_to_string,
@@ -66,90 +68,108 @@ pub(super) fn require_lane_aligned(lane: &str, analysis_len: usize, lane_len: us
 pub fn ordered_structure_to_ffi(
     structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
 ) -> FfiOrderedSfcStructure {
-    use verter_language::parse_artifact::carrier_inventory::{CarrierBlock, MarkupNodeKind};
+    let Ok(projected) = project_ordered_structure(structure, &RegisteredByteRanges);
+    projected
+}
+
+fn project_ordered_structure<E: StructureRangeEncoding>(
+    structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
+    encoding: &E,
+) -> Result<FfiOrderedSfcStructure, E::Error> {
+    use verter_language::parse_artifact::carrier_inventory::{
+        CarrierBlock, MarkupNodeKind, SourceSpan,
+    };
 
     let inventory = structure.inventory.as_ref();
-    let range = |span| structure_range(structure, span);
+    let range = |span: SourceSpan| encoding.range(structure, span);
     let blocks = inventory
         .blocks()
         .iter()
-        .map(|block| match block {
-            CarrierBlock::Section { id, role, syntax } => {
-                let markup_root_tokens = inventory
-                    .markup()
-                    .roots()
-                    .iter()
-                    .filter(|root| {
-                        inventory.markup().nodes()[root.get() as usize].root_block == *id
-                    })
-                    .map(|root| structure.markup_node_tokens[root.get() as usize].clone())
-                    .collect();
-                FfiStructureBlock::Section {
-                    section: Box::new(FfiStructureSection {
-                        block_token: structure.block_tokens[id.get() as usize].clone(),
-                        role: block_role_to_ffi(role),
-                        authored_name: authored_name_to_ffi(
-                            structure,
-                            syntax.authored_name,
-                            syntax.normalized_name,
-                        ),
-                        opening_range: range(syntax.opening_span),
-                        opening_name_range: range(syntax.opening_name_span),
-                        content_range: range(syntax.content_span),
-                        closing_range: syntax.closing_span.map(range),
-                        closing_name_range: syntax.closing_name_span.map(range),
-                        full_range: range(syntax.full_span),
-                        termination: termination_to_ffi(structure, &syntax.termination),
-                        attributes: syntax
-                            .attributes
-                            .iter()
-                            .map(|attribute| attribute_to_ffi(structure, attribute))
-                            .collect(),
-                        block_content_basis_token: None,
-                        attribute_insertion_anchor: range(syntax.attribute_insertion_anchor),
-                    }),
-                    markup_root_tokens,
+        .map(|block| -> Result<FfiStructureBlock, E::Error> {
+            Ok(match block {
+                CarrierBlock::Section { id, role, syntax } => {
+                    let markup_root_tokens = inventory
+                        .markup()
+                        .roots()
+                        .iter()
+                        .filter(|root| {
+                            inventory.markup().nodes()[root.get() as usize].root_block == *id
+                        })
+                        .map(|root| structure.markup_node_tokens[root.get() as usize].clone())
+                        .collect();
+                    FfiStructureBlock::Section {
+                        section: Box::new(FfiStructureSection {
+                            block_token: structure.block_tokens[id.get() as usize].clone(),
+                            role: block_role_to_ffi(role),
+                            authored_name: authored_name_to_ffi(
+                                structure,
+                                encoding,
+                                syntax.authored_name,
+                                syntax.normalized_name,
+                            )?,
+                            opening_range: range(syntax.opening_span)?,
+                            opening_name_range: range(syntax.opening_name_span)?,
+                            content_range: range(syntax.content_span)?,
+                            closing_range: syntax.closing_span.map(range).transpose()?,
+                            closing_name_range: syntax.closing_name_span.map(range).transpose()?,
+                            full_range: range(syntax.full_span)?,
+                            termination: termination_to_ffi(
+                                structure,
+                                encoding,
+                                &syntax.termination,
+                            )?,
+                            attributes: syntax
+                                .attributes
+                                .iter()
+                                .map(|attribute| attribute_to_ffi(structure, encoding, attribute))
+                                .collect::<Result<_, _>>()?,
+                            block_content_basis_token: None,
+                            attribute_insertion_anchor: range(syntax.attribute_insertion_anchor)?,
+                        }),
+                        markup_root_tokens,
+                    }
                 }
-            }
-            CarrierBlock::MarkupRoot { id, node } => FfiStructureBlock::MarkupRoot {
-                block_token: structure.block_tokens[id.get() as usize].clone(),
-                markup_root_token: structure.markup_node_tokens[node.get() as usize].clone(),
-            },
+                CarrierBlock::MarkupRoot { id, node } => FfiStructureBlock::MarkupRoot {
+                    block_token: structure.block_tokens[id.get() as usize].clone(),
+                    markup_root_token: structure.markup_node_tokens[node.get() as usize].clone(),
+                },
+            })
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     let markup_nodes = inventory
         .markup()
         .nodes()
         .iter()
-        .map(|node| {
+        .map(|node| -> Result<FfiMarkupNode, E::Error> {
             let syntax = match node.kind() {
                 MarkupNodeKind::Element(element) => FfiMarkupSyntax::Element {
                     authored_name: authored_name_to_ffi(
                         structure,
+                        encoding,
                         element.authored_name,
                         element.normalized_name,
-                    ),
+                    )?,
                     namespace: format!("{:?}", element.namespace),
                     element_kind: format!("{:?}", element.kind),
-                    opening_range: range(element.opening_span),
-                    opening_name_range: range(element.opening_name_span),
-                    attribute_insertion_anchor: range(element.attribute_insertion_anchor),
-                    content_range: range(element.content_span),
-                    closing_range: element.closing_span.map(range),
-                    closing_name_range: element.closing_name_span.map(range),
-                    full_range: range(element.full_span),
+                    opening_range: range(element.opening_span)?,
+                    opening_name_range: range(element.opening_name_span)?,
+                    attribute_insertion_anchor: range(element.attribute_insertion_anchor)?,
+                    content_range: range(element.content_span)?,
+                    closing_range: element.closing_span.map(range).transpose()?,
+                    closing_name_range: element.closing_name_span.map(range).transpose()?,
+                    full_range: range(element.full_span)?,
                     self_closing: element.self_closing,
                     void_element: element.void_element,
                     raw_text: element.raw_text,
-                    termination: termination_to_ffi(structure, &element.termination),
+                    termination: termination_to_ffi(structure, encoding, &element.termination)?,
                     attributes: element
                         .attributes
                         .iter()
-                        .map(|attribute| attribute_to_ffi(structure, attribute))
-                        .collect(),
+                        .map(|attribute| attribute_to_ffi(structure, encoding, attribute))
+                        .collect::<Result<_, _>>()?,
                 },
                 MarkupNodeKind::Text { content_span } => FfiMarkupSyntax::Text {
-                    content_range: range(*content_span),
+                    content_range: range(*content_span)?,
                 },
                 MarkupNodeKind::Comment {
                     opening_span,
@@ -158,11 +178,11 @@ pub fn ordered_structure_to_ffi(
                     full_span,
                     termination,
                 } => FfiMarkupSyntax::Comment {
-                    opening_range: range(*opening_span),
-                    content_range: range(*content_span),
-                    closing_range: closing_span.map(range),
-                    full_range: range(*full_span),
-                    termination: termination_to_ffi(structure, termination),
+                    opening_range: range(*opening_span)?,
+                    content_range: range(*content_span)?,
+                    closing_range: closing_span.map(range).transpose()?,
+                    full_range: range(*full_span)?,
+                    termination: termination_to_ffi(structure, encoding, termination)?,
                 },
                 MarkupNodeKind::Interpolation {
                     family,
@@ -173,24 +193,24 @@ pub fn ordered_structure_to_ffi(
                     termination,
                 } => FfiMarkupSyntax::Interpolation {
                     family: format!("{family:?}"),
-                    opening_range: range(*opening_span),
-                    expression_range: range(*expression_span),
-                    closing_range: closing_span.map(range),
-                    full_range: range(*full_span),
-                    termination: termination_to_ffi(structure, termination),
+                    opening_range: range(*opening_span)?,
+                    expression_range: range(*expression_span)?,
+                    closing_range: closing_span.map(range).transpose()?,
+                    full_range: range(*full_span)?,
+                    termination: termination_to_ffi(structure, encoding, termination)?,
                 },
                 MarkupNodeKind::SvelteControlBlock(value) => FfiMarkupSyntax::SvelteControlBlock {
-                    full_range: range(value.full_span),
-                    termination: termination_to_ffi(structure, &value.termination),
+                    full_range: range(value.full_span)?,
+                    termination: termination_to_ffi(structure, encoding, &value.termination)?,
                 },
                 MarkupNodeKind::SvelteClause(value) => FfiMarkupSyntax::SvelteClause {
-                    full_range: range(value.full_span),
-                    termination: termination_to_ffi(structure, &value.termination),
+                    full_range: range(value.full_span)?,
+                    termination: termination_to_ffi(structure, encoding, &value.termination)?,
                 },
                 MarkupNodeKind::SvelteStandaloneTag(value) => {
                     FfiMarkupSyntax::SvelteStandaloneTag {
-                        full_range: range(value.full_span),
-                        termination: termination_to_ffi(structure, &value.termination),
+                        full_range: range(value.full_span)?,
+                        termination: termination_to_ffi(structure, encoding, &value.termination)?,
                     }
                 }
                 MarkupNodeKind::Recovered {
@@ -204,13 +224,13 @@ pub fn ordered_structure_to_ffi(
                     expected,
                     reason,
                 } => FfiMarkupSyntax::Recovered {
-                    opening_range: opening_span.map(range),
-                    opening_name_range: opening_name_span.map(range),
-                    content_range: content_span.map(range),
-                    closing_range: closing_span.map(range),
-                    closing_name_range: closing_name_span.map(range),
-                    full_range: range(*full_span),
-                    termination: termination_to_ffi(structure, termination),
+                    opening_range: opening_span.map(range).transpose()?,
+                    opening_name_range: opening_name_span.map(range).transpose()?,
+                    content_range: content_span.map(range).transpose()?,
+                    closing_range: closing_span.map(range).transpose()?,
+                    closing_name_range: closing_name_span.map(range).transpose()?,
+                    full_range: range(*full_span)?,
+                    termination: termination_to_ffi(structure, encoding, termination)?,
                     expected: format!("{expected:?}"),
                     reason: format!("{reason:?}"),
                 },
@@ -225,13 +245,13 @@ pub fn ordered_structure_to_ffi(
                     authored_head,
                     reason,
                 } => FfiMarkupSyntax::Unknown {
-                    opening_range: opening_span.map(range),
-                    opening_name_range: opening_name_span.map(range),
-                    content_range: content_span.map(range),
-                    closing_range: closing_span.map(range),
-                    closing_name_range: closing_name_span.map(range),
-                    full_range: range(*full_span),
-                    termination: termination_to_ffi(structure, termination),
+                    opening_range: opening_span.map(range).transpose()?,
+                    opening_name_range: opening_name_span.map(range).transpose()?,
+                    content_range: content_span.map(range).transpose()?,
+                    closing_range: closing_span.map(range).transpose()?,
+                    closing_name_range: closing_name_span.map(range).transpose()?,
+                    full_range: range(*full_span)?,
+                    termination: termination_to_ffi(structure, encoding, termination)?,
                     authored_head: authored_head
                         .and_then(|slice| inventory.slice(slice).ok())
                         .map(str::to_owned),
@@ -243,22 +263,22 @@ pub fn ordered_structure_to_ffi(
                 .iter()
                 .map(|child| structure.markup_node_tokens[child.get() as usize].clone())
                 .collect();
-            FfiMarkupNode {
+            Ok(FfiMarkupNode {
                 node_token: structure.markup_node_tokens[node.id.get() as usize].clone(),
                 parent_node_token: node
                     .parent
                     .map(|parent| structure.markup_node_tokens[parent.get() as usize].clone()),
                 child_node_tokens: children,
                 syntax,
-            }
+            })
         })
-        .collect();
-    FfiOrderedSfcStructure {
+        .collect::<Result<_, _>>()?;
+    Ok(FfiOrderedSfcStructure {
         schema_version: structure.schema_version,
         artifact_token: structure.artifact_token.clone(),
         blocks,
         markup_nodes,
-    }
+    })
 }
 
 /// Project directly from the sole registered envelope owner.
@@ -270,24 +290,110 @@ pub fn registered_structure_to_ffi(
     )
 }
 
-fn structure_range(
-    structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
-    span: verter_language::parse_artifact::carrier_inventory::SourceSpan,
-) -> FfiStructureRange {
-    FfiStructureRange {
-        source_space_token: structure.source_space_tokens[span.source_space.get() as usize].clone(),
-        start: span.start,
-        end: span.end,
-        encoding: SpanEncodingTag::Utf8,
+/// [`registered_structure_to_ffi`] with every range in `encoding`: UTF-8
+/// bytes as registered, or UTF-16 code units. Each range's offsets index the
+/// bytes of the source space its `source_space_token` names. A structural
+/// record ships no wrong range: one span that cannot be converted exactly
+/// refuses the whole projection.
+pub fn registered_structure_to_ffi_in(
+    structure: &verter_session::carrier_publication_store::RegisteredFileStructure,
+    encoding: SpanEncodingTag,
+) -> Result<FfiOrderedSfcStructure, CoordError> {
+    let structure =
+        verter_session::component_meta_host::ordered_sfc_structure_projection(structure);
+    match encoding {
+        SpanEncodingTag::Utf8 => Ok(ordered_structure_to_ffi(&structure)),
+        SpanEncodingTag::Utf16 => {
+            project_ordered_structure(&structure, &Utf16StructureRanges::new(&structure))
+        }
     }
 }
 
-fn authored_name_to_ffi(
+/// How a structure projection writes its ranges.
+trait StructureRangeEncoding {
+    type Error;
+
+    fn range(
+        &self,
+        structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
+        span: verter_language::parse_artifact::carrier_inventory::SourceSpan,
+    ) -> Result<FfiStructureRange, Self::Error>;
+}
+
+/// The registered UTF-8 byte offsets, unchanged.
+struct RegisteredByteRanges;
+
+impl StructureRangeEncoding for RegisteredByteRanges {
+    type Error = std::convert::Infallible;
+
+    fn range(
+        &self,
+        structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
+        span: verter_language::parse_artifact::carrier_inventory::SourceSpan,
+    ) -> Result<FfiStructureRange, Self::Error> {
+        Ok(FfiStructureRange {
+            source_space_token: structure.source_space_tokens[span.source_space.get() as usize]
+                .clone(),
+            start: span.start,
+            end: span.end,
+            encoding: SpanEncodingTag::Utf8,
+        })
+    }
+}
+
+/// UTF-16 code units, through one offset index per source space.
+struct Utf16StructureRanges<'a> {
+    indexes: Vec<OffsetIndex<'a>>,
+}
+
+impl<'a> Utf16StructureRanges<'a> {
+    fn new(
+        structure: &'a verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
+    ) -> Self {
+        Self {
+            indexes: structure
+                .inventory
+                .source_spaces()
+                .iter()
+                .map(|space| OffsetIndex::new(space.bytes()))
+                .collect(),
+        }
+    }
+}
+
+impl StructureRangeEncoding for Utf16StructureRanges<'_> {
+    type Error = CoordError;
+
+    fn range(
+        &self,
+        structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
+        span: verter_language::parse_artifact::carrier_inventory::SourceSpan,
+    ) -> Result<FfiStructureRange, Self::Error> {
+        let index = self
+            .indexes
+            .get(span.source_space.get() as usize)
+            .ok_or(CoordError::InvalidBoundary)?;
+        let (start, end) = index.convert_range(
+            source_range(verter_span::Span::new(span.start, span.end))?,
+            OffsetEncoding::Utf16,
+        )?;
+        Ok(FfiStructureRange {
+            source_space_token: structure.source_space_tokens[span.source_space.get() as usize]
+                .clone(),
+            start,
+            end,
+            encoding: SpanEncodingTag::Utf16,
+        })
+    }
+}
+
+fn authored_name_to_ffi<E: StructureRangeEncoding>(
     structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
+    encoding: &E,
     authored: verter_language::parse_artifact::carrier_inventory::SourceSlice,
     normalized: verter_language::parse_artifact::carrier_inventory::InternedNameId,
-) -> FfiAuthoredName {
-    FfiAuthoredName {
+) -> Result<FfiAuthoredName, E::Error> {
+    Ok(FfiAuthoredName {
         spelling: structure
             .inventory
             .slice(authored)
@@ -298,8 +404,8 @@ fn authored_name_to_ffi(
             .normalized_name(normalized)
             .expect("validated normalized name")
             .to_owned(),
-        range: structure_range(structure, authored.span),
-    }
+        range: encoding.range(structure, authored.span)?,
+    })
 }
 
 /// Project a block's role onto the wire DTO.
@@ -338,12 +444,13 @@ fn block_role_to_ffi(
     }
 }
 
-fn termination_to_ffi(
+fn termination_to_ffi<E: StructureRangeEncoding>(
     structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
+    encoding: &E,
     value: &verter_language::parse_artifact::carrier_inventory::SyntaxTermination,
-) -> FfiSyntaxTermination {
+) -> Result<FfiSyntaxTermination, E::Error> {
     use verter_language::parse_artifact::carrier_inventory::SyntaxTermination;
-    match value {
+    Ok(match value {
         SyntaxTermination::Closed => FfiSyntaxTermination::Closed,
         SyntaxTermination::SelfClosing => FfiSyntaxTermination::SelfClosing,
         SyntaxTermination::Void => FfiSyntaxTermination::Void,
@@ -353,24 +460,28 @@ fn termination_to_ffi(
             recovery_span,
         } => FfiSyntaxTermination::Recovered {
             reason: format!("{reason:?}"),
-            recovery_range: recovery_span.map(|span| structure_range(structure, span)),
+            recovery_range: recovery_span
+                .map(|span| encoding.range(structure, span))
+                .transpose()?,
         },
-    }
+    })
 }
 
-fn attribute_to_ffi(
+fn attribute_to_ffi<E: StructureRangeEncoding>(
     structure: &verter_session_query::analysis::component_meta::OrderedSfcStructureAnalysis,
+    encoding: &E,
     attribute: &verter_language::parse_artifact::carrier_inventory::CarrierAttribute,
-) -> FfiCarrierAttribute {
+) -> Result<FfiCarrierAttribute, E::Error> {
     use verter_language::parse_artifact::carrier_inventory::{AttributeValue, CarrierAttribute};
     let (kind, name, value) = match attribute {
         CarrierAttribute::Named { name, value, .. } => (
             "named",
             Some(authored_name_to_ffi(
                 structure,
+                encoding,
                 name.authored,
                 name.normalized,
-            )),
+            )?),
             match value {
                 AttributeValue::Static { raw, .. } => {
                     structure.inventory.slice(*raw).ok().map(str::to_owned)
@@ -385,7 +496,10 @@ fn attribute_to_ffi(
             "directive",
             local_name
                 .as_ref()
-                .map(|name| authored_name_to_ffi(structure, name.authored, name.normalized)),
+                .map(|name| {
+                    authored_name_to_ffi(structure, encoding, name.authored, name.normalized)
+                })
+                .transpose()?,
             match value {
                 AttributeValue::Static { raw, .. } => {
                     structure.inventory.slice(*raw).ok().map(str::to_owned)
@@ -395,16 +509,16 @@ fn attribute_to_ffi(
         ),
         CarrierAttribute::Attach { .. } => ("attach", None, None),
     };
-    FfiCarrierAttribute {
+    Ok(FfiCarrierAttribute {
         attribute_token: structure.attribute_tokens[attribute.id().get() as usize].clone(),
         kind: kind.to_owned(),
         name,
         value,
-        full_range: structure_range(structure, attribute.full_span()),
+        full_range: encoding.range(structure, attribute.full_span())?,
         duplicate_of: attribute
             .duplicate_of()
             .map(|id| structure.attribute_tokens[id.get() as usize].clone()),
-    }
+    })
 }
 
 /// Parts-level mechanical mapping — the body of

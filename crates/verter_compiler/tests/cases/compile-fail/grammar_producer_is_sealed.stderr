@@ -1,0 +1,29 @@
+error[E0277]: the trait bound `ForgedProducer: fragment::sealed::Sealed` is not satisfied
+  --> tests/cases/compile-fail/grammar_producer_is_sealed.rs:12:26
+   |
+12 | impl GrammarProducer for ForgedProducer {
+   |                          ^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `fragment::sealed::Sealed` is not implemented for `ForgedProducer`
+  --> tests/cases/compile-fail/grammar_producer_is_sealed.rs:10:1
+   |
+10 | struct ForgedProducer;
+   | ^^^^^^^^^^^^^^^^^^^^^
+   = note: `ForgedProducer` implements similarly named trait `unicode_width::private::Sealed`, but not `fragment::sealed::Sealed`
+help: the following other types implement trait `fragment::sealed::Sealed`
+  --> src/assembly/fragment.rs
+   |
+   | impl sealed::Sealed for crate::script::ScriptCodeGenResult<'_> {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `verter_compiler::script::ScriptCodeGenResult<'_>`
+...
+   | impl sealed::Sealed for super::vue_module::VueMainDecoration {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `VueMainDecoration`
+note: required by a bound in `GrammarProducer`
+  --> src/assembly/fragment.rs
+   |
+   | pub trait GrammarProducer: sealed::Sealed {
+   |                            ^^^^^^^^^^^^^^ required by this bound in `GrammarProducer`
+   = note: `GrammarProducer` is a "sealed trait", because to implement it you also need to implement `verter_compiler::assembly::fragment::sealed::Sealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+   = help: the following types implement the trait:
+             verter_compiler::script::ScriptCodeGenResult<'_>
+             verter_compiler::assembly::VueMainDecoration

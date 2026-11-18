@@ -931,7 +931,7 @@ fn retained_weight_counts_nested_svelte_children_not_just_top_level_nodes() {
     let shallow = compiler.prepare(&shallow_src, &request);
     let nested = compiler.prepare(&nested_src, &request);
     let (a, b) = match (&shallow, &nested) {
-        (PreparedCarrier::Svelte(a), PreparedCarrier::Svelte(b)) => (&a.parsed, &b.parsed),
+        (PreparedCarrier::Svelte(a), PreparedCarrier::Svelte(b)) => (a.parsed(), b.parsed()),
         other => panic!("expected Svelte carriers, got {other:?}"),
     };
     fn count_nodes(nodes: &[SvelteNode]) -> usize {
@@ -994,11 +994,11 @@ fn retained_weight_counts_svelte_custom_element_descriptor_strings() {
     // Bind directly to the retained descriptor field the claim is about — a
     // node-count or unrelated-string oracle must not satisfy this test.
     let plain_tags = match &plain {
-        PreparedCarrier::Svelte(carrier) => &carrier.parsed.options_custom_element_text_tags,
+        PreparedCarrier::Svelte(carrier) => &carrier.parsed().options_custom_element_text_tags,
         other => panic!("expected a Svelte carrier, got {other:?}"),
     };
     let tagged_tags = match &tagged {
-        PreparedCarrier::Svelte(carrier) => &carrier.parsed.options_custom_element_text_tags,
+        PreparedCarrier::Svelte(carrier) => &carrier.parsed().options_custom_element_text_tags,
         other => panic!("expected a Svelte carrier, got {other:?}"),
     };
     assert!(
@@ -1032,7 +1032,7 @@ fn retained_weight_counts_svelte_custom_element_descriptor_strings() {
         &request,
     );
     let longer_tags = match &longer {
-        PreparedCarrier::Svelte(carrier) => &carrier.parsed.options_custom_element_text_tags,
+        PreparedCarrier::Svelte(carrier) => &carrier.parsed().options_custom_element_text_tags,
         other => panic!("expected a Svelte carrier, got {other:?}"),
     };
     assert_eq!(
@@ -1070,7 +1070,7 @@ fn v_if_modifier_spill(carrier: &PreparedCarrier) -> Option<bool> {
     let PreparedCarrier::Vue(vue) = carrier else {
         panic!("expected a Vue carrier, got {carrier:?}");
     };
-    let ast = vue.parsed.template_ast().expect("template must parse");
+    let ast = vue.parsed().template_ast().expect("template must parse");
     ast.nodes.iter().find_map(|node| match &node.kind {
         crate::ast::types::AstNodeKind::Element(element) => element
             .v_condition
@@ -1089,7 +1089,7 @@ fn v_if_modifier_spill_bytes(carrier: &PreparedCarrier) -> usize {
     let PreparedCarrier::Vue(vue) = carrier else {
         panic!("expected a Vue carrier, got {carrier:?}");
     };
-    let ast = vue.parsed.template_ast().expect("template must parse");
+    let ast = vue.parsed().template_ast().expect("template must parse");
     ast.nodes
         .iter()
         .find_map(|node| match &node.kind {
@@ -1670,23 +1670,23 @@ fn explicit_prepare_of_unsupported_svelte_product_still_parses() {
     match &prepared {
         PreparedCarrier::Svelte(carrier) => {
             assert!(
-                !carrier.parsed.template.is_empty(),
+                !carrier.parsed().template.is_empty(),
                 "ParsedSvelte::default() has an empty template — a real parse must not"
             );
             let oracle = crate::svelte::parse_svelte(SVELTE_MARKUP_ONLY);
             assert_eq!(
-                carrier.parsed.template.len(),
+                carrier.parsed().template.len(),
                 oracle.template.len(),
                 "the prepared parse must match a real parse of the same source"
             );
             assert_eq!(
-                carrier.parsed.styles.len(),
+                carrier.parsed().styles.len(),
                 oracle.styles.len(),
                 "the prepared parse must retain the real style-block count, \
                  not ParsedSvelte::default()'s zero"
             );
             assert_eq!(
-                carrier.parsed.styles.len(),
+                carrier.parsed().styles.len(),
                 1,
                 "the fixture has exactly one <style> block"
             );
@@ -1723,7 +1723,7 @@ fn vue_retained_weight_counts_the_template_arena_once_not_twice() {
         panic!("expected a Vue carrier, got {carrier:?}");
     };
     let ast = vue
-        .parsed
+        .parsed()
         .template_ast()
         .expect("the fixture has a template block");
 
@@ -1935,48 +1935,135 @@ fn compile_batch_results_follow_input_order_not_group_order() {
 
 // ── Runtime-backend delegation (catalog-selected) ───────────────────
 
-/// The immutable runtime catalog holds exactly the two registered runtime
-/// rows — Vue and Svelte — keyed adapter × epoch × Runtime, each carrying
-/// the matching backend payload. A third runtime emitter, or a row whose
-/// payload disagrees with its identity, fails here.
+/// The compiler-backend registry holds exactly the two registered rows —
+/// Vue and Svelte — keyed adapter × epoch × Runtime, each handing out only
+/// its own runtime backend. A third runtime emitter, or a row whose typed
+/// access disagrees with its identity, fails here.
 #[test]
-fn runtime_catalog_registers_exactly_the_vue_and_svelte_runtime_rows() {
-    let catalog = built_in_runtime_catalog();
-    assert_eq!(catalog.len(), 2, "exactly two runtime rows are registered");
-
-    let vue = registered_runtime_for(
-        &VueRuntimeBackend.adapter_id(),
-        &FrameworkEpochId::from_type::<VueSfcV3>(),
-    )
-    .expect("the Vue runtime row is catalog-selectable");
-    assert!(
-        matches!(vue, InstalledRuntimeBackend::Vue(_)),
-        "the Vue identity row must carry the Vue runtime backend"
+fn compiler_backend_registry_registers_exactly_the_vue_and_svelte_runtime_rows() {
+    use crate::framework_common::carrier_registry::CarrierCompilerBackendRegistry;
+    use crate::framework_common::catalog::CatalogCapability;
+    let registry = CarrierCompilerBackendRegistry::built_in();
+    assert_eq!(
+        registry.rows().count(),
+        2,
+        "exactly two compiler-backend rows are registered"
     );
 
-    let svelte = registered_runtime_for(
-        &SvelteRuntimeBackend.adapter_id(),
-        &FrameworkEpochId::from_type::<SvelteSfc5>(),
-    )
-    .expect("the Svelte runtime row is catalog-selectable");
+    let vue_carrier = carrier_profile(&VueRuntimeBackend.carrier_language_id());
+    let svelte_carrier = carrier_profile(&SvelteRuntimeBackend.carrier_language_id());
+    let vue_profile = framework_profile(&VueSfcV3::MANIFEST).expect("admitted");
+    let svelte_profile = framework_profile(&SvelteSfc5::MANIFEST).expect("admitted");
     assert!(
-        matches!(svelte, InstalledRuntimeBackend::Svelte(_)),
+        registry
+            .runtime::<VueRuntimeBackend>(&vue_carrier, &vue_profile)
+            .is_some(),
+        "the Vue identity row must carry the Vue runtime backend"
+    );
+    assert!(
+        registry
+            .runtime::<SvelteRuntimeBackend>(&svelte_carrier, &svelte_profile)
+            .is_some(),
         "the Svelte identity row must carry the Svelte runtime backend"
+    );
+    assert!(
+        registry
+            .runtime::<SvelteRuntimeBackend>(&vue_carrier, &vue_profile)
+            .is_none(),
+        "the Vue row never hands out the Svelte runtime backend"
     );
 
     // A wrong epoch is a miss, never a framework fallback.
-    assert!(registered_runtime_for(
-        &VueRuntimeBackend.adapter_id(),
-        &FrameworkEpochId::from_type::<SvelteSfc5>(),
-    )
-    .is_none());
+    assert!(registry.row_for(&vue_carrier, &svelte_profile).is_none());
 
-    for row in catalog.iter() {
-        assert_eq!(
-            row.identity().capability(),
-            crate::framework_common::catalog::CatalogCapability::Runtime
-        );
+    for row in registry.rows() {
+        assert_eq!(row.identity().capability(), CatalogCapability::Runtime);
         assert!(row.identity().host_epoch().is_none());
+        assert_eq!(
+            row.host_identity().capability(),
+            CatalogCapability::HostIntegration
+        );
+    }
+}
+
+/// Each demand enters each registry table at most once per product: the
+/// registered projection enters the frontend table once; a direct runtime
+/// compile enters the frontend table for its parse and the compiler-backend
+/// table for its runtime product; the audited compile of an admitted
+/// artifact enters only the compiler-backend table. No route performs a
+/// hidden second lookup.
+#[test]
+fn each_demand_enters_each_registry_table_once_per_product() {
+    use crate::framework_common::carrier_registry::{take_registry_dispatches, RegistryDispatches};
+    use crate::framework_common::registered_carrier_projection::parse_registered_source_for_tests;
+    use verter_language::FileLanguage;
+
+    let compiler = StandaloneCompiler;
+    let vue_runtime = vue_request(vec![CompileProduct::RuntimeClient(
+        RuntimeProductRequest::default(),
+    )]);
+    let svelte_runtime = svelte_request(vec![CompileProduct::RuntimeClient(
+        RuntimeProductRequest::default(),
+    )]);
+    let vue_grammar =
+        crate::framework_common::vue_grammar_config("{{", "}}", std::iter::empty::<&str>())
+            .expect("default Vue grammar");
+
+    let _ = take_registry_dispatches();
+    let artifact = parse_registered_source_for_tests(FileLanguage::vue(), vue_grammar, VUE_SIMPLE);
+    let projection = take_registry_dispatches();
+
+    compiler
+        .compile(VUE_SIMPLE, &vue_runtime, vue_inputs())
+        .expect("direct Vue runtime compile succeeds");
+    let vue_direct = take_registry_dispatches();
+
+    compiler
+        .compile(SVELTE_MARKUP_ONLY, &svelte_runtime, svelte_inputs())
+        .expect("direct Svelte runtime compile succeeds");
+    let svelte_direct = take_registry_dispatches();
+
+    let attempt =
+        crate::compile_transaction::CompileAttempt::enter_direct(VUE_SIMPLE, &vue_runtime, "vue");
+    let allocator = Allocator::new();
+    let audited = registered_audit_compile(
+        VUE_SIMPLE,
+        &artifact,
+        &vue_runtime,
+        LEAKED_VUE_EXECUTION_INPUTS,
+        &attempt,
+        &allocator,
+    );
+    assert!(
+        audited.is_some(),
+        "the Vue runtime backend serves the audited compile"
+    );
+    let audit = take_registry_dispatches();
+
+    let parse_only = RegistryDispatches {
+        frontend: 1,
+        ..RegistryDispatches::default()
+    };
+    let parse_and_runtime = RegistryDispatches {
+        frontend: 1,
+        backend: 1,
+        ..RegistryDispatches::default()
+    };
+    let runtime_only = RegistryDispatches {
+        backend: 1,
+        ..RegistryDispatches::default()
+    };
+    for (demand, observed, expected) in [
+        ("registered projection", projection, parse_only),
+        ("direct Vue runtime compile", vue_direct, parse_and_runtime),
+        (
+            "direct Svelte runtime compile",
+            svelte_direct,
+            parse_and_runtime,
+        ),
+        ("audited compile", audit, runtime_only),
+    ] {
+        assert_eq!(observed, expected, "{demand}");
     }
 }
 
@@ -2125,7 +2212,7 @@ fn direct_runtime_output_is_the_backend_parsed_core_output() {
     let via_route = StandaloneCompiler
         .compile(VUE_LARGE, &request, vue_inputs())
         .expect("direct dual-runtime compile succeeds");
-    let parsed = crate::compile::parse_sfc(VUE_LARGE, None, None);
+    let parsed = crate::framework_common::vue_bridge::parse_sfc(VUE_LARGE, None, None);
     let mut attempt =
         crate::compile_transaction::CompileAttempt::enter_direct(VUE_LARGE, &request, "vue");
     attempt.stage_vue_macro_semantics(LEAKED_VUE_MACROS.clone());
@@ -2450,5 +2537,80 @@ fn a_prepared_compile_whose_parse_was_refused_is_the_typed_refusal() {
                 batch.results[0].as_ref().err()
             );
         }
+    }
+}
+
+#[test]
+fn direct_compile_and_prepare_consume_one_admitted_frontend_parse() {
+    use crate::framework_common::registered_carrier_projection::registered_frontend_parse_count;
+    let compiler = StandaloneCompiler;
+    let vue = vue_request(vec![CompileProduct::RuntimeClient(
+        RuntimeProductRequest::default(),
+    )]);
+    let svelte = svelte_request(vec![CompileProduct::RuntimeClient(
+        RuntimeProductRequest::default(),
+    )]);
+    for (source, request, inputs) in [
+        (VUE_SIMPLE, &vue, vue_inputs()),
+        (SVELTE_MARKUP_ONLY, &svelte, svelte_inputs()),
+    ] {
+        let before = registered_frontend_parse_count();
+        let _ = compiler.compile(source, request, inputs);
+        assert_eq!(
+            registered_frontend_parse_count() - before,
+            1,
+            "a direct compile parses once, through the catalog frontend"
+        );
+        let before = registered_frontend_parse_count();
+        let _prepared = compiler.prepare(source, request);
+        assert_eq!(
+            registered_frontend_parse_count() - before,
+            1,
+            "a preparation parses once, through the catalog frontend"
+        );
+    }
+}
+
+#[test]
+fn an_untokenizable_vue_delimiter_pair_is_a_typed_refusal_on_every_route() {
+    let compiler = StandaloneCompiler;
+    let request = vue_request_with_delimiters(
+        vec![CompileProduct::RuntimeClient(
+            RuntimeProductRequest::default(),
+        )],
+        Some(("", "")),
+    );
+    let direct = compiler
+        .compile(VUE_SIMPLE, &request, vue_inputs())
+        .expect_err("an empty delimiter pair cannot be tokenized");
+    assert!(
+        matches!(direct, DirectCompileError::SyntaxRejected(_)),
+        "{direct:?}"
+    );
+    let prepared = compiler.prepare(VUE_SIMPLE, &request);
+    let replayed = compiler
+        .compile_prepared(VUE_SIMPLE, &prepared, &request, vue_inputs())
+        .expect_err("the prepared refusal is reported at compile time");
+    assert_eq!(replayed, direct);
+}
+
+#[test]
+fn vue_self_closing_template_v_if_with_v_else_prepares_every_producible_product() {
+    let compiler = StandaloneCompiler;
+    let src = "<script setup lang=\"ts\">\nconst c = false;\n</script>\n<template><div><template v-if=\"c\" /><p v-else>a</p></div></template>";
+    for kind in [
+        ProductKind::RuntimeClient,
+        ProductKind::RuntimeServer,
+        ProductKind::IdeCompanion,
+        ProductKind::Declarations,
+    ] {
+        let request = vue_request(vec![product_for(kind)]);
+        let output = compiler
+            .compile(src, &request, vue_inputs())
+            .unwrap_or_else(|e| panic!("{kind:?} must compile an empty template branch: {e:?}"));
+        assert!(
+            output.artifact(kind).is_some(),
+            "{kind:?} published no artifact"
+        );
     }
 }

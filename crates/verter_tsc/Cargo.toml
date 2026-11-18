@@ -23,6 +23,11 @@ required-features = ["test-fake-engine"]
 
 [features]
 test-fake-engine = ["verter_tsgo_api/test-fake-engine"]
+# TEST-ONLY qualification of the SFC projection driver: exposes the hidden
+# `--projection-route`, `--watch` and `--content-mapper` entries. Never
+# built by a default/release build: enabled only by this crate's own test
+# builds through the dev-dependency on itself below.
+projection-route-qualification = []
 # Default-off measurement opt-in: forwards the session's optional provenance
 # counters so the instrumentation lane runs this crate's counter assertions.
 semantic-observe = ["verter_session/semantic-observe"]
@@ -53,13 +58,19 @@ tempfile = "3.27"
 base64 = "0.23.1"
 oxc_sourcemap = "9.0.0"
 walkdir = "2.5"
+# Operating-system file change events for `--watch`.
+notify = "8.2.2"
 # One-shot runtime to drive the async `TsgoClient` from the sync CLI.
 tokio = { version = "1.54", features = ["rt", "rt-multi-thread", "io-util", "process", "net", "time", "sync"] }
 
 [dev-dependencies]
+verter_session = { path = "../verter_session", features = ["test-util"] }
 verter_test_support = { path = "../verter_test_support" }
 # Stack-reservation fault injection, for the checker's stack-refusal tests.
 verter_parser = { path = "../verter_parser", features = ["stack-fault-injection"] }
+# Registered source and carrier grammar authorities, to build the parse
+# artifacts the projection checks compose.
+verter_language = { path = "../verter_language" }
 verter_macro_dto = { path = "../verter_macro_dto" }
 # Self dev-dependency: enables `test-fake-engine` for THIS crate's test builds
 # only, so the fake-engine shim bin exists for `cargo test` (CARGO_BIN_EXE_)
@@ -67,4 +78,4 @@ verter_macro_dto = { path = "../verter_macro_dto" }
 # "ignoring invalid dependency … missing a lib target" warning for this
 # bin-only crate's self-dep — the feature activation it performs is exactly
 # what the test lane needs, and there is no lib to link either way.
-verter_tsc = { path = ".", features = ["test-fake-engine"] }
+verter_tsc = { path = ".", features = ["test-fake-engine", "projection-route-qualification"] }

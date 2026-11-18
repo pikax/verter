@@ -39,12 +39,17 @@ use verter_ffi::types::*;
 use verter_session as host;
 use verter_type_expr::TypeExpr;
 
+use crate::block_override_refusal::{block_override_error, error_with_text_code};
+
 mod audit;
+mod block_override_refusal;
 mod compile_request_response;
 mod host_compile_request;
 #[cfg(test)]
 mod host_compile_request_tests;
 pub mod host_compile_request_ts;
+#[cfg(test)]
+mod host_identity_bindings_tests;
 mod js_value_graph;
 mod memory_audit;
 mod meta;
@@ -746,6 +751,43 @@ fn to_napi_v_bind_vars(vars: Vec<verter_compiler::style_planner::VBindVar>) -> V
         .collect()
 }
 
+/// Normalize a path or bundler request id to the host's canonical id: forward
+/// slashes, a lower-case Windows drive letter, no Windows extended-length
+/// prefix, and no query or virtual-file suffix. For an id with no host yet;
+/// with a host in hand, `upsert(...).canonicalId` / `resolve(...).canonicalId`
+/// answer the same.
+#[napi(js_name = "canonicalizeId")]
+pub fn canonicalize_id(raw: String) -> String {
+    host::canonicalize_id(&raw).into_owned()
+}
+
+/// A raw request id as the host's id grammar reads it, with no host: the
+/// node it names, its marker, language, `scoped`, raw path and custom block
+/// type, or the grammar's typed rejection. It carries no canonical id and no
+/// host metadata; `VerterHost.resolve` adds those.
+#[napi(js_name = "parseRequestId")]
+pub fn parse_request_id(raw: String) -> Either<NapiParsedRequestId, NapiRejectedId> {
+    match host::parse_raw_id(&raw) {
+        Ok(parsed) => Either::A(NapiParsedRequestId {
+            nodeKind: host_node_kind_to_napi(&parsed.node_kind),
+            marker: parsed.marker.map(|marker| marker.as_str().to_owned()),
+            lang: parsed.lang,
+            scoped: parsed.scoped,
+            rawPath: parsed.raw_path,
+            blockType: parsed.block_type,
+        }),
+        Err(rejected) => Either::B(host_rejected_id_to_napi(rejected)),
+    }
+}
+
+/// The host's block-content hash token of `code` (UTF-8 bytes): the token a
+/// block override's `codeHash` / `sourceMapHash` must carry.
+#[napi(js_name = "hashBlockContent")]
+pub fn hash_block_content(code: Buffer) -> Result<String> {
+    let code = buffer_to_string(code)?;
+    Ok(host::hash_block_content(&code).into_string())
+}
+
 #[napi(object)]
 #[derive(Default)]
 pub struct PrepareStyleForPreprocessorOptions {
@@ -1001,7 +1043,7 @@ pub fn parse_selector_thread_invocations() -> f64 {
 // =============================================================================
 
 #[napi(object)]
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct NapiHostConfig {
     pub devMode: Option<bool>,
     pub compileErrorPolicy: Option<String>,
@@ -1047,6 +1089,21 @@ pub struct NapiHostConfig {
     /// and WebAssembly carriers use, so an invalid combination cannot
     /// reach a request.
     pub frameworks: Option<Vec<String>>,
+    /// Extra carrier suffixes for this host: `{ suffix: ".md", framework:
+    /// "vue" }` makes this host read `.md` files as Vue carriers. Other
+    /// hosts and the built-in suffixes are unaffected; a suffix that already
+    /// has a language, or an unknown framework, rejects construction.
+    pub carrierExtensions: Option<Vec<NapiCarrierExtension>>,
+}
+
+/// One extra carrier suffix of a host and the framework it belongs to.
+#[napi(object)]
+#[derive(Clone)]
+pub struct NapiCarrierExtension {
+    /// The file suffix, with or without its dot (`".md"`).
+    pub suffix: String,
+    /// The framework name, as `frameworks` spells it (`"vue"`).
+    pub framework: String,
 }
 
 impl From<NapiHostConfig> for FfiHostConfig {
@@ -1077,11 +1134,20 @@ impl From<NapiHostConfig> for FfiHostConfig {
 /// other carriers do.
 fn apply_framework_options(
     host_config: &mut host::HostConfig,
-    frameworks: Option<&[String]>,
+    config: &NapiHostConfig,
 ) -> Result<()> {
-    if let Some(names) = frameworks {
+    if let Some(names) = &config.frameworks {
         host_config.framework =
             host::framework::FrameworkOptions::admitting_names(names).map_err(ffi_err)?;
+    }
+    if let Some(extensions) = &config.carrierExtensions {
+        host_config.framework = std::mem::take(&mut host_config.framework)
+            .with_carrier_extensions(
+                extensions
+                    .iter()
+                    .map(|extension| (&extension.suffix, &extension.framework)),
+            )
+            .map_err(ffi_err)?;
     }
     Ok(())
 }
@@ -1335,6 +1401,9 @@ pub struct NapiResolvedExport {
 #[napi(object)]
 pub struct NapiUpdateResult {
     pub canonicalId: String,
+    /// The host's whole-content hash of the registered source (32 lower-case
+    /// hex characters). Equal for every commit of the same bytes.
+    pub contentHash: String,
     pub changed: bool,
     pub sliceChanges: NapiSliceChanges,
     pub changedVirtualNodes: Vec<NapiVirtualNodeKind>,
@@ -1377,6 +1446,50 @@ pub struct NapiResolvedId {
     pub existsInHost: bool,
     pub bundlerId: String,
     pub lspId: String,
+    /// `"vue"` or `"verter"`; absent for a main request and an LSP-format id.
+    pub marker: Option<String>,
+    /// The language the request names; may be dotted (`module.css`).
+    pub lang: Option<String>,
+    pub scoped: bool,
+    /// The raw id up to its query or virtual-file suffix, as received.
+    pub rawPath: String,
+    /// The block type of a custom block request; absent for every other node.
+    pub blockType: Option<String>,
+}
+
+/// A raw request id as the id grammar reads it, with no host.
+#[napi(object)]
+pub struct NapiParsedRequestId {
+    pub nodeKind: NapiVirtualNodeKind,
+    /// `"vue"` or `"verter"`; absent for a main request and an LSP-format id.
+    pub marker: Option<String>,
+    /// The language the request names; may be dotted (`module.css`).
+    pub lang: Option<String>,
+    pub scoped: bool,
+    /// The raw id up to its query or virtual-file suffix, as received.
+    pub rawPath: String,
+    /// The block type of a custom block request; absent for every other node.
+    pub blockType: Option<String>,
+}
+
+/// A raw import id the host's id grammar rejects.
+#[napi(object)]
+pub struct NapiRejectedId {
+    /// `both-markers`, `marker-without-type`, `repeated-owned-key`,
+    /// `invalid-index` or `unknown-virtual-suffix`.
+    pub rejected: String,
+    /// The raw id up to its query or virtual-file suffix, as received.
+    pub rawPath: String,
+    /// The single marker the request carries, when it carries one kind.
+    pub marker: Option<String>,
+}
+
+fn host_rejected_id_to_napi(rejected: host::RejectedRawId) -> NapiRejectedId {
+    NapiRejectedId {
+        rejected: rejected.reason.code().to_owned(),
+        rawPath: rejected.raw_path,
+        marker: rejected.marker.map(|marker| marker.as_str().to_owned()),
+    }
 }
 
 #[napi(object)]
@@ -1449,11 +1562,14 @@ pub struct NapiCompileRequestVirtualNode {
 /// Complete response for one typed request.
 #[napi(object, object_from_js = false)]
 #[derive(ts_rs::TS)]
-#[ts(rename = "HostCompileResponse")]
+#[ts(rename = "HostCompileResponse", optional_fields)]
 pub struct NapiCompileRequestResponse {
     pub canonicalId: String,
     pub diagnostics: NapiDiagnosticsSnapshot,
     pub products: Vec<NapiCompiledProduct>,
+    /// The compile's complete artifact set as terminal JSON, present
+    /// exactly when the compile published one.
+    pub artifactSet: Option<String>,
 }
 
 /// TSC output for TypeScript declaration generation (macro-extraction only).
@@ -1960,10 +2076,47 @@ fn host_module_reference_to_napi(
     })
 }
 
+/// The resolution context a binding's `resolveImport(importer, specifier,
+/// phase?, kind?)` names: phase `"codegen"` (default) or `"provider"`; kind
+/// `"esm"` (default), `"type"`, `"require"` or `"src"`.
+fn resolution_context_from_napi(
+    phase: Option<&str>,
+    kind: Option<&str>,
+) -> verter_session_query::resolution::ResolutionContext {
+    use verter_session_query::resolution::{ResolvePhase, ResolveRequestKind};
+    let phase = match phase {
+        Some("provider") => ResolvePhase::ProviderGraph,
+        _ => ResolvePhase::CodegenBlocker,
+    };
+    let kind = match kind {
+        Some("type") => ResolveRequestKind::TypeImport,
+        Some("require") => ResolveRequestKind::RequireCall,
+        Some("src") => ResolveRequestKind::SfcSrcAttr,
+        _ => ResolveRequestKind::EsmImport,
+    };
+    verter_session_query::resolution::ResolutionContext { phase, kind }
+}
+
+/// The host's whole-content hash of `canonical_id`, rendered for the wire.
+///
+/// Read right after the update that registered the source, so a missing hash
+/// means the host lost the file it just accepted: refused, never invented.
+fn registered_content_hash(host: &host::VerterHost, canonical_id: &str) -> Result<String> {
+    host.get_whole_hash(canonical_id)
+        .map(|hash| host::format_hash16_hex(&hash))
+        .ok_or_else(|| {
+            Error::new(
+                Status::GenericFailure,
+                format!("the host holds no content hash for '{canonical_id}' after its update"),
+            )
+        })
+}
+
 /// Module-reference spans are structural facts of the result: one that cannot
 /// be converted exactly against `source` refuses the whole conversion.
 fn host_update_to_napi(
     input: host::HostUpdateResult,
+    content_hash: String,
     source: Option<&str>,
 ) -> Result<NapiUpdateResult> {
     let spans = verter_ffi::convert::SpanConverter::new(source);
@@ -1980,6 +2133,7 @@ fn host_update_to_napi(
         })?;
     Ok(NapiUpdateResult {
         canonicalId: input.canonical_id,
+        contentHash: content_hash,
         changed: input.changed,
         sliceChanges: NapiSliceChanges {
             scriptChanged: input.slice_changes.script_changed,
@@ -2172,6 +2326,20 @@ fn host_resolved_id_to_napi(input: host::ResolvedId) -> NapiResolvedId {
         existsInHost: input.exists_in_host,
         bundlerId: input.bundler_id,
         lspId: input.lsp_id,
+        marker: input.marker.map(|marker| marker.as_str().to_owned()),
+        lang: input.lang,
+        scoped: input.scoped,
+        rawPath: input.raw_path,
+        blockType: input.block_type,
+    }
+}
+
+fn host_resolve_outcome_to_napi(
+    input: std::result::Result<host::ResolvedId, host::RejectedRawId>,
+) -> Either<NapiResolvedId, NapiRejectedId> {
+    match input {
+        Ok(resolved) => Either::A(host_resolved_id_to_napi(resolved)),
+        Err(rejected) => Either::B(host_rejected_id_to_napi(rejected)),
     }
 }
 
@@ -2367,6 +2535,14 @@ impl NapiWorkspace {
         Ok(self.inner.realpath(&path))
     }
 
+    /// Whether the workspace classifies `canonicalId` as package-backed
+    /// (owned by an installed package, not by a workspace project).
+    #[napi(js_name = "isPackageBacked")]
+    pub fn is_package_backed(&self, canonical_id: String) -> bool {
+        use verter_workspace::WorkspaceRead;
+        self.inner.is_package_backed(&canonical_id)
+    }
+
     /// Resolve an import specifier with context.
     #[napi(js_name = "resolveImport")]
     pub async fn resolve_import(
@@ -2377,17 +2553,7 @@ impl NapiWorkspace {
         kind: Option<String>,
     ) -> Result<Option<String>> {
         use verter_workspace::WorkspaceRead;
-        let phase = match phase.as_deref() {
-            Some("provider") => verter_session_query::resolution::ResolvePhase::ProviderGraph,
-            _ => verter_session_query::resolution::ResolvePhase::CodegenBlocker,
-        };
-        let kind = match kind.as_deref() {
-            Some("type") => verter_session_query::resolution::ResolveRequestKind::TypeImport,
-            Some("require") => verter_session_query::resolution::ResolveRequestKind::RequireCall,
-            Some("src") => verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
-            _ => verter_session_query::resolution::ResolveRequestKind::EsmImport,
-        };
-        let ctx = verter_session_query::resolution::ResolutionContext { phase, kind };
+        let ctx = resolution_context_from_napi(phase.as_deref(), kind.as_deref());
         Ok(self
             .inner
             .resolve_import(&importer, &specifier, ctx)
@@ -2459,10 +2625,9 @@ impl NapiVerterHost {
     pub fn new(config: Option<NapiHostConfig>) -> Result<Self> {
         let config = config.unwrap_or_default();
         let scheduler_config = scheduler_config_from_napi(&config);
-        let frameworks = config.frameworks.clone();
-        let ffi_config: FfiHostConfig = config.into();
-        let mut host_config = ffi_config_to_host(ffi_config).map_err(ffi_err)?;
-        apply_framework_options(&mut host_config, frameworks.as_deref())?;
+        let mut host_config =
+            ffi_config_to_host(FfiHostConfig::from(config.clone())).map_err(ffi_err)?;
+        apply_framework_options(&mut host_config, &config)?;
         Ok(Self {
             inner: std::sync::Arc::new(host::VerterHost::new_standalone_with_scheduler_config(
                 host_config,
@@ -2483,10 +2648,9 @@ impl NapiVerterHost {
     ) -> Result<Self> {
         let config = config.unwrap_or_default();
         let scheduler_config = scheduler_config_from_napi(&config);
-        let frameworks = config.frameworks.clone();
-        let ffi_config: FfiHostConfig = config.into();
-        let mut host_config = ffi_config_to_host(ffi_config).map_err(ffi_err)?;
-        apply_framework_options(&mut host_config, frameworks.as_deref())?;
+        let mut host_config =
+            ffi_config_to_host(FfiHostConfig::from(config.clone())).map_err(ffi_err)?;
+        apply_framework_options(&mut host_config, &config)?;
         Ok(Self {
             inner: std::sync::Arc::new(host::VerterHost::new_with_scheduler_config(
                 host_config,
@@ -2496,14 +2660,41 @@ impl NapiVerterHost {
         })
     }
 
-    /// Resolves a raw import ID (e.g. `./Foo.vue?type=style&index=0`) into its
-    /// canonical ID, virtual node kind, and bundler/LSP identifiers.
+    /// The bundler id of `node` of a carrier, in `lang` (which may be
+    /// dotted, as in `module.css`) when given. The marker comes from the
+    /// host's metadata when it holds the carrier, else from the language it
+    /// classifies the carrier as.
+    #[napi(js_name = "renderBundlerId")]
+    pub fn render_bundler_id(
+        &self,
+        canonical_id: String,
+        node: NapiVirtualNodeKind,
+        lang: Option<String>,
+    ) -> Result<String> {
+        let node = ffi_node_kind_to_host(node.into()).map_err(ffi_err)?;
+        Ok(self
+            .inner
+            .render_bundler_id(&canonical_id, &node, lang.as_deref()))
+    }
+
+    /// Whether this host reads `path` as a framework carrier: a built-in
+    /// carrier extension, or one of the `carrierExtensions` it was built with.
+    #[napi(js_name = "isCarrierSourcePath")]
+    pub fn is_carrier_source_path(&self, path: String) -> bool {
+        self.inner
+            .language_classifier()
+            .classify_registered(&host::canonicalize_id(&path))
+            .is_some_and(|language| language.is_framework_carrier())
+    }
+
+    /// Resolves a raw import ID (e.g. `./Foo.vue?vue&type=style&index=0`) into its
+    /// canonical ID, virtual node kind, request facets, and bundler/LSP identifiers.
     ///
-    /// Returns `None` if the ID does not match any file tracked by this host.
+    /// A raw ID the id grammar rejects resolves to `{ rejected: <code> }`.
     #[napi]
-    pub fn resolve(&self, raw_id: String) -> Result<Option<NapiResolvedId>> {
+    pub fn resolve(&self, raw_id: String) -> Result<Either<NapiResolvedId, NapiRejectedId>> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
-            self.inner.resolve(&raw_id).map(host_resolved_id_to_napi)
+            host_resolve_outcome_to_napi(self.inner.resolve(&raw_id))
         }))
     }
 
@@ -2533,10 +2724,26 @@ impl NapiVerterHost {
             file_kind: request.fileKind,
             aliases: request.aliases,
         };
-        let host_req = ffi_upsert_to_host(ffi_req).map_err(ffi_err)?;
-        catch_panic(std::panic::AssertUnwindSafe(|| self.inner.upsert(host_req)))?
-            .map_err(host_error)
-            .and_then(|result| host_update_to_napi(result, Some(source_for_spans.as_str())))
+        let infer_language = ffi_req.file_kind.is_none();
+        let mut host_req = ffi_upsert_to_host(ffi_req).map_err(ffi_err)?;
+        if infer_language {
+            // A carrier extension this host was built with reads as its
+            // framework's carrier; the static registry does not know it.
+            let canonical = host_req.canonical_id.clone();
+            let path = canonical.as_deref().unwrap_or(&host_req.input_id);
+            if let Some(language) = self
+                .inner
+                .language_classifier()
+                .classify_registered(&host::canonicalize_id(path))
+                .filter(host::FileLanguage::is_framework_carrier)
+            {
+                host_req.file_language = language;
+            }
+        }
+        let result = catch_panic(std::panic::AssertUnwindSafe(|| self.inner.upsert(host_req)))?
+            .map_err(host_error)?;
+        let content_hash = registered_content_hash(&self.inner, &result.canonical_id)?;
+        host_update_to_napi(result, content_hash, Some(source_for_spans.as_str()))
     }
 
     /// Execute one typed compile request against an already-registered source.
@@ -2948,7 +3155,7 @@ impl NapiVerterHost {
     pub fn apply_block_overrides(
         &self,
         request: NapiBlockOverrideRequest,
-    ) -> Result<NapiUpdateResult> {
+    ) -> Result<NapiUpdateResult, String> {
         let canonical_for_source = request.canonicalId.clone();
         let overrides = request
             .overrides
@@ -2999,18 +3206,23 @@ impl NapiVerterHost {
                     supplied_provenance: e.suppliedProvenance,
                 })
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()
+            .map_err(error_with_text_code)?;
         let ffi_req = FfiBlockOverrideRequest {
             canonical_id: request.canonicalId,
             overrides,
         };
-        let host_req = ffi_block_override_to_host(ffi_req).map_err(ffi_err)?;
+        let host_req =
+            ffi_block_override_to_host(ffi_req).map_err(|e| error_with_text_code(ffi_err(e)))?;
         let result = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner.apply_block_overrides(host_req)
-        }))?
-        .map_err(host_error)?;
+        }))
+        .map_err(error_with_text_code)?
+        .map_err(block_override_error)?;
         let source = self.inner.get_source(&canonical_for_source);
-        host_update_to_napi(result, source.as_deref())
+        let content_hash = registered_content_hash(&self.inner, &result.canonical_id)
+            .map_err(error_with_text_code)?;
+        host_update_to_napi(result, content_hash, source.as_deref()).map_err(error_with_text_code)
     }
 
     /// Retrieves a single compiled virtual file (script, template, or style).
@@ -3033,7 +3245,7 @@ impl NapiVerterHost {
         let canonical_for_source = if let Some(canonical) = query.canonicalId.as_ref() {
             Some(canonical.clone())
         } else if let Some(raw_id) = query.rawId.as_ref() {
-            self.inner.resolve(raw_id).map(|r| r.canonical_id)
+            self.inner.resolve(raw_id).ok().map(|r| r.canonical_id)
         } else {
             None
         };
@@ -3115,13 +3327,34 @@ impl NapiVerterHost {
     }
 
     /// Returns the registered content-free carrier structure as JSON.
+    ///
+    /// `encoding` names the unit of every range: `"utf8.v1"` (the default)
+    /// keeps registered UTF-8 bytes, `"utf16.v1"` returns JavaScript string
+    /// offsets. Any other tag is refused before the structure is read, and a
+    /// range that cannot be converted exactly refuses the whole structure.
     #[napi(js_name = "getDocumentStructure")]
-    pub fn get_document_structure(&self, canonical_or_alias: String) -> Result<Option<String>> {
+    pub fn get_document_structure(
+        &self,
+        canonical_or_alias: String,
+        encoding: Option<String>,
+    ) -> Result<Option<String>> {
+        let encoding = encoding
+            .as_deref()
+            .map(parse_request_encoding_tag)
+            .transpose()
+            .map_err(ffi_err)?
+            .unwrap_or(SpanEncodingTag::Utf8);
         catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner
                 .registered_file_structure(&canonical_or_alias)
                 .map(|structure| {
-                    let projected = registered_structure_to_ffi(&structure);
+                    let projected =
+                        registered_structure_to_ffi_in(&structure, encoding).map_err(|error| {
+                            Error::new(
+                                Status::GenericFailure,
+                                format!("structure range conversion refused: {error}"),
+                            )
+                        })?;
                     serde_json::to_string(&projected).map_err(|error| {
                         Error::new(
                             Status::GenericFailure,
@@ -3359,18 +3592,20 @@ impl NapiVerterHost {
         }))
     }
 
-    /// Resolve an import specifier through the host's resolution chain.
-    ///
-    /// Uses VFS-first-then-fallback pattern (same as internal resolution).
+    /// Resolve an import specifier through the host's resolution chain,
+    /// under the given phase (`"codegen"` default, `"provider"`) and request
+    /// kind (`"esm"` default, `"type"`, `"require"`, `"src"`).
     #[napi(js_name = "resolveImport")]
     pub fn resolve_import_napi(
         &self,
         importer: String,
         specifier: String,
-        #[napi(ts_arg_type = "string | undefined")] _phase: Option<String>,
-        #[napi(ts_arg_type = "string | undefined")] _kind: Option<String>,
+        #[napi(ts_arg_type = "string | undefined")] phase: Option<String>,
+        #[napi(ts_arg_type = "string | undefined")] kind: Option<String>,
     ) -> Option<String> {
-        self.inner.resolve_import(&importer, &specifier)
+        let ctx = resolution_context_from_napi(phase.as_deref(), kind.as_deref());
+        self.inner
+            .resolve_import_in_context(&importer, &specifier, ctx)
     }
 
     /// Returns a snapshot of host performance metrics.
@@ -4446,6 +4681,7 @@ mod tests {
                 canonical_id: canonical_id.to_string(),
                 diagnostics: host::DiagnosticsSnapshot::default(),
                 products: Vec::new(),
+                artifact_set: None,
             }),
         }
     }
@@ -4544,6 +4780,7 @@ mod tests {
                 kind: verter_compiler::compile_request::ProductKind::Analysis,
                 nodes: Vec::new(),
             }],
+            artifact_set: None,
         };
 
         let error = match compile_request_response_to_napi(response, "") {
@@ -4914,6 +5151,7 @@ mod tests {
                 }],
                 ..host::HostUpdateResult::no_change("/test/App.vue".to_string())
             },
+            "0".repeat(32),
             Some("const x = import(`./${name}.vue`)"),
         )
         .expect("module reference spans convert");
@@ -4949,7 +5187,9 @@ mod tests {
             "barrel file must produce export signatures"
         );
 
-        let result = host_update_to_napi(host_result, Some(barrel_source)).expect("spans convert");
+        let content_hash = registered_content_hash(&h, "/src/barrel.ts").expect("registered");
+        let result = host_update_to_napi(host_result, content_hash, Some(barrel_source))
+            .expect("spans convert");
 
         // Positive: re-export signatures mapped with camelCase fields
         let button = result.exportSignatures.iter().find(|s| s.name == "Button");
@@ -4979,7 +5219,9 @@ mod tests {
             })
             .unwrap();
 
-        let result = host_update_to_napi(host_result, None).expect("no spans to convert");
+        let content_hash = registered_content_hash(&h, "/src/utils.ts").expect("registered");
+        let result =
+            host_update_to_napi(host_result, content_hash, None).expect("no spans to convert");
 
         let greet = result.exportSignatures.iter().find(|s| s.name == "greet");
         assert!(greet.is_some(), "local export must be present");
@@ -4996,6 +5238,7 @@ mod tests {
     fn host_update_to_napi_export_signatures_empty_on_no_change() {
         let result = host_update_to_napi(
             host::HostUpdateResult::no_change("/src/Empty.vue".to_string()),
+            "0".repeat(32),
             None,
         )
         .expect("nothing to convert");
@@ -5575,5 +5818,69 @@ mod framework_options_carrier_tests {
             .expect("default construction");
         extensions.sort_unstable();
         assert_eq!(extensions, vec!["svelte", "vue"]);
+    }
+
+    /// `carrierExtensions` makes the host it builds read `.md` as a Vue
+    /// carrier, both when asked and when a file is registered without a
+    /// kind; another host and an unregistered extension are unaffected.
+    #[test]
+    fn napi_carrier_extensions_read_as_carriers_on_that_host_only() {
+        let with_md = NapiVerterHost::new(Some(NapiHostConfig {
+            carrierExtensions: Some(vec![NapiCarrierExtension {
+                suffix: ".md".to_string(),
+                framework: "vue".to_string(),
+            }]),
+            ..NapiHostConfig::default()
+        }))
+        .expect("md as a Vue carrier");
+        let built_in = NapiVerterHost::new(None).expect("default construction");
+        assert!(with_md.is_carrier_source_path("/docs/Guide.md".to_string()));
+        assert!(!with_md.is_carrier_source_path("/docs/Guide.mdx".to_string()));
+        assert!(!built_in.is_carrier_source_path("/docs/Guide.md".to_string()));
+
+        let update = with_md
+            .upsert(NapiUpsertRequest {
+                canonicalId: None,
+                inputId: "/docs/Guide.md".to_string(),
+                source: Buffer::from(b"<template><p>guide</p></template>".to_vec()),
+                fileKind: None,
+                aliases: None,
+            })
+            .expect("the md carrier registers");
+        assert!(
+            update
+                .changedVirtualNodes
+                .iter()
+                .any(|node| node.kind == "template"),
+            "the md file parsed as a Vue carrier"
+        );
+        assert!(
+            update
+                .changedVirtualIds
+                .iter()
+                .any(|id| id == "/docs/Guide.md?vue&type=template"),
+            "a registered Vue suffix renders the vue marker: {:?}",
+            update.changedVirtualIds
+        );
+
+        let request = "/docs/Other.md?vue&type=template".to_string();
+        let rendered = |host: &NapiVerterHost| match host.resolve(request.clone()) {
+            Ok(Either::A(resolved)) => resolved.bundlerId,
+            _ => panic!("the request resolves"),
+        };
+        assert_eq!(rendered(&with_md), "/docs/Other.md?vue&type=template");
+        assert_eq!(rendered(&built_in), "/docs/Other.md?verter&type=template");
+    }
+
+    #[test]
+    fn napi_carrier_extensions_refuse_a_taken_extension() {
+        let refused = NapiVerterHost::new(Some(NapiHostConfig {
+            carrierExtensions: Some(vec![NapiCarrierExtension {
+                suffix: ".ts".to_string(),
+                framework: "vue".to_string(),
+            }]),
+            ..NapiHostConfig::default()
+        }));
+        assert!(refused.is_err(), "ts already has a language");
     }
 }

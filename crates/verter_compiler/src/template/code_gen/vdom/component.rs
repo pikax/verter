@@ -4,8 +4,8 @@
 //! dynamic component handling, and PascalCase conversion.
 
 use crate::ast::types::ElementNode;
-use crate::template::code_gen::binding::BindingResolver;
-use crate::template::code_gen::vapor::find_prop_oxc_exp;
+use crate::template::binding::prefixed_expr::find_prop_oxc_exp;
+use crate::template::binding::BindingResolver;
 use crate::template::oxc::types::OxcParsedElement;
 
 use super::super::shared::helpers::{is_builtin_component, VdomHelper};
@@ -242,5 +242,5 @@ pub(super) fn resolve_dynamic_component<'a>(
 
 /// Convert a kebab-case or camelCase string to PascalCase.
 pub(crate) fn to_pascal_case(s: &str) -> String {
-    super::super::shared::helpers::to_pascal_case(s)
+    crate::template::vue_syntax::to_pascal_case(s)
 }

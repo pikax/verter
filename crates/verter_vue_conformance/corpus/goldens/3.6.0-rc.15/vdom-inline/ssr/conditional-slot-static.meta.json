@@ -1,0 +1,82 @@
+{
+  "schema": 2,
+  "caseId": "ssr/conditional-slot-static",
+  "backend": "vdom",
+  "topology": "inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/conditional-slot-static.vue",
+    "sha256": "ea6840d458d7a7feb5585193ab1320acaf7ba4ce78eabe080de9ffda7250f32b"
+  },
+  "options": {
+    "sha256": "3c0f56c97638e292b26f301cc7928b7827e5dfc513bd3a0e1f7df49bbdb14201",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/ssr/conditional-slot-static.vue",
+      "id": "ssr/conditional-slot-static",
+      "pipeline": "compileScript:inlineTemplate",
+      "topology": "inline",
+      "inlineTemplate": true,
+      "bindingMetadata": false,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/vdom-inline/ssr/conditional-slot-static.js",
+      "sha256": "0db87a15d7b0adc3c8f10ef94d52753bb9b09f0a6cdbbbfde02c4be464b211f4",
+      "bytes": 951
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/vdom-inline/ssr/conditional-slot-static.map.json",
+      "sha256": "61ffc7235317644c05f770af92ad65e208f88da703e475a2a7947ee3f16ace8d"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createBlock",
+      "alias": "_createBlock"
+    },
+    {
+      "imported": "createSlots",
+      "alias": "_createSlots"
+    },
+    {
+      "imported": "createTextVNode",
+      "alias": "_createTextVNode"
+    },
+    {
+      "imported": "defineComponent",
+      "alias": "_defineComponent"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "withCtx",
+      "alias": "_withCtx"
+    }
+  ]
+}

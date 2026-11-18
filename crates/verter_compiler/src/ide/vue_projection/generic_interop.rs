@@ -6,12 +6,15 @@
 //! signature relationships within the reflection limits described below:
 //!
 //! - [`ForeignComponentContractAdapter`] — the construction's callee. It
-//!   hands TypeScript the component's own contract first and an
-//!   attribute-tolerant signature second, as one intersection, so ordinary
-//!   overload resolution picks the first signature that accepts the use:
-//!   - a typed constructor (a generated SFC default, a hand-written
-//!     declaration, `defineComponent` over a setup function) is passed
-//!     through unchanged, so every construct overload and every binder —
+//!   uses the existing attribute-tolerant signature alone when the signature
+//!   walk exhausts the exact contract after one concrete construct signature.
+//!   This keeps prop errors as assignability diagnostics. Otherwise it hands
+//!   TypeScript the component's own contract first and the tolerant signature
+//!   second, so overload resolution preserves generic relationships:
+//!   - a typed constructor carrying generic or overload relationships
+//!     (a generated SFC default, a hand-written declaration,
+//!     `defineComponent` over a setup function) is passed through unchanged,
+//!     so every construct overload and every binder —
 //!     constraints, defaults, `const`, variadic and dependent parameters —
 //!     stays TypeScript's to resolve, with no fixed overload count;
 //!     a generic rest constructor whose instance carries its inferred tuple
@@ -52,6 +55,9 @@
 //!   props behind an open-argument one) is the fallback only, never
 //!   part of a rebuilt overload: an undeclared fallthrough attribute is not
 //!   an excess-key error, while an exact overload always wins over it.
+//!   Public-default mode uses that same signature walk to retain a callable
+//!   or constructor verbatim, and wraps only signature-less Options values
+//!   over Vue's `ComponentInstance` through the existing construct primitive.
 //! - [`AdvancedGenericUseProjection`] — every use of a parent carrier,
 //!   rendered through the adapter inside one scope over the parent's
 //!   authored `generic` binder, so a parent parameter forwarded to a child
@@ -76,13 +82,14 @@ use crate::ide::vue_projection::public_constructor::{
     render_binder_list, BinderSite, PublicBinderParam,
 };
 
-/// Adapter entry: the component's exact contract intersected with its
-/// attribute-tolerant signature.
+/// Adapter entry: a single concrete contract uses its tolerant signature;
+/// generic and overloaded contracts retain the exact contract ahead of it.
 pub const USE_COMPONENT: &str = "__VerterUseComponent";
 /// The component's exact construct contract: a typed constructor itself, a
 /// constructor ending in an open-argument signature rebuilt signature by
 /// signature, an overloaded callable rebuilt signature by signature, and no
-/// construct signature for anything else.
+/// construct signature for anything else in component-use mode. Public-default
+/// mode retains signatures exactly and adapts raw Options through Vue.
 pub const USE_CONTRACT: &str = "__VerterUseContract";
 /// Readable construct signatures of a constructor ending in an open-argument
 /// signature, rebuilt in declaration order; see the module's generic limit.
@@ -113,17 +120,18 @@ macro_rules! foreign_contract_declarations {
             "type __VerterUseOrdered<T, Acc> = T extends readonly [infer H, ...infer R] ? __VerterUseOrdered<R, Acc & H> : Acc;\n",
             "type __VerterUseTupleRest<C> = C extends new <T extends any[]>(...args: T) => { readonly args: T } ? true : C extends new <T extends readonly any[]>(...args: T) => { readonly args: T } ? true : false;\n",
             "type __VerterUseConstruct<A extends readonly unknown[], I> = __VerterUseOpenArgs<A> extends true ? (I extends { readonly $props: infer P } ? new (props: P) => I : new (props: Record<string, never>) => I) : new (...args: A) => I;\n",
-            "type __VerterUseConstructs<C, Seen, Prev, Out extends readonly unknown[]> = (Seen & C) extends abstract new (...args: infer A) => infer I ? (A extends readonly [__VerterUsePeeled<number>] ? __VerterUseOrdered<Out, unknown> : __VerterUseSame<[A, I], Prev> extends true ? __VerterUseOrdered<Out, unknown> : __VerterUseConstructs<C, Seen & { new (...args: A): I; new (...args: [__VerterUsePeeled<Out[\"length\"]>]): never }, [A, I], [__VerterUseConstruct<A, I>, ...Out]>) : C;\n",
+            "type __VerterUseConstructs<C, Seen, Prev, Out extends readonly unknown[], Single = never, Fallback = C> = (Seen & C) extends abstract new (...args: infer A) => infer I ? (A extends readonly [__VerterUsePeeled<number>] ? ([Single] extends [never] ? __VerterUseOrdered<Out, unknown> : Out extends readonly [unknown] ? Single : Fallback) : __VerterUseSame<[A, I], Prev> extends true ? ([Single] extends [never] ? __VerterUseOrdered<Out, unknown> : Fallback) : __VerterUseConstructs<C, Seen & { new (...args: A): I; new (...args: [__VerterUsePeeled<Out[\"length\"]>]): never }, [A, I], [__VerterUseConstruct<A, I>, ...Out], Single, Fallback>) : Fallback;\n",
             "type __VerterUseCall<A> = A extends readonly [infer P, ...infer X] ? new (props: P) => __VerterUseFunctional<P, X extends readonly [infer Y, ...unknown[]] ? Y : unknown> : new (props: Record<string, never>) => __VerterUseFunctional<unknown, unknown>;\n",
-            "type __VerterUseCalls<C, Seen, Prev, Out extends readonly unknown[]> = (Seen & C) extends (...args: infer A) => infer R ? (A extends readonly [__VerterUsePeeled<number>] ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) : __VerterUseSame<[A, R], Prev> extends true ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) : __VerterUseCalls<C, Seen & { (...args: A): R; (...args: [__VerterUsePeeled<Out[\"length\"]>]): never }, [A, R], [__VerterUseCall<A>, ...Out]>) : unknown;\n",
-            "type __VerterUseContract<C> = __VerterUseTupleRest<C> extends true ? C : C extends abstract new (...args: infer A) => unknown ? (__VerterUseOpenArgs<A> extends true ? __VerterUseConstructs<C, unknown, never, []> : C) : __VerterUseCalls<C, unknown, never, []>;\n",
+            "type __VerterUseCalls<C, Seen, Prev, Out extends readonly unknown[], Public extends boolean = false> = (Seen & C) extends (...args: infer A) => infer R ? (Public extends true ? C : A extends readonly [__VerterUsePeeled<number>] ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) : __VerterUseSame<[A, R], Prev> extends true ? (Out extends readonly [unknown, unknown, ...unknown[]] ? __VerterUseOrdered<Out, unknown> : unknown) : __VerterUseCalls<C, Seen & { (...args: A): R; (...args: [__VerterUsePeeled<Out[\"length\"]>]): never }, [A, R], [__VerterUseCall<A>, ...Out]>) : (Public extends true ? __VerterUseConstruct<any[], import(\"vue\").ComponentInstance<C>> : unknown);\n",
+            "type __VerterUseContract<C, Public extends boolean = false> = __VerterUseTupleRest<C> extends true ? C : C extends abstract new (...args: infer A) => unknown ? (Public extends true ? C : __VerterUseOpenArgs<A> extends true ? __VerterUseConstructs<C, unknown, never, []> : C) : __VerterUseCalls<C, unknown, never, [], Public>;\n",
             "type __VerterUseTolerant<P, I> = (0 extends 1 & P ? (I extends { readonly $props: infer Q } ? Q : (0 extends 1 & I ? P : {})) : P) & Record<string, unknown>;\n",
             "type __VerterUseFunctional<P, X> = { readonly $props: P; readonly $slots: X extends { slots: infer S } ? S : {}; $emit: X extends { emit: infer E } ? E : never };\n",
-            "declare function __VerterUseComponent<C, A>(component: C, tolerant: A): __VerterUseContract<C> & A;\n",
+            "declare function __VerterUseComponent<C, A>(component: C, tolerant: A): __VerterUseConstructs<__VerterUseContract<C>, unknown, never, [], A, __VerterUseContract<C> & A>;\n",
             "declare function __VerterUseConstructor<C extends new <T extends any[]>(...args: T) => { readonly args: T }>(component: C): C;\n",
             "declare function __VerterUseConstructor<C extends new <T extends readonly any[]>(...args: T) => { readonly args: T }>(component: C): C;\n",
             "declare function __VerterUseConstructor<P, I>(component: abstract new (props: P) => I): new (props: __VerterUseTolerant<P, I>) => I;\n",
             "declare function __VerterUseConstructor<P, X, R>(component: (props: P, ctx: X) => R): new (props: P & Record<string, unknown>) => __VerterUseFunctional<P, X>;\n",
+            "declare function __VerterPublicDefault<C>(component: C): __VerterUseContract<C, true>;\n",
         )
     };
 }
@@ -139,8 +147,15 @@ impl ForeignComponentContractAdapter {
     /// per checking module (inside the component-use prelude).
     pub const DECLARATIONS: &'static str = foreign_contract_declarations!();
 
-    /// The constructor a use of `component` applies: its exact contract,
-    /// then its attribute-tolerant signature. `component` is the rendered
+    /// Public-default mode of the same signature classifier: retain a callable
+    /// or constructor exactly; use Vue's instance contract for raw Options.
+    pub(crate) fn public_default(&self, component: &str) -> String {
+        format!("__VerterPublicDefault({component})")
+    }
+
+    /// The constructor a use of `component` applies: its tolerant signature
+    /// alone for a single concrete contract, otherwise its exact contract
+    /// then its tolerant signature. `component` is the rendered
     /// constructor expression (a binding, a member path or a parenthesized
     /// `:is` expression), repeated so each helper infers from the
     /// component's own declared type.
@@ -255,5 +270,16 @@ pub fn project_advanced_generic_uses(
         binder,
         uses,
         witnesses,
+    }
+}
+
+impl crate::framework_common::vue_projection_backend::VueProjectionProduct
+    for AdvancedGenericUseProjection
+{
+    fn project(
+        backend: &crate::framework_common::vue_projection_backend::VueProjectionBackend,
+        input: &crate::framework_common::vue_projection_backend::VueProductInput<'_>,
+    ) -> Result<Self, super::script_setup::SetupProjectionRefusal> {
+        backend.advanced_generic_uses(input.source, input.artifact, input.canonical_id)
     }
 }

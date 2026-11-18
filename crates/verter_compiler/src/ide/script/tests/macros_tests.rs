@@ -1008,7 +1008,9 @@ fn script_setup_ts_type_assertion_preserves_type_and_value_source_identity() {
     let mut transform = CodeTransform::new(source, &alloc);
     rewrite_ts_type_assertions(source, 0, &mut transform);
     let carrier = transform.build_string();
-    let map = transform.generate_map(SourceMapOptions::new().with_source("Component.vue"));
+    let map = transform
+        .generate_map(SourceMapOptions::new().with_source("Component.vue"))
+        .expect("mapped transform");
 
     let authored_type = source.rfind("<Box>").expect("authored assertion type") + 1;
     let generated_type = carrier.rfind("Box").expect("relocated assertion type");
@@ -1138,15 +1140,17 @@ fn define_props_type_content_is_source_mapped() {
         &alloc,
         &options,
         template_end,
-    );
+    )
+    .expect("recorded script edits apply");
 
     if let (Some(return_close), Some(pos)) = (&result.return_close, result.return_close_pos) {
         ct.prepend_left(pos, return_close);
     }
 
     // Generate the sourcemap
-    let map =
-        ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("App.vue"));
+    let map = ct
+        .generate_map(crate::code_transform::SourceMapOptions::new().with_source("App.vue"))
+        .expect("mapped transform");
 
     let output = ct.build_string();
 

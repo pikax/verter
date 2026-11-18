@@ -72,3 +72,20 @@ describe("style preprocessing failures outside Vite", () => {
     expect(await preprocessStyle("stylus", "a\n  color red", "/test/Styl.vue", null)).toBeNull();
   });
 });
+
+describe("style preprocessing results outside Vite", () => {
+  it("names the tool, its options and the files it read", async () => {
+    const result = await preprocessStyle(
+      "scss",
+      ".a { .b { color: red; } }",
+      "/test/Tool.vue",
+      null,
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.processor).toBe("sass");
+    expect(result!.version).toMatch(/^\d+\.\d+\.\d+/);
+    expect(result!.config).toEqual({ syntax: "scss" });
+    expect(result!.dependencies).toEqual([]);
+  });
+});

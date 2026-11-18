@@ -17,6 +17,10 @@ path = "src/bin/block0_naive_a2_enumeration.rs"
 name = "cutover-state"
 path = "src/bin/cutover_state.rs"
 
+[[bin]]
+name = "gen-test-case-modules"
+path = "src/bin/gen_test_case_modules.rs"
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 toml = "1.1"

@@ -44,6 +44,26 @@ pub enum Dynamism {
 /// Type alias for parameter byte slices - most functions have ≤8 params
 pub type ParamBytes<'a> = SmallVec<[&'a str; 8]>;
 
+/// How an expression uses one identifier occurrence.
+///
+/// Recorded by the reference collector from the occurrence's syntactic
+/// position, so a consumer that rewrites identifiers can tell a value read
+/// from an assignment without walking the expression again.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum ReferenceUse {
+    /// The value is read.
+    Read,
+    /// The value is read as the constructor of a `new` expression, directly
+    /// or as the object of a member chain: `X` in `new X()` and in
+    /// `new X.Y()`. A rewrite that wraps it in a call must parenthesise it,
+    /// or `new` applies to the wrapper.
+    Construct,
+    /// The binding itself is assigned: the left side of an assignment, the
+    /// operand of an update, a target inside a destructuring assignment, or
+    /// the target of a `for…in` / `for…of` head.
+    Write,
+}
+
 /// Represents a binding extracted from an expression (byte-optimized version).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding<'a> {
@@ -56,10 +76,16 @@ pub struct Binding<'a> {
     pub pos: u32,
     /// Whether this binding should be ignored (is a keyword, parameter, or local variable)
     pub ignore: bool,
+    /// Declared inside the expression (a parameter or local declaration).
+    /// Unlike an enclosing template alias, this occurrence must never use a
+    /// template-local rename, even when the names coincide.
+    pub is_expression_local: bool,
     /// Whether this identifier is the value of a shorthand property (`{ foo }`).
     /// When true and a prefix is applied (e.g., `_ctx.`), the shorthand must be
     /// expanded to key: value form (`{ foo: _ctx.foo }`).
     pub is_shorthand: bool,
+    /// How the expression uses this occurrence: read, constructed or written.
+    pub usage: ReferenceUse,
 }
 
 /// Represents a function found in an expression (byte-optimized version).
@@ -259,6 +285,9 @@ pub struct BindingContext<'a> {
     /// is a genuine reference to a script binding and must resolve normally, not be
     /// silently swallowed as a scoped local.
     completion_prefixes: bool,
+    /// Inside an ordinary function body, where `arguments` is the function's
+    /// own implicit binding. Matched exactly, never as a completion prefix.
+    function_arguments: bool,
 }
 
 impl std::fmt::Debug for BindingContext<'_> {
@@ -268,6 +297,7 @@ impl std::fmt::Debug for BindingContext<'_> {
             .field("has_enclosing_scope", &self.enclosing.is_some())
             .field("base_offset", &self.base_offset)
             .field("completion_prefixes", &self.completion_prefixes)
+            .field("function_arguments", &self.function_arguments)
             .finish()
     }
 }
@@ -286,6 +316,7 @@ impl<'a> BindingContext<'a> {
             enclosing: None,
             base_offset,
             completion_prefixes: false,
+            function_arguments: false,
         }
     }
 
@@ -296,6 +327,7 @@ impl<'a> BindingContext<'a> {
             enclosing: None,
             base_offset,
             completion_prefixes: false,
+            function_arguments: false,
         }
     }
 
@@ -329,7 +361,7 @@ impl<'a> BindingContext<'a> {
         is_keyword(bytes)
             || is_global(bytes)
             || name == "$event"
-            || self.ignored_identifiers.contains(name)
+            || self.is_expression_local(name)
             || self
                 .enclosing
                 .as_ref()
@@ -357,6 +389,12 @@ impl<'a> BindingContext<'a> {
         self.ignored_identifiers.insert(name);
     }
 
+    /// Whether the expression's own lexical declarations shadow this name.
+    #[inline]
+    pub fn is_expression_local(&self, name: &str) -> bool {
+        self.ignored_identifiers.contains(name) || (self.function_arguments && name == "arguments")
+    }
+
     /// Create a child context with additional ignored identifiers
     pub fn child_with_ignored(&self, additional: SmallVec<[&'a str; 8]>) -> Self {
         let mut ignored = self.ignored_identifiers.clone();
@@ -366,7 +404,16 @@ impl<'a> BindingContext<'a> {
             enclosing: self.enclosing.clone(),
             base_offset: self.base_offset,
             completion_prefixes: self.completion_prefixes,
+            function_arguments: self.function_arguments,
         }
+    }
+
+    /// The context of an ordinary function's parameters and body: its
+    /// parameters plus its implicit `arguments`, which nested arrows inherit.
+    pub fn child_function(&self, parameters: SmallVec<[&'a str; 8]>) -> Self {
+        let mut child = self.child_with_ignored(parameters);
+        child.function_arguments = true;
+        child
     }
 }
 
@@ -499,28 +546,36 @@ mod tests {
             span: RelativeSpan::new(0, 3),
             pos: 0,
             ignore: false,
+            is_expression_local: false,
             is_shorthand: false,
+            usage: ReferenceUse::Read,
         });
         result.bindings.push(Binding {
             name: "bar",
             span: RelativeSpan::new(6, 9),
             pos: 6,
             ignore: false,
+            is_expression_local: false,
             is_shorthand: false,
+            usage: ReferenceUse::Read,
         });
         result.bindings.push(Binding {
             name: "foo",
             span: RelativeSpan::new(12, 15),
             pos: 12,
             ignore: false,
+            is_expression_local: false,
             is_shorthand: false,
+            usage: ReferenceUse::Read,
         }); // duplicate
         result.bindings.push(Binding {
             name: "ignored",
             span: RelativeSpan::new(18, 25),
             pos: 18,
             ignore: true,
+            is_expression_local: false,
             is_shorthand: false,
+            usage: ReferenceUse::Read,
         });
 
         let names = result.non_ignored_binding_names();

@@ -986,7 +986,7 @@ fn collect_member_sources(
                 (
                     MemberRole::Exposed,
                     row.analysis.name.as_str(),
-                    row.type_source.present(),
+                    row.authority.source(),
                 )
             })
             .collect(),
@@ -1065,6 +1065,9 @@ fn fold_requested_slot(
     requested: FrameworkSurfaceKind,
     dtos: &MacroSurfaceDtos,
 ) {
+    aggregate
+        .diagnostics
+        .extend(dtos.diagnostics.iter().cloned());
     use crate::typeinfo::framework_surface::results::{
         EmitsSurface, ExposeSurface, OptionsSurface, PropsSurface,
     };

@@ -3163,7 +3163,9 @@ impl VerterLanguageServer {
         let args = BackgroundInitArgs::from_server(self, roots, vite_opts, init_lint_opts, my_gen);
 
         let ctx = context.to_owned();
+        let settlement = super::background_init::BackgroundInitSettlement::new(self, my_gen);
         tokio::spawn(async move {
+            let _settlement = settlement;
             if let Err(e) = background_init(args).await {
                 tracing::error!("background {ctx} failed: {e}");
             }

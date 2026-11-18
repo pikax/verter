@@ -4813,3 +4813,62 @@ fn inline_setup_destructure_official_order() {
         code
     );
 }
+
+/// A specifier-only `export type { … } from` in `<script setup>` is a type-only
+/// export: it moves to module scope (as Vue does), never into the setup wrapper.
+#[test]
+fn keep_ts_hoists_type_reexport_out_of_setup() {
+    let result = compile_sfc_keep_ts(
+        r#"<script setup lang="ts">
+export type { Foo } from "./types";
+const n = 1;
+</script>
+<template><p>{{ n }}</p></template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let code = &result.script.as_ref().expect("script").code;
+    let export_at = code
+        .find(r#"export type { Foo } from "./types""#)
+        .unwrap_or_else(|| panic!("type re-export must be kept: {code}"));
+    let setup_at = code
+        .find("setup(")
+        .unwrap_or_else(|| panic!("setup missing: {code}"));
+    assert!(
+        export_at < setup_at,
+        "the type re-export must sit before the component, not inside setup: {code}"
+    );
+    let alloc = Allocator::new();
+    let parsed =
+        verter_parser::oxc_parse::Parser::new(&alloc, code, oxc_span::SourceType::ts()).parse();
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "output must be valid TypeScript, with no export left inside setup: {:?}\n---\n{code}",
+        parsed.diagnostics
+    );
+}
+
+/// `v-model` on a binding initialised by a call may target a ref: it is a
+/// maybe-ref, so the inline assignment never becomes a const reassignment.
+#[test]
+fn inline_v_model_on_call_initialised_binding_does_not_reassign_const() {
+    let result = compile_sfc_inline(
+        r#"<script setup lang="ts">
+import { ref } from 'vue';
+function make() { return ref(''); }
+const other = make();
+</script>
+<template><input v-model="other"></template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let code = &result.script.as_ref().expect("script").code;
+    assert!(
+        !code.contains("other = $event"),
+        "a maybe-ref must be assigned through its ref, not reassigned: {code}"
+    );
+    assert!(
+        code.contains("other.value"),
+        "the update must write through the ref's value: {code}"
+    );
+}

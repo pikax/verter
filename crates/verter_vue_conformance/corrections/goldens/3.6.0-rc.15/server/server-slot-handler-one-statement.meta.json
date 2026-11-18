@@ -1,0 +1,24 @@
+{
+  "vueVersion": "3.6.0-rc.15",
+  "sourcePath": "crates/verter_compiler/tests/cases/sfc_regression_fixtures/server_slot_handler_one_statement.vue",
+  "sourceSha256": "7b27f43d7548e6ffe50267a22b0c343b09e4bac649add24582076bd86ec1a511",
+  "codeSha256": "2f56d0f61e64e423429bcd6917634d5088d8ff92385e9e844e9d729673c05528",
+  "options": {
+    "filename": "App.vue",
+    "id": "test",
+    "ssr": true,
+    "ssrCssVars": [],
+    "compilerOptions": {
+      "bindingMetadata": {
+        "ref": "setup-const",
+        "Child": "setup-const",
+        "a": "setup-ref",
+        "b": "setup-ref"
+      },
+      "expressionPlugins": [
+        "typescript"
+      ]
+    }
+  },
+  "diagnostics": []
+}

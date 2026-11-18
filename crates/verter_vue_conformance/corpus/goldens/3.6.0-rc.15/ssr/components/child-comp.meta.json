@@ -1,0 +1,56 @@
+{
+  "schema": 2,
+  "caseId": "components/child-comp",
+  "backend": "ssr",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/components/child-comp.vue",
+    "sha256": "ccec2f3e27465b962543d548e1cebee609ac84bae1ed48fc544c591b55211e05"
+  },
+  "options": {
+    "sha256": "692f59081c42492163eb2b0b08ee30c52638110c9a0a92b88584aefc936095a7",
+    "summary": {
+      "backend": "ssr",
+      "vapor": false,
+      "ssr": true,
+      "filename": "cases/components/child-comp.vue",
+      "id": "components/child-comp",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/ssr/components/child-comp.js",
+      "sha256": "511524088e0d6787ceb8b971d62f31bcd6ccf0eb17b9c95f03da7a0ec929db0f",
+      "bytes": 1203
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/ssr/components/child-comp.map.json",
+      "sha256": "658ae6c0b2937500f6bf0ade6447f3a728083c8cf3058bd86efe5db908853621"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "mergeProps",
+      "alias": "_mergeProps"
+    }
+  ]
+}

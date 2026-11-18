@@ -1,6 +1,30 @@
 use super::*;
 use verter_span::path::CanonicalPath;
 
+#[test]
+fn walk_root_stops_before_the_first_wildcard_component() {
+    for (pattern, root) in [
+        ("/workspace/app/**/*.vue", "/workspace/app"),
+        ("/workspace/app*/View.vue", "/workspace"),
+        ("/workspace/app?/View.vue", "/workspace"),
+        ("/workspace/[ab]/View.vue", "/workspace"),
+        ("/workspace/View.vue", "/workspace"),
+        ("/**/*.vue", "/"),
+        ("d:/**/*.vue", "d:/"),
+    ] {
+        let glob = CompiledGlob::new(NormalizedGlob::new(pattern));
+        assert_eq!(
+            glob.walk_root(),
+            Some(CanonicalPath::new(root)),
+            "{pattern}"
+        );
+    }
+    assert_eq!(
+        CompiledGlob::new(NormalizedGlob::new("/workspace/[bad")).walk_root(),
+        None
+    );
+}
+
 // ── Normalization ──
 
 #[test]

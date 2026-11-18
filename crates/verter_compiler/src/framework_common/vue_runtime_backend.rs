@@ -15,9 +15,9 @@ use crate::compile::types::{TemplateBindingMetadata, VueExecutionInputs, VueMacr
 use crate::compile_request::{CompileRequest, CompileRequestError, ProductKind};
 use crate::framework_common::capability::{Present, RuntimeCompilerBackend};
 use crate::framework_common::carrier_compiler::RuntimeBlockContentInputs;
+use crate::framework_common::carrier_registry::RegisteredBackend;
 use crate::framework_common::catalog::{RuntimeCap, TypedCapabilityRegistration};
-use crate::framework_common::vue_bridge::VueCarrierCompiler;
-use crate::framework_common::vue_carrier_frontend::VueSfcV3;
+use crate::framework_common::vue_carrier_frontend::{VueCarrierFrontend, VueSfcV3};
 use crate::framework_common::FrameworkParseArtifact;
 use crate::standalone::{
     compile_vue_parsed_runtime, DirectCompileError, DirectCompileOutput, VueParsedRuntimeError,
@@ -94,13 +94,13 @@ impl VueRuntimeBackend {
     /// Adapter this backend answers to.
     #[must_use]
     pub fn adapter_id(&self) -> FrameworkAdapterId {
-        VueCarrierCompiler.adapter_id()
+        VueCarrierFrontend.adapter_id()
     }
 
     /// Carrier language this backend compiles.
     #[must_use]
     pub fn carrier_language_id(&self) -> LanguageId {
-        VueCarrierCompiler.carrier_language_id()
+        VueCarrierFrontend.carrier_language_id()
     }
 }
 
@@ -128,7 +128,7 @@ impl RuntimeCompilerBackend<VueSfcV3> for VueRuntimeBackend {
         grant
             .consume_for(expected)
             .map_err(|_| VueRuntimeError::ExecutionUngranted { product: expected })?;
-        let Some(parsed) = VueCarrierCompiler.parsed_sfc(artifact) else {
+        let Some(parsed) = VueCarrierFrontend.parsed_sfc(artifact) else {
             return Err(VueRuntimeError::UnusableParse);
         };
         let requested_profile = requested_vue_syntax_profile(request)?;
@@ -243,6 +243,13 @@ fn map_parsed_runtime(err: VueParsedRuntimeError) -> VueRuntimeError {
     }
 }
 
+impl RegisteredBackend for VueRuntimeBackend {
+    fn registered() -> &'static Self {
+        static REGISTERED: VueRuntimeBackend = VueRuntimeBackend;
+        &REGISTERED
+    }
+}
+
 /// Typed Vue runtime catalog row.
 #[must_use]
 pub fn vue_runtime_backend_registration(
@@ -252,4 +259,5 @@ pub fn vue_runtime_backend_registration(
         VueRuntimeBackend.carrier_language_id(),
         Present(VueRuntimeBackend),
     )
+    .expect("the built-in Vue profile manifest is admitted")
 }

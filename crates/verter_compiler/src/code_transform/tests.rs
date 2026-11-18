@@ -1,5 +1,6 @@
 use super::*;
 use crate::code_transform::chunk::Chunk;
+use crate::emission::MapMode;
 use oxc_allocator::Allocator;
 
 #[test]
@@ -13,7 +14,9 @@ fn source_ranges_split_original_chunks_at_sorted_unique_internal_locations() {
             .expect("fixture location is a UTF-8 boundary");
     }
 
-    let (output, ranges) = transform.build_string_with_source_ranges();
+    let (output, ranges) = transform
+        .build_string_with_source_ranges()
+        .expect("mapped transform");
 
     assert_eq!(output, ">>abcdef");
     assert_eq!(
@@ -55,7 +58,9 @@ fn source_ranges_split_moved_chunks_and_preserve_original_provenance() {
     }
     transform.move_slice(2, 4, 0);
 
-    let (output, ranges) = transform.build_string_with_source_ranges();
+    let (output, ranges) = transform
+        .build_string_with_source_ranges()
+        .expect("mapped transform");
 
     assert_eq!(output, "CDABEF");
     assert_eq!(
@@ -113,7 +118,9 @@ fn source_ranges_mark_overwrites_as_non_linear_replacements() {
     let mut transform = CodeTransform::new("abcd", &allocator);
     transform.overwrite(1, 3, "XYZ");
 
-    let (output, ranges) = transform.build_string_with_source_ranges();
+    let (output, ranges) = transform
+        .build_string_with_source_ranges()
+        .expect("mapped transform");
 
     assert_eq!(output, "aXYZd");
     assert_eq!(
@@ -151,14 +158,17 @@ fn source_range_projection_retains_live_generated_unmapped_boundaries() {
     transform.overwrite_with_unmapped_boundaries(1, 3, "XYZ", &[1]);
     transform.prepend_left_with_unmapped_boundaries(4, "PQ", &[1]);
 
-    let (output, _, boundaries) =
-        transform.build_string_with_source_ranges_and_unmapped_boundaries();
+    let (output, _, boundaries) = transform
+        .build_string_with_source_ranges_and_unmapped_boundaries()
+        .expect("mapped transform");
 
     assert_eq!(output, "aXYZdPQ");
     assert_eq!(boundaries, vec![2, 6]);
 
     transform.overwrite(1, 3, "Z");
-    let (_, _, boundaries) = transform.build_string_with_source_ranges_and_unmapped_boundaries();
+    let (_, _, boundaries) = transform
+        .build_string_with_source_ranges_and_unmapped_boundaries()
+        .expect("mapped transform");
     assert_eq!(boundaries, vec![4]);
 }
 
@@ -167,7 +177,9 @@ fn source_ranges_omit_removed_and_empty_overwrite_bytes() {
     let allocator = Allocator::default();
     let mut middle = CodeTransform::new("abcd", &allocator);
     middle.remove(1, 3);
-    let (output, ranges) = middle.build_string_with_source_ranges();
+    let (output, ranges) = middle
+        .build_string_with_source_ranges()
+        .expect("mapped transform");
     assert_eq!(output, "ad");
     assert_eq!(
         ranges,
@@ -192,7 +204,9 @@ fn source_ranges_omit_removed_and_empty_overwrite_bytes() {
     let mut empty = CodeTransform::new("abcd", &allocator);
     empty.overwrite(0, 4, "");
     assert_eq!(
-        empty.build_string_with_source_ranges(),
+        empty
+            .build_string_with_source_ranges()
+            .expect("mapped transform"),
         (String::new(), Vec::new())
     );
 }
@@ -202,7 +216,9 @@ fn source_ranges_leave_intro_outro_and_plain_insertions_unmapped() {
     let allocator = Allocator::default();
     let mut transform = CodeTransform::new("abc", &allocator);
     transform.prepend("<").append(">").prepend_left(1, "X");
-    let (output, ranges) = transform.build_string_with_source_ranges();
+    let (output, ranges) = transform
+        .build_string_with_source_ranges()
+        .expect("mapped transform");
     assert_eq!(output, "<aXbc>");
     assert_eq!(
         ranges,
@@ -234,7 +250,9 @@ fn source_ranges_include_only_the_mapped_suffix_of_inserted_mapped_chunks() {
         1,
         2,
     ));
-    let (output, ranges) = transform.build_string_with_source_ranges();
+    let (output, ranges) = transform
+        .build_string_with_source_ranges()
+        .expect("mapped transform");
     assert_eq!(output, "ab__id");
     assert_eq!(
         ranges.last(),
@@ -256,7 +274,9 @@ fn source_ranges_split_only_at_valid_utf8_byte_boundaries() {
     for location in [0, 1, 3, 4] {
         transform.try_add_sourcemap_location(location).unwrap();
     }
-    let (output, ranges) = transform.build_string_with_source_ranges();
+    let (output, ranges) = transform
+        .build_string_with_source_ranges()
+        .expect("mapped transform");
     assert_eq!(output, "aéz");
     assert_eq!(
         ranges
@@ -276,7 +296,9 @@ fn source_ranges_keep_moved_and_edited_geometry_non_overlapping() {
     let allocator = Allocator::default();
     let mut transform = CodeTransform::new("abcdef", &allocator);
     transform.move_slice(1, 3, 5).overwrite(3, 5, "XY");
-    let (output, ranges) = transform.build_string_with_source_ranges();
+    let (output, ranges) = transform
+        .build_string_with_source_ranges()
+        .expect("mapped transform");
     assert_eq!(output, "aXYbcf");
     assert!(ranges
         .windows(2)
@@ -296,7 +318,9 @@ fn source_ranges_preserve_replacement_identity_when_overwritten_content_moves() 
     let allocator = Allocator::default();
     let mut transform = CodeTransform::new("abcd", &allocator);
     transform.overwrite(1, 3, "XY").move_slice(1, 3, 4);
-    let (output, ranges) = transform.build_string_with_source_ranges();
+    let (output, ranges) = transform
+        .build_string_with_source_ranges()
+        .expect("mapped transform");
     assert_eq!(output, "adXY");
     assert_eq!(
         ranges,
@@ -607,7 +631,7 @@ fn test_generate_map_basic() {
         .with_source("input.js")
         .with_file("output.js");
 
-    let map = ms.generate_map(options);
+    let map = ms.generate_map(options).expect("mapped transform");
 
     let sources: Vec<_> = map.get_sources().collect();
     assert_eq!(sources.len(), 1);
@@ -619,7 +643,7 @@ fn test_generate_map_json() {
     let allocator = Allocator::default();
     let ms = CodeTransform::new("test", &allocator);
     let options = SourceMapOptions::new().with_source("test.js");
-    let json = ms.generate_map_json(options);
+    let json = ms.generate_map_json(options).expect("mapped transform");
 
     // Should be valid JSON
     assert!(json.contains("\"sources\""));
@@ -699,7 +723,7 @@ fn test_source_map_after_multiple_edits() {
         .with_source("test.js")
         .include_content(true);
 
-    let map = ct.generate_map(options);
+    let map = ct.generate_map(options).expect("mapped transform");
 
     // Verify source map is valid
     let sources: Vec<_> = map.get_sources().collect();
@@ -811,7 +835,7 @@ fn test_move_slice_preserves_source_mapping() {
         .with_source("test.js")
         .include_content(true);
 
-    let map = ct.generate_map(options);
+    let map = ct.generate_map(options).expect("mapped transform");
     let sources: Vec<_> = map.get_sources().collect();
     assert_eq!(sources.len(), 1);
 }
@@ -901,7 +925,7 @@ fn test_move_with_prefix_preserves_source_mapping() {
         .with_source("test.js")
         .include_content(true);
 
-    let map = ct.generate_map(options);
+    let map = ct.generate_map(options).expect("mapped transform");
     let sources: Vec<_> = map.get_sources().collect();
     assert_eq!(sources.len(), 1);
 }
@@ -1382,7 +1406,7 @@ fn test_move_then_overwrite_at_boundary() {
     assert_eq!(ct.build_string(), "(EFG)ABCDHIJ");
     // Overwrite spanning from D into the (now-empty) moved region
     ct.overwrite(3, 5, "XX");
-    // Moved chunks are skipped by overwrite, so this replaces D and the gap
+    // Relocated runs are skipped by overwrite, so this replaces D and the gap
     assert_eq!(ct.build_string(), "(EFG)ABCXXHIJ");
 }
 
@@ -1430,11 +1454,13 @@ fn test_source_map_overwrite_identical_content_is_not_move() {
     let options = SourceMapOptions::new()
         .with_source("test.js")
         .include_content(true);
-    let map = ct.generate_map(options);
+    let map = ct.generate_map(options).expect("mapped transform");
     let sources: Vec<_> = map.get_sources().collect();
     assert_eq!(sources.len(), 1);
     // Map should be valid regardless of the mapping style
-    let json = ct.generate_map_json(SourceMapOptions::new().with_source("test.js"));
+    let json = ct
+        .generate_map_json(SourceMapOptions::new().with_source("test.js"))
+        .expect("mapped transform");
     assert!(json.contains("\"mappings\""));
 }
 
@@ -1448,7 +1474,7 @@ fn test_source_map_moved_chunk_produces_valid_map() {
     let options = SourceMapOptions::new()
         .with_source("test.js")
         .include_content(true);
-    let map = ct.generate_map(options);
+    let map = ct.generate_map(options).expect("mapped transform");
     let sources: Vec<_> = map.get_sources().collect();
     assert_eq!(sources.len(), 1);
     assert_eq!(map.get_source_content(0).unwrap(), source);
@@ -1463,7 +1489,7 @@ fn test_source_map_pure_insertion_produces_valid_map() {
     let options = SourceMapOptions::new()
         .with_source("test.js")
         .include_content(true);
-    let map = ct.generate_map(options);
+    let map = ct.generate_map(options).expect("mapped transform");
     let sources: Vec<_> = map.get_sources().collect();
     assert_eq!(sources.len(), 1);
 }
@@ -1483,7 +1509,7 @@ fn test_source_map_complex_scenario() {
         .with_source("test.vue")
         .with_file("test.tsx")
         .include_content(true);
-    let map = ct.generate_map(options);
+    let map = ct.generate_map(options).expect("mapped transform");
     let sources: Vec<_> = map.get_sources().collect();
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0], "test.vue");
@@ -1516,8 +1542,6 @@ fn test_batch_prepend_left_multiple_at_same_position() {
 #[test]
 fn test_batch_overwrite_empty_content_removal() {
     // Batch overwrite with empty content acts as removal
-    // batch_overwrite skips emitting empty-content chunks for efficiency,
-    // which means the original content in those ranges is removed
     let allocator = Allocator::default();
     let mut ct = CodeTransform::new("ABCDEFGHIJ", &allocator);
     ct.batch_overwrite(&[(2, 5, ""), (7, 9, "")]);
@@ -1783,60 +1807,184 @@ fn test_batch_overwrite_preserves_prior_overwrite_content() {
     assert_eq!(ct.build_string(), "11cXYZgh22");
 }
 
-/// @ai-generated — batch_overwrite with a fully contained range: the inner
-/// overwrite is a no-op because its source region is already replaced by the
-/// outer overwrite. This reproduces the overlap from resolve_whitespace
-/// emitting a deletion for whitespace that the parent's tag extension already covers.
 #[test]
-fn test_batch_overwrite_contained_range_is_noop() {
-    let allocator = Allocator::default();
-    let mut ct = CodeTransform::new("0123456789", &allocator);
-    // Outer: replaces [0,5) with "VNODE", inner: deletes [3,5) — fully contained
-    ct.batch_overwrite(&[(0, 5, "VNODE"), (3, 5, "")]);
-    assert_eq!(ct.build_string(), "VNODE56789");
+fn relocation_copies_no_text() {
+    let allocator = Allocator::with_capacity(64 * 1024);
+    let source = "a".repeat(4096);
+    let mut ct = CodeTransform::new(&source, &allocator);
+    let before = allocator.used_bytes();
+    ct.move_slice(100, 4000, 4096);
+    let grown = allocator.used_bytes() - before;
+    // One member chunk reference, not the 3,900 moved bytes.
+    assert!(
+        grown <= 2 * std::mem::size_of::<Chunk<'_>>(),
+        "a move allocated {grown} bytes"
+    );
+    let built = ct.build_string();
+    assert_eq!(built.len(), 4096);
+    assert_eq!(&built[..196], &source[..196]);
+}
 
-    let s = ct.build_string();
+#[test]
+fn extraction_reads_the_source_even_after_the_range_was_replaced() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("abcdefghijkl", &allocator);
+    ct.overwrite(4, 9, "X");
+    assert_eq!(ct.build_string(), "abcdXjkl");
+    ct.extract_original(4, 9, 0, "", "");
+    assert_eq!(ct.build_string(), "efghiabcdXjkl");
+    // The checked form refuses a target inside the extracted range.
+    assert!(ct.try_extract_original(4, 9, 6, "", "").is_err());
+    assert_eq!(ct.build_string(), "efghiabcdXjkl");
+}
+
+#[test]
+fn many_prepends_allocate_linearly() {
+    let allocator = Allocator::with_capacity(64 * 1024);
+    let mut ct = CodeTransform::new("body", &allocator);
+    let before = allocator.used_bytes();
+    for _ in 0..64 {
+        ct.prepend("12345678");
+    }
+    // Each prepend stores its own eight bytes; nothing re-copies the intro.
+    assert_eq!(allocator.used_bytes() - before, 512);
+    assert_eq!(ct.build_string().len(), 64 * 8 + 4);
+}
+
+/// A transform without observation capture, named so construction infers it.
+type TextTransform<'a> = CodeTransform<'a>;
+
+/// Every edit operation, including the ones that record map-only facts.
+fn apply_every_edit(ct: &mut CodeTransform<'_>) {
+    ct.overwrite(0, 1, "A");
+    ct.overwrite_unmapped(2, 3, "B");
+    ct.overwrite_with_unmapped_boundaries(4, 5, "CD", &[1]);
+    ct.prepend_left_with_unmapped_boundaries(6, "EF", &[1]);
+    ct.prepend_left(7, "G");
+    ct.prepend_helper_preamble_content("// preamble\n");
+    ct.append("// end");
+    ct.try_add_sourcemap_location(8).unwrap();
+    ct.move_slice(9, 10, 0);
+}
+
+#[test]
+fn a_text_only_transform_captures_nothing() {
+    let allocator = Allocator::default();
+    let mut ct = TextTransform::with_mode_in("abcdefghijkl", &allocator, MapMode::NoMap);
+    crate::emission::reset_map_capture_events();
+    apply_every_edit(&mut ct);
+    let _ = ct.build_string();
+    assert_eq!(ct.captured_map_facts(), (0, false));
+    assert_eq!(crate::emission::map_capture_events(), 0);
+}
+
+#[test]
+fn the_same_edits_capture_under_map_mode() {
+    let allocator = Allocator::default();
+    let mut ct = TextTransform::with_mode_in("abcdefghijkl", &allocator, MapMode::Map);
+    crate::emission::reset_map_capture_events();
+    apply_every_edit(&mut ct);
+    assert!(ct.captured_map_facts().0 > 0);
+    assert!(crate::emission::map_capture_events() > 0);
+}
+
+#[test]
+fn a_text_only_transform_refuses_each_map_product() {
+    let allocator = Allocator::default();
+    let mut ct = TextTransform::with_mode_in("abcdef", &allocator, MapMode::NoMap);
+    ct.overwrite(1, 2, "X");
+    let refused = Err(CodeTransformError::MapNotCaptured);
+    let options = || SourceMapOptions::new().with_source("a.ts");
+    assert_eq!(ct.generate_map(options()).map(|_| ()), refused);
     assert_eq!(
-        s.len(),
-        (ct.original().len() as i64 + ct.output_delta()) as usize,
-        "output_delta must be accurate with contained overlap"
+        ct.generate_map_with_preamble(options()).map(|_| ()),
+        refused
+    );
+    assert_eq!(ct.generate_map_json(options()).map(|_| ()), refused);
+    assert_eq!(
+        ct.generate_map_json_with_preamble(options()).map(|_| ()),
+        refused
+    );
+    assert_eq!(ct.build_string_with_source_ranges().map(|_| ()), refused);
+    assert_eq!(
+        ct.build_string_with_source_ranges_and_unmapped_boundaries()
+            .map(|_| ()),
+        refused
+    );
+    assert_eq!(MappingProduct::of(&ct).map(|_| ()), refused);
+    let upstream = CodeTransform::new("abcdef", &allocator)
+        .generate_map(options())
+        .expect("mapped transform");
+    assert!(matches!(
+        ct.chain_source_map(&upstream),
+        Err(SourceMapChainError::MapNotCaptured)
+    ));
+}
+
+#[test]
+fn text_is_identical_with_and_without_capture() {
+    let source = "abcdefghijkl";
+    let text_only = Allocator::default();
+    let mut without = TextTransform::with_mode_in(source, &text_only, MapMode::NoMap);
+    apply_every_edit(&mut without);
+    let mapped = Allocator::default();
+    let mut with = TextTransform::with_mode_in(source, &mapped, MapMode::Map);
+    apply_every_edit(&mut with);
+    assert_eq!(without.build_string(), with.build_string());
+}
+
+#[test]
+fn a_window_keeps_absolute_offsets() {
+    let allocator = Allocator::default();
+    let source = "<t>ab</t>";
+    let mut ct = TextTransform::for_window_in(
+        source,
+        verter_span::Span::new(3, 5),
+        1,
+        &allocator,
+        MapMode::Map,
+    )
+    .expect("the window lies inside its source");
+    ct.overwrite(3, 4, "X");
+    assert_eq!(ct.build_string(), "Xb");
+    // `b` keeps its authored offset 4: line 0, column 4.
+    let map = ct
+        .generate_map(SourceMapOptions::new().with_source("t.vue"))
+        .expect("mapped transform");
+    assert!(map.get_tokens().any(|token| token.get_dst_col() == 1
+        && token.get_source_id().is_some()
+        && token.get_src_col() == 4));
+}
+
+#[test]
+fn a_window_outside_its_source_is_refused() {
+    let allocator = Allocator::default();
+    let window = |start, end| {
+        TextTransform::for_window_in(
+            "abc",
+            verter_span::Span::new(start, end),
+            0,
+            &allocator,
+            MapMode::NoMap,
+        )
+        .map(|_| ())
+    };
+    assert_eq!(
+        window(1, 9),
+        Err(CodeTransformError::OutOfRange { offset: 9, len: 3 })
+    );
+    assert_eq!(
+        window(2, 1),
+        Err(CodeTransformError::ReversedRange { start: 2, end: 1 })
     );
 }
 
-/// @ai-generated — batch_overwrite with duplicate ranges at the same position:
-/// second overwrite is a no-op because the region was already replaced.
-/// This reproduces the gap-filling + whitespace-removal duplicate.
 #[test]
-fn test_batch_overwrite_duplicate_range() {
-    let allocator = Allocator::default();
-    let mut ct = CodeTransform::new("0123456789", &allocator);
-    // Both delete [3,6) — second is redundant
-    ct.batch_overwrite(&[(3, 6, ""), (3, 6, "")]);
-    assert_eq!(ct.build_string(), "0126789");
-
-    let s = ct.build_string();
+fn a_source_over_four_gigabytes_is_refused_before_narrowing() {
+    let len = u32::MAX as usize + 1;
     assert_eq!(
-        s.len(),
-        (ct.original().len() as i64 + ct.output_delta()) as usize,
-        "output_delta must be accurate with duplicate ranges"
+        super::code_transform::check_source_len(len),
+        Err(CodeTransformError::Capacity { len })
     );
-}
-
-/// @ai-generated — batch_overwrite with trailing contained range: the close
-/// tag extension covers trailing whitespace. Inner deletion of the trailing
-/// whitespace is a no-op.
-#[test]
-fn test_batch_overwrite_trailing_contained() {
-    let allocator = Allocator::default();
-    let mut ct = CodeTransform::new("0123456789", &allocator);
-    // First: delete trailing whitespace [7,8), then outer replaces [7,10) with ")"
-    ct.batch_overwrite(&[(7, 8, ""), (7, 10, ")")]);
-    assert_eq!(ct.build_string(), "0123456)");
-
-    let s = ct.build_string();
-    assert_eq!(
-        s.len(),
-        (ct.original().len() as i64 + ct.output_delta()) as usize,
-        "output_delta must be accurate with trailing contained overlap"
-    );
+    assert_eq!(super::code_transform::check_source_len(12), Ok(12));
 }

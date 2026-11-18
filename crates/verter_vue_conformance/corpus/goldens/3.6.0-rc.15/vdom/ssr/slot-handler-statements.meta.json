@@ -1,0 +1,82 @@
+{
+  "schema": 2,
+  "caseId": "ssr/slot-handler-statements",
+  "backend": "vdom",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/slot-handler-statements.vue",
+    "sha256": "35d7fa9a92d0279e86f85a8300b31876780269940e2fccbc6251e83943be380f"
+  },
+  "options": {
+    "sha256": "bc5a32dd7a690b9469249e89243eebfc328ab2c8168aba7a1a41a8ea6c144249",
+    "summary": {
+      "backend": "vdom",
+      "vapor": false,
+      "filename": "cases/ssr/slot-handler-statements.vue",
+      "id": "ssr/slot-handler-statements",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": {
+        "tool": "esbuild",
+        "version": "0.28.0",
+        "options": {
+          "loader": "ts"
+        },
+        "reason": "strip TypeScript types from compileScript output (official SFC-loader pipeline parity)"
+      }
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/vdom/ssr/slot-handler-statements.js",
+      "sha256": "7f91d294b9a40f6f0dca0fa134562f3952b750cf813c3826d2c7357a5953c253",
+      "bytes": 1039
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/vdom/ssr/slot-handler-statements.map.json",
+      "sha256": "010c824145360fdc92ce68f21cad260b5090989e95ef8a93e8e7445ea44514d5"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "createBlock",
+      "alias": "_createBlock"
+    },
+    {
+      "imported": "createElementVNode",
+      "alias": "_createElementVNode"
+    },
+    {
+      "imported": "defineComponent",
+      "alias": "_defineComponent"
+    },
+    {
+      "imported": "openBlock",
+      "alias": "_openBlock"
+    },
+    {
+      "imported": "ref",
+      "alias": "ref"
+    },
+    {
+      "imported": "withCtx",
+      "alias": "_withCtx"
+    }
+  ]
+}

@@ -112,6 +112,18 @@ mod tests {
     }
 
     #[test]
+    fn typed_catch_bindings_lose_their_annotation() {
+        assert_eq!(
+            strip("try { f() } catch (err: unknown) { g(err) }"),
+            "try { f() } catch (err) { g(err) }"
+        );
+        assert_eq!(
+            strip("try { f() } catch ({ message }: any) { g(message) }"),
+            "try { f() } catch ({ message }) { g(message) }"
+        );
+    }
+
+    #[test]
     fn test_strip_as_expression() {
         assert_eq!(strip("const x = y as string;"), "const x = y;");
     }

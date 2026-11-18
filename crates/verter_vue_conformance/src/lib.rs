@@ -8,7 +8,7 @@
 //! - `corpus/cases/**.vue` — the seed SFC corpus (one focused feature each).
 //! - `corpus/support/` — locally vendored shared files so compilation never
 //!   reads outside `corpus/`.
-//! - `corpus/goldens/<vue-version>/{vdom,vapor}/**` — the official emitted
+//! - `corpus/goldens/<vue-version>/{vdom,vdom-inline,vapor,ssr}/**` — the official emitted
 //!   render/component module (`.js`), its source map (`.map.json`), and a
 //!   per-cell metadata file (`.meta.json`) per case per backend.
 //! - `corpus/manifest.json` — case-id → SFC → per-backend artifact paths and
@@ -127,21 +127,24 @@ pub fn authored_identifiers(sfc_source: &str) -> BTreeSet<String> {
     out
 }
 
-/// The two compile backends every case is compiled for.
+/// The compile backends every case is compiled for: the client VDOM and Vapor
+/// renders and the server (SSR) render.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
     Vdom,
     Vapor,
+    Ssr,
 }
 
 impl Backend {
-    pub const ALL: [Backend; 2] = [Backend::Vdom, Backend::Vapor];
+    pub const ALL: [Backend; 3] = [Backend::Vdom, Backend::Vapor, Backend::Ssr];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Backend::Vdom => "vdom",
             Backend::Vapor => "vapor",
+            Backend::Ssr => "ssr",
         }
     }
 }

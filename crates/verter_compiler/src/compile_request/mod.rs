@@ -13,6 +13,7 @@
 //! the framework/backend/product capability lookup.
 
 pub mod capability;
+pub mod demand;
 pub mod identity;
 pub mod product;
 pub mod svelte;

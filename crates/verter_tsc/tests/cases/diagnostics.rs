@@ -1071,3 +1071,89 @@ fn svelte_project_still_emits_typescript_declarations() {
     );
     drop(temp);
 }
+
+// ── Imports across Vue and Svelte ───────────────────────────────────────
+
+/// Check the fixture project `cross/<project>`, which holds `carriers` Vue
+/// and Svelte files, through the projection driver and the Svelte lane.
+/// Unlike the checks above, the prerequisites are required: a missing
+/// package or engine fails the test instead of skipping it.
+fn run_cross_framework_check(
+    project: &str,
+    carriers: usize,
+) -> (tempfile::TempDir, Vec<Diag>, String) {
+    let (temp, root) = setup_svelte_temp_project()
+        .expect("the workspace node_modules must hold svelte: run `pnpm install`");
+    assert!(
+        root.join("node_modules").join("vue").exists(),
+        "the workspace node_modules must hold vue: run `pnpm install`"
+    );
+    let engine = resolve_rc_engine().expect("a supported tsgo engine is required");
+    let output = Command::new(verter_test_support::cargo_test_binary_path!("verter-tsc"))
+        .env("VERTER_TSGO_BIN", &engine)
+        .arg("--projection-route")
+        .arg("-p")
+        .arg(root.join("cross").join(project).join("tsconfig.json"))
+        .current_dir(&root)
+        .output()
+        .expect("failed to execute verter-tsc");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let report = format!("exit={:?}\nstdout={stdout}\nstderr={stderr}", output.status);
+    assert_eq!(output.status.code(), Some(1), "{report}");
+    assert!(
+        stderr.contains(&format!("checking {carriers} .vue file(s)")),
+        "the Vue carriers through the driver and the Svelte carriers through the lane: {report}"
+    );
+    (temp, parse_diagnostics(&stdout), report)
+}
+
+/// A `.vue` file that mounts a `.svelte` component is checked against that
+/// component's real props.
+#[test]
+fn a_vue_file_checks_the_props_it_passes_to_a_svelte_component() {
+    let (_temp, diags, report) = run_cross_framework_check("vue-mounts-svelte", 3);
+    assert_error_at(&diags, "/MountsCounter.vue", 6, 2322);
+    assert_no_errors(&diags, "/MountsCounterClean.vue");
+    assert!(
+        diags.iter().all(|d| d.ts_code != 2307),
+        "every import across frameworks resolves: {report}"
+    );
+}
+
+/// A `.svelte` file that renders a `.vue` component is checked against that
+/// component's real props.
+#[test]
+fn a_svelte_file_checks_the_props_it_passes_to_a_vue_component() {
+    let (_temp, diags, report) = run_cross_framework_check("svelte-renders-vue", 3);
+    let at_value: Vec<_> = diags
+        .iter()
+        .filter(|d| d.file.ends_with("/RendersGreeting.svelte") && d.line == 4)
+        .collect();
+    assert!(
+        at_value
+            .iter()
+            .any(|d| d.ts_code == 2322 || d.ts_code == 2769),
+        "the number passed as `msg` is reported: {report}"
+    );
+    assert_no_errors(&diags, "/RendersGreetingClean.svelte");
+    assert_no_tsx_paths(&diags);
+}
+
+/// An error in a `.vue` file a `.svelte` file imports is reported once, on
+/// the `.vue` file, and never on the module the Svelte lane imports.
+#[test]
+fn an_error_in_a_vue_file_is_reported_once_when_a_svelte_file_imports_it() {
+    let (_temp, diags, report) = run_cross_framework_check("error-once", 2);
+    let broken: Vec<_> = diags
+        .iter()
+        .filter(|d| d.file.ends_with("/Broken.vue"))
+        .collect();
+    assert_eq!(broken.len(), 1, "{report}");
+    assert_eq!((broken[0].line, broken[0].ts_code), (3, 2322), "{report}");
+    assert!(
+        diags.iter().all(|d| !d.file.ends_with(".vue.ts")),
+        "no diagnostic on the checking module: {report}"
+    );
+    assert_no_errors(&diags, "/UsesBroken.svelte");
+}

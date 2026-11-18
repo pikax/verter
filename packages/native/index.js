@@ -35,6 +35,9 @@ const {
   prepareStyleForPreprocessor: _prepareStyleForPreprocessor,
   transformVueStyle: _transformVueStyle,
   analyzeStyle: _analyzeStyle,
+  canonicalizeId,
+  parseRequestId,
+  hashBlockContent: _hashBlockContent,
   VerterHost,
   Workspace,
   MetaProject,
@@ -60,6 +63,10 @@ function transformVueStyle(css, options) {
 
 function analyzeStyle(css, options) {
   return _analyzeStyle(toBuffer(css), options);
+}
+
+function hashBlockContent(code) {
+  return _hashBlockContent(toBuffer(code));
 }
 
 const _upsert = VerterHost.prototype.upsert;
@@ -111,6 +118,9 @@ if (MetaSession) {
 module.exports.prepareStyleForPreprocessor = prepareStyleForPreprocessor;
 module.exports.transformVueStyle = transformVueStyle;
 module.exports.analyzeStyle = analyzeStyle;
+module.exports.canonicalizeId = canonicalizeId;
+module.exports.parseRequestId = parseRequestId;
+module.exports.hashBlockContent = hashBlockContent;
 module.exports.VerterHost = VerterHost;
 module.exports.Workspace = Workspace;
 module.exports.ComponentMetaHost = ComponentMetaHost;

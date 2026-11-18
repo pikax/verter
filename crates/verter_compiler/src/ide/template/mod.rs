@@ -39,20 +39,21 @@ use crate::ast::types::{
     AstNodeKind, CommentNode, ConditionalChain, ElementNode, ElementNodeConditionKind,
     InterpolationNode, TagType, TextNode,
 };
+use crate::code_transform::EditRecorder;
+use crate::code_transform::MappedGeneratedText;
 use crate::ide::template::emit::{
     emit_expr_plan, emit_op, emit_synthesized_shorthand_value, EmitOp, EmitText,
 };
-use crate::template::code_gen::binding::{BindingResolver, BindingType};
-use crate::template::code_gen::expression::{
+use crate::template::binding::prefixed_expr::{
     build_prefixed_expr_segments, resolve_simple_expr_segments,
 };
-use crate::template::code_gen::types::{CodeGenOutput, MappedGeneratedText};
+use crate::template::binding::{BindingResolver, BindingType};
 use crate::template::oxc::types::{
     ComponentSlotSummary, OxcNodeData, OxcParsedAst, OxcParsedElement, SlotChildFact, SlotChildKind,
 };
 use crate::types::NodeId;
 
-use super::{IdeTemplateOptions, TemplateComponentBindings};
+use super::{get_directive_name, IdeTemplateOptions, TemplateComponentBindings};
 
 /// How this element is being emitted relative to a v-if chain.
 ///
@@ -62,6 +63,8 @@ use super::{IdeTemplateOptions, TemplateComponentBindings};
 enum ChainMode {
     /// Normal emission (JSX children context). Default for all non-chain elements.
     Normal,
+    /// An unmatched v-else/v-else-if is recovered as a plain element, as in Vue.
+    OrphanBranch,
     /// Lifted chain branch that has v-for: condition is outside,
     /// v-for emits bare (no `{`/`}`), element is in expression context.
     LiftedBranch,
@@ -130,7 +133,7 @@ struct IdeTemplateCtx<'a, 'alloc> {
     ast: &'a crate::ast::types::TemplateAst,
     oxc_ast: &'a OxcParsedAst<'alloc>,
     source: &'alloc str,
-    out: &'a mut CodeGenOutput<'alloc>,
+    out: &'a mut EditRecorder<'alloc>,
     alloc: &'alloc Allocator,
     resolver: &'a BindingResolver<'alloc>,
     options: &'a IdeTemplateOptions<'a>,
@@ -150,14 +153,14 @@ struct IdeTemplateCtx<'a, 'alloc> {
 /// Generate TSX template (JSX) from the template AST.
 ///
 /// Walks the AST and produces JSX output by overwriting Vue-specific syntax
-/// with JSX equivalents. Uses `CodeGenOutput` for deferred batch operations.
+/// with JSX equivalents. Uses `EditRecorder` for deferred batch operations.
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
 pub fn generate_ide_template<'alloc>(
     ast: &crate::ast::types::TemplateAst,
     oxc_ast: &OxcParsedAst<'alloc>,
     source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     alloc: &'alloc Allocator,
     bindings: &FxHashMap<&'alloc str, BindingType>,
     options: &IdeTemplateOptions<'_>,
@@ -175,11 +178,15 @@ pub fn generate_ide_template<'alloc>(
 
     // Overwrite <template> tags
     // Replace <template> open tag with empty (we just want the content)
-    out.overwrite(root.tag_open.start, root.tag_open.end, "");
+    if root.tag_open.start != root.tag_open.end {
+        out.overwrite(root.tag_open.start, root.tag_open.end, "");
+    }
 
     // Replace </template> close tag with empty
     if let Some(tag_close) = &root.tag_close {
-        out.overwrite(tag_close.start, tag_close.end, "");
+        if tag_close.start != tag_close.end {
+            out.overwrite(tag_close.start, tag_close.end, "");
+        }
     }
 
     // Walk root children
@@ -268,7 +275,7 @@ fn walk_element<'a, 'alloc>(
     chain_mode: ChainMode,
 ) {
     // Handle structural directives first
-    let has_v_if = el.v_condition.is_some();
+    let has_v_if = el.v_condition.is_some() && chain_mode != ChainMode::OrphanBranch;
     let has_v_for = el.v_for.is_some();
 
     // Lifted chain members skip v-if emission (the condition is emitted by the parent walk loop).
@@ -278,8 +285,8 @@ fn walk_element<'a, 'alloc>(
 
     // Compute emit context for brace ownership
     let emit_ctx = match chain_mode {
-        ChainMode::Normal if has_v_for => EmitContext::Expression,
-        ChainMode::Normal => EmitContext::JsxChildren,
+        ChainMode::Normal | ChainMode::OrphanBranch if has_v_for => EmitContext::Expression,
+        ChainMode::Normal | ChainMode::OrphanBranch => EmitContext::JsxChildren,
         ChainMode::LiftedBranch | ChainMode::LiftedPlain => EmitContext::Expression,
     };
 
@@ -303,7 +310,7 @@ fn walk_element<'a, 'alloc>(
             el.tag_open.start,
             flow::ScopeKind::LiftedCondition,
         )),
-        ChainMode::Normal => None,
+        ChainMode::Normal | ChainMode::OrphanBranch => None,
     };
 
     // v-for frame: `{(() => { const ___VERTER___vN = (<source>); { const <aliases> =
@@ -956,7 +963,7 @@ fn close_structural_scopes(
 fn isolate_vue_slot_body(
     el: &ElementNode,
     emitted_tag_name: &str,
-    out: &mut CodeGenOutput<'_>,
+    out: &mut EditRecorder<'_>,
     slot_instance: Option<&str>,
     emit_ctx: EmitContext,
 ) -> bool {
@@ -1457,7 +1464,22 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
             if let Some(comments) = analysis.component_is_comments.get(&idx) {
                 ctx.ts_directives_for_component_is = comments.clone();
             }
-            walk_node(child_id, ctx, ChainMode::Normal);
+            // The parser owns adjacency. An else absent from its chain plan
+            // cannot open or close a branch; recover its body as Vue does.
+            let orphan = matches!(
+                &child_node.kind,
+                AstNodeKind::Element(el) if el.v_condition.as_ref().is_some_and(|condition|
+                    matches!(condition.kind, ElementNodeConditionKind::Else | ElementNodeConditionKind::ElseIf))
+            );
+            walk_node(
+                child_id,
+                ctx,
+                if orphan {
+                    ChainMode::OrphanBranch
+                } else {
+                    ChainMode::Normal
+                },
+            );
             ctx.ts_directives_for_component_is.clear();
 
             // Inject repositioned comments
@@ -1492,7 +1514,7 @@ fn walk_children_with_iife_tracking<'a, 'alloc>(
                 }
 
                 // Solo v-if elements NOT in any chain still use IIFE tracking
-                if let Some(ref cond) = child_el.v_condition {
+                if let Some(cond) = child_el.v_condition.as_ref().filter(|_| !orphan) {
                     let el_end = child_el
                         .tag_close
                         .as_ref()
@@ -1543,7 +1565,7 @@ fn is_dynamic_component_is(el: &ElementNode, source: &str) -> bool {
         && &source[el.tag_open.start as usize + 1..el.tag_open.name_end as usize] == "component"
         && el.props.iter().any(|p| {
             p.is_directive
-                && directive_name(p, source) == "bind"
+                && get_directive_name(p, source) == "bind"
                 && p.arg_start
                     .zip(p.arg_end)
                     .map(|(a, b)| &source[a as usize..b as usize] == "is")
@@ -1659,7 +1681,7 @@ fn inject_repositioned_comments<'alloc>(
     reposition_set: &rustc_hash::FxHashSet<usize>,
     ast: &crate::ast::types::TemplateAst,
     source: &str,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     el: &ElementNode,
     _alloc: &'alloc Allocator,
 ) {
@@ -1706,14 +1728,14 @@ fn inject_repositioned_comments<'alloc>(
 ///
 /// Comments are emitted at `el.tag_open.start` via `prepend_alloc_mapped_with_offset`.
 /// Because the v-for `.map()` open is also emitted at this position via earlier prepends,
-/// and `CodeGenOutput` uses stable sort order (later prepends appear after earlier ones at
+/// and `EditRecorder` uses stable sort order (later prepends appear after earlier ones at
 /// the same position), these comments land inside the callback body.
 fn inject_ts_directive_comments_for_v_for(
     comment_indices: &[usize],
     children: &[NodeId],
     ast: &crate::ast::types::TemplateAst,
     source: &str,
-    out: &mut CodeGenOutput<'_>,
+    out: &mut EditRecorder<'_>,
     el: &ElementNode,
 ) {
     for &j in comment_indices {
@@ -1752,7 +1774,7 @@ struct ComponentIsRewrite<'a> {
 /// `pascal` byte-for-byte (always true for `to_pascal_case`-derived bindings);
 /// any mismatch falls back to the single whole-span mapped overwrite.
 fn emit_mapped_kebab_pascal_rewrite<'alloc>(
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     start: u32,
     end: u32,
     source: &str,
@@ -1807,7 +1829,7 @@ fn rewrite_component_is<'alloc>(
     el: &ElementNode,
     oxc_el: Option<&OxcParsedElement<'alloc>>,
     source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     resolver: &BindingResolver<'alloc>,
     components: &TemplateComponentBindings,
     ts_directives: &[String],
@@ -1863,7 +1885,7 @@ fn rewrite_component_is<'alloc>(
         if !prop.is_directive || prop.is_dynamic == Some(true) {
             return false;
         }
-        if directive_name(prop, source) != "bind" {
+        if get_directive_name(prop, source) != "bind" {
             return false;
         }
         let (Some(arg_start), Some(arg_end)) = (prop.arg_start, prop.arg_end) else {
@@ -1950,7 +1972,7 @@ fn rewrite_component_is<'alloc>(
     })
 }
 
-fn rewrite_component_tag_name(el: &ElementNode, target_tag: &str, out: &mut CodeGenOutput<'_>) {
+fn rewrite_component_tag_name(el: &ElementNode, target_tag: &str, out: &mut EditRecorder<'_>) {
     // Rewrite opening `<component` to `<targetTag`.
     out.overwrite(el.tag_open.start + 1, el.tag_open.name_end, target_tag);
 
@@ -1974,20 +1996,6 @@ fn eat_leading_whitespace(source: &str, pos: u32) -> u32 {
         i -= 1;
     }
     i as u32
-}
-
-fn directive_name<'a>(prop: &crate::types::NodeProp, source: &'a str) -> &'a str {
-    let name = &source[prop.start as usize..prop.name_end as usize];
-    if name.starts_with(':') || name.starts_with('.') {
-        return "bind";
-    }
-    if name.starts_with('@') {
-        return "on";
-    }
-    if name.starts_with('#') {
-        return "slot";
-    }
-    name.strip_prefix("v-").unwrap_or(name)
 }
 
 /// Check if a string is a valid JS identifier (can be used as a bare property name).
@@ -2033,7 +2041,7 @@ fn extract_slot_name<'a>(el: &ElementNode, source: &'a str) -> Option<SlotNameIn
                 }
             }
         } else {
-            let dir_name = directive_name(prop, source);
+            let dir_name = get_directive_name(prop, source);
             if dir_name == "bind" {
                 if let (Some(arg_s), Some(arg_e)) = (prop.arg_start, prop.arg_end) {
                     let arg = &source[arg_s as usize..arg_e as usize];
@@ -2057,7 +2065,7 @@ fn collect_slot_props(
     source: &str,
     resolver: &BindingResolver<'_>,
 ) -> String {
-    use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
+    use crate::template::binding::prefixed_expr::build_prefixed_expr;
 
     let mut parts = Vec::new();
 
@@ -2076,7 +2084,7 @@ fn collect_slot_props(
                 parts.push(format!("{}: true", key));
             }
         } else {
-            let dir_name = directive_name(prop, source);
+            let dir_name = get_directive_name(prop, source);
             match dir_name {
                 "bind" => {
                     if let (Some(arg_s), Some(arg_e)) = (prop.arg_start, prop.arg_end) {
@@ -2126,7 +2134,7 @@ fn quote_prop_key_if_needed(key: &str) -> String {
 /// To keep TSX valid for content like `2 < 1`, non-empty trimmed text is wrapped
 /// as a string expression (`{"..."}`), matching v5/process text-plugin semantics.
 /// Whitespace-only text remains unchanged.
-fn visit_text(text: &TextNode, source: &str, out: &mut CodeGenOutput<'_>) {
+fn visit_text(text: &TextNode, source: &str, out: &mut EditRecorder<'_>) {
     if text.end <= text.start {
         return;
     }
@@ -2170,7 +2178,7 @@ fn visit_interpolation<'alloc>(
     oxc_expr: Option<&crate::template::oxc::types::OxcParsedExpression<'alloc>>,
     scopes: &crate::template::oxc::types::LexicalScopes<'alloc>,
     source: &'alloc str,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     resolver: &BindingResolver<'alloc>,
 ) {
     // Replace `{{` with `{`
@@ -2220,7 +2228,7 @@ enum RecoveredInterpolationPatch {
 fn recover_broken_interpolation_expr<'alloc>(
     raw_expr: &str,
     expr_start: u32,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     resolver: &BindingResolver<'alloc>,
     recovery_scope: Option<(
         &crate::template::oxc::types::LexicalScopes<'_>,
@@ -2469,7 +2477,7 @@ fn is_ident_continue(byte: u8) -> bool {
 /// Visit a comment node: `<!-- text -->` → `{/* text */}`.
 fn visit_comment(
     comment: &CommentNode,
-    out: &mut CodeGenOutput<'_>,
+    out: &mut EditRecorder<'_>,
     options: &IdeTemplateOptions<'_>,
 ) {
     if !options.comments {

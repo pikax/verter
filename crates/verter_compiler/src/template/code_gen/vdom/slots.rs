@@ -31,7 +31,7 @@ fn format_slot_key(buf: &mut String, name: &str) {
         buf.push_str(name);
     } else {
         buf.push('"');
-        helpers::escape_js_string_into(buf, name);
+        crate::template::vue_syntax::escape_js_string_into(buf, name);
         buf.push('"');
     }
 }
@@ -81,7 +81,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                             if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                                 let raw = &source[vs as usize..ve as usize];
                                 let oxc_exp =
-                                    super::super::vapor::find_prop_oxc_exp(oxc_el, prop_idx);
+                                    crate::template::binding::prefixed_expr::find_prop_oxc_exp(
+                                        oxc_el, prop_idx,
+                                    );
                                 let resolved = element::resolve_expr(
                                     raw,
                                     vs,
@@ -169,7 +171,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         match &slot_name {
             SlotName::Static(name) => {
                 buf.push('"');
-                helpers::escape_js_string_into(&mut buf, name);
+                crate::template::vue_syntax::escape_js_string_into(&mut buf, name);
                 buf.push('"');
             }
             SlotName::Dynamic(expr) => {
@@ -268,7 +270,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 }
                 if super::props::needs_quoted_key(name) {
                     named_buf.push('"');
-                    helpers::escape_js_string_into(&mut named_buf, name);
+                    crate::template::vue_syntax::escape_js_string_into(&mut named_buf, name);
                     named_buf.push('"');
                 } else {
                     named_buf.push_str(name);
@@ -276,7 +278,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 named_buf.push_str(": ");
                 if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                     named_buf.push('"');
-                    helpers::escape_js_string_into(
+                    crate::template::vue_syntax::escape_js_string_into(
                         &mut named_buf,
                         &source[vs as usize..ve as usize],
                     );
@@ -305,10 +307,10 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 }
 
                 // Emit key
-                let key = super::props::camelize(arg);
+                let key = crate::template::vue_syntax::camelize(arg);
                 if super::props::needs_quoted_key(&key) {
                     named_buf.push('"');
-                    helpers::escape_js_string_into(&mut named_buf, &key);
+                    crate::template::vue_syntax::escape_js_string_into(&mut named_buf, &key);
                     named_buf.push('"');
                 } else {
                     named_buf.push_str(&key);
@@ -318,7 +320,9 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 // Emit value
                 if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                     let raw = &source[vs as usize..ve as usize];
-                    let oxc_exp = super::super::vapor::find_prop_oxc_exp(oxc_el, prop_idx);
+                    let oxc_exp = crate::template::binding::prefixed_expr::find_prop_oxc_exp(
+                        oxc_el, prop_idx,
+                    );
                     let resolved = element::resolve_expr(
                         raw,
                         vs,
@@ -337,7 +341,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                 // Bare `v-bind="expr"` spread — pass the object through as
                 // the slot props (or merge with named props below).
                 let raw = &source[vs as usize..ve as usize];
-                let oxc_exp = super::super::vapor::find_prop_oxc_exp(oxc_el, prop_idx);
+                let oxc_exp =
+                    crate::template::binding::prefixed_expr::find_prop_oxc_exp(oxc_el, prop_idx);
                 let resolved =
                     element::resolve_expr(raw, vs, oxc_exp, &self.resolver, self.options.force_js);
                 spreads.push(resolved);

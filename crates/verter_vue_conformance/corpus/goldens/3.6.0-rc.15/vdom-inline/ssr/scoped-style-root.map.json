@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/ssr/scoped-style-root.vue"
+  ],
+  "names": [],
+  "mappings": ";;;;;AACA,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;;;;AACxB,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC,CAAC;;;wBAIb,oBAAwB,KAAxB,UAAwB,mBAAR,OAAC",
+  "sourcesContent": [
+    "<script setup lang=\"ts\">\nimport { ref } from \"vue\"\nconst n = ref(1)\n</script>\n\n<template>\n  <p class=\"a\">{{ n }}</p>\n</template>\n\n<style scoped>\n.a {\n  color: red;\n}\n</style>\n"
+  ]
+}

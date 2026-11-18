@@ -27,6 +27,11 @@ export interface HostCompileResponse {
   canonicalId: string;
   diagnostics: HostDiagnosticsSnapshot;
   products: Array<HostCompiledProduct>;
+  /**
+   * The compile's complete artifact set as terminal JSON, present
+   * exactly when the compile published one.
+   */
+  artifactSet?: string;
 }
 
 /**

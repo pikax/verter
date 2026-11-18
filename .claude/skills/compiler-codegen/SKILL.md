@@ -60,11 +60,14 @@ template/
 |   +-- mod.rs            # parse_template_expressions()
 |   +-- scope.rs          # LexicalScopes frames, LexicalScopeId handles, ActiveScope
 |   +-- types.rs          # OxcParsedAst, OxcParsedElement, OxcParsedExpression
-+-- code_gen/             # Render function codegen
++-- binding/            # Shared by runtime codegen and the IDE
+|   +-- mod.rs            # BindingResolver (_ctx./$setup. prefix resolution), collect_binding_patches
+|   +-- prefixed_expr.rs  # Prefixed expression text (build_prefixed_expr)
++-- vue_syntax.rs         # Vue template syntax helpers (camelize, event keys/modifiers, builtin_component, JS escaping)
++-- code_gen/             # Render function codegen (runtime only; the IDE never imports it)
     +-- mod.rs            # generate_template() entry point
     +-- walker.rs         # DFS tree walker (shared by all backends)
     +-- types.rs          # TemplateCodeGen trait, CodeGenOutput
-    +-- binding.rs        # BindingResolver (_ctx./$setup. prefix resolution)
     +-- shared/           # Shared codegen helpers
     +-- vdom/             # VDOM render function output (_createElementVNode, etc.)
     +-- vapor/            # Vapor mode output (_template, _renderEffect, etc.)
@@ -87,8 +90,14 @@ css/
 +-- types.rs              # ProcessStyleOptions, ProcessStyleResult
 code_transform/
 +-- code_transform.rs     # Chunk-based deferred mutation engine (MagicString equivalent)
-+-- chunk.rs              # Chunk types (Original, Overwritten, Inserted, InsertedMapped)
++-- chunk.rs              # Chunk types (Original, Inserted, InsertedMapped, InsertedAnchored, Overwritten, OverwrittenSegmented, Moved)
++-- recorder.rs           # EditRecorder: deferred source edits, applied by the one law
 +-- source_map.rs         # Source map generation from chunk positions
+emission/                 # Shared immutable emission representation
++-- piece.rs              # Piece, PieceText, Provenance (exact / rewritten / anchor / unmapped / external)
++-- fragment.rs           # EmissionFragment (sealed), FragmentSlot, MapHints
++-- builder.rs            # EmissionBuilder: the one direct construction path
++-- writer.rs             # The one writer: text and decoded map in one pass
 utils/
 +-- oxc/                  # OXC parser utilities
 |   +-- bindings/         # Expression binding extraction
@@ -150,7 +159,7 @@ rediscover a node's scope. Exact lexical identity and order are the frames'
 
 ## CodeTransform (Deferred Mutations)
 
-All codegen phases use `CodeTransform` -- a chunk-based deferred mutation engine:
+Source-coordinate rewrites use CodeTransform. Direct construction and final assembly use the shared immutable emission representation. Building a String is a terminal operation, not an intermediate handoff.
 
 ```rust
 let mut ct = CodeTransform::new(input, &allocator);
@@ -165,7 +174,7 @@ Key features:
 - `output_delta`: Incremental length tracking avoids full scan
 - Pre-allocated chunk capacity: `source_len / 13` (empirically tuned)
 
-## CodeTransform Is the Single Source of Truth (CRITICAL)
+## Source Editing and Output Assembly (CRITICAL)
 
 `CodeTransform<'a, M>` carries the compiler's selected capture mode through
 script, template and source-map operations. `CodeTransform::new` defaults to
@@ -178,16 +187,27 @@ Standalone transform owners select from the installed observer once at their
 entry (`code_transform::installed_capture_mode`) and specialise before creating
 the transform. This preserves captured operation counts in nested script/TSC,
 style, assembly and Svelte transforms without polling during their operations.
+The map policy (`MapMode`) is a second, independent selection made when the transform, recorder or builder is created.
 
-**All modifications to generated code MUST go through `CodeTransform` operations** (`overwrite`, `prepend_left`, `append_left`, `move_with_suffix`, etc.). Never apply string replacements, regex transforms, or manual splicing to the output of `build_string()` or to content produced by a `CodeTransform`.
+Server slot functions receive their client VDOM arrays as frozen emission
+fragments under the caller's capture and map modes. The server records each
+array position as a generated marker paired with its fragment, freezes the
+render with those markers and fills them through `replace_marked` before the
+one artifact write. Deferred relocation keeps allocated wrapper identities so
+a default slot moved after named slots retains its marker and authored maps.
+JavaScript runtime producers remove TypeScript ranges while emitting each retained
+expression, including loop sources and server expression segments. The shared
+expression writer also expands a renamed loop-local shorthand into its authored
+property key and rewritten value. A server default slot carries control-flow
+closers at its exclusive source boundary in its relocation suffix.
+The carrier parser classifies text with HTML's ASCII whitespace predicate;
+non-breaking spaces, literal or entity-encoded, remain significant children.
+Both render targets consume component-tag classification and matched bindings
+from the semantic snapshot; hoisted resolutions retain its self-reference flag.
 
-Post-hoc string manipulation breaks sourcemap accuracy: `CodeTransform` generates source maps by tracking chunks (Original, Inserted, Moved, Overwritten). Modifying the string after the transform makes byte offsets in the source map no longer match the content, causing position mismatches in the LSP (e.g. hover landing on the wrong token, go-to-definition jumping to wrong locations).
+The rule is the CLAUDE.md section "Source Editing and Output Assembly (CRITICAL)"; it is stated there once.
 
-**Correct:** Use `ct.prepend_left(pos, ".ts")` to insert text at a known position -- chunk list and source map stay consistent.
-
-**Wrong:** Call `content.replace(".vue'", ".vue.ts'")` on the built string -- the source map still reflects the pre-replace byte offsets.
-
-The rule has NO scoped exceptions: the Svelte scoped-CSS renderer (`crates/verter_compiler/src/svelte/runtime/css/render.rs`) edits the original component source through the shared `CodeTransform`'s checked (`try_*`) operations -- whose insertion-affinity chunk model carries the `magic-string` semantics the official `svelte@5.56.10` `render_stylesheet` depends on (content-only `try_update` preserving the replaced range's first-chunk boundary insertions, left/right insertion affinity with per-affinity stacking, `try_remove` clearing interior insertions; pinned by `code_transform/edit_semantics_tests.rs`) -- and generates the css source map (`css.map`) from the SAME transform that built `css.code`. The guard `svelte_css_renderer_uses_code_transform` (`crates/verter_compiler/tests/`) asserts the renderer stays on the shared transform and bans any private edit buffer from the css matcher/render tree.
+The Svelte scoped-CSS renderer (`crates/verter_compiler/src/svelte/runtime/css/render.rs`) edits the original component source through the shared `CodeTransform`'s checked (`try_*`) operations -- whose insertion-affinity chunk model carries the `magic-string` semantics the official `svelte@5.56.10` `render_stylesheet` depends on (content-only `try_update` preserving the replaced range's first-chunk boundary insertions, left/right insertion affinity with per-affinity stacking, `try_remove` clearing interior insertions; pinned by `code_transform/edit_semantics_tests.rs`) -- and generates the css source map (`css.map`) from the SAME transform that built `css.code`.
 
 ## Compile artifact schema
 
@@ -221,9 +241,22 @@ Unmapped generated text has no authored segment. An absent family is not an
 implicit identity map. These mappings describe authored anchors and do not
 assert byte-for-byte fidelity or interpolate between differently sized ranges.
 
-Terminal JSON uses schema version 1, explicit `utf8-bytes` coordinates,
+Every artifact has an `ArtifactRole` (`Module` by default, `Style` or
+`Metadata`). A style artifact carries `StyleArtifactFacts` (authored block
+index, `scoped`, `module`, `lang`, the stage its bytes are at, whether an
+external stage is still needed) and names its module through exactly one
+`StyleOf` relation; a metadata artifact names its module through exactly one
+`MetadataOf`. The set refuses facts on a non-style artifact, a role relation
+from the wrong role or to a non-module, two styles of one module with the same
+index, and a second metadata artifact for one module. `ArtifactGraph`
+(`assembly/artifact_graph.rs`, implemented for `CompileArtifactSet`) is the
+host walk over those facts: the module of a runtime product, its styles in
+block order, its metadata, and any artifact's role and style facts.
+
+Terminal JSON uses schema version 2, explicit `utf8-bytes` coordinates,
 hex-encoded full canonical identities, sorted objects/sets and generated-order
-segments. JSON/V3/LSP adapters own UTF-16 conversion using source documents.
+segments. Every artifact carries `role`; style artifacts also carry `style`
+(`index`, `scoped`, `module`, `lang`, `needsExternalStage`). JSON/V3/LSP adapters own UTF-16 conversion using source documents.
 The schema does not replace the live `ArtifactSet` publication boundary or
 `VerterCompileResult` routes.
 
@@ -256,6 +289,80 @@ root artifact, so a published body without its typed set is not
 representable and no consumer re-derives the module's language or locates
 its artifact by name.
 
+`framework::vue::assembly::VueArtifactSet` is one Vue component's complete
+set: one `main` module per requested runtime product (each written as an
+`EmittedArtifact`, with the `ArtifactSourceUnit`s of the sources its
+fragments name), each style block once per module as `style/<index>`
+(`StyleOf`; language `css`, or the authored language while an external
+stage is still needed), and one `meta` artifact per module holding the
+`VueComponentMetadata` JSON with sorted keys (`MetadataOf`). Every
+artifact shares the request's one source identity and revision, minted by
+`mint_direct_source_id` and `mint_admission_identity`. Map segments come
+straight from the module's `DecodedMap`; `stage(product)` builds the V3
+JSON once, at the handoff. Custom blocks attach afterwards through
+`VueArtifactSet::attach_custom_blocks`.
+
+A module the compiler's own producers wrote in full is published without
+a second parse. `GrammarWitness` (contract and dialect) is minted only
+through the sealed `GrammarProducer` trait (today: script lowering and the
+main-module decoration). `EmitPlanBuilder::witnessed` opens a plan a
+producer writes as a whole; `fill_fragment` takes the filling fragment's
+witness and checks it against the slot's contract; a fragment placed
+without one (`push_fragment`, `push_transform`, `replace_marked`), a nested
+plan without one, or a fill in another dialect leaves the plan
+unwitnessed. `EmittedArtifact::grammar` carries the result to
+`ArtifactContribution::grammar`, and `publish` skips its final parse only
+for a complete module witnessed in the contribution's own dialect.
+Supplied and external bytes are always parsed. Compile contracts
+`grammar_witness_is_not_forgeable` and `grammar_producer_is_sealed`.
+
+`vue_module::compose_main_fragments` is the fragment-taking form of
+`compose_main_module`: the decoration's prelude, the script fragment, the
+render fragment and the trailer go into one `EmitPlan`, each declared
+`__sfc__` binding slot is filled with `_sfc_main` and the export-statement
+slot with nothing (`replace_marked`), and one `write` produces the text and
+the decoded map. No rename pass, map chain or JSON map runs between
+producers. The script's slots come from `CodeTransform::freeze_marked`,
+which resolves each `GeneratedContentMarker` by the same content-pointer
+identity as `generated_content_range` and makes the run it covers its own
+piece; a marker over mapped text, one no chunk holds, or two partly
+overlapping markers are typed refusals, and a marker inside another (the
+export statement's own binding) has no slot of its own. `SfcSlots::of`
+collects the slots from the frozen fragment.
+
+`framework::vue::assembly::compile_vue_runtime` compiles a native component
+into client-tree, fine-grained client, or server modules. It closes the request's demand, shares
+the topology, expression snapshot and style plan, composes their admission
+(including `NeedInputs`), lowers the script into declared fragment slots,
+and passes the executor's preamble and render plans to `compose_main_fragments`.
+`script_fragment` reuses `generate_script` and freezes its declared component
+binding/export markers. For an inline client render it also declares the
+setup-return hole at script lowering's `inline_inject_pos`; the composer
+places the preamble after helper imports and fills that hole with the render
+fragment behind a newline. CSS variable inputs come from the shared scope
+plan. Server renders remain separate.
+The render-route comparison selector passes its existing runtime expression
+overlay and completed cascade scope facts into the prerequisite builder.
+The snapshot borrows that overlay; the style owner records the completed
+facts through the same scope accumulator used by a fresh style plan.
+Supplied setup scripts and templates use the existing raw-block parsers and
+the same pipeline. Script preparation reads the selected script source;
+topology, expressions and structure read the selected template source, with
+the script lane's bindings. Styles and custom blocks retain their carrier
+coordinates. Each fragment keeps its qualified source key through composition;
+inline supplied templates fill the ordinary setup-return slot.
+Script and template diagnostics validate their respective selected parses.
+`VueArtifactSet::stage` is its terminal module/map handoff. It validates each
+supplied source's host map through `assembly::map_input`, remaps only the
+decoded segments naming that source, and encodes once. The staged schema's
+byte maps and provenance include the host sources. Remapping reuses the
+written wire tokens, with one host lookup per selected token. Source columns
+past their line's content are refused. A host map without content
+for a token-addressed source keeps the compiler's map over the supplied bytes.
+No-map products do no host-map work. Invalid templates publish no set;
+projected plain scripts and plain plus setup remain typed refusals.
+Supplied style and custom-block inputs retain their existing module refusal.
+
 ## Multi-unit carrier lowering
 
 Runtime and IDE output blocks carry a `RuntimeOutputDescriptor` naming the generated destination space, emitted content artifact, declared input spaces, raw map, and honest `Exact`/`Approximate` fidelity. A separately lowered template receives `TemplateBindingMetadata` from its script pass (bindings, `has_script`, const props, and ref-bindable imports), matching Vue's official `bindingMetadata` mechanism.
@@ -271,11 +378,204 @@ Current Vue capability gates:
 - IDE lowering supports native carriers and external/validated-supplied templates with composed maps when the carrier has no script, a setup script, or both plain and setup scripts. An external/validated-supplied template with only a carrier plain script remains `BlockContentIdeUnavailable` because its registered template hole is mid-module. Any projected plain or setup script also remains `BlockContentIdeUnavailable`, including the simultaneous case.
 - Every lifted IDE class must pass the real TypeScript syntax gate; the gate must prove tsc analyzed the emitted file and may tolerate only missing-module/intrinsic-environment diagnostics TS2307 and TS7026. Every lifted runtime class must pass `node --check`, with both gates carrying invalid-output and non-execution controls. A compiler `Ok` result alone is not proof of capability.
 
+### Public declaration products
+
+`ide/projection_declarations::build_declaration_product` fills the backend's
+typed `Declarations` slot. It consumes the already-closed `BinderCapturePlan`:
+each `LiftedSourceDeclaration::emission` is an owned declaration fragment
+rendered by the existing TSC declaration owner while the original AST, tokens
+and shared semantic snapshot are live. Annotated values lose their initializer;
+classes and enums reuse that owner's existing declaration plans. Captures with
+no certified declaration representation, including binder-dependent lifts and
+values requiring type inference, produce `InaccessibleCapture` rather than an
+unbound declaration. No authored dependency is reparsed during assembly.
+
+The product composes exact authored runs and unmapped generated text through
+`EmitPlan`; its text and decoded declaration correspondence have one writer.
+The generated contract is parsed once for the existing binder-aware reference
+collector and borrowed-program module-specifier inventory. Private companion
+references use the naming owner's `classify_carrier_companion_reference`,
+which expands reserved extensionless producer spellings and delegates to
+`classify_carrier_companion`;
+absolute workspace-only specifiers use the shared resolution predicate. Any
+diagnostic or closure refusal makes the whole module unpublishable. The Vue
+public-constructor fill and engine declaration stage consume this separate
+artifact; declaration source is not inserted into template checking statements.
+
+The product's `declaration_file` is the naming owner's
+`published_declaration_identity` (`Foo.vue.d.ts`): the file the engine emits
+for the carrier's TypeScript checking module (`Foo.vue.ts`). The CLI declaration
+stage (`verter_tsc` `sfc_driver::declaration_mirror`) stages every product at
+that checking module and copies the project's TypeScript members into one
+mirror of the project directory. Specifiers are bound through the workspace
+resolver (a relative one to a staged file keeps its spelling, a `paths` alias
+to a staged file is spelled relative, any other relative one is made absolute),
+so a TypeScript member infers carrier types from the products, never from the
+`*.vue` wildcard. Published declarations get their authored specifiers back,
+and diagnostics and declaration maps reach the authored file through the
+specifier edits and, for a carrier, the product's map. Declaration files,
+members outside the project directory and members whose specifiers cannot be
+read are not copied; their own carrier imports still read the wildcard.
+
 ### Vue component resolution projection
+
+Template refs consume the parser's `BindingType` inventory and the literal-key
+records forwarded by `script_setup`. `VueImportAliases` resolves named runtime
+imports, and `collect_template_util_usage` is the shared extractor of call,
+binding, key and type-argument spans plus the decoded key. The setup collector
+uses its existing parsed program and visit; companion imports remain live while
+setup is projected. Local functions and type-only imports provide no Vue API
+evidence. `public_instance` reads each component use's `Instance` observation
+and each native element's existing namespace contract. Checks retain null,
+collect loop refs into arrays, and leave function refs as individual nullable
+instances. Native bound refs retain the native attribute owner's checks.
+Static receiving refs capture the setup ref at the template root before
+template-local aliases can shadow it, and check its `.value`. Assignability
+arguments carry the parser key's authored origin. Explicit `useTemplateRef` arguments therefore keep their authored
+type; untyped calls receive no template-to-script inference.
+
+The checking composer also supports empty, template-only and normal-script-only
+carriers. `public_constructor::options_api_wrap` is the shared Options default
+wrapping decision used by the checking module and the legacy TSC stub generator.
+It consumes the existing script parser's facts from the already parsed program;
+plain object defaults receive Vue's `defineComponent` contextual typing. The
+constructor owner supplies source-coordinate edits for this adaptation, so the
+authored object, methods and data remain mapped. The existing foreign component
+adapter supplies a constructor for the checking context while the public default
+retains its authored callable or constructor type. Template contexts read that
+adapted constructor's `InstanceType`. Combined scripts retain Options members,
+with setup-declared props/events/slots and exposed members taking precedence.
+The constructor owner's existing `value_bindings` classification filters normal
+script type-only names out of the context's value captures. No-default carriers receive
+the existing empty public-constructor rendering. External script defaults keep
+their separate forwarding path and withhold a carrier-local template scope.
+
+Nonliteral normal defaults pass through `generic_interop`'s public-default mode
+of the existing foreign signature classifier. It retains callable and
+constructable values exactly (including generic binders, overloads and statics),
+and adapts raw Options with Vue's `ComponentInstance` and the existing
+`__VerterUseConstruct` primitive, without an additional helper-package dependency.
+Named default specifiers use `NamedExportParts`; local captures follow the whole
+normal script so forward exports are initialized, reexports become imports, and
+sibling exports and authored references retain their source correspondence.
+Default function overload groups retain every signature and the implementation
+in source order; all contributing export prefixes are removed and adaptation
+follows the implementation. Anonymous contributors receive one shared name at
+the parsed type-parameter or parameter boundary, reusing an authored group name
+when present. Entirely anonymous groups need no separate capture alias.
+Value-bearing namespace defaults become namespace imports through the same
+facade. Named and namespace imports retain the authored module literal through
+any import attributes, including the keyword and trivia; surviving sibling
+exports keep their own clause and correspondence. Ordinary wildcard and
+type-only exports remain authored exports.
+
+`builtins::project_builtins` takes the parser-derived `CarrierShape` alongside
+the existing plan and component-resolution product. It recognizes tags through
+`template::vue_syntax::builtin_component` and reads the export name from that
+same owner. At the existing use anchor it composes `__VerterUseConstructor`
+with `__VerterUseConstruct<any[], InstanceType<typeof normalized>>`: the first
+existing primitive accepts callable and constructor exports, and the second
+reads the instance's published props while retaining its slots and ref surface.
+This also handles Vue's zero-argument builtin constructors without a separate
+constructor adapter. The ordinary component witness, slot-body owner and child
+contracts remain the checking authorities.
+The composer reads builtin status through its existing `ComposedProduct` entry,
+and provided-slot preludes follow that same trait alongside their block heads.
+The shared foreign-contract declarations are emitted once for both component
+uses and normal defaults.
 
 `VueProjectionBackend::component_resolution` combines the admitted `ProjectionPlan`, component-use witnesses, `ScriptProjectionFacts` binding inventory and the parse-selected custom-element prefixes. Configured custom elements do not enter component resolution. `ComponentResolutionObservation` distinguishes local/namespace, filename-recursive, global and dynamic uses without answering their types in Rust. Global names use the existing script fallback emitter, including its navigation probe; missing PascalCase members remain `unknown`. Non-Pascal authored tags retain the existing `GlobalComponentKebabType` route, and any Pascal-authored occurrence upgrades the shared fallback to Pascal intent.
 
+Checking fallbacks carry ambient helper declarations from the same
+`script/type_constructs.rs` producer as the legacy `@verter/types` surfaces.
+They read the project's augmentation-merged Vue types without requiring a
+helper package. The existing builtin filter runs before fallback rendering,
+so modules with only local or builtin components gain no global helpers.
+
 `DynamicComponentUseContract` checks a pure `:is="choice.component"` plus `v-bind="choice.props"` pair over each arm of `choice`. A branch containing a constructor union must satisfy every possible constructor; a mismatched or `never` arm is refused. Other dynamic expressions keep the ordinary component-use witness. Resolution specialization includes the plan snapshot and binding route alongside the witness key, so source shifts and binding changes invalidate the observation. The product is dormant until the Vue checking composer adopts it; TypeScript remains the type authority.
+
+The foreign component adapter extends its existing `__VerterUseConstructs`
+signature walk with result alternatives. Marker exhaustion after one concrete
+signature selects `__VerterUseConstructor` alone, so a
+wrong prop produces an assignability diagnostic instead of an artificial
+overload error. A repeated signature at a generic stall or exhaustion after
+multiple signatures keeps the exact contract ahead of the tolerant fallback.
+Static members do not affect signature enumeration, and the public default
+retains its authored static surface.
+
+The composer keeps its generated setup scope live with the same `void` read
+as the no-setup scope. Native and component observation preludes use the
+existing `void (null! as ...)` form for optional type roots. These generated
+reads never name authored bindings, so unused setup declarations remain
+diagnosable under `noUnusedLocals` and `noUnusedParameters`.
+
+### Vue native form-model checking projection
+
+`ide/vue_projection/native_models.rs` consumes admitted element operations and
+the native-element witnesses. Text and textarea controls write strings;
+`.number` and number inputs retain the `number | string` conversion fallback.
+Checkbox writes distinguish scalar true/false values, arrays and sets; radios
+use their bound or decoded static value. Multiple selects preserve the model's
+array/set shape and dynamic `multiple` retains both scalar and collection writes.
+Select item types come from the model domain; option-value compatibility is
+not inferred from a second child scan. Dynamic input types retain text,
+numeric, checkbox and radio writes. `.trim` and `.lazy` retain their literal
+flags without changing the payload domain.
+
+The product reuses `models::model_target` and `models::write_statement` for
+write-domain checks and readonly rejection, and the composer's existing
+callback plan for guard replay. Attribute values replay the native product's
+mapped expression; static text uses the native owner's shared entity decoder.
+Opaque spreads or computed attribute keys withhold the model contract until
+their effective attribute payload is available. Forced DOM routes on model
+attributes are identified through `attribute_operations::bind_key` and also
+withheld until their actual payload is modeled. The `ComposedProduct` trait
+and existing product-list entry own composition; no block-emitter branch is
+needed. Compiler tests cover projection, generated syntax and source anchors;
+provider-backed form diagnostics require the desktop TypeScript lane.
+
+### Vue template-ref checking projection
+
+`ide/vue_projection/public_instance.rs` reads parser-owned utility usage and
+binding facts, per-use instance observations and native element contracts.
+Static receivers are captured before template aliases can shadow them; ref
+storage remains nullable and loop storage is a collection. Bound component
+refs use the primary expression mapping because reserved ref operations are
+not emitted in the component transaction. A nested `Ref` survives the
+template context's `ShallowUnwrapRef`, so its receiving value type is the
+assignability target. Native bound refs stay with native attribute checking.
+The composer's placed-host filter removes component ref checks whose witness
+was withheld and marks the ref product incomplete. Untyped `useTemplateRef`
+inference from the template remains outside this projection's contract.
+
+### Vue directive checking projection
+
+`ide/vue_projection/directives.rs` checks built-in values in their existing
+template blocks and uses `runCustomDirective` for custom host/value/argument/
+modifier assignability. Its borrowed `DirectiveSyntax` supplies parser-owned
+argument/modifier spans and the composer's existing setup `BindingType` inventory;
+directive names use `to_pascal_case`, and global bindings use
+`retrieveSetupDirectives` over Vue's project-bound `GlobalDirectives`.
+Local directives use the shared `shallowUnwrapRef` read view directly, so a ref
+unwraps without allowing an invalid local to select a same-named global. Built-in
+values already carried by a component witness's transaction stay with that owner.
+`ExtractLeafElement` recognizes HTML, SVG and MathML hosts through component
+instances/constructors. Ordinary Vue `$el: any` roots and the shared adapter's
+functional instance surface (`$props`, `$slots`, `$emit`, without `$el`) retain
+an unknown host. `runCustomDirective` compares the extracted host as a whole,
+so these instances produce one callable binding check while preserving the
+directive's value, argument and modifier types. Explicit component roots still
+enforce element compatibility. Native hosts reference the DOM namespace tag maps with
+the namespace base type for parser-admitted tags missing from the DOM library;
+syntax-only wrappers without a concrete host remain incomplete for custom checks.
+The composer reads directive status, fragments and preludes through the shared
+`ComposedProduct` implementation and its product-list entry. Before composition,
+`DirectiveProjection::retain_component_hosts` removes custom component checks
+whose witnesses were withheld, marks the product incomplete and drops their
+binding contexts so an unused directive prelude is not emitted. Type tests live in
+`packages/types/src/directives/directives.spec.ts`; checking-module tests cover
+generated syntax, placement and source anchors. Keep the shared helper's source,
+compiler preludes, published declaration and provider fallbacks synchronized.
 
 ### Svelte IDE structural projection
 
@@ -292,7 +592,7 @@ Vue IDE self-instance declarations reference the public API as `InstanceType<typ
 1. `script/process.rs` parses `<script setup>` -> walks AST -> classifies bindings as `BindingType` (SetupConst, SetupRef, Props, etc.)
 2. Bindings passed to `template/code_gen/` via `generate_template()` parameter
 3. `BindingResolver` determines correct accessor prefix (`_ctx.`, `$setup.`, `__props.`) and suffix (`.value` for refs)
-4. Binding patches accumulated in `CodeGenOutput`, batch-applied to `CodeTransform`
+4. Binding patches accumulated in an `EditRecorder` (held by `CodeGenOutput` at runtime, used directly by the IDE, which also records its helper-import preamble there), batch-applied to `CodeTransform`
 
 ## Vue Macro Semantic Boundary (CRITICAL)
 
@@ -331,6 +631,12 @@ records replay the analyzer's retained model `Field(1)` payload through the shar
 source-raise and TSC render funnel: explicit M becomes `Partial<Record<M, true>>`,
 otherwise `Record<string, true | undefined>`. `Field(0)` remains the value type.
 The syntax-only unannotated model path uses the same projection schema and renderer.
+Syntax-only producers type the record through `verter_macro_dto::model_modifiers_record`
+(`TscModelProjection::untyped` passes no keys). The IDE public constructor
+(`ide/vue_projection/public_constructor.rs`) has no TypeInfo bundle, so it passes the authored
+`M` text to that function, names the prop with `model_modifiers_prop_name`, and renders the
+member with `render_model_modifiers_member`, the member renderer `render_model_props_type`
+uses. The editor and the emitted declaration therefore accept the same modifier keys.
 The retained Testing-body macro declaration accepts Vue's second modifier type
 parameter (`extends PropertyKey = string`); public modifiers prop types still
 come exclusively from the model projection.
@@ -415,11 +721,58 @@ Three backends implement the `TemplateCodeGen` trait, called by `walker::walk_te
 - **VDOM** (`vdom/`): In-place source overwrites producing `_createElementVNode()` calls
 - **Vapor** (`vapor/`): Replaces entire template block with direct DOM manipulation code
 
+The admitted fine-grained target executor is `framework/vue/vapor::VueVaporExecutor`. It consumes the shared topology, semantic snapshot and rendered-child structure in one `walk_template` visit. Open scopes record typed operations and expression runs; `close_block` resolves navigation reservations, and only `output.rs` writes the preamble and render emission builders at template close. The legacy `template/code_gen/vapor` backend remains the comparison route until its caller cutover.
+
+Each fine-grained element reserves condition, loop and slot-outlet identities
+independently. Structural closures compose condition outside loop outside the
+element/component/slot payload. Loop alias frames remain active while recording
+payload props, then close before recording the iterable and condition; a nested
+fallback condition keeps its enclosing sibling chain in the walk frame.
+A pending conditional chain is placed when the walk reaches the first sibling
+that does not continue it, so its `<!>` placeholder and insertion position
+precede later siblings.
+A transparent `<template v-if>`/`v-for` has no DOM container: each child unit
+(an element, a construct, a comment, or a run of text and interpolation) closes
+as its own block root. One root keeps its runtime kind; several are returned as
+an array with the native multi-root conditional shapes. Loop flags distinguish
+DOM nodes, components and fragments before selecting the runtime's insertion and
+removal operations; `WRAPPED_ROWS` is independent of that kind and set for a
+`<template v-for>` (outside `<Transition>`) unless its content is one element
+without its own `v-if`/`v-for`.
+A navigated child whose node reference is named (by its effects, events,
+insertion points or own children's navigation) is declared under that node
+name; a child read only for its text uses a path name.
+Component assets are resolved once per tag at the top of `render`; a different
+tag whose mangled local is taken gets a numbered local. A component event prop
+returns its handler: a handler reference (`vue_syntax::is_handler_reference`,
+read from the parsed root: an identifier or a static, computed or optional
+member) is returned as read, and any other value is written once as a handler
+local by the shared element-listener handler writer (a parsed root that is a
+function, under parentheses or TypeScript assertions, is used unchanged) and
+returned by name. The writer classifies element-listener references the same
+way. Handler locals skip names the component's props scope (enclosing slot and
+loop parameters plus its own loop aliases) or the script bindings declare.
+
+Expressions use `template/binding/prefixed_expr` through an `ExprSink`, preserving authored `Source` spans separately from generated scaffolding. `OxcParsedVFor::source_bindings` retains the shared collector's complete iterable occurrence inventory, evaluated in the enclosing template scope before the loop's own aliases bind. The fine-grained source recorder and the tree/server `build_prefixed_iterable` both pass that inventory to the same prefixed writer, so setup and prop reads inside spread elements and callback bodies are prefixed while callback parameters and outer aliases stay local. `Binding::is_expression_local` distinguishes callback parameters and local declarations from enclosing template locals, so a shadowing callback never receives a loop rename. Under `force_js`, retained expression ASTs and statement-handler Programs use the existing TypeScript-removal span visitor; retained loop-source AST spans are rebased to the recorded window. Loop keys go through the same writer: the key callback's parameters are the loop's own aliases, so an identity frame over every name the loop element's own `v-for` declares (its `props_scope` frames, destructured names included, its own `v-slot` parameters excluded) shadows any enclosing rename of the same name while setup reads and enclosing aliases resolve as elsewhere. The shared writer also supports an authored, unprefixed context for memo dependencies. No target-local reparse or expression walker is needed. Effect groups own ordered effect edges and distinct read dependencies in a `RelationGraph`; repeated-read substitution operates on those authored occurrence records before emission, and the first read's source pieces map the hoisted declaration. Optional `semantic-observe` tests verify graph size and that the client-tree target records no fine-grained graph work. Synthetic loop-source and render-contract components with exact native Vue goldens live in `crates/verter_vue_conformance/vapor`.
+
+The shared occurrence collector installs function parameters before reading
+their defaults or computed pattern keys. Body declarations are installed only
+after those parameter expressions. Statement-list scopes register direct lexical
+declarations before reading the list, so forward function references remain local;
+block frames keep those names out of their siblings. A syntax-only statement
+inventory preserves function-scoped `var` names across child blocks, without
+descending into expressions or nested function/class/module bodies. Computed keys
+and defaults in binding patterns are inventoried with an explicit work stack and
+use the same occurrence visitor as other reads. Binding extraction enters the
+shared `leased_span_walk` / `leased_program_walk` containment; a refused walk
+marks its binding result as erroneous as well as recording the operation refusal.
+
 ## Condition Narrowing (`ide/template/flow.rs`)
 
 The IDE emitter narrows template conditions exactly, without a term cap, in generated size linear in the template. TypeScript narrows a reference only along one function's control flow, and every non-immediately-invoked function starts its flow from the declared type of each property-access reference (`checker.ts` `getFlowTypeOfReference`, the `FlowStart` arm). So the emitter keeps conditions in one flow and re-narrows only where a real callback starts a new one:
 
 - **Chains.** A `v-if` / `v-else-if` / `v-else` chain is one immediately invoked block, `{(()=>{if(A){…}else if(B){…}else{…}})()}` (`directives::emit_v_if_open` / `emit_v_if_close`, `CHAIN_CLOSE`). Each authored condition is resolved and emitted once; a nested chain or element inherits every enclosing positive and predecessor negation through flow. A chain whose members carry `v-for` stays a lifted ternary (`cond ? … : …`).
+- **Unmatched branches.** Parser-owned chain membership decides adjacency. Significant text (including NBSP entities) ends a chain; the IDE recovers an unmatched `v-else` / `v-else-if` as a plain element, retaining its body without branch syntax, matching Vue's recovery after its adjacency diagnostic. HTML ASCII whitespace entities and comments can separate members of one chain.
 - **Frames.** A `v-for` is an immediately invoked frame like the scoped-slot frame: `{(() => { const ___VERTER___vN = (<source>); { const <aliases> = ___VERTER___flowEachK(___VERTER___vN); return (…); } })()}`. The source is evaluated before the aliases' block, so an alias never shadows a name its source reads (`node in node.children`). `flowEach1/2/3` type the aliases as Vue's `renderList` iterates (arrays, iterables, numbers, objects, `null`/`undefined` sources).
 - **Callbacks.** An authored callback (or the wrapper around an inline `@event` statement) under a condition reads its outer references (`outer_refs`: free reference chains in the body's own flow, prefixes first, `x++`/`x += 1` targets included, nested functions excluded) from snapshots: the innermost statement scope (branch block, frame body, or a lifted branch wrapped as `(() => { … return (…); })()` only when it needs one) declares `const ___VERTER___oN = <ref>;` in the narrowed flow, and the body opens with `if (!___VERTER___flowNarrow(ref, oN) || ___VERTER___flowExcluded(oN)(ref)) throw 0;` per reference — `flowNarrow` re-narrows to the snapshot type, `flowExcluded` removes constituents re-admitted only as subtypes of kept ones. The callback stays an ordinary contextually typed function (generic component inference is unaffected), its return type is unchanged, and a return-type error still lands on the authored body. Mutations and nested authored closures lose narrowing exactly as TypeScript decides for the same code.
 - **Placement.** Snapshot declarations fill a prepend reserved when their scope opened (`CodeGenOutput::reserve_ordered_unmapped` / `fill_reserved`), so they are produced by the same `CodeTransform` pass and stay unmapped; authored bytes stay in place and keep their mappings.
@@ -631,7 +984,7 @@ Framework style rewrites use `verter_css_syntax::StyleSyntaxIr` and are delibera
 1. `transform_vue_v_bind(AuthoredStyleInput)` is the production v-bind-only entry: it runs on authored CSS, SCSS, indented Sass, Less, or Stylus and returns the same dialect. It never preprocesses or evaluates.
 2. CSS Modules hashing and the original-to-hashed mapping from typed selector spans are a cascade stage over the shared IR, not a public parse/materialize entry.
 3. Scoped-selector rewriting runs only on plain CSS after preprocessing. `PlainCssInput::try_new` typed-refuses every non-CSS dialect before that cascade stage is admitted. There is no shipped isolated parse/materialize entry for this stage.
-4. Svelte owns a separate plain-CSS consumer for `:global`, selector matching/pruning, scope insertion, and keyframe rewriting. Authored preprocessor dialects are typed-refused unless the host supplied a completed external preprocessing result for the block: the host hands it over once as a `SvelteSuppliedStyle` (produced bytes, producer, the host-minted source-space/artifact identity of those bytes, the host's parse of them, and the content identity of the authored bytes it validated — all read off the projection the block-content capture fence stamped, never re-derived from the live carrier), `bind_svelte_style_continuations` (`svelte/carrier.rs`) binds it to its block through `ExternalStyleContinuation::admit`, and the admitted continuation's produced bytes are then the block's only body for every stage (official-reject css probe, analysis, matcher, render) via `AdmittedStyleIrs`. A result that cannot be bound (stale basis, missing basis, unknown authored dialect, no block at its slot, boundary refusal) refuses the compile with `svelte-runtime-style-continuation-refused`; it never falls back to the authored block. Svelte's external css artifact publishes as a stage-qualified `QualifiedRuntimeStyle` (`RuntimeCompileOutput.qualified_styles` / `DirectCompileOutput.qualified_styles`), declared over the byte space the render consumed: the carrier source for an authored block, and for a continued block the HOST-minted space/artifact pair carried on `BoundStyleContinuation` — never a carrier space minted over the produced bytes, which would name an identity the host's own produced-to-authored map cannot be joined to. That host map (`SvelteSuppliedStyle.source_map` → `BoundStyleContinuation.source_map`) is transported with the continuation, and a continued block's css map is published chained through it (`chain_generated_map_json`, as for a supplied Vue block) — or absent when the host holds no map or the chain cannot be built — never the bare render map, whose produced-space positions would be labelled with the carrier file. The diagnostics the producing tool reported (`SvelteSuppliedStyle.diagnostics`, projected from the admitted override at the severity the tool stated, addressing the authored stage with no fabricated position) ride the continuation's result and then the published style's result in production order; they are never replaced by an empty list at the boundary.
+4. Svelte owns a separate plain-CSS consumer for `:global`, selector matching/pruning, scope insertion, and keyframe rewriting. Authored preprocessor dialects are typed-refused unless the host supplied a completed external preprocessing result for the block: the host hands it over once as a `SvelteSuppliedStyle` (produced bytes, producer, the host-minted source-space/artifact identity of those bytes, the host's parse of them, and the content identity of the authored bytes it validated — all read off the projection the block-content capture fence stamped, never re-derived from the live carrier), `bind_svelte_style_continuations` (`svelte/carrier_bundle.rs`) binds it to its block through `ExternalStyleContinuation::admit`, and the admitted continuation's produced bytes are then the block's only body for every stage (official-reject css probe, analysis, matcher, render) via `AdmittedStyleIrs`. A result that cannot be bound (stale basis, missing basis, unknown authored dialect, no block at its slot, boundary refusal) refuses the compile with `svelte-runtime-style-continuation-refused`; it never falls back to the authored block. Svelte's external css artifact publishes as a stage-qualified `QualifiedRuntimeStyle` (`RuntimeCompileOutput.qualified_styles` / `DirectCompileOutput.qualified_styles`), declared over the byte space the render consumed: the carrier source for an authored block, and for a continued block the HOST-minted space/artifact pair carried on `BoundStyleContinuation` — never a carrier space minted over the produced bytes, which would name an identity the host's own produced-to-authored map cannot be joined to. That host map (`SvelteSuppliedStyle.source_map` → `BoundStyleContinuation.source_map`) is transported with the continuation, and a continued block's css map is published chained through it (`chain_generated_map_json`, as for a supplied Vue block) — or absent when the host holds no map or the chain cannot be built — never the bare render map, whose produced-space positions would be labelled with the carrier file. The diagnostics the producing tool reported (`SvelteSuppliedStyle.diagnostics`, projected from the admitted override at the severity the tool stated, addressing the authored stage with no fabricated position) ride the continuation's result and then the published style's result in production order; they are never replaced by an empty list at the boundary.
 
 Only complete trusted nodes publish edits. Rewrite uncertainty fails closed; style-liveness uncertainty fails open. Every emitted edit and its source map comes from the same `CodeTransform`. Supplied or external inputs retain their host-minted source-space/artifact identity in `RuntimeOutputDescriptor`; carrier-absolute positions are never fabricated.
 
@@ -732,7 +1085,7 @@ The OXC worker and the semantic-lowering surface produce owned `TypeExpr` IR (an
 | `crates/verter_compiler/src/script/process.rs` | Script setup processing, companion script merging |
 | `crates/verter_compiler/src/template/code_gen/mod.rs` | Template codegen entry point |
 | `crates/verter_compiler/src/template/code_gen/walker.rs` | DFS tree walker (shared by VDOM/Vapor backends) |
-| `crates/verter_compiler/src/template/code_gen/binding.rs` | BindingResolver (\_ctx./$setup. prefix resolution) |
+| `crates/verter_compiler/src/template/binding/mod.rs` | BindingResolver (\_ctx./$setup. prefix resolution) |
 | `crates/verter_compiler/src/template/code_gen/vdom/` | VDOM render function codegen |
 | `crates/verter_compiler/src/template/code_gen/vapor/` | Vapor mode codegen |
 | `crates/verter_compiler/src/ide/mod.rs` | IDE codegen entry: TSX (TS SFCs) or JSX+JSDoc (JS SFCs) |
@@ -749,7 +1102,9 @@ The OXC worker and the semantic-lowering surface produce owned `TypeExpr` IR (an
 | `crates/verter_compiler/src/css/mod.rs` | Legacy NAPI/CSS-modules compatibility owner pending provider cutover |
 | `crates/verter_compiler/src/css/modules.rs` | CSS Modules: hash class names |
 | `crates/verter_compiler/src/code_transform/code_transform.rs` | Chunk-based deferred mutation engine |
-| `crates/verter_compiler/src/code_transform/chunk.rs` | Chunk types (Original, Overwritten, Inserted, InsertedMapped) |
+| `crates/verter_compiler/src/code_transform/chunk.rs` | Chunk types (Original, Inserted, InsertedMapped, InsertedAnchored, Overwritten, OverwrittenSegmented, Moved) |
+| `crates/verter_compiler/src/code_transform/recorder.rs` | `EditRecorder`: deferred source edits applied to a `CodeTransform` by the one replacement and relocation law |
+| `crates/verter_compiler/src/emission/` | Shared immutable emission representation: pieces, sealed fragments, `EmissionBuilder`, the one writer |
 | `crates/verter_compiler/src/code_transform/source_map.rs` | Source map generation from chunk positions |
 | `crates/verter_compiler/src/framework_common/generated_chunk.rs` | Generated-chunk assembly and multi-source map composition |
 
@@ -764,3 +1119,50 @@ bump-backed children again. These data-only measurements do not choose admission
 or change the standalone prepared compiler's production boundary. The owning
 accounting conventions are in
 `crates/verter_type_engine/observe-inventory/parse-artifact-storage-accounting.md`.
+
+### Vue root and fallthrough checking projection
+
+`branches::TemplateBranchProjection` retains a private runtime-root inventory
+while its existing topology pass builds checking blocks. It keeps significant
+text, comments, if-chain membership and transparent template children. Bare
+native roots retain their tag and namespace even when the projection plan admits
+no attribute check for them; ordinary native descendants never become roots.
+
+`fallthrough::project_fallthrough` consumes that inventory and the existing
+resolution, builtin, attribute-operation and public-constructor products. Root
+key subtraction consumes the attribute product's effective key plans and its
+existing consumer relations, including model value, update and modifier writes;
+it never recalculates runtime keys from authored operations. It publishes native
+contract references, with a union for conditional alternatives. A component
+among several roots (a fragment) is no fallthrough arm: the fragment's contract
+is published and never names the child. A component that is a root arm (the
+single root, or a conditional alternative) makes the product incomplete and
+withholds declaration extras: imported-child
+generic status is not available, and the specialized witness is scoped inside
+the template block. Publishing component-root extras requires both an
+authoritative generic-status fact and access to that same specialized witness;
+the bare public signature must not substitute for it. TypeScript performs the
+type operations. The product
+uses the constructor owner's `declared_props_type` to subtract declared props,
+models, emits and augmented public props before intersection. The composer carries
+complete `PublicDeclarationExtras` alongside the template scope into
+`declaration_over`, including normal Options defaults. Stale or incomplete
+products contribute no extras. This is independent of the session's native
+metadata inheritance resolver.
+
+A component use's construction members and prop validations (`component_use`)
+spell each key as the component's camel-case prop, through the template path's
+`normalized_component_prop_name` (camelize, except `data-*` / `aria-*`), as the
+runtime's `camelize(key)` prop lookup and vue-tsc read it, listener-shaped keys
+included: `:initial-count` is `initialCount`, `:onCustom-event` is
+`onCustomEvent`. A renamed key's direct-key check also accepts the authored
+spelling, under which an undeclared attribute falls through (`stroke-width`
+onto an `<svg>` root); a key that is neither is rejected as its camel-case
+spelling (`bogus-attr` as `bogusAttr`). Such an attribute, like an
+`EmitsToProps` listener published under a kebab-case name, reaches the
+attribute-tolerant index, so its key is checked and its value is not, as in
+vue-tsc. A later key with an already constructed member's camel-case spelling
+(`:fooBar` after `:foo-bar`) is a prop validation and keeps its own direct-key
+check. The runtime key plan keeps the authored key. The listener product
+(`event_payloads`) is complete with nothing to check when the plan has no
+component use, including a template with no checking block at all.

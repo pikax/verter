@@ -14,11 +14,12 @@
 use crate::ast::types::TextNode;
 
 use super::super::shared::helpers::{
-    condense_and_escape_js as condense_and_escape, decode_html_entities_into,
-    escape_js_string_into, has_consecutive_ws, has_html_entities, is_condense_ws as is_ws,
-    needs_js_escaping,
+    condense_and_escape_js as condense_and_escape, decode_html_entities_into, has_consecutive_ws,
+    has_html_entities, is_condense_ws as is_ws,
 };
+
 use super::super::types::{ChildKind, ChildRecord, CodeGenOutput};
+use crate::template::vue_syntax::{escape_js_string_into, needs_js_escaping};
 
 /// Classify text content into a [`ChildKind`] for parent-level processing.
 ///
@@ -135,7 +136,7 @@ mod tests {
 
         let record = process_text(&text, source, &mut out).unwrap();
         assert_eq!(record.kind, ChildKind::WhitespaceSpace);
-        assert!(out.overwrites.is_empty());
+        assert!(out.overwrites().is_empty());
     }
 
     #[test]
@@ -147,7 +148,7 @@ mod tests {
 
         let record = process_text(&text, source, &mut out).unwrap();
         assert_eq!(record.kind, ChildKind::WhitespaceNewline);
-        assert!(out.overwrites.is_empty());
+        assert!(out.overwrites().is_empty());
     }
 
     #[test]
@@ -198,7 +199,7 @@ mod tests {
         assert_eq!(record.start, 0);
         assert_eq!(record.end, 11);
         // No escaping needed → no overwrites
-        assert!(out.overwrites.is_empty());
+        assert!(out.overwrites().is_empty());
     }
 
     // ==================== Text with escaping ====================
@@ -212,10 +213,10 @@ mod tests {
 
         let record = process_text(&text, source, &mut out).unwrap();
         assert_eq!(record.kind, ChildKind::Text);
-        assert_eq!(out.overwrites.len(), 1);
-        assert_eq!(out.overwrites[0].0, 0);
-        assert_eq!(out.overwrites[0].1, 8);
-        assert_eq!(out.overwrites[0].2, r#"say \"hi\""#);
+        assert_eq!(out.overwrites().len(), 1);
+        assert_eq!(out.overwrites()[0].0, 0);
+        assert_eq!(out.overwrites()[0].1, 8);
+        assert_eq!(out.overwrites()[0].2, r#"say \"hi\""#);
     }
 
     #[test]
@@ -227,8 +228,8 @@ mod tests {
 
         let record = process_text(&text, source, &mut out).unwrap();
         assert_eq!(record.kind, ChildKind::Text);
-        assert_eq!(out.overwrites.len(), 1);
-        assert_eq!(out.overwrites[0].2, "line1\\nline2");
+        assert_eq!(out.overwrites().len(), 1);
+        assert_eq!(out.overwrites()[0].2, "line1\\nline2");
     }
 
     #[test]
@@ -240,7 +241,7 @@ mod tests {
 
         let record = process_text(&text, source, &mut out).unwrap();
         assert_eq!(record.kind, ChildKind::Text);
-        assert_eq!(out.overwrites[0].2, "a\\\\b");
+        assert_eq!(out.overwrites()[0].2, "a\\\\b");
     }
 
     // ==================== Whitespace condensation ====================
@@ -254,8 +255,8 @@ mod tests {
 
         let record = process_text(&text, source, &mut out).unwrap();
         assert_eq!(record.kind, ChildKind::Text);
-        assert_eq!(out.overwrites.len(), 1);
-        assert_eq!(out.overwrites[0].2, "a b");
+        assert_eq!(out.overwrites().len(), 1);
+        assert_eq!(out.overwrites()[0].2, "a b");
     }
 
     #[test]
@@ -267,8 +268,8 @@ mod tests {
 
         let record = process_text(&text, source, &mut out).unwrap();
         assert_eq!(record.kind, ChildKind::Text);
-        assert_eq!(out.overwrites.len(), 1);
-        assert_eq!(out.overwrites[0].2, "a b");
+        assert_eq!(out.overwrites().len(), 1);
+        assert_eq!(out.overwrites()[0].2, "a b");
     }
 
     #[test]
@@ -281,7 +282,7 @@ mod tests {
 
         let record = process_text(&text, source, &mut out).unwrap();
         assert_eq!(record.kind, ChildKind::Text);
-        assert_eq!(out.overwrites[0].2, "a \\\"b");
+        assert_eq!(out.overwrites()[0].2, "a \\\"b");
     }
 
     // ==================== Source offset ====================
@@ -298,7 +299,7 @@ mod tests {
         assert_eq!(record.kind, ChildKind::Text);
         assert_eq!(record.start, 5);
         assert_eq!(record.end, 7);
-        assert!(out.overwrites.is_empty()); // "hi" needs no escaping
+        assert!(out.overwrites().is_empty()); // "hi" needs no escaping
     }
 
     // ==================== classify_text_kind ====================

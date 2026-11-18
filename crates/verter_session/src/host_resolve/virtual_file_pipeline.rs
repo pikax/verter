@@ -32,7 +32,7 @@ use super::compile_request_build::{
 use super::native_host_binding::BoundNativeHostRequest;
 use super::vue_script_extract::template_converter_inputs;
 use crate::hash::compile_profile_hash;
-use crate::id::{parse_raw_id, render_ids, render_single_id};
+use crate::id::{parse_raw_id, render_resolved_ids, render_single_id};
 use crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand;
 use crate::types::*;
 use crate::CompileTarget;
@@ -525,10 +525,10 @@ struct CompileTierPrefetchObservation {
 
 impl VerterHost {
     /// Resolve a raw import identifier (bundler query string or LSP `._VERTER_.` format)
-    /// to its canonical ID, virtual node kind, and rendered bundler/LSP IDs.
+    /// to its canonical ID, virtual node kind, request facets, and rendered bundler/LSP IDs.
     ///
-    /// Returns `None` if the raw ID cannot be parsed.
-    pub fn resolve(&self, raw_id: &str) -> Option<ResolvedId> {
+    /// Returns the typed rejection when the raw ID is not a request of the id grammar.
+    pub fn resolve(&self, raw_id: &str) -> Result<ResolvedId, RejectedRawId> {
         if self.config.metrics_enabled {
             self.metrics
                 .resolves
@@ -537,32 +537,24 @@ impl VerterHost {
 
         let parsed = parse_raw_id(raw_id)?;
         let canonical = self.resolve_alias_or_canonical(&parsed.canonical_id);
-        let (exists, bundler_id, lsp_id) = {
-            {
-                use crate::host_executor::HostSourceData;
-                let meta = self.scheduler.try_get_source(&canonical).and_then(|s| {
-                    s.downcast_data::<HostSourceData>()
-                        .map(|h| h.parse.meta.clone())
-                });
-                match meta {
-                    Some(m) => {
-                        let (b, l) = render_ids(&canonical, &parsed.node_kind, &m);
-                        (true, b, l)
-                    }
-                    None => {
-                        let default_meta = FileMeta::default();
-                        let (b, l) = render_ids(&canonical, &parsed.node_kind, &default_meta);
-                        (false, b, l)
-                    }
-                }
-            }
-        };
-        Some(ResolvedId {
+        let held_meta = self.held_file_meta(&canonical);
+        let (bundler_id, lsp_id) = render_resolved_ids(
+            &canonical,
+            &parsed,
+            held_meta.as_ref(),
+            self.classified_marker(&canonical),
+        );
+        Ok(ResolvedId {
             canonical_id: canonical,
             node_kind: parsed.node_kind,
-            exists_in_host: exists,
+            exists_in_host: held_meta.is_some(),
             bundler_id,
             lsp_id,
+            marker: parsed.marker,
+            lang: parsed.lang,
+            scoped: parsed.scoped,
+            raw_path: parsed.raw_path,
+            block_type: parsed.block_type,
         })
     }
 
@@ -1248,7 +1240,7 @@ impl VerterHost {
         }
 
         let (canonical_id, node_kind, raw_was_lsp) = if let Some(raw) = query.raw_id.clone() {
-            let parsed = parse_raw_id(&raw).ok_or(HostError::InvalidQuery)?;
+            let parsed = parse_raw_id(&raw).map_err(|_| HostError::InvalidQuery)?;
             (
                 self.resolve_alias_or_canonical(&parsed.canonical_id),
                 parsed.node_kind,

@@ -5,7 +5,13 @@ use verter_language::{FrameworkAdapterId, LanguageId};
 
 struct TestEpoch;
 impl FrameworkEpoch for TestEpoch {
-    const ID: &'static str = "vue-sfc-v3";
+    const MANIFEST: verter_compiler::framework_common::profile::FrameworkProfileManifest =
+        verter_compiler::framework_common::profile::FrameworkProfileManifest {
+        family: "vue-sfc-v3",
+        release: "1",
+        admitted_majors: &[1],
+        claimed_carriers: &[],
+    };
 }
 
 struct HostCapable;
@@ -39,5 +45,6 @@ fn main() {
         FrameworkAdapterId::new("host"),
         LanguageId::new("vue"),
         Present(HostCapable),
-    );
+    )
+    .expect("the test manifest is admitted");
 }

@@ -26,7 +26,7 @@
     { "id": "ts-js", "package": "typescript", "version": "6.0.3", "role": "selected-evidence" },
     { "id": "ts-native", "package": "typescript", "version": "7.1.0-beta", "role": "selected-evidence" }
   ],
-  "vue": { "package": "vue", "version": "3.6.0-rc.5", "source": "package.json" },
+  "vue": { "package": "vue", "version": "3.6.0-rc.15", "source": "package.json" },
   "toyEvidenceAdmitted": false,
   "publicSurface": {
     "defaultExport": "constructor-shaped-declare-class",

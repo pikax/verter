@@ -15,12 +15,12 @@ use verter_parser::oxc_parse::Parser;
 
 use crate::ast::types::TemplateAst;
 use crate::code_transform::CodeTransform;
+use crate::code_transform::EditRecorder;
 use crate::compile::types::{DestructuredBindingInfo, DestructuredBlockMeta};
 use crate::cursor::ScriptLanguage;
 use crate::ide::{IdeGenericInfo, IdeScriptOptions};
 use crate::parser::types::RootNodeScript;
-use crate::template::code_gen::binding::BindingType;
-use crate::template::code_gen::types::CodeGenOutput;
+use crate::template::binding::BindingType;
 use crate::utils::oxc::bindings::collect_setup_binding_refs;
 use crate::utils::oxc::vue::{parse_script, ScriptItem, ScriptMacro, ScriptMode};
 
@@ -46,7 +46,7 @@ pub(super) fn process_tsx_script_setup<'alloc, M: verter_audit::observe::Observe
     template_ast: Option<&TemplateAst>,
     source: &'alloc str,
     ct: &mut CodeTransform<'alloc, M>,
-    out: &mut CodeGenOutput<'alloc>,
+    out: &mut EditRecorder<'alloc>,
     bindings: &mut FxHashMap<&'alloc str, BindingType>,
     type_constructs: &mut String,
     alloc: &'alloc Allocator,
@@ -92,9 +92,12 @@ pub(super) fn process_tsx_script_setup<'alloc, M: verter_audit::observe::Observe
     // Process companion <script> block if present.
     // Hoists imports and type declarations, removes tags and export default,
     // and registers companion import bindings for template resolution.
-    if let Some(companion) = normal_script {
-        process_companion_for_tsx(companion, source, ct, out, bindings, alloc, hoist_pos);
-    }
+    let companion_items = match normal_script {
+        Some(companion) => {
+            process_companion_for_tsx(companion, source, ct, out, bindings, alloc, hoist_pos)
+        }
+        None => Vec::new(),
+    };
 
     // Parse with OXC
     let oxc_alloc = Allocator::default();
@@ -159,6 +162,7 @@ pub(super) fn process_tsx_script_setup<'alloc, M: verter_audit::observe::Observe
         ScriptMode::Setup,
         content_start,
         effective_content_str,
+        &companion_items,
     );
 
     // Build binding source info for JSDoc + offset comments
@@ -405,19 +409,9 @@ pub(super) fn process_tsx_script_setup<'alloc, M: verter_audit::observe::Observe
                     .or_insert(BindingType::SetupImport);
             }
         }
-        // Emit the OUTPUT-ONLY recovery holes (unmapped synthetic chunks). A
-        // member hole fills a dangling `a.` / `a?.` with a universal member so the
-        // dot cannot absorb the following token; an expression hole completes a
-        // trailing operator / assignment / arm. Neither becomes a source fact.
+        // Emit the OUTPUT-ONLY recovery holes (unmapped synthetic chunks).
         for insert in &plan.inserts {
-            match insert {
-                crate::ide::script_recover::RecoveryInsert::MemberHole { at } => {
-                    out.prepend_static(*at, "valueOf");
-                }
-                crate::ide::script_recover::RecoveryInsert::ExpressionHole { at } => {
-                    out.prepend_static(*at, "(undefined)");
-                }
-            }
+            out.prepend_static(insert.at(), insert.placeholder());
         }
     }
 
@@ -514,26 +508,26 @@ pub(super) fn process_tsx_script_setup<'alloc, M: verter_audit::observe::Observe
                 out.overwrite(attr.end, setup.tag_open.end, ") {\n");
             } else {
                 // Source order is attrs before generic — need to reorder.
-                // Use move_wrapped to relocate generic content before attrs.
+                // Emit the authored generic content before attrs.
                 //
                 // Source: ...attrs="ATTRS"...generic="GEN"...>
                 // Output: ...FN<GEN>(_attrs: ATTRS) {\n
                 //
                 // 1. Overwrite [tag_open.start, attr.start) → function prefix with "<"
-                // 2. Move generic content to attr.start with suffix ">(_attrs: "
+                // 2. Extract generic content to attr.start with suffix ">(_attrs: "
                 //    This inserts "GEN>(_attrs: " just before attrs content.
                 // 3. Attrs content stays in place (preserved, sourcemapped).
-                // 4. Overwrite [attr.end, gen.start) → empty (removes gap text)
+                // 4. Overwrite [attr.end, gen.end) → empty (removes the gap
+                //    text and the generic's original position)
                 // 5. Overwrite [gen.end, tag_open.end) → ") {\n"
-                //    (gen content was moved away, original position is empty)
                 let fn_prefix = format!(
                     ";export {}function {}TemplateBindingFN<",
                     async_prefix, PREFIX
                 );
                 out.overwrite(setup.tag_open.start, attr.start, &fn_prefix);
-                out.move_wrapped(gen.start, gen.end, attr.start, "", ">(_attrs: ");
+                out.extract_original(gen.start, gen.end, attr.start, "", ">(_attrs: ");
                 // attrs content preserved at [attr.start, attr.end)
-                out.overwrite(attr.end, gen.start, "");
+                out.overwrite(attr.end, gen.end, "");
                 out.overwrite(gen.end, setup.tag_open.end, ") {\n");
             }
         }
@@ -573,15 +567,10 @@ pub(super) fn process_tsx_script_setup<'alloc, M: verter_audit::observe::Observe
                 })
             });
 
-        // Recovery boundary (failure path only): this string is emitted right
-        // after the user's body (it overwrites `</script>`). First close any
-        // brackets the user left open, then terminate the now-complete trailing
-        // statement, so the generated scaffolding below starts at a clean
-        // statement boundary instead of being absorbed by a dangling expression.
-        // These chunks are OUTPUT-ONLY (unmapped) and never become source facts.
+        // Recovery boundary (failure path only), emitted right after the user's
+        // body (it overwrites `</script>`).
         if let Some(plan) = &recovery_plan {
-            wrapper_end.push_str(&plan.scope_closers);
-            wrapper_end.push(';');
+            wrapper_end.push_str(&plan.boundary_completion());
         }
 
         // Inject __props alias so template codegen's `__props.xxx` references resolve

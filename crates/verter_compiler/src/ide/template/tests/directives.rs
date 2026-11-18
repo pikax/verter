@@ -2848,23 +2848,39 @@ fn v_if_v_for_with_comments_between_branches() {
 
 #[test]
 fn v_if_v_for_with_entity_whitespace_between_branches() {
-    // Entity-backed whitespace should be treated like ignorable formatting
-    // whitespace for v-if / v-else adjacency.
-    let result = gen_tsx_template(
-        r#"<template><div v-if="show" v-for="item in items">{{ item }}</div>&nbsp;<div v-else>fallback</div></template>"#,
-    );
-    eprintln!(
-        "=== v_if_v_for_with_entity_whitespace_between_branches ===\n{}\n=== END ===",
-        result
-    );
-    assert!(
-        result.contains("show ?") || result.contains("show?"),
-        "entity-backed whitespace should not break the lifted chain: {result}"
-    );
-    assert_valid_jsx(
-        r#"<template><div v-if="show" v-for="item in items">{{ item }}</div>&nbsp;<div v-else>fallback</div></template>"#,
-        "entity whitespace between v-if+v-for branches",
-    );
+    // Vue reports a non-adjacent branch after significant text and recovers
+    // that element without its condition. ASCII space entities remain adjacent.
+    for separator in ["&nbsp;", "&#160;", "text", "&#32;"] {
+        for directive in ["v-else", "v-else-if=\"other\""] {
+            let source = format!(
+                "<template><div v-if=\"show\" v-for=\"item in items\">{{{{ item }}}}</div>{separator}<div {directive}>fallback</div></template>"
+            );
+            let result = gen_tsx_template(&source);
+            assert!(result.contains("fallback"), "recovered body: {result}");
+            if separator != "&#32;" {
+                assert!(result.contains(separator), "significant text: {result}");
+                assert!(result.contains(": null}"), "first chain closes: {result}");
+                assert!(
+                    !result.contains("other"),
+                    "orphan condition is ignored: {result}"
+                );
+            } else {
+                assert!(
+                    !result.contains(separator),
+                    "formatting is suppressed: {result}"
+                );
+                if directive.starts_with("v-else-if") {
+                    assert!(result.contains("other"), "adjacent condition: {result}");
+                } else {
+                    assert!(
+                        !result.contains(": null}"),
+                        "adjacent else closes chain: {result}"
+                    );
+                }
+            }
+            assert_valid_jsx(&source, "entity whitespace between v-if+v-for branches");
+        }
+    }
 }
 
 #[test]

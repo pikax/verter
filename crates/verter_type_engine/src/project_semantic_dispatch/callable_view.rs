@@ -1280,8 +1280,7 @@ construction_ordinal_seam! {
     /// `InstantiationRef` / `DeclRef` carrier, a declaration placeholder, or
     /// a `Union` / `Intersection` of such carriers. Consumers (the
     /// graph-native slot binding extractor's `Function` match arm,
-    /// `surface_member_to_expanded_field`'s classification, the slot
-    /// projector) MUST normalize their input through this primitive BEFORE
+    /// slot surface normalizers) MUST normalize their input through this primitive BEFORE
     /// deciding "not a callable".
     ///
     /// This primitive owns NO evaluation of its own. The carrier shells are

@@ -10,9 +10,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::collect_global_component_fallbacks;
 use crate::ast::types::{AstNodeKind, TagType, TemplateAst};
+use crate::code_transform::EditRecorder;
 use crate::ide::{event_to_jsx_name, get_directive_name, TemplateComponentBindings};
-use crate::template::code_gen::binding::is_simple_ident;
-use crate::template::code_gen::types::CodeGenOutput;
+use crate::template::binding::is_simple_ident;
 
 /// Infer untyped function-declaration parameters from template event bindings.
 ///
@@ -27,7 +27,7 @@ pub(super) fn apply_event_handler_param_inference(
     content_start: u32,
     available_bindings: &FxHashSet<String>,
     custom_elements: Option<&[String]>,
-    out: &mut CodeGenOutput<'_>,
+    out: &mut EditRecorder<'_>,
 ) {
     let Some(template_ast) = template_ast else {
         return;
@@ -78,7 +78,7 @@ fn maybe_annotate_function_params(
     handler_type_hints: &FxHashMap<String, Vec<String>>,
     source: &str,
     content_start: u32,
-    out: &mut CodeGenOutput<'_>,
+    out: &mut EditRecorder<'_>,
 ) {
     let Some(id) = &func.id else {
         return;

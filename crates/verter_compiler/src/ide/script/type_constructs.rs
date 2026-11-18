@@ -5,9 +5,9 @@ use oxc_ast::ast::{BindingPattern, Statement};
 use oxc_ast::{Comment, CommentContent};
 use rustc_hash::FxHashMap;
 
+use crate::code_transform::EditRecorder;
 use crate::ide::IdeGenericInfo;
 use crate::ide::IdeScriptOptions;
-use crate::template::code_gen::types::CodeGenOutput;
 
 use super::PREFIX;
 
@@ -96,6 +96,65 @@ pub(super) fn build_binding_source_info<'a>(
     info
 }
 
+// The legacy module and checking module share the exact GlobalComponents
+// contracts; only their declaration names, ambient placement and the type
+// they read Vue's JSX intrinsic elements through differ.
+macro_rules! global_component_helpers {
+    ($indent:literal, $function:literal, $alias:literal, $prefix:literal, $intrinsics:literal) => {
+        concat!(
+            $indent, $function, $prefix, "globalComponentsNav", "(): import(\"vue\").GlobalComponents;\n",
+            $indent, $alias, $prefix, "GlobalComponentType", "<N> = N extends keyof import(\"vue\").GlobalComponents ? import(\"vue\").GlobalComponents[N] : unknown;\n",
+            $indent, $alias, $prefix, "GlobalComponentKebabType", "<N, K extends string> = N extends keyof import(\"vue\").GlobalComponents ? import(\"vue\").GlobalComponents[N] : K extends keyof import(\"vue\").GlobalComponents ? import(\"vue\").GlobalComponents[K] : K extends keyof ", $intrinsics, " ? (props: ", $intrinsics, "[K]) => any : (props: Record<string, any>) => any;\n",
+        )
+    };
+}
+
+/// Ambient helper contracts for the single checking module, without an
+/// @verter/types dependency or a second GlobalComponents implementation.
+pub(crate) const GLOBAL_COMPONENT_CHECKING_HELPERS: &str = concat!(
+    vue_jsx_intrinsic_elements_alias!("declare type ", "___VERTER___JsxIntrinsicElements"),
+    global_component_helpers!(
+        "",
+        "declare function ",
+        "declare type ",
+        "___VERTER___",
+        "___VERTER___JsxIntrinsicElements"
+    ),
+);
+
+// The legacy module and checking module share the exact custom-directive
+// contracts the same way: Vue's shallow read view of a setup binding, then
+// the directive call and the setup/global directive lookup.
+macro_rules! shallow_unwrap_helper {
+    ($indent:literal, $function:literal, $prefix:literal) => {
+        concat!(
+            $indent,
+            $function,
+            $prefix,
+            "shallowUnwrapRef",
+            "<T>(obj: T): import(\"vue\").ShallowUnwrapRef<T>;\n",
+        )
+    };
+}
+
+macro_rules! directive_helpers {
+    ($indent:literal, $function:literal, $alias:literal, $prefix:literal) => {
+        concat!(
+            $indent, $alias, $prefix, "ExtractLeafElement", "<T> = 0 extends 1 & T ? any : T extends HTMLElement | SVGElement | MathMLElement ? T : T extends { $el: infer E } ? ", $prefix, "ExtractLeafElement", "<E> : T extends { new (): infer I } ? ", $prefix, "ExtractLeafElement", "<I> : T extends { readonly $props: unknown; readonly $slots: unknown; $emit: unknown } ? any : never;\n",
+            $indent, $alias, $prefix, "ExtractDirectives", "<T> = { [K in keyof T as T[K] extends import(\"vue\").Directive<any, any, any, any> ? K extends `v${Capitalize<string>}` ? K : never : never]: T[K]; };\n",
+            $indent, $function, $prefix, "runCustomDirective", "<TInstance, TDirective extends import(\"vue\").Directive<", $prefix, "ExtractLeafElement", "<TInstance>>>(instance: TInstance, directive: TDirective): ", $prefix, "ExtractLeafElement", "<TInstance> extends infer El extends HTMLElement | SVGElement | MathMLElement ? TDirective extends import(\"vue\").Directive<infer TElement, infer TValue, infer M extends string, infer TArg> ? [El] extends [TElement] ? (instance: TInstance, value: TValue, arg: TArg | undefined, modifiers: { [K in M]?: true }) => void : (instance: TElement, value: TValue, arg: TArg | undefined, modifiers: { [K in M]?: true }) => void : false : false;\n",
+            $indent, $function, $prefix, "retrieveSetupDirectives", "<T>(o: T): ", $prefix, "ExtractDirectives", "<T> extends infer D ? ", $prefix, "ExtractDirectives", "<Omit<import(\"vue\").GlobalDirectives, keyof D>> & D : ", $prefix, "ExtractDirectives", "<import(\"vue\").GlobalDirectives>;\n",
+        )
+    };
+}
+
+/// Custom-directive helper contracts for the single checking module, without
+/// an @verter/types dependency or a second directive contract.
+pub(crate) const DIRECTIVE_CHECKING_HELPERS: &str = concat!(
+    shallow_unwrap_helper!("", "declare function ", "___VERTER___"),
+    directive_helpers!("", "declare function ", "declare type ", "___VERTER___"),
+);
+
 /// Ambient module declaration for `@verter/types`.
 ///
 /// Appended to `type_constructs` so that every TSX file self-contains the module
@@ -108,15 +167,21 @@ pub(super) fn build_binding_source_info<'a>(
 ///
 /// See also [`VERTER_TYPES_STANDALONE_DTS`] for the unwrapped external-module
 /// version.
-pub const VERTER_TYPES_AMBIENT_MODULE: &str = r#"
+pub const VERTER_TYPES_AMBIENT_MODULE: &str = concat!(
+    r#"
 declare module "@verter/types" {
   export type Prettify<T> = T extends { (...args: any[]): any } ? T : { [K in keyof T]: T[K] } & {};
   export declare function enhanceElementWithProps<T, P>(el: T, props: P): T & P;
-  export declare function shallowUnwrapRef<T>(obj: T): import("vue").ShallowUnwrapRef<T>;
-  export declare function globalComponentsNav(): import("vue").GlobalComponents;
-  export type GlobalComponentType<N> = N extends keyof import("vue").GlobalComponents ? import("vue").GlobalComponents[N] : unknown;
-  export type GlobalComponentKebabType<N, K extends string> = N extends keyof import("vue").GlobalComponents ? import("vue").GlobalComponents[N] : K extends keyof import("vue").GlobalComponents ? import("vue").GlobalComponents[K] : K extends keyof import("vue/jsx-runtime").JSX.IntrinsicElements ? (props: import("vue/jsx-runtime").JSX.IntrinsicElements[K]) => any : (props: Record<string, any>) => any;
-  export type ExtractRenderComponent<T> = T extends { new (...args: any[]): infer I; } ? I extends { $props: any } ? T : I extends HTMLElement ? (props: {}) => I : I : T extends (...args: any) => infer R ? void extends R ? typeof import("vue").Comment : R extends Array<any> ? typeof import("vue").Fragment : HTMLElement : T extends HTMLElement ? (props: {}) => T : T extends keyof import("vue").GlobalComponents ? ExtractRenderComponent<import("vue").GlobalComponents[T]> : T extends keyof import("vue").NativeElements ? (props: import("vue").NativeElements[T]) => JSX.Element : (props: {}) => JSX.Element;
+"#,
+    shallow_unwrap_helper!("  ", "export declare function ", ""),
+    global_component_helpers!(
+        "  ",
+        "export declare function ",
+        "export type ",
+        "",
+        "import(\"vue/jsx-runtime\").JSX.IntrinsicElements"
+    ),
+    r#"  export type ExtractRenderComponent<T> = T extends { new (...args: any[]): infer I; } ? I extends { $props: any } ? T : I extends HTMLElement ? (props: {}) => I : I : T extends (...args: any) => infer R ? void extends R ? typeof import("vue").Comment : R extends Array<any> ? typeof import("vue").Fragment : HTMLElement : T extends HTMLElement ? (props: {}) => T : T extends keyof import("vue").GlobalComponents ? ExtractRenderComponent<import("vue").GlobalComponents[T]> : T extends keyof import("vue").NativeElements ? (props: import("vue").NativeElements[T]) => JSX.Element : (props: {}) => JSX.Element;
   export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
   export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
   export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
@@ -131,11 +196,9 @@ export declare function instantiateComponent<T, P>(comp: T, props: P): T extends
     component: { $slots: TSlots },
     slotName: N,
   ): TSlots[N] extends ((...args: infer P) => any) | undefined ? P[0] : never;
-  export type ExtractLeafElement<T> = T extends HTMLElement ? T : T extends { $el: infer E } ? ExtractLeafElement<E> : T extends { new (): infer I } ? ExtractLeafElement<I> : never;
-  export type ExtractDirectives<T> = { [K in keyof T as T[K] extends import("vue").Directive<any, any, any, any> ? K extends `v${Capitalize<string>}` ? K : never : never]: T[K]; };
-  export declare function runCustomDirective<TInstance, TDirective extends import("vue").Directive<ExtractLeafElement<TInstance>>>(instance: TInstance, directive: TDirective): ExtractLeafElement<TInstance> extends infer El extends HTMLElement ? TDirective extends import("vue").Directive<infer TElement, infer TValue, infer M extends string, infer TArg> ? El extends TElement ? (instance: TInstance, value: TValue, arg: TArg | undefined, modifiers: { [K in M]?: true }) => void : (instance: TElement, value: TValue, arg: TArg | undefined, modifiers: { [K in M]?: true }) => void : false : false;
-  export declare function retrieveSetupDirectives<T>(o: T): ExtractDirectives<T> extends infer D ? ExtractDirectives<Omit<import("vue").GlobalDirectives, keyof D>> & D : ExtractDirectives<import("vue").GlobalDirectives>;
-  export type IsExactlyEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+"#,
+    directive_helpers!("  ", "export declare function ", "export type ", ""),
+    r#"  export type IsExactlyEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
   export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, child: ReturnType<T> extends infer R ? R extends Array<any> ? never : R extends string ? [R] : R extends U ? [U] : R : ReturnType<T>): any;
   export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, children: ReturnType<T> extends infer R ? R extends readonly [any, ...any[]] ? R : R extends Array<infer E> ? U extends Array<infer UE> ? [UE] extends [never] ? U : E extends string | number | boolean | symbol | bigint | null | undefined ? E extends UE ? U : never : UE extends E ? IsExactlyEqual<UE, E> extends true ? U : never : never : never : never : ReturnType<T>): any;
   export declare function checkRequiredSlots<T>(slots: T, provided: { [K in keyof T as undefined extends T[K] ? never : K]: true }): void;
@@ -158,7 +221,8 @@ export declare function instantiateComponent<T, P>(comp: T, props: P): T extends
   export declare function flowEach3(source: number | null | undefined): [number, number, number];
   export declare function flowEach3<S extends object>(source: S | null | undefined): [S[keyof S], keyof S, number];
 }
-"#;
+"#
+);
 
 /// Module augmentation guaranteeing the augmentable `vue` `GlobalComponents`
 /// surface exists on EVERY Vue version (Vue <3.5 ships no `GlobalComponents`
@@ -188,17 +252,23 @@ pub const VUE_GLOBAL_COMPONENTS_AUGMENTATION: &str = r#"declare module "vue" {
 /// virtual declaration consumers.
 ///
 /// Uses `import("vue").X` syntax for Vue type references.
-pub const VERTER_TYPES_STANDALONE_DTS: &str = r#"// Auto-generated by verter-lsp — do not edit.
+pub const VERTER_TYPES_STANDALONE_DTS: &str = concat!(
+    r#"// Auto-generated by verter-lsp — do not edit.
 // This file provides @verter/types declarations so that TSGO can resolve
 // the imports emitted by Verter's TSX codegen.
 
 export type Prettify<T> = T extends { (...args: any[]): any } ? T : { [K in keyof T]: T[K] } & {};
 export declare function enhanceElementWithProps<T, P>(el: T, props: P): T & P;
-export declare function shallowUnwrapRef<T>(obj: T): import("vue").ShallowUnwrapRef<T>;
-export declare function globalComponentsNav(): import("vue").GlobalComponents;
-export type GlobalComponentType<N> = N extends keyof import("vue").GlobalComponents ? import("vue").GlobalComponents[N] : unknown;
-export type GlobalComponentKebabType<N, K extends string> = N extends keyof import("vue").GlobalComponents ? import("vue").GlobalComponents[N] : K extends keyof import("vue").GlobalComponents ? import("vue").GlobalComponents[K] : K extends keyof import("vue/jsx-runtime").JSX.IntrinsicElements ? (props: import("vue/jsx-runtime").JSX.IntrinsicElements[K]) => any : (props: Record<string, any>) => any;
-export type ExtractRenderComponent<T> = T extends { new (...args: any[]): infer I; } ? I extends { $props: any } ? T : I extends HTMLElement ? (props: {}) => I : I : T extends (...args: any) => infer R ? void extends R ? typeof import("vue").Comment : R extends Array<any> ? typeof import("vue").Fragment : HTMLElement : T extends HTMLElement ? (props: {}) => T : T extends keyof import("vue").GlobalComponents ? ExtractRenderComponent<import("vue").GlobalComponents[T]> : T extends keyof import("vue").NativeElements ? (props: import("vue").NativeElements[T]) => JSX.Element : (props: {}) => JSX.Element;
+"#,
+    shallow_unwrap_helper!("", "export declare function ", ""),
+    global_component_helpers!(
+        "",
+        "export declare function ",
+        "export type ",
+        "",
+        "import(\"vue/jsx-runtime\").JSX.IntrinsicElements"
+    ),
+    r#"export type ExtractRenderComponent<T> = T extends { new (...args: any[]): infer I; } ? I extends { $props: any } ? T : I extends HTMLElement ? (props: {}) => I : I : T extends (...args: any) => infer R ? void extends R ? typeof import("vue").Comment : R extends Array<any> ? typeof import("vue").Fragment : HTMLElement : T extends HTMLElement ? (props: {}) => T : T extends keyof import("vue").GlobalComponents ? ExtractRenderComponent<import("vue").GlobalComponents[T]> : T extends keyof import("vue").NativeElements ? (props: import("vue").NativeElements[T]) => JSX.Element : (props: {}) => JSX.Element;
 export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
 export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
 export type ExtractComponentProps<T> = T extends { new (): infer I } ? ExtractComponentProps<I> : T extends { $props: infer P } ? P : T extends HTMLElement ? import("vue").HTMLAttributes : T extends (p: infer P) => any ? P : {};
@@ -213,11 +283,9 @@ export declare function extractArgumentsFromRenderSlot<
   component: { $slots: TSlots },
   slotName: N,
 ): TSlots[N] extends ((...args: infer P) => any) | undefined ? P[0] : never;
-export type ExtractLeafElement<T> = T extends HTMLElement ? T : T extends { $el: infer E } ? ExtractLeafElement<E> : T extends { new (): infer I } ? ExtractLeafElement<I> : never;
-export type ExtractDirectives<T> = { [K in keyof T as T[K] extends import("vue").Directive<any, any, any, any> ? K extends `v${Capitalize<string>}` ? K : never : never]: T[K]; };
-export declare function runCustomDirective<TInstance, TDirective extends import("vue").Directive<ExtractLeafElement<TInstance>>>(instance: TInstance, directive: TDirective): ExtractLeafElement<TInstance> extends infer El extends HTMLElement ? TDirective extends import("vue").Directive<infer TElement, infer TValue, infer M extends string, infer TArg> ? El extends TElement ? (instance: TInstance, value: TValue, arg: TArg | undefined, modifiers: { [K in M]?: true }) => void : (instance: TElement, value: TValue, arg: TArg | undefined, modifiers: { [K in M]?: true }) => void : false : false;
-export declare function retrieveSetupDirectives<T>(o: T): ExtractDirectives<T> extends infer D ? ExtractDirectives<Omit<import("vue").GlobalDirectives, keyof D>> & D : ExtractDirectives<import("vue").GlobalDirectives>;
-export type IsExactlyEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+"#,
+    directive_helpers!("", "export declare function ", "export type ", ""),
+    r#"export type IsExactlyEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
 export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, child: ReturnType<T> extends infer R ? R extends Array<any> ? never : R extends string ? [R] : R extends U ? [U] : R : ReturnType<T>): any;
 export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(slot: T, children: ReturnType<T> extends infer R ? R extends readonly [any, ...any[]] ? R : R extends Array<infer E> ? U extends Array<infer UE> ? [UE] extends [never] ? U : E extends string | number | boolean | symbol | bigint | null | undefined ? E extends UE ? U : never : UE extends E ? IsExactlyEqual<UE, E> extends true ? U : never : never : never : never : ReturnType<T>): any;
 export declare function checkRequiredSlots<T>(slots: T, provided: { [K in keyof T as undefined extends T[K] ? never : K]: true }): void;
@@ -254,7 +322,8 @@ declare module "vue/jsx-runtime" {
     interface ElementChildrenAttribute {}
   }
 }
-"#;
+"#
+);
 
 /// Module augmentation that prevents a foreign ambient JSX namespace from
 /// supplying React-style element children to Vue IDE carriers.
@@ -279,7 +348,7 @@ pub(super) fn collect_builtin_components(
     template_ast: Option<&crate::ast::types::TemplateAst>,
     source: &str,
 ) -> Vec<&'static str> {
-    use crate::template::code_gen::shared::helpers::is_builtin_component;
+    use crate::template::vue_syntax::builtin_component;
 
     let ast = match template_ast {
         Some(a) => a,
@@ -295,19 +364,11 @@ pub(super) fn collect_builtin_components(
                 continue;
             }
             let tag_name = &source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize];
-            if let Some((flag_bit, _helper_name)) = is_builtin_component(tag_name) {
+            if let Some(component) = builtin_component(tag_name) {
+                let flag_bit = 1u8 << component as u8;
                 if seen & flag_bit == 0 {
                     seen |= flag_bit;
-                    // Map to the user-facing Vue export name (PascalCase)
-                    let vue_name = match tag_name {
-                        "Teleport" | "teleport" => "Teleport",
-                        "Suspense" | "suspense" => "Suspense",
-                        "KeepAlive" | "keep-alive" => "KeepAlive",
-                        "BaseTransition" | "base-transition" => "BaseTransition",
-                        "Transition" | "transition" => "Transition",
-                        "TransitionGroup" | "transition-group" => "TransitionGroup",
-                        _ => continue,
-                    };
+                    let vue_name = component.export_name();
                     result.push(vue_name);
                 }
             }
@@ -416,7 +477,7 @@ pub(super) fn unbound_builtin_components<'b>(
 
 /// Emit helper imports hoisted before the wrapper function.
 pub(super) fn emit_helper_imports(
-    out: &mut CodeGenOutput<'_>,
+    out: &mut EditRecorder<'_>,
     pos: u32,
     carrier_anchor: Option<u32>,
     options: &IdeScriptOptions<'_>,
@@ -437,7 +498,7 @@ pub(super) fn emit_helper_imports(
 /// [`emit_helper_imports`] for a setup script that reads at least one proven
 /// `defineAsyncComponent` binding through the `asyncComponent` helper.
 pub(super) fn emit_helper_imports_with_async_component(
-    out: &mut CodeGenOutput<'_>,
+    out: &mut EditRecorder<'_>,
     pos: u32,
     carrier_anchor: Option<u32>,
     options: &IdeScriptOptions<'_>,
@@ -459,7 +520,7 @@ pub(super) fn emit_helper_imports_with_async_component(
 }
 
 pub(super) fn emit_helper_imports_with_define_component(
-    out: &mut CodeGenOutput<'_>,
+    out: &mut EditRecorder<'_>,
     pos: u32,
     carrier_anchor: Option<u32>,
     options: &IdeScriptOptions<'_>,
@@ -499,7 +560,7 @@ struct HelperImportNeeds {
 }
 
 fn emit_helper_imports_inner(
-    out: &mut CodeGenOutput<'_>,
+    out: &mut EditRecorder<'_>,
     pos: u32,
     carrier_anchor: Option<u32>,
     options: &IdeScriptOptions<'_>,

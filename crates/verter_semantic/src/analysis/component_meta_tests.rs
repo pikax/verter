@@ -105,6 +105,7 @@ fn resolved_model_inputs(macros: &[AnalyzedMacro]) -> Vec<ResolvedMacroInput> {
         .filter(|(_, mac)| mac.kind == AnalyzedMacroKind::DefineModel)
         .map(|(macro_index, mac)| ResolvedMacroInput {
             macro_index,
+            diagnostics: Vec::new(),
             props: mac
                 .prop_fields
                 .iter()
@@ -287,6 +288,7 @@ fn resolved_emit_macro_input(
 ) -> crate::analysis::component_meta::ResolvedMacroInput {
     crate::analysis::component_meta::ResolvedMacroInput {
         macro_index,
+        diagnostics: Vec::new(),
         props: Vec::new(),
         emits: fields.iter().cloned().map(resolved_emit_input).collect(),
         slots: Vec::new(),
@@ -360,14 +362,13 @@ fn extracts_props_from_define_props_macro() {
 }
 
 #[test]
-fn flat_evaluated_props_contribute_metadata_not_the_source() {
+fn flat_evaluated_props_never_override_member_metadata() {
     let macros = vec![make_define_props(vec![make_prop(
         "label",
         Some("string"),
         false,
     )])];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: vec![verter_session_query::analysis::type_expand::ExpandedField {
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "label".to_string(),
@@ -407,16 +408,16 @@ fn flat_evaluated_props_contribute_metadata_not_the_source() {
         )) => {}
         other => panic!(
             "the row's authored source is authoritative — the flat evaluated \
-             lane contributes metadata only; got {other:?}"
+             lane supplies neither source nor metadata; got {other:?}"
         ),
     }
-    // The flat lane's expansion METADATA still folds in.
+    // Metadata describes the authored member, even when the flat lane is concrete.
     assert_eq!(
         result.props[0]
             .type_expansion
             .as_ref()
             .map(|meta| meta.exactness),
-        Some(verter_session_query::analysis::type_expand::ExpansionExactness::ExactConcrete)
+        Some(verter_session_query::analysis::type_expand::ExpansionExactness::ExactSymbolic)
     );
 }
 
@@ -428,7 +429,6 @@ fn props_preserve_expansion_metadata_when_available() {
         false,
     )])];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: vec![verter_session_query::analysis::type_expand::ExpandedField {
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "label".to_string(),
@@ -455,8 +455,23 @@ fn props_preserve_expansion_metadata_when_available() {
         bindings: Vec::new(),
     };
 
+    let mut row = resolved_prop_input(macros[0].prop_fields[0].clone());
+    let mut metadata = field_expansion_metadata(&evaluated.props[0]);
+    metadata.diagnostics[0].context = "member resolution retained Missing".to_string();
+    row.authority = ResolvedTypeAuthority::from_source_position(
+        &row.authority.source_position(),
+        metadata.exactness.into(),
+        ResolutionProvenance::FrameworkSurface,
+        diagnostics_from_expansion(Some(&metadata)),
+    );
+    let resolved = [ResolvedMacroInput {
+        props: vec![row],
+        ..Default::default()
+    }];
+
     let mut input = empty_input(&macros);
     input.evaluated_types = Some(&evaluated);
+    input.resolved_macros = &resolved;
 
     let result = extract_component_meta(input);
     let expansion = result.props[0]
@@ -467,6 +482,10 @@ fn props_preserve_expansion_metadata_when_available() {
     assert_eq!(
         expansion.exactness,
         verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete
+    );
+    assert_eq!(
+        expansion.diagnostics[0].context,
+        "member resolution retained Missing"
     );
     assert!(expansion.diagnostics.iter().any(|diagnostic| {
         diagnostic.reason
@@ -482,7 +501,6 @@ fn flat_evaluated_types_never_shadow_the_row_source() {
         false,
     )])];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: vec![verter_session_query::analysis::type_expand::ExpandedField {
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "label".to_string(),
@@ -555,7 +573,6 @@ fn props_fall_back_to_parsed_annotation_when_no_evaluated_type() {
 fn define_props_eval_supplements_missing_prop_fields() {
     let macros = vec![make_define_props(Vec::new())];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: Vec::new(),
         define_props: vec![
             verter_session_query::analysis::type_expand::ExpandedMacroProps {
@@ -616,6 +633,7 @@ fn resolved_macro_projection_merges_all_entries_for_one_macro_index() {
     let resolved = vec![
         crate::analysis::component_meta::ResolvedMacroInput {
             macro_index: 0,
+            diagnostics: Vec::new(),
             props: vec![resolved_prop_input(make_prop("x", Some("string"), false))],
             emits: Vec::new(),
             slots: Vec::new(),
@@ -630,6 +648,7 @@ fn resolved_macro_projection_merges_all_entries_for_one_macro_index() {
         },
         crate::analysis::component_meta::ResolvedMacroInput {
             macro_index: 0,
+            diagnostics: Vec::new(),
             props: vec![resolved_prop_input(make_prop("y", Some("number"), true))],
             emits: Vec::new(),
             slots: Vec::new(),
@@ -671,6 +690,7 @@ fn svelte_producer_guarantees_classify_the_membership_lanes() {
         verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(true);
     let resolved = vec![ResolvedMacroInput {
         macro_index: 0,
+        diagnostics: Vec::new(),
         props: Vec::new(),
         emits: Vec::new(),
         slots: Vec::new(),
@@ -714,6 +734,7 @@ fn resolved_macro_projection_merges_metadata_without_splicing_evidence() {
     let resolved = vec![
         crate::analysis::component_meta::ResolvedMacroInput {
             macro_index: 0,
+            diagnostics: Vec::new(),
             props: vec![resolved_prop_input(sparse)],
             emits: Vec::new(),
             slots: Vec::new(),
@@ -728,6 +749,7 @@ fn resolved_macro_projection_merges_metadata_without_splicing_evidence() {
         },
         crate::analysis::component_meta::ResolvedMacroInput {
             macro_index: 0,
+            diagnostics: Vec::new(),
             props: vec![resolved_prop_input(rich)],
             emits: Vec::new(),
             slots: Vec::new(),
@@ -906,6 +928,7 @@ fn define_emits_eval_cannot_supplement_resolver_owned_occurrences() {
     }];
     let resolved_macros = vec![crate::analysis::component_meta::ResolvedMacroInput {
         macro_index: 0,
+        diagnostics: Vec::new(),
         exposed: Vec::new(),
         props: Vec::new(),
         emits: vec![
@@ -940,7 +963,6 @@ fn define_emits_eval_cannot_supplement_resolver_owned_occurrences() {
         exposed_guarantee: None,
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: vec![
@@ -1023,6 +1045,7 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
     }];
     let resolved_macros = vec![crate::analysis::component_meta::ResolvedMacroInput {
         macro_index: 0,
+        diagnostics: Vec::new(),
         exposed: Vec::new(),
         props: Vec::new(),
         emits: vec![
@@ -1057,7 +1080,6 @@ fn define_emits_eval_does_not_resurrect_omitted_imported_events() {
         exposed_guarantee: None,
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: vec![
@@ -1186,7 +1208,6 @@ fn evaluated_slots_take_bindings_from_the_per_binding_channel_only() {
         ..make_define_props(vec![])
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: Vec::new(),
@@ -1561,7 +1582,6 @@ fn partial_slot_expansion_without_binding_channel_keeps_authored_binding_source(
         ..make_define_props(vec![])
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: Vec::new(),
@@ -1652,7 +1672,6 @@ fn incomplete_per_binding_evaluation_keeps_authority_and_evidence_separate() {
         ..make_define_props(vec![])
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: Vec::new(),
@@ -1746,7 +1765,6 @@ fn define_slots_prefer_exact_evaluated_slot_bindings_over_authored_sources() {
         ..make_define_props(vec![])
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: Vec::new(),
@@ -1831,7 +1849,6 @@ fn define_slots_keep_source_bindings_when_expanded_slot_bindings_are_empty() {
         ..make_define_props(vec![])
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: Vec::new(),
@@ -1899,7 +1916,6 @@ fn source_prop_raw_type_beats_expanded_backend_display_when_it_preserves_macro_c
         true,
     )])];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: vec![verter_session_query::analysis::type_expand::ExpandedField {
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "ui".to_string(),
@@ -1972,7 +1988,6 @@ fn optional_prop_raw_type_prefers_source_annotation_without_adding_undefined() {
         true,
     )])];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: vec![verter_session_query::analysis::type_expand::ExpandedField {
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "modelValue".to_string(),
@@ -2044,7 +2059,6 @@ fn placeholder_evaluated_prop_raw_type_falls_back_to_meaningful_source_annotatio
         make_prop("trailingIcon", Some("IconProps['name']"), true),
     ])];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: vec![
             verter_session_query::analysis::type_expand::ExpandedField {
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -2159,7 +2173,6 @@ fn small_partial_props_keep_resolved_authority_and_authored_evidence() {
         property_name: Some("to".to_string()),
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: vec![
             verter_session_query::analysis::type_expand::ExpandedField {
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -2285,6 +2298,7 @@ fn partial_identifier_props_keep_resolved_authority_and_authored_evidence() {
     }];
     let resolved_macros = vec![ResolvedMacroInput {
         macro_index: 0,
+        diagnostics: Vec::new(),
         props: vec![resolved_prop_input(imported)],
         emits: Vec::new(),
         slots: Vec::new(),
@@ -2298,7 +2312,6 @@ fn partial_identifier_props_keep_resolved_authority_and_authored_evidence() {
         exposed_guarantee: None,
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: vec![verter_session_query::analysis::type_expand::ExpandedField {
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "as".to_string(),
@@ -2375,7 +2388,6 @@ fn partial_object_props_keep_resolved_authority_and_authored_evidence() {
         true,
     )])];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: vec![verter_session_query::analysis::type_expand::ExpandedField {
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "ui".to_string(),
@@ -2453,7 +2465,6 @@ fn large_partial_props_keep_resolved_authority_and_authored_evidence() {
         true,
     )])];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: vec![verter_session_query::analysis::type_expand::ExpandedField {
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "mention".to_string(),
@@ -2556,7 +2567,6 @@ fn source_event_raw_signature_beats_backend_when_backend_widens_macro_payload() 
         ..make_define_props(vec![])
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: Vec::new(),
@@ -2626,7 +2636,6 @@ fn source_backed_update_events_keep_their_raw_emit_payloads() {
         },
     ];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: vec![verter_session_query::analysis::type_expand::ExpandedField {
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             name: "modelValue".to_string(),
@@ -2729,7 +2738,6 @@ fn evaluated_tuple_event_raw_type_is_not_double_wrapped() {
         ..make_define_props(vec![])
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: Vec::new(),
@@ -2818,7 +2826,6 @@ fn expanded_slot_bindings_preserve_source_binding_order() {
         ..make_define_props(vec![])
     }];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: Vec::new(),
@@ -2896,6 +2903,7 @@ fn resolved_slots_merge_local_details_and_append_new_slots() {
     }];
     let resolved_macros = vec![ResolvedMacroInput {
         macro_index: 0,
+        diagnostics: Vec::new(),
         exposed: Vec::new(),
         props: Vec::new(),
         emits: Vec::new(),
@@ -3334,7 +3342,6 @@ fn define_model_reconciles_existing_model_value_prop_from_define_props() {
         },
     ];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: vec![
             verter_session_query::analysis::type_expand::ExpandedField {
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -3513,6 +3520,32 @@ fn define_model_publishes_only_the_resolved_surface_row() {
         result.models[0].type_source,
         SourcePosition::Present(authored_source(0)),
         "the model type source is the resolved row's"
+    );
+
+    let mut with_event = resolved.clone();
+    let payload_text = "[emitted: Choice]";
+    let (payload, payload_expr_scope) = lower_for_test(Some(payload_text));
+    with_event[0].emits = vec![resolved_emit_input(
+        verter_session_query::analysis::types::AnalyzedEmitField {
+            name: "update:choice".to_string(),
+            span: verter_span::Span::default(),
+            call_signature_span: None,
+            payload_type: Some(payload_text.to_string()),
+            payload,
+            payload_expr_scope,
+            description: None,
+            tags: Vec::new(),
+        },
+    )];
+    let with_event = extract_component_meta(model_input(&macros, &with_event));
+    assert_eq!(
+        with_event
+            .events
+            .iter()
+            .find(|event| event.name == "update:choice")
+            .and_then(|event| event.raw_signature.as_deref()),
+        Some(payload_text),
+        "the update event keeps its own row's authored spelling"
     );
 
     let unanswered = extract_component_meta(model_input(&macros, &[]));
@@ -3772,8 +3805,10 @@ fn extract_exposed_type_arg_only_expansion_ignores_same_spelling_bindings_row() 
                 ),
                 authored_evidence: test_authored_evidence(None, None),
                 optional: false,
-                exactness: verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete,
-                execution_status: verter_session_query::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                exactness:
+                    verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete,
+                execution_status:
+                    verter_session_query::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: vec![ctor_diagnostic.clone()],
                 declared_in_macro_type_arg: false,
             },
@@ -3786,33 +3821,19 @@ fn extract_exposed_type_arg_only_expansion_ignores_same_spelling_bindings_row() 
                 ),
                 authored_evidence: test_authored_evidence(None, None),
                 optional: false,
-                exactness: verter_session_query::analysis::type_expand::ExpansionExactness::ExactConcrete,
-                execution_status: verter_session_query::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                exactness:
+                    verter_session_query::analysis::type_expand::ExpansionExactness::ExactConcrete,
+                execution_status:
+                    verter_session_query::analysis::type_expand::ExpansionExecutionStatus::Completed,
                 diagnostics: Vec::new(),
                 declared_in_macro_type_arg: false,
             },
         ],
-        exposed: vec![verter_session_query::analysis::type_expand::ExpandedMacroExposed {
-            macro_index: 0,
-            fields: vec![verter_session_query::analysis::type_expand::ExpandedField {
-                owner: instance,
-                name: "String".to_string(),
-                authority: test_authority(
-                    SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
-                    verter_session_query::analysis::type_expand::ExpansionExactness::ExactConcrete,
-                ),
-                authored_evidence: test_authored_evidence(None, None),
-                optional: false,
-                exactness: verter_session_query::analysis::type_expand::ExpansionExactness::ExactConcrete,
-                execution_status: verter_session_query::analysis::type_expand::ExpansionExecutionStatus::Completed,
-                diagnostics: Vec::new(),
-                declared_in_macro_type_arg: true,
-            }],
-        }],
         ..Default::default()
     };
     let resolved_macros = vec![ResolvedMacroInput {
         macro_index: 0,
+        diagnostics: Vec::new(),
         exposed: vec![crate::analysis::component_meta::ResolvedExposeInput {
             field: AnalyzedExposeField {
                 name: "String".to_string(),
@@ -3823,7 +3844,13 @@ fn extract_exposed_type_arg_only_expansion_ignores_same_spelling_bindings_row() 
                 description: None,
                 tags: Vec::new(),
             },
-            type_source: SourcePosition::Present(closed_leaf(PrimitiveName::Number)),
+            authority: verter_type_expr::ResolvedTypeAuthority::present(
+                closed_leaf(PrimitiveName::Number),
+                verter_type_expr::ResolutionExactness::ExactConcrete,
+                verter_type_expr::ResolutionProvenance::FrameworkSurface,
+                std::sync::Arc::from([]),
+            ),
+            authored_evidence: None,
         }],
         ..Default::default()
     }];
@@ -3873,6 +3900,7 @@ fn resolved_macros_supply_imported_metadata_without_snapshot_mutation() {
     ];
     let resolved_macros = vec![ResolvedMacroInput {
         macro_index: 0,
+        diagnostics: Vec::new(),
         props: resolved_fields
             .into_iter()
             .map(resolved_prop_input)
@@ -3923,6 +3951,7 @@ fn resolved_prop_callable_role_survives_component_meta_extraction() {
     prop.callable_role = expected.clone();
     let resolved_macros = vec![ResolvedMacroInput {
         macro_index: 0,
+        diagnostics: Vec::new(),
         props: vec![prop],
         ..Default::default()
     }];
@@ -3943,6 +3972,7 @@ fn resolved_macros_merge_with_local_prop_fields_for_mixed_type_sources() {
     )])];
     let resolved_macros = vec![ResolvedMacroInput {
         macro_index: 0,
+        diagnostics: Vec::new(),
         props: vec![resolved_prop_input(make_prop(
             "importedOnly",
             Some("number"),
@@ -3984,6 +4014,7 @@ fn native_framework_input_preserves_defaults_duplicate_event_publications_and_sl
     let slot_payload = lower_for_test(Some("number"));
     let resolved_macros = vec![ResolvedMacroInput {
         macro_index: 0,
+        diagnostics: Vec::new(),
         props: vec![resolved_prop_input(make_prop(
             "count",
             Some("number"),
@@ -4324,6 +4355,7 @@ fn runtime_prop_type_payload_wins_over_host_unknown_placeholder() {
     );
     let resolved = [ResolvedMacroInput {
         macro_index: 0,
+        diagnostics: Vec::new(),
         props: vec![ResolvedPropInput {
             field: macros[0].prop_fields[0].clone(),
             authority: unknown_authority,
@@ -5604,7 +5636,6 @@ fn macro_wide_diagnostics_split_from_per_field_diagnostics() {
     ])];
 
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: vec![
             verter_session_query::analysis::type_expand::ExpandedField {
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -5693,8 +5724,30 @@ fn macro_wide_diagnostics_split_from_per_field_diagnostics() {
         bindings: Vec::new(),
     };
 
+    let resolved = [ResolvedMacroInput {
+        props: macros[0].prop_fields.iter().cloned().map(|field| {
+            let mut row = resolved_prop_input(field);
+            let metadata = verter_session_query::analysis::type_expand::ExpansionMetadata {
+                exactness: verter_session_query::analysis::type_expand::ExpansionExactness::Incomplete,
+                execution_status: verter_session_query::analysis::type_expand::ExpansionExecutionStatus::Completed,
+                diagnostics: evaluated.define_props[0].result.diagnostics.iter().filter(|diagnostic| {
+                    diagnostic.property_name.as_deref() == Some(row.field.name.as_str())
+                }).cloned().collect(),
+            };
+            row.authority = ResolvedTypeAuthority::from_source_position(
+                &row.authority.source_position(),
+                metadata.exactness.into(),
+                ResolutionProvenance::FrameworkSurface,
+                diagnostics_from_expansion(Some(&metadata)),
+            );
+            row
+        }).collect(),
+        ..Default::default()
+    }];
+
     let mut input = empty_input(&macros);
     input.evaluated_types = Some(&evaluated);
+    input.resolved_macros = &resolved;
 
     let result = extract_component_meta(input);
 
@@ -5791,7 +5844,6 @@ fn define_emits_evaluator_call_signatures_do_not_create_event_occurrences() {
     }];
 
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         props: Vec::new(),
         define_props: Vec::new(),
         define_emits: vec![verter_session_query::analysis::type_expand::ExpandedMacroObjectShape {
@@ -6016,7 +6068,6 @@ fn synthesizes_default_value_tag_for_runtime_define_props() {
 fn evaluator_only_props_publish_no_fabricated_jsdoc() {
     let macros = vec![make_define_props(Vec::new())];
     let evaluated = verter_session_query::analysis::type_expand::ExpandedComponentTypes {
-        exposed: Vec::new(),
         define_props: vec![
             verter_session_query::analysis::type_expand::ExpandedMacroProps {
                 macro_index: 0,

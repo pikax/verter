@@ -1,7 +1,7 @@
 {
   "main": {
     "code": "import 'svelte/internal/disclose-version';\nimport 'svelte/internal/flags/legacy';\nimport * as $ from 'svelte/internal/client';\n\nvar root = $.from_html(`<h1 class=\"svelte-rk9ote\"></h1>`);\n\nexport default function Widget($$anchor) {\n\tlet name = 'world';\n\tvar h1 = root();\n\th1.textContent = 'hello world';\n\t$.append($$anchor, h1);\n}\n",
-    "sourceMap": "{\"version\":3,\"file\":\"Widget.svelte\",\"names\":[],\"sources\":[\"Widget.svelte\"],\"sourcesContent\":[\"<script lang=\\\"ts\\\">\\nlet name = 'world';\\n</script>\\n<h1>hello {name}</h1>\\n<style>h1 { color: blue }</style>\\n\"],\"mappings\":\"A;;;;;;;CACA,mB\"}"
+    "sourceMap": "{\"version\":3,\"file\":\"Widget.svelte\",\"names\":[],\"sources\":[\"Widget.svelte\"],\"sourcesContent\":[\"<script lang=\\\"ts\\\">\\nlet name = 'world';\\n</script>\\n<h1>hello {name}</h1>\\n<style>h1 { color: blue }</style>\\n\"],\"mappings\":\";;;;;;;CACA\"}"
   },
   "style_0": {
     "code": "h1.svelte-rk9ote { color: blue }",

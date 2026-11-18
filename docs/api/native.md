@@ -56,6 +56,11 @@ await ws.deleteFile("/src/old.ts");
 const resolved = await ws.resolveImport("/src/App.vue", "./Child.vue");
 // phase: "codegen" | "provider"  —  kind: "esm" | "type" | "require" | "src"
 const types = await ws.resolveImport("/src/App.vue", "pkg", "provider", "type");
+// A type request answers the declaration: "./video.js" resolves to "./video.d.ts"
+// when one sits beside it.
+
+// Whether a file belongs to an installed package rather than to the workspace
+const fromPackage = ws.isPackageBacked("/project/node_modules/pkg/index.d.ts"); // boolean
 
 // Project configuration from a tsconfig: the native loader reads its
 // compiler options and its files/include/exclude membership (the program's
@@ -181,6 +186,34 @@ const result = analyzeStyle(css, { scopeId: "a4f2eed6" });
 
 **Returns:** `AnalyzeStyleResult`
 
+### `canonicalizeId(raw)`
+
+Returns the host's canonical id for a path or bundler request id: forward
+slashes, a lower-case Windows drive letter, no extended-length prefix
+(`//?/UNC/server/share/App.vue` keeps its server and share as
+`//server/share/App.vue`), no query and no virtual-file suffix. Use it where no
+host is at hand; with a host, `upsert(...).canonicalId` and
+`resolve(...).canonicalId` give the same id.
+
+```ts
+import { canonicalizeId } from "@verter/native";
+
+canonicalizeId("C:\\proj\\src\\App.vue?vue&type=script&lang.ts"); // "c:/proj/src/App.vue"
+```
+
+### `parseRequestId(raw)`
+
+Reads a raw request id with the host's id grammar and no host: the node it
+names, its `marker`, `lang`, `scoped`, `rawPath` and custom `blockType`, or
+the same `{ rejected, rawPath, marker? }` refusal `host.resolve` returns. It
+carries no canonical id and no host metadata.
+
+### `hashBlockContent(code)`
+
+Returns the host's content token (`sha256:<hex>`) for a block's code: the
+`codeHash` a block override carries. `code` is a string or a Buffer of UTF-8
+bytes.
+
 ### `VerterHost`
 
 In-memory virtual file host for multi-file compilation with caching and dependency tracking. This is the primary API for build tools that need to compile multiple `.vue` files with cross-file awareness.
@@ -196,17 +229,26 @@ const host = new VerterHost({
 
 #### `host.resolve(rawId)`
 
-Resolve a raw module ID (e.g., a virtual file request like `App.vue?vue&type=style&index=0&scoped&lang.css`) into a canonical ID and node kind.
+Resolve a raw module ID (e.g., a virtual file request like `App.vue?vue&type=style&index=0&scoped&lang.css`) into a canonical ID, node kind and the facets the request carries.
 
 ```ts
-const resolved = host.resolve("App.vue?vue&type=style&index=0");
+const resolved = host.resolve("App.vue?vue&type=style&index=0&scoped&lang.css");
 // resolved.canonicalId — 'App.vue'
 // resolved.nodeKind — { kind: 'style', index: 0 }
+// resolved.marker — 'vue' (absent for a main request)
+// resolved.lang — 'css' (from `lang.<ext>` or `lang=<ext>`; may be dotted, as in `module.css`)
+// resolved.scoped — true
+// resolved.rawPath — 'App.vue', the text before the query, as received
+// resolved.blockType — the `type` of a custom block request (`?vue&type=i18n&index=0` gives 'i18n'); absent otherwise
 // resolved.bundlerId — full virtual file ID for the bundler
 // resolved.lspId — LSP-compatible URI
 ```
 
-**Returns:** `HostResolvedId | null`
+A request without a marker (`vue` or `verter`) is a main request, whatever else its query carries. Tokens the grammar does not own (`inline`, `used`, `t=…`) are ignored. The rendered `bundlerId` carries the marker of the carrier's language and, on script and style ids, `lang.<ext>` last.
+
+A request the grammar rejects resolves to `{ rejected, rawPath, marker? }` (the path before the query, and the marker when the request carries one kind), where `rejected` is one of `"both-markers"`, `"marker-without-type"`, `"repeated-owned-key"` (a repeated marker, `type` or `index`), `"invalid-index"` (an `index` that is not a non-negative integer) and `"unknown-virtual-suffix"` (an LSP-format id with an unknown suffix).
+
+**Returns:** `HostResolvedId | HostRejectedId`
 
 #### `host.upsert(request)`
 
@@ -453,16 +495,16 @@ stamps and the code/map hashes after the processor await; stale or mismatched
 results are refused without cache mutation. Block type and index are descriptive
 metadata only and are not accepted as identity.
 
-```ts
-import { createHash } from "node:crypto";
+A supplied `sourceMap` maps the code to the block: exactly one of its sources
+carries the block's input as its `sourcesContent` (a map with a single source
+may leave it out). It may also name other files the tool read, such as a
+stylesheet the block imports, each with its `sourcesContent`; the published
+map keeps them. A refused result throws an error whose `code` is a
+`HostBlockOverrideRefusalCode`, such as `"BlockContentStale"` or
+`"BlockContentInvalidSourceMap"`.
 
-function hashBlockContent(value: string | Buffer): string {
-  const digest = createHash("sha256")
-    .update("verter.block-content.bytes.v1\0")
-    .update(value)
-    .digest("hex");
-  return `sha256:${digest}`;
-}
+```ts
+import { hashBlockContent } from "@verter/native";
 
 const update = host.upsert({
   inputId: "/path/to/App.vue",
@@ -655,7 +697,10 @@ interface HostUpdateResult {
   importSpecifiers: HostScriptImportInfo[];
   moduleReferences: HostModuleReference[];
   preprocessorRequests: HostPreprocessorRequest[];
+  exportSignatures: HostExportSignature[];
   parseDurationMs: number;
+  /** The host's hash of the registered source: equal for equal bytes. */
+  contentHash: string;
 }
 ```
 

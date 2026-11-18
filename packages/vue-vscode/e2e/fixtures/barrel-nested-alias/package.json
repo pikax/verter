@@ -2,7 +2,7 @@
   "name": "e2e-barrel-nested-alias",
   "private": true,
   "dependencies": {
-    "vue": "^3.5.0"
+    "vue": "^3.5.0 || ^3.6.0-0"
   },
   "devDependencies": {
     "typescript": "^5.8.0",

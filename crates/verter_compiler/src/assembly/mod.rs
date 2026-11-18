@@ -1,8 +1,17 @@
 //! Logical source units, fragment placement, source-space/mapping
 //! composition, and atomic compiler-artifact publication.
 //!
-//! [`compose`] stays the fragment-local edit engine (owns one fragment's
-//! own bytes/map) is [`crate::code_transform::CodeTransform`] — unchanged.
+//! Source-coordinate edits belong to [`crate::code_transform::CodeTransform`]
+//! and the edit recorder it owns, and to nothing else. The meaning of
+//! output bytes is carried by the shared emission pieces (exact, rewritten,
+//! point-anchored, unmapped or externally mapped), which are never rebuilt
+//! from a finished `String` plus a map. Placement belongs to
+//! [`emit_plan`]: it orders fragments, fills typed slots, registers
+//! boundaries and binds sources, and never resolves an edit or reinterprets
+//! a provenance. Final text and maps come from the one writer behind
+//! [`emit_plan::EmitPlan::write`], with V3 encoding only at an external
+//! boundary through [`map_compose`].
+//!
 //! This module owns what combines multiple already-generated fragments
 //! into one final product and decides where things go: [`fragment`]
 //! declares a generated unit's contract/placement/identity, [`source_unit`]
@@ -26,8 +35,10 @@
 //! bytes, language and map off the staged handoff rather than locating its
 //! artifact by name or re-deriving its dialect from carrier metadata.
 
+pub mod artifact_graph;
 pub mod compose;
 pub mod custom_block;
+pub mod emit_plan;
 pub mod fragment;
 pub mod map_compose;
 pub mod map_input;

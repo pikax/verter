@@ -46,3 +46,12 @@ function readableId(result: unknown): string | null {
   if (resolved.id.startsWith("\0") || resolved.id.includes("?")) return null;
   return resolved.id;
 }
+
+/**
+ * The bundler's own `resolve` of a hook context, bound to it, or `undefined`
+ * when the host provides none (unplugin's context type does not declare it).
+ */
+export function bundlerResolveOf(context: unknown): ResolveHook | undefined {
+  const resolve = (context as { resolve?: unknown } | null | undefined)?.resolve;
+  return typeof resolve === "function" ? (resolve.bind(context) as ResolveHook) : undefined;
+}

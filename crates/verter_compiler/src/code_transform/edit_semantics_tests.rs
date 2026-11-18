@@ -403,11 +403,13 @@ fn affinity_insertions_are_unmapped_in_the_generated_sourcemap() {
     ct.try_update(3, 5, "XY").unwrap();
     assert_eq!(ct.build_string(), "abLRcXYf");
 
-    let map = ct.generate_map(
-        SourceMapOptions::new()
-            .with_source("test.css")
-            .include_content(true),
-    );
+    let map = ct
+        .generate_map(
+            SourceMapOptions::new()
+                .with_source("test.css")
+                .include_content(true),
+        )
+        .expect("mapped transform");
     let sources: Vec<_> = map.get_sources().collect();
     assert_eq!(sources.len(), 1);
     assert_eq!(map.get_source_content(0).unwrap(), "abcdef");
@@ -456,4 +458,183 @@ fn overlapping_removals_do_not_double_count_the_output_delta() {
     ct.try_remove(2, 6).unwrap(); // [2,3) already removed
     assert_eq!(ct.build_string(), "");
     assert_eq!(ct.output_delta(), -6);
+}
+
+// ─── Checked moves, batches and relocated ranges ────────────────────────────
+
+#[test]
+fn a_partially_overlapping_batch_is_refused_and_changes_nothing() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("abcdefgh", &allocator);
+    let err = ct
+        .try_batch_overwrite(&[(0, 4, "X"), (2, 6, "Y")])
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(
+        err,
+        CodeTransformError::Conflict {
+            first: verter_span::Span::new(0, 4),
+            second: verter_span::Span::new(2, 6),
+        }
+    );
+    assert_eq!(ct.build_string(), "abcdefgh");
+}
+
+#[test]
+fn a_contained_replacement_in_one_batch_is_refused_by_the_unfiltered_surface() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("abcdefgh", &allocator);
+    let err = ct
+        .try_batch_overwrite(&[(0, 6, "X"), (2, 4, "Y")])
+        .map(|_| ())
+        .unwrap_err();
+    assert_eq!(
+        err,
+        CodeTransformError::Conflict {
+            first: verter_span::Span::new(0, 6),
+            second: verter_span::Span::new(2, 4),
+        }
+    );
+    assert_eq!(ct.build_string(), "abcdefgh");
+}
+
+#[test]
+fn a_valid_batch_replaces_every_range_whatever_the_chunk_layout() {
+    // Each range inside one unedited chunk: one rebuild.
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("abcdef", &allocator);
+    ct.try_batch_overwrite(&[(0, 1, "A"), (2, 3, "C")]).unwrap();
+    assert_eq!(ct.build_string(), "AbCdef");
+
+    // A range crossing an insertion boundary: the interior insertion leaves
+    // with the replaced bytes, and nothing after the range survives twice.
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("abcdef", &allocator);
+    ct.prepend_left(3, "|");
+    ct.try_batch_overwrite(&[(2, 5, "X")]).unwrap();
+    assert_eq!(ct.build_string(), "abXf");
+}
+
+#[test]
+fn a_batch_removal_keeps_its_position_for_later_moves() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("abcdef", &allocator);
+    ct.try_batch_overwrite(&[(1, 3, "")]).unwrap();
+    assert_eq!(ct.build_string(), "adef");
+    ct.try_move(0, 4, 6).unwrap();
+    assert_eq!(ct.build_string(), "efad");
+}
+
+#[test]
+fn a_move_onto_itself_is_refused() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("abcdefgh", &allocator);
+    let err = ct.try_move(2, 6, 4).map(|_| ()).unwrap_err();
+    assert_eq!(
+        err,
+        CodeTransformError::InvalidMove {
+            range: verter_span::Span::new(2, 6),
+            target: 4,
+        }
+    );
+    assert_eq!(ct.build_string(), "abcdefgh");
+
+    // Either edge of the range is a real target: the moved run lands after
+    // or before the insertions recorded there.
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("abcdef", &allocator);
+    ct.try_move_wrapped(2, 4, 4, "<", ">").unwrap();
+    assert_eq!(ct.build_string(), "ab<cd>ef");
+}
+
+#[test]
+fn a_move_that_splits_a_code_point_is_refused() {
+    // `é` occupies bytes 1..3.
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("aé b", &allocator);
+    assert_eq!(
+        ct.try_move(2, 4, 0).map(|_| ()).unwrap_err(),
+        CodeTransformError::MidChar { offset: 2 }
+    );
+    assert_eq!(
+        ct.try_move(3, 4, 2).map(|_| ()).unwrap_err(),
+        CodeTransformError::MidChar { offset: 2 }
+    );
+    assert_eq!(ct.build_string(), "aé b");
+}
+
+#[test]
+fn an_edit_inside_a_relocated_range_is_refused() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("abcdef", &allocator);
+    ct.move_slice(2, 4, 0);
+    assert_eq!(ct.build_string(), "cdabef");
+    let relocated = CodeTransformError::EditInsideRelocated {
+        range: verter_span::Span::new(2, 4),
+    };
+    assert_eq!(
+        ct.try_overwrite(2, 4, "X").map(|_| ()).unwrap_err(),
+        relocated
+    );
+    assert_eq!(ct.try_remove(2, 4).map(|_| ()).unwrap_err(), relocated);
+    assert_eq!(
+        ct.try_batch_overwrite(&[(2, 4, "X")])
+            .map(|_| ())
+            .unwrap_err(),
+        relocated
+    );
+    assert_eq!(ct.try_move(2, 4, 6).map(|_| ()).unwrap_err(), relocated);
+    // The replacement never lands at the end of the output.
+    assert_eq!(ct.build_string(), "cdabef");
+}
+
+#[test]
+fn a_refused_edit_leaves_the_chunk_list_untouched() {
+    type Attempt = fn(&mut CodeTransform<'_>) -> Result<(), CodeTransformError>;
+    let attempts: [(&str, Attempt); 5] = [
+        ("partial overlap", |ct| {
+            ct.try_batch_overwrite(&[(0, 4, "X"), (2, 6, "Y")])
+                .map(|_| ())
+        }),
+        ("splitting an earlier replacement", |ct| {
+            ct.try_batch_overwrite(&[(8, 10, "Y")]).map(|_| ())
+        }),
+        ("move into itself", |ct| ct.try_move(0, 4, 2).map(|_| ())),
+        ("edit of a relocated range", |ct| {
+            ct.try_overwrite(1, 2, "Z").map(|_| ())
+        }),
+        ("batch over a relocated range", |ct| {
+            ct.try_batch_overwrite(&[(0, 3, "Z")]).map(|_| ())
+        }),
+    ];
+    for (name, attempt) in attempts {
+        let allocator = Allocator::default();
+        let mut ct = CodeTransform::new("abcdefghij", &allocator);
+        ct.overwrite(7, 9, "H");
+        ct.move_slice(1, 2, 5);
+        let text = ct.build_string();
+        let chunks = ct.chunk_count();
+        assert!(attempt(&mut ct).is_err(), "{name}: must be refused");
+        assert_eq!(ct.build_string(), text, "{name}: text changed");
+        assert_eq!(ct.chunk_count(), chunks, "{name}: chunk list changed");
+    }
+}
+
+#[test]
+fn a_batch_follows_the_splice_against_earlier_replacements() {
+    // Inside an earlier replacement there is nothing left to replace.
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("abcdefgh", &allocator);
+    ct.overwrite(0, 5, "X");
+    ct.try_batch_overwrite(&[(1, 2, "Y"), (6, 6, "Z")])
+        .expect("contained ranges are dropped, an empty range is placed");
+    assert_eq!(ct.build_string(), "XfZgh");
+
+    // Covering an earlier replacement replaces it.
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("abcdefgh", &allocator);
+    ct.overwrite(2, 3, "X");
+    ct.try_batch_overwrite(&[(1, 4, "W")])
+        .expect("a covering range replaces the earlier one");
+    assert_eq!(ct.build_string(), "aWefgh");
 }

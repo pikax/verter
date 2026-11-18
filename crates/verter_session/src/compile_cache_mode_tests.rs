@@ -64,6 +64,7 @@ fn empty_file_meta() -> FileMeta {
         template_lang: None,
         style_langs: Vec::new(),
         custom_types: Vec::new(),
+        request_marker: Default::default(),
     }
 }
 

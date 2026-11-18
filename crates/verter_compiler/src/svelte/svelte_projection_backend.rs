@@ -19,12 +19,38 @@ use crate::framework_common::FrameworkParseArtifact;
 use crate::standalone::{DirectCompileError, StandaloneCompiler};
 use crate::svelte::ide::SvelteIdeUnsupportedDiagnostic;
 
-use super::carrier::SvelteCarrierCompiler;
-use super::carrier_frontend::SvelteSfc5;
+use super::carrier_frontend::{SvelteCarrierFrontend, SvelteSfc5};
 
 /// Svelte IDE projection backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SvelteProjectionBackend;
+
+/// What every product lookup reads.
+#[derive(Debug, Clone, Copy)]
+pub struct SvelteProductInput<'a> {
+    pub source: &'a str,
+    pub artifact: &'a FrameworkParseArtifact,
+    pub canonical_id: &'a str,
+}
+
+/// A product the Svelte projection backend can produce. Implemented by each
+/// product in its own module. Lookup is monomorphised; there is no registry.
+pub trait SvelteProjectionProduct: Sized {
+    fn project(
+        backend: &SvelteProjectionBackend,
+        input: &SvelteProductInput<'_>,
+    ) -> Result<Self, SvelteProjectionError>;
+}
+
+impl SvelteProjectionBackend {
+    /// The product `P` for one admitted parse.
+    pub fn product<P: SvelteProjectionProduct>(
+        &self,
+        input: &SvelteProductInput<'_>,
+    ) -> Result<P, SvelteProjectionError> {
+        P::project(self, input)
+    }
+}
 
 /// Compile diagnostic tagged with the source space it was emitted against.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,13 +93,13 @@ impl SvelteProjectionBackend {
     /// Adapter this backend answers to.
     #[must_use]
     pub fn adapter_id(&self) -> FrameworkAdapterId {
-        SvelteCarrierCompiler.adapter_id()
+        SvelteCarrierFrontend.adapter_id()
     }
 
     /// Carrier language this backend projects.
     #[must_use]
     pub fn carrier_language_id(&self) -> LanguageId {
-        SvelteCarrierCompiler.carrier_language_id()
+        SvelteCarrierFrontend.carrier_language_id()
     }
 }
 
@@ -102,7 +128,7 @@ impl ProjectionBackend for SvelteProjectionBackend {
             })
         })?;
         require_ide_only(request)?;
-        let Some(parsed) = SvelteCarrierCompiler.parsed_svelte(artifact) else {
+        let Some(parsed) = SvelteCarrierFrontend.parsed_svelte(artifact) else {
             return Err(no_ide());
         };
         let requested_profile = requested_svelte_syntax_profile(request)?;
@@ -202,4 +228,5 @@ pub fn svelte_projection_backend_registration(
         SvelteProjectionBackend.carrier_language_id(),
         Present(SvelteProjectionBackend),
     )
+    .expect("the built-in Svelte profile manifest is admitted")
 }

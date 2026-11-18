@@ -1,0 +1,11 @@
+{
+  "version": 3,
+  "sources": [
+    "cases/ssr/conditional-slot.vue"
+  ],
+  "names": [],
+  "mappings": ";;;;;KAOoB,WAAI;;gBAAG,SAAO;uBAA9B,CAA2C;;;;;iCAAZ,GAAC",
+  "sourcesContent": [
+    "\n  <ChildComp>\n    <template v-if=\"show\" #actions>x</template>\n  </ChildComp>\n"
+  ]
+}

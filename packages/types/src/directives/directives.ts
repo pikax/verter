@@ -2,13 +2,18 @@ import { PickByValue } from "../helpers/index.js";
 import { ExtractFromHTMLElement } from "../tsx/components-tsx.js";
 import { SystemModifiers } from "../vue/index.js";
 
-export type ExtractLeafElement<T> = T extends HTMLElement
-  ? T
-  : T extends { $el: infer E }
-    ? ExtractLeafElement<E>
-    : T extends { new (): infer I }
-      ? ExtractLeafElement<I>
-      : never;
+/** Resolve a DOM host; Vue components without a declared root retain an unknown host. */
+export type ExtractLeafElement<T> = 0 extends 1 & T
+  ? any
+  : T extends HTMLElement | SVGElement | MathMLElement
+    ? T
+    : T extends { $el: infer E }
+      ? ExtractLeafElement<E>
+      : T extends { new (): infer I }
+        ? ExtractLeafElement<I>
+        : T extends { readonly $props: unknown; readonly $slots: unknown; $emit: unknown }
+          ? any
+          : never;
 
 // vOn
 type StopGuard<T> = T extends { stopPropagation(): void } ? true : false;
@@ -187,14 +192,14 @@ export declare function runCustomDirective<
 >(
   instance: TInstance,
   directive: TDirective,
-): ExtractLeafElement<TInstance> extends infer El extends HTMLElement
+): ExtractLeafElement<TInstance> extends infer El extends HTMLElement | SVGElement | MathMLElement
   ? TDirective extends import("vue").Directive<
       infer TElement,
       infer TValue,
       infer M extends string,
       infer TArg
     >
-    ? El extends TElement
+    ? [El] extends [TElement]
       ? (
           instance: TInstance,
           value: TValue,

@@ -27,6 +27,7 @@ use super::process::source_type_from_lang;
 pub struct PreparedScript<'alloc> {
     setup: Option<PreparedSetup<'alloc>>,
     companion: Option<PreparedCompanion<'alloc>>,
+    css_vars: Option<super::css_vars::PreparedCssVarExpressions>,
 }
 
 /// The parsed `<script setup>` block.
@@ -70,7 +71,27 @@ impl<'alloc> PreparedScript<'alloc> {
         let setup =
             script_setup.and_then(|ss| PreparedSetup::build(source, ss, alloc, companion.as_ref()));
 
-        Self { setup, companion }
+        Self {
+            setup,
+            companion,
+            css_vars: None,
+        }
+    }
+
+    pub(crate) fn prepare_css_var_expressions(&mut self, vars: &[crate::style_planner::VBindVar]) {
+        assert!(
+            self.css_vars.is_none(),
+            "CSS expressions are prepared once per compile"
+        );
+        if self.setup.is_some() {
+            self.css_vars = Some(super::css_vars::PreparedCssVarExpressions::new(vars));
+        }
+    }
+
+    pub(crate) fn css_var_expressions(
+        &self,
+    ) -> Option<&super::css_vars::PreparedCssVarExpressions> {
+        self.css_vars.as_ref()
     }
 
     /// The parsed setup block, if `<script setup>` with content is present.
@@ -89,7 +110,7 @@ impl<'alloc> PreparedSetup<'alloc> {
         source: &'alloc str,
         script_setup: &'p RootNodeScript,
         alloc: &'alloc Allocator,
-        _companion: Option<&PreparedCompanion<'alloc>>,
+        companion: Option<&PreparedCompanion<'alloc>>,
     ) -> Option<Self> {
         let content_span = script_setup.content?;
         let content_start = content_span.start;
@@ -98,7 +119,19 @@ impl<'alloc> PreparedSetup<'alloc> {
         let parser_ret = Parser::new(alloc, content_str, source_type).parse();
         let program: &'alloc Program<'alloc> = alloc.alloc(parser_ret.program);
 
-        let parse_result = parse_script(program, ScriptMode::Setup, content_start, content_str);
+        // The companion's imports reach the setup classification, as Vue's
+        // `userImports` do: a `ref` imported in `<script>` is Vue's `ref`.
+        let companion_items = match companion {
+            Some(companion) => companion.parse_result().items.as_slice(),
+            None => &[],
+        };
+        let parse_result = parse_script(
+            program,
+            ScriptMode::Setup,
+            content_start,
+            content_str,
+            companion_items,
+        );
 
         Some(Self {
             program,
@@ -147,7 +180,13 @@ impl<'alloc> PreparedCompanion<'alloc> {
         let parser_ret = Parser::new(alloc, content_str, source_type).parse();
         let program: &'alloc Program<'alloc> = alloc.alloc(parser_ret.program);
 
-        let parse_result = parse_script(program, ScriptMode::Options, content_start, content_str);
+        let parse_result = parse_script(
+            program,
+            ScriptMode::Options,
+            content_start,
+            content_str,
+            &[],
+        );
         Some(Self {
             program,
             content_start,

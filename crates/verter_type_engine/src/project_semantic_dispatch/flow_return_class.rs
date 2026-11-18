@@ -467,11 +467,16 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 let Some(Positional::Value(constructor)) = delivered else {
                     return ClassStep::Done(Positional::Unmodeled);
                 };
-                let frame_env: &FlowBinderEnv = self.st.binder_env;
-                let env: &FlowBinderEnv = frame.class_env.as_deref().unwrap_or(frame_env);
+                let frame_env: &Arc<FlowBinderEnv> = self.st.binder_env;
+                let env: &Arc<FlowBinderEnv> = frame.class_env.as_ref().unwrap_or(frame_env);
                 let mut type_arguments = Vec::with_capacity(heritage.type_arguments.len());
                 for argument in heritage.type_arguments.iter() {
-                    if signature_answer_is_frame_shadowed(self.dispatch, env, argument) {
+                    if signature_answer_is_frame_shadowed(
+                        self.dispatch,
+                        self.st.canonical,
+                        env,
+                        argument,
+                    ) {
                         return ClassStep::Done(Positional::Unmodeled);
                     }
                     type_arguments.push(self.lower_type_in(env, argument.ty()));
@@ -637,10 +642,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 return ClassStep::Done(self.finish_class_value(frame));
             };
             let degradation = self.st.degradation;
-            let frame_env: &FlowBinderEnv = self.st.binder_env;
+            let frame_env: &Arc<FlowBinderEnv> = self.st.binder_env;
             let value = match &class.members[index].value {
                 SliceClassMemberValue::Declared(ty) => {
-                    let env: &FlowBinderEnv = frame.class_env.as_deref().unwrap_or(frame_env);
+                    let env: &Arc<FlowBinderEnv> = frame.class_env.as_ref().unwrap_or(frame_env);
                     self.lower_gated_in(env, ty)
                 }
                 SliceClassMemberValue::Initializer { value, widen } => {
@@ -705,8 +710,9 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             .map(|value| value.expect("every member evaluated"))
             .collect();
         let graph = self.dispatch.graph();
-        let frame_env: &FlowBinderEnv = self.st.binder_env;
-        let env: &FlowBinderEnv = class_env.as_deref().unwrap_or(frame_env);
+        let frame_env: &Arc<FlowBinderEnv> = self.st.binder_env;
+        let shared_env: &Arc<FlowBinderEnv> = class_env.as_ref().unwrap_or(frame_env);
+        let env: &FlowBinderEnv = shared_env;
         let methods_complete = class.members.iter().zip(&values).all(|(member, value)| {
             let SliceClassMemberValue::Method(expr) = &member.value else {
                 return true;
@@ -759,8 +765,8 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
             });
         }
         for signature in class.index_signatures.iter() {
-            let key_type = self.lower_gated_in(env, &signature.key);
-            let value_type = self.lower_gated_in(env, &signature.value);
+            let key_type = self.lower_gated_in(shared_env, &signature.key);
+            let value_type = self.lower_gated_in(shared_env, &signature.value);
             let side = if signature.is_static {
                 &mut static_side
             } else {
@@ -893,12 +899,17 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
                 for parameters in signatures.iter() {
                     let mut params = Vec::with_capacity(parameters.len());
                     for parameter in parameters.iter() {
-                        if signature_answer_is_frame_shadowed(self.dispatch, env, &parameter.ty) {
+                        if signature_answer_is_frame_shadowed(
+                            self.dispatch,
+                            self.st.canonical,
+                            shared_env,
+                            &parameter.ty,
+                        ) {
                             return Positional::Unmodeled;
                         }
                         params.push(crate::semantic_query::FunctionParam::synthetic(
                             parameter.name.clone(),
-                            self.lower_type_in(env, parameter.ty.ty()),
+                            self.lower_type_in(shared_env, parameter.ty.ty()),
                             parameter.optional,
                             parameter.rest,
                         ));
@@ -1011,10 +1022,10 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
     /// when the frame shadows a name the answer reads.
     fn lower_gated_in(
         &mut self,
-        env: &FlowBinderEnv,
+        env: &Arc<FlowBinderEnv>,
         gated: &verter_session_query::flow::slice::GatedType,
     ) -> SemanticNodeId {
-        if signature_answer_is_frame_shadowed(self.dispatch, env, gated) {
+        if signature_answer_is_frame_shadowed(self.dispatch, self.st.canonical, env, gated) {
             return self.unmodeled_position();
         }
         self.lower_type_in(env, gated.ty())
@@ -1237,18 +1248,12 @@ impl<'s, 'd, 'b, D: FlowDemandDriver> FlowEvaluator<'s, 'd, 'b, D> {
 
     fn lower_type_in(
         &self,
-        env: &FlowBinderEnv,
+        env: &Arc<FlowBinderEnv>,
         ty: &verter_type_expr::TypeExpr,
     ) -> SemanticNodeId {
-        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-        self.dispatch.shallow_lower_type_expr_with_context(
+        self.lower_in_place(
             ty,
-            &env.env,
-            &env.scope,
-            &env.name_resolution,
-            env.scope_payload.as_ref(),
-            &env.shadowing,
-            &mut substitutions,
+            env,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
         )
     }

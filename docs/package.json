@@ -19,6 +19,6 @@
     "typescript": "7.1.0-beta",
     "vitepress": "^1.6.4",
     "vitepress-plugin-mermaid": "^2.0.17",
-    "vue": "3.6.0-rc.5"
+    "vue": "3.6.0-rc.15"
   }
 }

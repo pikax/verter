@@ -30,6 +30,31 @@ export interface HostAnalysisProductOptions {
 }
 
 /**
+ * The `code` of the error `applyBlockOverrides` throws when the host
+ * refuses supplied block content: one per refusal, except that a result
+ * made for an owner revision a newer one has replaced is as stale as one
+ * the host marked stale.
+ */
+export type HostBlockOverrideRefusalCode =
+  | "BlockContentUnavailable"
+  | "BlockContentOwnerMissing"
+  | "BlockContentStale"
+  | "BlockContentSourcesConflict"
+  | "BlockContentArtifactMismatch"
+  | "BlockContentBasisMismatch"
+  | "BlockContentSourceSpaceMismatch"
+  | "BlockContentCodeHashMismatch"
+  | "BlockContentSourceMapHashMismatch"
+  | "BlockContentInvalidSourceMap"
+  | "BlockContentCorrelationMismatch"
+  | "BlockContentCorrelationTerminal"
+  | "BlockContentCorrelationClosed"
+  | "BlockContentCorrelationCancelled"
+  | "BlockContentMalformedToken"
+  | "BlockContentPayloadTooLarge"
+  | "BlockContentDuplicateBlock";
+
+/**
  * Dev-server tooling flavour for Main-assembly decoration. Wire spellings
  * are all-lowercase (`"none"` / `"vite"` / `"webpack"`).
  */

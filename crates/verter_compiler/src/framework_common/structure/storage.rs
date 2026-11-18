@@ -83,8 +83,16 @@ impl<K, T: Copy, L: LifetimeClass> Arena<K, T, L> {
     pub fn get(&self, id: Id<K>) -> Option<&T> {
         self.values.get(id.index())
     }
+    /// Rewrite a stored record in place. Identity and length never change.
+    pub fn get_mut(&mut self, id: Id<K>) -> Option<&mut T> {
+        self.values.get_mut(id.index())
+    }
     pub fn as_slice(&self) -> &[T] {
         &self.values
+    }
+    /// Every stored ID in dense order.
+    pub fn ids(&self) -> impl Iterator<Item = Id<K>> {
+        (0..self.values.len()).map(|index| Id::at(index).expect("stored index"))
     }
     pub fn len(&self) -> usize {
         self.values.len()
@@ -104,6 +112,14 @@ impl<K> Copy for FlatRange<K> {}
 impl<K> Clone for FlatRange<K> {
     fn clone(&self) -> Self {
         *self
+    }
+}
+impl<K> FlatRange<K> {
+    pub fn len(self) -> usize {
+        (self.end - self.start) as usize
+    }
+    pub fn is_empty(self) -> bool {
+        self.start == self.end
     }
 }
 /// Flat backing storage for attributes, operations, dependencies or relations.
@@ -213,6 +229,9 @@ impl<K, T, L: LifetimeClass> SparseFacts<K, T, L> {
     }
     pub fn get(&self, id: Id<K>) -> Option<&T> {
         self.values.get(&id.index())
+    }
+    pub fn get_mut(&mut self, id: Id<K>) -> Option<&mut T> {
+        self.values.get_mut(&id.index())
     }
     pub fn iter(&self) -> impl Iterator<Item = (Id<K>, &T)> {
         self.values

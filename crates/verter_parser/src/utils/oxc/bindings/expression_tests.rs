@@ -599,3 +599,98 @@ fn extracted_bindings_are_in_source_order_for_every_form() {
         assert_source_ordered(&wrapped, &result);
     }
 }
+
+// ===========================================
+// How each occurrence is used
+// ===========================================
+
+/// `(name, usage)` of every non-ignored binding of a template statement list.
+fn usages(source: &str) -> Vec<(String, ReferenceUse)> {
+    let alloc = Allocator::default();
+    let result = extract_program_result(source, &alloc);
+    result
+        .bindings
+        .iter()
+        .filter(|b| !b.ignore)
+        .map(|b| (b.name.to_string(), b.usage))
+        .collect()
+}
+
+/// An identifier is a write target only where the binding itself is
+/// assigned; the object of an assigned member, a value on the right, a
+/// default and a computed key are all reads. A `new` constructor reached
+/// through member objects is constructed, and its arguments are reads.
+#[test]
+fn each_occurrence_records_how_it_is_used() {
+    use ReferenceUse::{Construct, Read, Write};
+    let rows: &[(&str, &[(&str, ReferenceUse)])] = &[
+        ("a = b", &[("a", Write), ("b", Read)]),
+        ("a += b", &[("a", Write), ("b", Read)]),
+        ("a++", &[("a", Write)]),
+        ("--a", &[("a", Write)]),
+        ("a.b = c", &[("a", Read), ("c", Read)]),
+        ("a[k] = c", &[("a", Read), ("k", Read), ("c", Read)]),
+        ("a.b++", &[("a", Read)]),
+        (
+            "({ a, b: c } = d)",
+            &[("a", Write), ("c", Write), ("d", Read)],
+        ),
+        (
+            "[a, b = c, ...e] = d",
+            &[
+                ("a", Write),
+                ("b", Write),
+                ("c", Read),
+                ("e", Write),
+                ("d", Read),
+            ],
+        ),
+        (
+            "for (x of xs) f(x)",
+            &[("x", Write), ("xs", Read), ("f", Read), ("x", Read)],
+        ),
+        ("new X(a)", &[("X", Construct), ("a", Read)]),
+        ("new X.Y[k]()", &[("X", Construct), ("k", Read)]),
+        ("new (f())()", &[("f", Read)]),
+        ("f(a)", &[("f", Read), ("a", Read)]),
+        ("x = { y }", &[("x", Write), ("y", Read)]),
+        ("(a as any) = b", &[("a", Write), ("b", Read)]),
+        ("(a!) = b", &[("a", Write), ("b", Read)]),
+        ("(a as any)++", &[("a", Write)]),
+        ("(a.b as any) = c", &[("a", Read), ("c", Read)]),
+    ];
+    for &(source, expected) in rows {
+        let expected: Vec<(String, ReferenceUse)> = expected
+            .iter()
+            .map(|&(name, usage)| (name.to_string(), usage))
+            .collect();
+        assert_eq!(usages(source), expected, "{source}");
+    }
+}
+
+/// An ordinary function's implicit `arguments` is local in its body and in
+/// the arrows nested in it. It is matched exactly: under IDE completion
+/// matching, a name it merely starts with still resolves normally.
+#[test]
+fn ordinary_function_arguments_are_local_and_exact() {
+    let source = "(function () { return arguments[0] + (() => arguments[1])() + arg })()";
+    let arg = source.find(" arg ").unwrap() as u32 + 1;
+    for completion in [false, true] {
+        let allocator = Allocator::default();
+        let parser = Parser::new(&allocator, source, SourceType::tsx());
+        let expr = parser.parse_expression().expect("valid expression");
+        let ctx = BindingContext::new(0).completion_aware(completion);
+        let result = extract_bindings_from_expression(&expr, source, ctx);
+        let free: Vec<(&str, u32)> = result
+            .bindings
+            .iter()
+            .filter(|binding| !binding.ignore)
+            .map(|binding| (binding.name, binding.pos))
+            .collect();
+        assert_eq!(
+            free,
+            vec![("arg", arg)],
+            "completion matching: {completion}"
+        );
+    }
+}

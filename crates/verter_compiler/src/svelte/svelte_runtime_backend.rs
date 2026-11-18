@@ -13,14 +13,14 @@ use verter_language::{
 use crate::assembly::AssembledArtifact;
 use crate::compile_request::{CompileRequest, ProductKind};
 use crate::framework_common::capability::{Present, RuntimeCompilerBackend};
+use crate::framework_common::carrier_registry::RegisteredBackend;
 use crate::framework_common::catalog::{RuntimeCap, TypedCapabilityRegistration};
 use crate::framework_common::FrameworkParseArtifact;
 use crate::standalone::{
     DirectCompileError, DirectCompileOutput, StandaloneCompiler, SvelteExecutionInputs,
 };
 
-use super::carrier::SvelteCarrierCompiler;
-use super::carrier_frontend::SvelteSfc5;
+use super::carrier_frontend::{SvelteCarrierFrontend, SvelteSfc5};
 
 /// Svelte runtime compiler backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -66,13 +66,13 @@ impl SvelteRuntimeBackend {
     /// Adapter this backend answers to.
     #[must_use]
     pub fn adapter_id(&self) -> FrameworkAdapterId {
-        SvelteCarrierCompiler.adapter_id()
+        SvelteCarrierFrontend.adapter_id()
     }
 
     /// Carrier language this backend compiles.
     #[must_use]
     pub fn carrier_language_id(&self) -> LanguageId {
-        SvelteCarrierCompiler.carrier_language_id()
+        SvelteCarrierFrontend.carrier_language_id()
     }
 }
 
@@ -100,7 +100,7 @@ impl RuntimeCompilerBackend<SvelteSfc5> for SvelteRuntimeBackend {
         grant
             .consume_for(expected)
             .map_err(|_| SvelteRuntimeError::ExecutionUngranted { product: expected })?;
-        let Some(parsed) = SvelteCarrierCompiler.parsed_svelte(artifact) else {
+        let Some(parsed) = SvelteCarrierFrontend.parsed_svelte(artifact) else {
             return Err(SvelteRuntimeError::UnusableParse);
         };
         let requested_profile = requested_svelte_syntax_profile(request)?;
@@ -193,7 +193,15 @@ fn map_parsed_runtime(err: DirectCompileError) -> SvelteRuntimeError {
         | DirectCompileError::VueComposition(_)
         | DirectCompileError::StalePreparedInput { .. }
         | DirectCompileError::Cancelled
+        | DirectCompileError::SyntaxRejected(_)
         | DirectCompileError::StackUnavailable(_) => SvelteRuntimeError::Direct(err),
+    }
+}
+
+impl RegisteredBackend for SvelteRuntimeBackend {
+    fn registered() -> &'static Self {
+        static REGISTERED: SvelteRuntimeBackend = SvelteRuntimeBackend;
+        &REGISTERED
     }
 }
 
@@ -206,6 +214,7 @@ pub fn svelte_runtime_backend_registration(
         SvelteRuntimeBackend.carrier_language_id(),
         Present(SvelteRuntimeBackend),
     )
+    .expect("the built-in Svelte profile manifest is admitted")
 }
 
 #[cfg(test)]

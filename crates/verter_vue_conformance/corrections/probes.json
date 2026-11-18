@@ -1,0 +1,1001 @@
+[
+  {
+    "bucket": 1,
+    "id": "inline-maybe-ref",
+    "targets": [
+      "client-inline"
+    ],
+    "sourceSha256": "c097060811b9a993e8c4406f173e68a7172a931a9f2d5edebc02ee77e7fdf190",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/inline-maybe-ref.js",
+        "sha256": "fac89a4b4a3480d42a64ecd41925b5b526ff6f19d4c8259b33a7490c258aa9d7",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/inline-maybe-ref.js",
+        "sha256": "6d6e8bea53625a9c5f8e2aa3edcbe2e1241c1dd7b1d1bfd1a2b933898a50e767",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/inline-maybe-ref.js",
+        "sha256": "a131e80bf32c4472fe064bc7891832c08f0ac39c1dc5113427dd779ff0124892",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "client-inline": {
+        "status": "corrected",
+        "reason": "Vue unwraps maybe-ref reads and guards model writes with isRef."
+      }
+    }
+  },
+  {
+    "bucket": 2,
+    "id": "event-arrow-bodies",
+    "targets": [
+      "client",
+      "client-inline",
+      "server"
+    ],
+    "sourceSha256": "42492ea49b8be17d637c47823e4ed841316eadc9212f4a0e14d23083f05574ff",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/event-arrow-bodies.js",
+        "sha256": "b10f892405b61446495652ea63c8372696425ffe027d6014699657404849d9db",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/event-arrow-bodies.js",
+        "sha256": "3f14879115c62853d3f6b62335f349455af323f72cebc858be2f315ec7b78427",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/event-arrow-bodies.js",
+        "sha256": "1f08d937433f48254115d8eec9b5a1a23018e6f6995b3f3e2383a30b72ff787c",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "client": {
+        "status": "matched",
+        "reason": "Both routes already use Vue expression and statement-list arrow bodies."
+      },
+      "client-inline": {
+        "status": "excluded",
+        "reason": "Pinned Vue guards updates to the setup let with isRef; this target does not."
+      },
+      "server": {
+        "status": "excluded",
+        "reason": "The statement-list arrow is corrected, but native SSR slot children omit inherited _scopeId."
+      }
+    }
+  },
+  {
+    "bucket": 5,
+    "id": "cached-whitespace-text",
+    "targets": [
+      "client"
+    ],
+    "sourceSha256": "e78a2d8f04c7b17f47b3b6c723210a695996c7c187f1c73ca4e6e46d8c4470c1",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/cached-whitespace-text.js",
+        "sha256": "af1f3f9df9f41e13c6b9bfa2fe3aa59b3f22dba2a70c9d96df21b4b4eecc1054",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/cached-whitespace-text.js",
+        "sha256": "ff0beeac6cb52fb4227cb01725150e22ef770e56b26a561b5d7dc8a5403ee1e0",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/cached-whitespace-text.js",
+        "sha256": "83a96c5e350dfa05cb5032bbe7920c8b1211c547b8ac406856a6ec0c28a93b51",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "client": {
+        "status": "excluded",
+        "reason": "The static i VNode passes CACHED as children instead of the fourth patch-flag argument; the text call and cache order also differ from pinned Vue."
+      }
+    }
+  },
+  {
+    "bucket": 6,
+    "id": "typescript-expression-erasure",
+    "targets": [
+      "fine-grained",
+      "server"
+    ],
+    "sourceSha256": "7d0f0dbcb72673a2a7fa70d7f77dace8943e0c62712e3720e09d8f9a8ff92a50",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/typescript-expression-erasure.js",
+        "sha256": "fe77cbfa7ab9d743e431ff5631718022a42eaa39f4cd67293e9d501921360ea6",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/typescript-expression-erasure.js",
+        "sha256": "5e8922e506397a8cdc6caaddad75f4ddfde174df80c784e3b24db47218093eee",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/typescript-expression-erasure.js",
+        "sha256": "2aed5496efa6b34084d0178c2f98aea0410194b4ac1661decbd5fdfc29bf6597",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "fine-grained": {
+        "status": "pending",
+        "reason": "TypeScript expression erasure awaits the owning force-JavaScript fixes."
+      },
+      "server": {
+        "status": "pending",
+        "reason": "TypeScript expression erasure awaits the owning force-JavaScript and fallback erasure fixes."
+      }
+    }
+  },
+  {
+    "bucket": 7,
+    "id": "typescript-model-module",
+    "targets": [
+      "fine-grained",
+      "server"
+    ],
+    "sourceSha256": "6060c0e58d33d88c1f511e1e10da533f20f170c6fa0235a537628a1f6f176666",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/typescript-model-module.js",
+        "sha256": "804a0c159897f3b9170d8541389f88abc1616f7e5423ac49d1384dafb7368213",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/typescript-model-module.js",
+        "sha256": "2e90be9c4c0944867648907b4175b02eab51affa88e537a188bf4b901e7ef61d",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/typescript-model-module.js",
+        "sha256": "58e1f487086a05f1e5291b9dfebf4e6daa5a5392e6ee019bb352c89b8f1a3ec3",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "fine-grained": {
+        "status": "pending",
+        "reason": "TypeScript module publication awaits the owning force-JavaScript fixes."
+      },
+      "server": {
+        "status": "pending",
+        "reason": "TypeScript module publication awaits the owning force-JavaScript and fallback erasure fixes."
+      }
+    }
+  },
+  {
+    "bucket": 8,
+    "id": "element-text-edge",
+    "targets": [
+      "fine-grained"
+    ],
+    "sourceSha256": "0fba193a9e5002eb7ba812d0b1e5f8370ef498404138691264cf9e8fe45daa69",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/element-text-edge.js",
+        "sha256": "b660f73c6d9157af497579eddb5bcea718914495acd2756ca4a3622071afc2cb",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/element-text-edge.js",
+        "sha256": "ca1807564ea752a39a4a0774117d60380742a53513f3b213ddc6a53818d05e8b",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/element-text-edge.js",
+        "sha256": "db50a4e83483941f676bda53084f11b93ac9493acf4d27b6f82f3ab65cf2b339",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "fine-grained": {
+        "status": "excluded",
+        "reason": "Both routes already produce the same trimmed text payload; Vue 3.5.42 has no native Vapor generator."
+      }
+    }
+  },
+  {
+    "bucket": 9,
+    "id": "conditional-named-slot",
+    "targets": [
+      "server"
+    ],
+    "sourceSha256": "2246407f09c8b2c36ba60b27dfe3e47b8c5c37c5fc9b163b6e46ab0d0a1932f9",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/conditional-named-slot.js",
+        "sha256": "ec2c813f6fd9bfd98d530abc5633e00d96c47c1c04519db9d6e69847101a615a",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/conditional-named-slot.js",
+        "sha256": "64107d4f1ea2047893ad08b62b946f8a1476c4830fc6ac366654093d25cba846",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/conditional-named-slot.js",
+        "sha256": "f3748eb845996c67edb651b50f48cef056ba6f13d67a174e27c29e48fe7c6b8b",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "server": {
+        "status": "excluded",
+        "reason": "Conditional slots use createSlots, but native SSR slot children omit inherited _scopeId."
+      }
+    }
+  },
+  {
+    "bucket": 10,
+    "id": "fallback-class-style",
+    "targets": [
+      "server"
+    ],
+    "sourceSha256": "20dcea17905d48bb35ccad377394db7752125055160b8277bd1ffe7a92ce5d6d",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/fallback-class-style.js",
+        "sha256": "7ea62fb0a28b175234b273f3dd1c4e7e39e14afdf828e4aa8de8251d602b0564",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/fallback-class-style.js",
+        "sha256": "79970d7bdfef021759bdb3dd18c28fbaf0030c7705c7808d9a2292d8cd4045e0",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/fallback-class-style.js",
+        "sha256": "e68ec19ea3a61db72d87779e752331be54b0aa186af2740b06529cf3d9d453b6",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "server": {
+        "status": "excluded",
+        "reason": "Pinned Vue keeps raw class/style props in this SSR VNode fallback; target adds normalization helpers and patch flag 6. Native SSR slot children also omit _scopeId."
+      }
+    }
+  },
+  {
+    "bucket": 11,
+    "id": "fallback-camelized-props",
+    "targets": [
+      "server"
+    ],
+    "sourceSha256": "284dc88b05caf2f7900a9714b0eeea88058cd66fd8e44072552d020d4812c974",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/fallback-camelized-props.js",
+        "sha256": "3b5e7fdac03dcb6ed4fca62862df71f6452937ce5f8a8dbc29c35c17b38833f7",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/fallback-camelized-props.js",
+        "sha256": "76fba98d6a6d2787ced6f16836d2a07f7155f457db281e99d9b6608bc6038b42",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/fallback-camelized-props.js",
+        "sha256": "e27fff7f4cbe7ef6c9e15ee953711b99e49fb39833a30a6a91717200c778606d",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "server": {
+        "status": "excluded",
+        "reason": "Pinned Vue keeps the authored page-key spelling and no patch flag in this SSR VNode fallback; target camelizes it and adds patch flag 8. Nested SSR components also omit _scopeId."
+      }
+    }
+  },
+  {
+    "bucket": 12,
+    "id": "fallback-native-model",
+    "targets": [
+      "server"
+    ],
+    "sourceSha256": "13b4439fbbe4de941ff35bc5f6d8648cedd5243f742f68f09d17afaec73ce9a9",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/fallback-native-model.js",
+        "sha256": "4f436b47c21b641911d74ca89ac3e77ddffa32251a90c863d8dd088a627726b7",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/fallback-native-model.js",
+        "sha256": "c8bea63080a7a2f47ce6fafafa7f0b684808bc4c7e272fba64e2ef7c4ef62bd0",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/fallback-native-model.js",
+        "sha256": "525d56e31644e75a4e4b14e534b1b86e6a8452b547ca4a1edf3c1d478637058c",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "server": {
+        "status": "excluded",
+        "reason": "The native model helpers match, but target adds NEED_PATCH (520 versus Vue 8). Native SSR slot children also omit inherited _scopeId."
+      }
+    }
+  },
+  {
+    "bucket": 17,
+    "id": "fallback-conditional-fragment",
+    "targets": [
+      "server"
+    ],
+    "sourceSha256": "cc13988affb33ab7d10cb8d791e2a31dddbc9c1fb118e5386639531454c23b22",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/fallback-conditional-fragment.js",
+        "sha256": "17da6b9eab50ff4754140385fc85d1ee5493d90af0bd4b8310430ec4a69b86bb",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/fallback-conditional-fragment.js",
+        "sha256": "0694b75738d864ca1e83d95f62b32b09cbe234d32c4ed8b64b3ab7d9dc945685",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/fallback-conditional-fragment.js",
+        "sha256": "dda695b1428b303c1a2d949e20a131229fbc298ceee636f28bce288ac994427a",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "server": {
+        "status": "excluded",
+        "reason": "Routes already match on fragment and placeholder lowering; native SSR slot children omit inherited _scopeId."
+      }
+    }
+  },
+  {
+    "bucket": 19,
+    "id": "unscoped-forwarded-outlet",
+    "targets": [
+      "server"
+    ],
+    "sourceSha256": "5d07914e4842f8aa1cb54fd51b5238d8c87611614527003e56b4ed393176c652",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/unscoped-forwarded-outlet.js",
+        "sha256": "0ca36a069e2248913d2654c1661367ab75397a26aa578be9440a217f2cf92229",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/unscoped-forwarded-outlet.js",
+        "sha256": "c4ba29fae4e1390576ff409b661db7f2b5f44fc506ca15bbd4efcb32f5b83a1d",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/unscoped-forwarded-outlet.js",
+        "sha256": "bfcd0e75a21e76a9b6baa1b7980a162f5da0922fe893f4eacfab97a5f941fc0e",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "server": {
+        "status": "corrected",
+        "reason": "The unscoped forwarded outlet passes inherited _scopeId and slot props in both render legs, as pinned Vue does."
+      }
+    }
+  },
+  {
+    "bucket": 20,
+    "id": "significant-sibling-space",
+    "targets": [
+      "server"
+    ],
+    "sourceSha256": "d0768e8645468a0378a35a136bdbf7a1fde2b82ff5c1a44261a7d80dc565f280",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/significant-sibling-space.js",
+        "sha256": "4685b3ce449fa55bd4cef7ee8bbfd29105900f09199888e3e583b8c56222725f",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/significant-sibling-space.js",
+        "sha256": "f8cec85acd2ab57fd3c45a1966312c4841067cbb2f036570deee6bac942f97c1",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/significant-sibling-space.js",
+        "sha256": "bfadf5912588cb135d1173dbfd3102e1c56e2373a56a40e936ed2736829e1976",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "server": {
+        "status": "excluded",
+        "reason": "The separating space is corrected, but target adds a TextVNode patch flag absent in pinned Vue and omits inherited _scopeId on the native sibling."
+      }
+    }
+  },
+  {
+    "bucket": 21,
+    "id": "deferred-event-expression",
+    "targets": [
+      "server"
+    ],
+    "sourceSha256": "7a3eeffe71830d475da134ed556e22b093f09a84f2822076e55bab1f44a495aa",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/deferred-event-expression.js",
+        "sha256": "cdc2fc7e014dfc8b0c5b9c3c6d0ee349531bcf28cd903f1d4d20e1e29c6277c0",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/deferred-event-expression.js",
+        "sha256": "a0857722d1429144816432c07b026f665c7c64d2e4b66c9745c6939e0b5a9233",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/deferred-event-expression.js",
+        "sha256": "ff1d2d6f9ac48a81e0eba0b1048774d80264f3a2bfc797a498007c0377024d96",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "server": {
+        "status": "excluded",
+        "reason": "Both routes already defer act() behind an arrow; native SSR slot children omit inherited _scopeId."
+      }
+    }
+  },
+  {
+    "bucket": 24,
+    "id": "comment-only-root",
+    "targets": [
+      "server"
+    ],
+    "sourceSha256": "68bc51ac38df47abd2e889de7d08b027881de5cbe2f0d2dd44e9b201c45dc337",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/comment-only-root.js",
+        "sha256": "8b318bc1fed1b213eaac8beadf6f2fde1c26176c7577726c7a16ed1ba3bca9b9",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/comment-only-root.js",
+        "sha256": "919ec9763080b5329cc0fd257b0fb0de449887d2551ae5172573cf0d27ae5235",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "server": {
+        "status": "corrected",
+        "reason": "The authored root comment is pushed verbatim, as pinned Vue does."
+      }
+    }
+  },
+  {
+    "bucket": 26,
+    "id": "merged-model-listener",
+    "targets": [
+      "server"
+    ],
+    "sourceSha256": "71162bb0043bc4e06781efdd12d7c0aa87ebc61ca5b88d7e53f67dccb947cee3",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/merged-model-listener.js",
+        "sha256": "8af8f83583840c40f83d26e73b8701eab8a956412d1ddea2a24048f57ab13ff3",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/merged-model-listener.js",
+        "sha256": "868c87d259607b34dafb8135a54277633958917188713c78cc8f351a8e013e1b",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/merged-model-listener.js",
+        "sha256": "f6235cb76d30361d28696a0507a7825b1171c970917e750ee489e172caf43a88",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "server": {
+        "status": "matched",
+        "reason": "Both routes already retain both update listeners in the canonical listener array, as pinned Vue does."
+      }
+    }
+  },
+  {
+    "bucket": 27,
+    "id": "implicit-default-with-named",
+    "targets": [
+      "server"
+    ],
+    "sourceSha256": "6e9341bed7a6b014b5d0ddfac9ed6dbf75759f3743cb2e67eb4135009eabd81b",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/implicit-default-with-named.js",
+        "sha256": "c171dc88a1aca59476c2ae2fc1b8ca04af31615ac0867fd885aeaef2aa9af876",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/implicit-default-with-named.js",
+        "sha256": "4ab70ee619d5798e328b8a2fe7ee39dd95de546c3cc8ce9e2e8b35c0f79d8887",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/implicit-default-with-named.js",
+        "sha256": "32e19732cc85a6ca4c1fa3167ce71d3581a7ba8ef8ec5a27d34a33b78d400e58",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "server": {
+        "status": "excluded",
+        "reason": "Both routes already emit an implicit default slot; target adds a TEXT patch flag absent in pinned Vue, and native SSR slot children omit inherited _scopeId."
+      }
+    }
+  },
+  {
+    "id": "loop-scoped-handlers",
+    "targets": [
+      "client",
+      "client-inline"
+    ],
+    "sourceSha256": "155ab3944fd727902796d7be13433b720a9ddc3435097c70ad1d3aa99efcdab4",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/loop-scoped-handlers.js",
+        "sha256": "44825b9a6fe49be2780a78eaf9e2bb4273ad747530e2e0c2fc00f831fc4f1eba",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/loop-scoped-handlers.js",
+        "sha256": "03a8aba1ce1e2a765a44a443cf2b971046a6b15abad19ac93dca0f834a61d527",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/loop-scoped-handlers.js",
+        "sha256": "0168d726decea82e38937f6448938e38781b6df699c0cd3328040d43215ca913",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "client": {
+        "status": "corrected",
+        "reason": "A handler or model update that reads a v-for alias stays uncached and is a dynamic prop; a handler that reads no template scope stays cached, as pinned Vue does."
+      },
+      "client-inline": {
+        "status": "corrected",
+        "reason": "A handler or model update that reads a v-for alias stays uncached and is a dynamic prop; a handler that reads no template scope stays cached, as pinned Vue does."
+      }
+    }
+  },
+  {
+    "id": "slot-scoped-handlers",
+    "targets": [
+      "client",
+      "client-inline"
+    ],
+    "sourceSha256": "8a991825783c303b029303b1fad5bd880cb18376b766afa90710446bafd02915",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/slot-scoped-handlers.js",
+        "sha256": "e02d757be8f3b0401a5c14f00252cde800eb52ecc65ef73c844da0f50e442723",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/slot-scoped-handlers.js",
+        "sha256": "437b300c90786614e9cef857e1c7d3159874ffd425bd6f9085871080e2e4867e",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/slot-scoped-handlers.js",
+        "sha256": "cd5743f8eecf822b0b421a667593a3741e0d492f39ff9763e197d61453700768",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "client": {
+        "status": "corrected",
+        "reason": "A handler that reads a v-slot parameter stays uncached and is a dynamic prop; its scope-free sibling stays cached, as pinned Vue does."
+      },
+      "client-inline": {
+        "status": "corrected",
+        "reason": "A handler that reads a v-slot parameter stays uncached and is a dynamic prop; its scope-free sibling stays cached, as pinned Vue does."
+      }
+    }
+  },
+  {
+    "id": "nested-loop-alias-source",
+    "targets": [
+      "client",
+      "client-inline",
+      "server"
+    ],
+    "sourceSha256": "af73bb489d588b24bd6334f7b88df79c95b080bcd352ce2842317c36d3e9d893",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/nested-loop-alias-source.js",
+        "sha256": "3e43b820a25445387e0beea7dd8fde43f2c9ab56f735e86e2f9b0d8dac2f409c",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/nested-loop-alias-source.js",
+        "sha256": "1f255125920dcb95a2f415898418123025e38ad28db84f6b22360b84c58453f3",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/nested-loop-alias-source.js",
+        "sha256": "49a3a609114204909e8738aa2ad8c98b1cc3ac1d7cc59d84d302e01565a2bcbf",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "client": {
+        "status": "matched",
+        "reason": "A nested loop whose source is an outer loop alias reads the alias lexically, as pinned Vue does."
+      },
+      "client-inline": {
+        "status": "matched",
+        "reason": "A nested loop whose source is an outer loop alias reads the alias lexically, as pinned Vue does."
+      },
+      "server": {
+        "status": "matched",
+        "reason": "A nested loop whose source is an outer loop alias reads the alias lexically, as pinned Vue does."
+      }
+    }
+  },
+  {
+    "id": "merged-model-statement",
+    "targets": [
+      "server"
+    ],
+    "sourceSha256": "00d59cc5fcc8e4ba45edafa0aea0f7898d67b3a7343e7e63837e5b4c2c61d31b",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/merged-model-statement.js",
+        "sha256": "a2508d31fbcc379a14a55dec3b68c00c72548e2256070173994534c9475e634b",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/merged-model-statement.js",
+        "sha256": "0aeedd6056226749bb665980be9730915ffdd017d7c3d2cba34d77fb553a16e1",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/merged-model-statement.js",
+        "sha256": "47a64b91ccef918fa36f9278269c08a0de886946baeac01193f7ca747b6d2a63",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "server": {
+        "status": "excluded",
+        "reason": "The merged update listener follows pinned Vue in both legs (synthetic_constructs_follow_pinned_vue); the nested SSR component call still omits the inherited _scopeId."
+      }
+    }
+  },
+  {
+    "id": "preformatted-line-ending",
+    "targets": [
+      "client",
+      "server"
+    ],
+    "sourceSha256": "018df54d6161b8dfde7f0e2bc5dc1327a3ad5bacd4a11df6b5ee621099d28f64",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/preformatted-line-ending.js",
+        "sha256": "8e586790bace10e0d007c9e52f7fc21dcf69a06f89c35db7cf6abfd84ca6f896",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/preformatted-line-ending.js",
+        "sha256": "9f982101cb248fe18dc2cd6839d21be4f8ba1533376d3f04867f147c906cd25b",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/preformatted-line-ending.js",
+        "sha256": "d301e5af376de66ffb8a4ac24bee76d4a74ea8a2e606ea2489cbd180a0ba49d4",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "client": {
+        "status": "corrected",
+        "reason": "A line ending inside preformatted content stays a newline, as pinned Vue keeps it."
+      },
+      "server": {
+        "status": "corrected",
+        "reason": "A line ending inside preformatted content stays a newline, as pinned Vue keeps it."
+      }
+    }
+  },
+  {
+    "id": "scoped-forwarded-outlet",
+    "targets": [
+      "server"
+    ],
+    "sourceSha256": "7786ca6114995ece0d969e0d20a5a2c5a089cfddd28f6c165dffeaae531b304c",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/scoped-forwarded-outlet.js",
+        "sha256": "0ca36a069e2248913d2654c1661367ab75397a26aa578be9440a217f2cf92229",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/scoped-forwarded-outlet.js",
+        "sha256": "c4ba29fae4e1390576ff409b661db7f2b5f44fc506ca15bbd4efcb32f5b83a1d",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/scoped-forwarded-outlet.js",
+        "sha256": "1738e3ec18d5350534fb3c0a6cebe20fbae997daddd49d7ae71cb683f2314f6b",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "server": {
+        "status": "excluded",
+        "reason": "The outlet passes its own -s scope with the inherited _scopeId (synthetic_constructs_follow_pinned_vue); the root component call still passes the component scope id, which pinned Vue leaves out."
+      }
+    }
+  },
+  {
+    "id": "merged-scope-listener",
+    "targets": [
+      "client",
+      "client-inline"
+    ],
+    "sourceSha256": "d90c4caad8283ef0b134f1a73e80beb86a99940b4806cb74b22e5c21a86138e6",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/merged-scope-listener.js",
+        "sha256": "f2cfdb28ef8bb93bd03f9ddd1fc7bc69a93ab5e581729058cfc92b780e5b7e2b",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/merged-scope-listener.js",
+        "sha256": "ec8363a32ce232999671d93fefea39d711b7d184279b3d6b9a559a4f0d538777",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/merged-scope-listener.js",
+        "sha256": "b9d47b39e56fb8f23cd110bc5105e65a6aa06a67a7109f883567da08809952c8",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "client": {
+        "status": "corrected",
+        "reason": "A merged listener key is a dynamic prop when any of its handlers reads a v-for alias; its scope-free handler stays cached, as pinned Vue does."
+      },
+      "client-inline": {
+        "status": "corrected",
+        "reason": "A merged listener key is a dynamic prop when any of its handlers reads a v-for alias; its scope-free handler stays cached, as pinned Vue does."
+      }
+    }
+  },
+  {
+    "id": "spread-scope-listener",
+    "targets": [
+      "client",
+      "client-inline"
+    ],
+    "sourceSha256": "66005f36ab780e909c63c48990973e08a13b2327a2399497d7e50d224fd974c1",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/spread-scope-listener.js",
+        "sha256": "20873c4f79df89df8fd328c12d1d134b44c8e5f6f419730ef19ad3eb5dcafcd1",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/spread-scope-listener.js",
+        "sha256": "5d49697392b357b5d5274d1d5a2e254ec706a05a35164d5524a111472d217115",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/spread-scope-listener.js",
+        "sha256": "4c6bcaf19a1c9bf1f04554590d290167ef2c5127b023792b130d05eeddbdb608",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "client": {
+        "status": "corrected",
+        "reason": "A spread makes the element FULL_PROPS alone, never with PROPS or NEED_PATCH, and keeps its bound names, as pinned Vue does."
+      },
+      "client-inline": {
+        "status": "corrected",
+        "reason": "A spread makes the element FULL_PROPS alone, never with PROPS or NEED_PATCH, and keeps its bound names, as pinned Vue does."
+      }
+    }
+  },
+  {
+    "id": "foreign-pre-whitespace",
+    "targets": [
+      "client",
+      "server"
+    ],
+    "sourceSha256": "f83bc1d24be8150b73e4e9a322add2fd2f14cecdfeb0d9e4ae0bae68ff228ce5",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/foreign-pre-whitespace.js",
+        "sha256": "f599034b8257ac906da1547296ab50505acfbb60cfd86d200255ffae2921b235",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/foreign-pre-whitespace.js",
+        "sha256": "15d2b10ec198513455066093c08c7c532281f457a31473d71c69fed8386fa01b",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/foreign-pre-whitespace.js",
+        "sha256": "41b69b8d69f22e0771244682548700eb73a688bc219668f6b05ef67e5a85a355",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "client": {
+        "status": "corrected",
+        "reason": "Only an HTML pre keeps authored whitespace: an svg pre or one under mglyph condenses, one under a MathML text integration point preserves, as pinned Vue does."
+      },
+      "server": {
+        "status": "corrected",
+        "reason": "Only an HTML pre keeps authored whitespace: an svg pre or one under mglyph condenses, one under a MathML text integration point preserves, as pinned Vue does."
+      }
+    }
+  },
+  {
+    "id": "loop-source-compound-reads",
+    "targets": [
+      "client",
+      "client-inline",
+      "server"
+    ],
+    "sourceSha256": "583522b6db64fe9dbdae98efd47cd81a3400388b532dbed7944e8be772d0c63a",
+    "vueVersion": "3.6.0-rc.15",
+    "goldens": [
+      {
+        "mode": "client",
+        "path": "goldens/3.6.0-rc.15/client/loop-source-compound-reads.js",
+        "sha256": "a7c5b6f029a59a97c10544ae63dda556793d36b4a8e38f8b1d01f71d4a5f6d64",
+        "diagnostics": []
+      },
+      {
+        "mode": "client-inline",
+        "path": "goldens/3.6.0-rc.15/client-inline/loop-source-compound-reads.js",
+        "sha256": "b3d2bb04d38afc35554a557785b22a9c43eb248ab8790f78bfb3b90712493fbc",
+        "diagnostics": []
+      },
+      {
+        "mode": "server",
+        "path": "goldens/3.6.0-rc.15/server/loop-source-compound-reads.js",
+        "sha256": "7bf665186c7b792de2bdf13e5cf46e173d7b2b0e9ef7eac7f8ffb9c6c3b4e76a",
+        "diagnostics": []
+      }
+    ],
+    "checks": {
+      "client": {
+        "status": "corrected",
+        "reason": "A setup binding or prop read inside a compound loop source (a spread element or a callback body) goes through the context, while callback parameters and outer loop aliases stay local, as pinned Vue does."
+      },
+      "client-inline": {
+        "status": "corrected",
+        "reason": "A setup binding or prop read inside a compound loop source (a spread element or a callback body) goes through the context, while callback parameters and outer loop aliases stay local, as pinned Vue does."
+      },
+      "server": {
+        "status": "corrected",
+        "reason": "A setup binding or prop read inside a compound loop source (a spread element or a callback body) goes through the context, while callback parameters and outer loop aliases stay local, as pinned Vue does."
+      }
+    }
+  }
+]

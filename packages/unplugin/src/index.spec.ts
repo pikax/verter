@@ -10,11 +10,61 @@ import { defineConfig, resolveConfig } from "vite";
 import { transform as transformJs } from "esbuild";
 import { compileStyle } from "@vue/compiler-sfc";
 import * as vueCompilerSfc from "@vue/compiler-sfc";
-import unplugin, { unpluginFactory, Verter, VerterSvelte, VerterVue } from "./index";
-import { loadHost, resetHost } from "./core/compiler";
+import type { VerterHost } from "@verter/native";
+import unplugin, {
+  unpluginFactory as createPlugin,
+  Verter,
+  VerterSvelte,
+  VerterVue,
+} from "./index";
+import { BundlerHostSession } from "./core/host-session/session";
 import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
 
 const require = createRequire(import.meta.url);
+const nativeModule = require("@verter/native") as typeof import("@verter/native");
+
+const createdPlugins: Array<{ closeBundle?: () => unknown }> = [];
+const openedSessions: BundlerHostSession[] = [];
+
+/** `unpluginFactory`, remembering each plugin so it is closed after the test. */
+const unpluginFactory: typeof createPlugin = (...args) => {
+  const plugin = createPlugin(...args);
+  createdPlugins.push(plugin as { closeBundle?: () => unknown });
+  return plugin;
+};
+
+/**
+ * Every plugin session creates its host from the native host class, so a spy
+ * on the class prototype observes the host of whichever plugin runs. Spies are
+ * restored after each test.
+ */
+function pluginHosts(): VerterHost {
+  return nativeModule.VerterHost.prototype as unknown as VerterHost;
+}
+
+/** A host owned by a session of its own, for tests that drive the native host directly. */
+function openHost(): VerterHost {
+  const session = BundlerHostSession.bind({
+    adapter: "rollup",
+    root: "/test",
+    mode: "dev",
+    defaultTarget: "client",
+    frameworkSelection: "auto",
+    options: {},
+    hostCssPipeline: false,
+    hostStripsTypeScript: false,
+    hostConfig: null,
+    nuxtFileRoles: false,
+  });
+  openedSessions.push(session);
+  return session.host();
+}
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  for (const plugin of createdPlugins.splice(0)) await plugin.closeBundle?.();
+  for (const session of openedSessions.splice(0)) session.close();
+});
 const VUE_SFC_VERSION = require("@vue/compiler-sfc/package.json").version as string;
 
 // The pug preprocessor is an optional peer the test environment does not
@@ -37,7 +87,7 @@ function cssTokens(css: string): string[] {
 }
 
 function vueOracle(source: string, scopeId: string, scoped: boolean): string {
-  expect(VUE_SFC_VERSION).toBe("3.6.0-rc.5");
+  expect(VUE_SFC_VERSION).toBe("3.6.0-rc.15");
   const result = compileStyle({
     source,
     filename: "Oracle.vue",
@@ -271,7 +321,6 @@ describe("vite style virtual modules", () => {
       `verter-vite-style-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     );
     mkdirSync(tempDir, { recursive: true });
-    resetHost();
   });
 
   afterEach(async () => {
@@ -280,7 +329,6 @@ describe("vite style virtual modules", () => {
       activePlugin = null;
     }
     rmSync(tempDir, { recursive: true, force: true });
-    resetHost();
   });
 
   async function createVitePlugin() {
@@ -347,7 +395,7 @@ $border: #555;
   });
 
   it("states the style-cascade owner on the typed runtime product: Vite owns preprocessing, the compiler owns the complete cascade elsewhere", async () => {
-    const host = loadHost();
+    const host = pluginHosts();
     const compileMany = vi.spyOn(host, "compileMany");
     const compileRequest = vi.spyOn(host, "compileRequest");
     const scopedScss = `<template><div>ok</div></template>
@@ -1083,12 +1131,10 @@ describe("disk fallback without workspace", () => {
       `verter-disk-fallback-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     );
     mkdirSync(tempDir, { recursive: true });
-    resetHost();
   });
 
   afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
-    resetHost();
   });
 
   function createPlugin() {
@@ -1119,12 +1165,10 @@ describe("bundler dependency delegation", () => {
   beforeEach(() => {
     tempDir = join(tmpdir(), `verter-deps-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
     mkdirSync(tempDir, { recursive: true });
-    resetHost();
   });
 
   afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
-    resetHost();
   });
 
   function createPlugin() {
@@ -1191,7 +1235,7 @@ import(branch)
     const resolve = vi.fn(async (specifier: string) =>
       specifier === "./route.source" ? { id: bundlerResolved } : null,
     );
-    const host = loadHost();
+    const host = pluginHosts();
     const upsertSpy = vi.spyOn(host, "upsert");
     const applySpy = vi.spyOn(host, "applyBlockOverrides");
     const compileManySpy = vi.spyOn(host, "compileMany");
@@ -1211,10 +1255,7 @@ import(branch)
     expect(hostCanonical).not.toBe(bundlerResolved);
     expect(
       upsertSpy.mock.calls.some(
-        ([request]) =>
-          request?.inputId === hostCanonical &&
-          request?.source === "bundler-marker\n" &&
-          request?.fileKind === "non_sfc",
+        ([request]) => request?.inputId === hostCanonical && request?.source === "bundler-marker\n",
       ),
     ).toBe(true);
     const refreshedResult = upsertSpy.mock.results[ownerCallIndexes[1]].value;
@@ -1251,7 +1292,7 @@ import(\`./widgets/\${window.name}\`)
 
   it("resolved .vue dependencies are recorded but not upserted as non_sfc", async () => {
     const plugin = createPlugin();
-    const host = loadHost();
+    const host = pluginHosts();
     const filename = join(tempDir, "Parent.vue").replace(/\\/g, "/");
     const childFile = join(tempDir, "Child.vue").replace(/\\/g, "/");
     writeFileSync(childFile, "<template><div>child</div></template>\n");
@@ -1272,12 +1313,19 @@ import Child from './Child.vue'
       filename,
     );
 
-    expect(setDepsSpy).toHaveBeenCalledWith(filename, [
-      { specifier: "./Child.vue", resolvedCanonicalId: childFile },
+    // The routes belong to the id the host minted for the carrier.
+    const carrierIndex = upsertSpy.mock.calls.findIndex(
+      ([request]) => request?.inputId === filename,
+    );
+    expect(carrierIndex).toBeGreaterThanOrEqual(0);
+    const carrierId = (upsertSpy.mock.results[carrierIndex]!.value as { canonicalId: string })
+      .canonicalId;
+    expect(setDepsSpy).toHaveBeenCalledWith(carrierId, [
+      { specifier: "./Child.vue", resolvedCanonicalId: nativeModule.canonicalizeId(childFile) },
     ]);
     expect(
       upsertSpy.mock.calls.some(
-        ([request]) => request?.inputId === childFile && request?.fileKind === "non_sfc",
+        ([request]) => request?.inputId === nativeModule.canonicalizeId(childFile),
       ),
     ).toBe(false);
   });
@@ -1289,12 +1337,10 @@ describe("dev-watch hydration invalidation", () => {
   beforeEach(() => {
     tempDir = join(tmpdir(), `verter-hmr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
     mkdirSync(tempDir, { recursive: true });
-    resetHost();
   });
 
   afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
-    resetHost();
   });
 
   function createPlugin() {
@@ -1312,7 +1358,7 @@ describe("dev-watch hydration invalidation", () => {
   // compiling against the stale type until the server restarts.
   it("re-hydrates a dependent SFC after a non-carrier type dep changes on watchChange", async () => {
     const plugin = createPlugin();
-    const host = loadHost();
+    const host = pluginHosts();
     const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
     const typesFile = join(tempDir, "types.ts").replace(/\\/g, "/");
 
@@ -1333,13 +1379,16 @@ defineProps<Props>()
     expect(
       upsertSpy.mock.calls.some(
         ([req]) =>
-          req?.inputId === typesFile && (req?.source as string)?.includes("interface Props"),
+          req?.inputId === nativeModule.canonicalizeId(typesFile) &&
+          (req?.source as string)?.includes("interface Props"),
       ),
     ).toBe(true);
     // Sanity: the original content did NOT declare `b`.
     expect(
       upsertSpy.mock.calls.some(
-        ([req]) => req?.inputId === typesFile && (req?.source as string)?.includes("b: number"),
+        ([req]) =>
+          req?.inputId === nativeModule.canonicalizeId(typesFile) &&
+          (req?.source as string)?.includes("b: number"),
       ),
     ).toBe(false);
 
@@ -1351,7 +1400,9 @@ defineProps<Props>()
     await plugin.transform.call({ resolve }, sfc, filename);
     expect(
       upsertSpy.mock.calls.some(
-        ([req]) => req?.inputId === typesFile && (req?.source as string)?.includes("b: number"),
+        ([req]) =>
+          req?.inputId === nativeModule.canonicalizeId(typesFile) &&
+          (req?.source as string)?.includes("b: number"),
       ),
     ).toBe(true);
   });
@@ -1361,7 +1412,7 @@ defineProps<Props>()
   // still evict non-carrier deps from the hydration memo.
   it("re-hydrates a dependent SFC after a non-carrier type dep changes on handleHotUpdate", async () => {
     const plugin = createPlugin();
-    const host = loadHost();
+    const host = pluginHosts();
     const filename = join(tempDir, "Card.vue").replace(/\\/g, "/");
     const typesFile = join(tempDir, "card-types.ts").replace(/\\/g, "/");
 
@@ -1386,7 +1437,8 @@ defineProps<CardProps>()
     expect(
       upsertSpy.mock.calls.some(
         ([req]) =>
-          req?.inputId === typesFile && (req?.source as string)?.includes("subtitle: string"),
+          req?.inputId === nativeModule.canonicalizeId(typesFile) &&
+          (req?.source as string)?.includes("subtitle: string"),
       ),
     ).toBe(true);
   });
@@ -1466,13 +1518,11 @@ describe("preCompile", () => {
 
   beforeEach(() => {
     tempDir = createTempDir();
-    resetHost();
   });
 
   afterEach(() => {
     if (origCwd) process.cwd = origCwd;
     rmSync(tempDir, { recursive: true, force: true });
-    resetHost();
   });
 
   let origCwd: typeof process.cwd;
@@ -1635,14 +1685,6 @@ describe("preCompile", () => {
 });
 
 describe("closeBundle hook", () => {
-  beforeEach(() => {
-    resetHost();
-  });
-
-  afterEach(() => {
-    resetHost();
-  });
-
   it("plugin has a closeBundle hook that resets the host", async () => {
     const plugin = unpluginFactory(undefined, {
       framework: "rollup",
@@ -1659,11 +1701,9 @@ describe("closeBundle hook", () => {
     // Call closeBundle — should not throw
     await plugin.closeBundle();
 
-    // After closeBundle, loadHost() should create a NEW host (the old one was nulled)
-    // We verify by importing loadHost and checking it works without error
-    const { loadHost } = await import("./core/compiler");
-    const newHost = loadHost();
-    expect(newHost).toBeDefined();
+    // After closeBundle the next hook binds a fresh session and succeeds.
+    const again = await plugin.transform(sfc, "/test/CloseBundle.vue");
+    expect(again.code).toContain("x");
   });
 
   it("closeBundle is safe to call even when no host was created", () => {
@@ -1688,7 +1728,10 @@ describe("closeBundle hook", () => {
 
     await plugin.closeBundle();
 
-    expect(await plugin.load(`${filename}?verter&type=script&lang.js`)).toBeUndefined();
+    // The next session has no record and the carrier is not on disk.
+    await expect(plugin.load(`${filename}?verter&type=script&lang.js`)).rejects.toMatchObject({
+      refusal: { kind: "carrier-unavailable" },
+    });
   });
 });
 
@@ -1739,12 +1782,10 @@ describe("macro type hydration", () => {
       `verter-macro-hydrate-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     );
     mkdirSync(tempDir, { recursive: true });
-    resetHost();
   });
 
   afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
-    resetHost();
   });
 
   function createPlugin() {
@@ -2142,7 +2183,7 @@ defineEmits<DrawerEmits>()
 
   it("direct host: barrel chain ending at .vue file resolves type", () => {
     // Bypasses unplugin transform to test the Rust host directly via NAPI.
-    const host = loadHost();
+    const host = openHost();
 
     const consumerPath = join(tempDir, "Consumer.vue").replace(/\\/g, "/");
     const basePath = join(tempDir, "base", "index.ts").replace(/\\/g, "/");
@@ -2708,12 +2749,8 @@ const emit = defineEmits<DropdownMenuContentEmits>()
 });
 
 describe("barrel file export signatures", () => {
-  afterEach(() => {
-    resetHost();
-  });
-
   it("upsert of barrel file returns export signatures with reexport metadata", () => {
-    const host = loadHost();
+    const host = openHost();
     const result = host.upsert({
       inputId: "/src/barrel.ts",
       source:
@@ -2738,7 +2775,7 @@ describe("barrel file export signatures", () => {
   });
 
   it("upsert of local-only file returns export signatures without reexport fields", () => {
-    const host = loadHost();
+    const host = openHost();
     const result = host.upsert({
       inputId: "/src/utils.ts",
       source: "export function greet() {}\nexport type Color = string;",
@@ -2759,7 +2796,7 @@ describe("barrel file export signatures", () => {
   });
 
   it("resolveExports follows re-export chains across multiple files", () => {
-    const host = loadHost();
+    const host = openHost();
 
     // Create a chain: deep.ts -> mid.ts -> top.ts
     host.upsert({
@@ -2802,7 +2839,7 @@ describe("barrel file export signatures", () => {
   });
 
   it("getAnalysis includes exportSignatures in JSON output", () => {
-    const host = loadHost();
+    const host = openHost();
     host.upsert({
       inputId: "/src/barrel.ts",
       source: "export { default as Dialog } from './Dialog.vue';\nexport const VERSION = '1.0';",
@@ -2896,14 +2933,6 @@ const msg = 'hello'
     });
     return overshooting;
   }
-
-  beforeEach(() => {
-    resetHost();
-  });
-
-  afterEach(() => {
-    resetHost();
-  });
 
   it("publishes the host's requested map on the non-Vite inline product", async () => {
     const plugin = unpluginFactory(undefined, {
@@ -3021,7 +3050,6 @@ describe("typed render routing", () => {
       `verter-lane-routing-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     );
     mkdirSync(tempDir, { recursive: true });
-    resetHost();
   });
 
   afterEach(async () => {
@@ -3030,7 +3058,6 @@ describe("typed render routing", () => {
       activePlugin = null;
     }
     rmSync(tempDir, { recursive: true, force: true });
-    resetHost();
   });
 
   async function createVitePlugin(ssr = false) {
@@ -3066,7 +3093,7 @@ describe("typed render routing", () => {
    * bundler's closeBundle records nothing).
    */
   function spyFreshHost() {
-    const host = loadHost();
+    const host = pluginHosts();
     return {
       compileMany: vi.spyOn(host, "compileMany"),
       compileRequest: vi.spyOn(host, "compileRequest"),
@@ -3166,7 +3193,7 @@ describe("typed render routing", () => {
     rolldownSpy.compileRequest.mockRestore();
     rolldownSpy.applyBlockOverrides.mockRestore();
 
-    // closeBundle resets the host, so each bundler spies the host it renders on.
+    // The spies were restored above, so each bundler is observed on its own.
     const webpack = unpluginFactory(undefined, {
       framework: "webpack",
       versions: { unplugin: "0.0.0", webpack: "0.0.0" },
@@ -3212,7 +3239,7 @@ describe("typed render routing", () => {
   });
 
   it("serves non-Vite style sub-requests from the same typed compile (no second native read)", async () => {
-    const host = loadHost();
+    const host = pluginHosts();
     const getVirtualFile = vi.spyOn(host, "getVirtualFile");
     const compileMany = vi.spyOn(host, "compileMany");
     const plugin = rollupPlugin();
@@ -3245,7 +3272,7 @@ describe("typed render routing", () => {
   });
 
   it("serves native-scoped CSS from the typed compile through the non-Vite style load", async () => {
-    const host = loadHost();
+    const host = pluginHosts();
     const getVirtualFile = vi.spyOn(host, "getVirtualFile");
     const plugin = rollupPlugin();
     const filename = "/test/ScopedTyped.vue";
@@ -3271,7 +3298,7 @@ describe("typed render routing", () => {
   });
 
   it("typed lane throws on error-severity diagnostics and forwards only warnings", async () => {
-    const host = loadHost();
+    const host = pluginHosts();
     const plugin = rollupPlugin();
     const filename = "/test/TypedDiag.vue";
     const source = `<template><div>ok</div></template>`;
@@ -3339,7 +3366,7 @@ describe("typed render routing", () => {
   });
 
   it("typed sub-request read fails closed: an error-severity compile publishes no module", async () => {
-    const host = loadHost();
+    const host = pluginHosts();
     const plugin = rollupPlugin();
     const filename = "/test/TypedLoadDiag.vue";
 
@@ -3370,11 +3397,13 @@ describe("typed render routing", () => {
       ],
     } as never);
 
-    // Script sub-requests are uncached outside Vite, so this read reaches the
-    // typed route. It must refuse the errored compile the way the profile-bearing
-    // virtual read it replaced did — never publish recovery output as a module.
+    // The script sub-request is served from the record the clean transform
+    // published; it never compiles again, so the errored compile's recovery
+    // output can never be published as a module.
     const loaded = await plugin.load.call({ warn }, `${filename}?vue&type=script&lang.js`);
-    expect(loaded).toBeUndefined();
+    expect(loaded).toBeDefined();
+    expect(loaded.code).not.toContain("__recovery");
+    expect(compileRequest).not.toHaveBeenCalled();
     // The carrier's transform already reported diagnostics; a sub-request read
     // must not duplicate them as a second build warning.
     expect(warn).not.toHaveBeenCalled();
@@ -3393,13 +3422,11 @@ describe("native request construction evidence", () => {
       `verter-request-evidence-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     );
     mkdirSync(tempDir, { recursive: true });
-    resetHost();
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     rmSync(tempDir, { recursive: true, force: true });
-    resetHost();
   });
 
   /** Every callable member of the native host, own and inherited. */
@@ -3424,7 +3451,7 @@ describe("native request construction evidence", () => {
    * member rather than a named list, so a profile-bearing call added on a
    * host method this file never mentions is still observed.
    */
-  function recordEveryHostCall(host: ReturnType<typeof loadHost>) {
+  function recordEveryHostCall(host: VerterHost) {
     const spies = new Map<string, { mock: { calls: unknown[][] } }>();
     for (const name of hostMethodNames(host)) {
       spies.set(name, vi.spyOn(host as never, name as never) as never);
@@ -3553,9 +3580,8 @@ describe("native request construction evidence", () => {
     ];
 
     for (const testCase of cases) {
-      resetHost();
       const plugin = await testCase.plugin();
-      const recorder = recordEveryHostCall(loadHost());
+      const recorder = recordEveryHostCall(pluginHosts());
 
       const transformed = await plugin.transform.call(
         { warn: vi.fn() },
@@ -3577,9 +3603,8 @@ describe("native request construction evidence", () => {
   });
 
   it("a non-Vite scoped SCSS carrier compiles typed through the complete cascade and publishes scoped CSS", async () => {
-    resetHost();
     const plugin = rollupPlugin();
-    const recorder = recordEveryHostCall(loadHost());
+    const recorder = recordEveryHostCall(pluginHosts());
     const filename = "/test/CompilerOwnedScss.vue";
 
     const transformed = await plugin.transform.call({ warn: vi.fn() }, SCOPED_SCSS_VUE, filename);
@@ -3605,7 +3630,7 @@ describe("native request construction evidence", () => {
   });
 
   it("legacy native exports remain reachable alongside the typed route", () => {
-    const host = loadHost();
+    const host = openHost();
     expect(typeof host.compileRequest).toBe("function");
     expect(typeof host.compileMany).toBe("function");
     expect(typeof host.getVirtualFile).toBe("function");

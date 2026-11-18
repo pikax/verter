@@ -18,7 +18,8 @@ mod tests;
 /// classification through the same module.
 pub use crate::parser::types::SfcScriptDialect;
 pub use module_specifiers::{
-    collect_module_specifier_spans, quote_module_specifier, ModuleSpecifierSpan,
+    collect_module_inventory, collect_module_specifier_spans, quote_module_specifier,
+    rewrite_module_specifiers, ModuleInventory, ModuleSpecifierSpan, RewrittenSpecifiers,
 };
 pub use script::{
     extract_tsc_state, generate_tsc_from_state, generate_tsc_output,

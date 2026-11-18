@@ -1,0 +1,51 @@
+{
+  "schema": 2,
+  "caseId": "ssr/comment-only-template-plain",
+  "backend": "ssr",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/ssr/comment-only-template-plain.vue",
+    "sha256": "c8aa7179a02291da83796adcf96546557b2924f04f85b430d41cab531ea15f77"
+  },
+  "options": {
+    "sha256": "7dff726e45bfcc702f8214dd03ee66378ebe02b83526725286fa842512c62d4b",
+    "summary": {
+      "backend": "ssr",
+      "vapor": false,
+      "ssr": true,
+      "filename": "cases/ssr/comment-only-template-plain.vue",
+      "id": "ssr/comment-only-template-plain",
+      "pipeline": "compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": false,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/ssr/ssr/comment-only-template-plain.js",
+      "sha256": "2a63e8ac5c73cb6e1d7e45ab7b3b83538d85942403296c7784f4631313d6ca08",
+      "bytes": 158
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/ssr/ssr/comment-only-template-plain.map.json",
+      "sha256": "33fc3b5fc2563133a09c23cd3f52c0ba4948e0af6f828b9412c3bb738020fbe8"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": []
+}

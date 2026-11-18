@@ -253,6 +253,85 @@ fn non_vue_function_call() {
     ));
 }
 
+fn initializer_of<'s>(snapshot: &'s ScriptAnalysisSnapshot, name: &str) -> &'s BindingInitializer {
+    snapshot
+        .bindings
+        .iter()
+        .find(|binding| binding.name == name)
+        .and_then(|binding| binding.initializer.as_ref())
+        .unwrap_or_else(|| panic!("{name} has an initializer"))
+}
+
+#[test]
+fn a_call_of_a_member_names_its_object_and_property() {
+    let result = analyze("import * as V from 'vue'\nconst n = V.ref(0)\nconst { a } = V.use()");
+    assert_eq!(
+        initializer_of(&result, "n"),
+        &BindingInitializer::MemberCall {
+            object: "V".into(),
+            property: "ref".into(),
+            binds_whole_call_result: true,
+        }
+    );
+    assert_eq!(
+        initializer_of(&result, "a"),
+        &BindingInitializer::MemberCall {
+            object: "V".into(),
+            property: "use".into(),
+            binds_whole_call_result: false,
+        }
+    );
+}
+
+#[test]
+fn type_wrappers_do_not_hide_the_initializer() {
+    let result = analyze(
+        "import { ref } from 'vue'\nconst a = ref(0) as any\nconst b = ref(0)!\nconst c = ref(0) satisfies object\nconst d = (ref as any)(0)\nconst e = ref as any",
+    );
+    for name in ["a", "b", "c", "d"] {
+        assert!(
+            matches!(
+                initializer_of(&result, name),
+                BindingInitializer::FunctionCall { callee, vue_api: Some(VueApiClassification::Ref), .. }
+                    if callee == "ref"
+            ),
+            "{name}: {:?}",
+            initializer_of(&result, name)
+        );
+    }
+    assert_eq!(
+        initializer_of(&result, "e"),
+        &BindingInitializer::Reference { name: "ref".into() }
+    );
+}
+
+#[test]
+fn destructured_members_keep_their_property_key() {
+    let result = analyze("const { computed, ref: r, nested: { x }, d = 1, ...rest } = V");
+    let member = |property: &str| BindingInitializer::MemberReference {
+        object: "V".into(),
+        property: property.into(),
+    };
+    assert_eq!(initializer_of(&result, "computed"), &member("computed"));
+    assert_eq!(initializer_of(&result, "r"), &member("ref"));
+    for name in ["x", "d", "rest"] {
+        assert_eq!(
+            initializer_of(&result, name),
+            &BindingInitializer::Other,
+            "{name}"
+        );
+    }
+    let names: Vec<&str> = result.bindings.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["computed", "r", "x", "d", "rest"]);
+
+    let whole = analyze("const W = V\nconst [first] = V");
+    assert_eq!(
+        initializer_of(&whole, "W"),
+        &BindingInitializer::Reference { name: "V".into() }
+    );
+    assert_eq!(initializer_of(&whole, "first"), &BindingInitializer::Other);
+}
+
 /// Helper: pull the captured `async_component_source` for a named binding.
 fn async_component_source_of<'a>(
     result: &'a ScriptAnalysisSnapshot,

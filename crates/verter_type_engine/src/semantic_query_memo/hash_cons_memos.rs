@@ -470,6 +470,22 @@ impl SemanticGraphStore {
             .then_some(())
     }
 
+    /// The proof every admitted shell evaluation was published with: the
+    /// facts the evaluation read and its strict self-roots, by input node.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn evaluate_deferred_memo_proofs_for_tests(
+        &self,
+    ) -> Vec<(
+        SemanticNodeId,
+        crate::fact_signature_helpers::StructuralCarrierReadSet,
+    )> {
+        self.evaluate_deferred_memo
+            .iter()
+            .filter(|entry| entry.key().2 == DeferredEvaluationDemand::Shell)
+            .map(|entry| (entry.key().0, entry.value().evidence.clone()))
+            .collect()
+    }
+
     /// Nonpermanent topology reached by the caches' explicit graph-root
     /// attachments, including receipt prerequisites. Signature-epoch leases
     /// have separate store ownership. This fixture probe distinguishes cache

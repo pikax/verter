@@ -93,7 +93,7 @@ fn make_root(
 
 fn apply_output<'a>(source: &str, out: CodeGenOutput<'a>, alloc: &'a Allocator) -> String {
     let mut ct = crate::code_transform::CodeTransform::new(source, alloc);
-    out.apply_to(&mut ct);
+    out.apply_to(&mut ct).expect("recorded edits apply");
     ct.build_string()
 }
 
@@ -121,7 +121,7 @@ fn enter_template_standalone_defers_to_leave() {
     gen.enter_template(&root, "", &mut out);
 
     // Open tag overwrite is deferred to leave_template
-    assert_eq!(out.overwrites.len(), 0);
+    assert_eq!(out.overwrites().len(), 0);
 }
 
 #[test]
@@ -146,7 +146,7 @@ fn enter_template_inline_defers_to_leave() {
     gen.enter_template(&root, "", &mut out);
 
     // Open tag overwrite is deferred to leave_template
-    assert_eq!(out.overwrites.len(), 0);
+    assert_eq!(out.overwrites().len(), 0);
 }
 
 // ==================== leave_template: empty ====================
@@ -364,9 +364,13 @@ fn leave_template_multi_root_production_no_comment() {
 
 // ==================== Block-tree optimization (full pipeline) ====================
 
+/// The route the full-pipeline helpers below render through.
+const ROUTE: crate::compile::render_route::RenderRoute =
+    crate::compile::render_route::RenderRoute::EditInPlace;
+
 /// Helper: compile a Vue SFC source and return the template code (VDOM mode).
 fn gen_vdom_template(source: &str) -> String {
-    use crate::compile::legacy_test_support::{compile, CodegenOptions, VerterCompileOptions};
+    use crate::compile::legacy_test_support::{compile_on, CodegenOptions, VerterCompileOptions};
     let alloc = oxc_allocator::Allocator::new();
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
@@ -376,7 +380,8 @@ fn gen_vdom_template(source: &str) -> String {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(
+    let result = compile_on(
+        ROUTE,
         source,
         &options,
         &verter_opts,
@@ -398,7 +403,7 @@ fn gen_vdom_template(source: &str) -> String {
 /// Helper: compile a Vue SFC source in PRODUCTION mode and return the
 /// template code (VDOM mode).
 fn gen_vdom_template_prod(source: &str) -> String {
-    use crate::compile::legacy_test_support::{compile, CodegenOptions, VerterCompileOptions};
+    use crate::compile::legacy_test_support::{compile_on, CodegenOptions, VerterCompileOptions};
     let alloc = oxc_allocator::Allocator::new();
     let options = CodegenOptions {
         filename: Some("App.vue".to_string()),
@@ -410,7 +415,8 @@ fn gen_vdom_template_prod(source: &str) -> String {
         force_js: true,
         ..Default::default()
     };
-    let result = compile(
+    let result = compile_on(
+        ROUTE,
         source,
         &options,
         &verter_opts,
@@ -2706,7 +2712,7 @@ fn event_merge_prescan_gated_when_no_duplicate_possible() {
 
 // ── condition prefix segmented mapping ──────────────────────────────
 
-use crate::template::code_gen::binding::BindingType;
+use crate::template::binding::BindingType;
 
 /// Build a binding resolver for the condition tests.
 fn cond_resolver(
@@ -2722,7 +2728,9 @@ fn cond_resolver(
 
 /// `(dst_col, src_col, has_source)` for every source-map token.
 fn token_dump(ct: &crate::code_transform::CodeTransform<'_>) -> Vec<(u32, u32, bool)> {
-    let map = ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"));
+    let map = ct
+        .generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"))
+        .expect("mapped transform");
     map.get_tokens()
         .map(|t| {
             (
@@ -2760,7 +2768,7 @@ fn condition_prefix_inline_setup_ref_keeps_value_unmapped() {
     let mut out = CodeGenOutput::new(&alloc);
     children::emit_condition_prefix_mapped(&mut out, 0, &cond);
     let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-    out.apply_to(&mut ct);
+    out.apply_to(&mut ct).expect("recorded edits apply");
 
     // Bytes unchanged — segmentation only refines the source map.
     assert_eq!(ct.build_string(), "(count.value) ? abc count");
@@ -2797,7 +2805,9 @@ fn two_prop_cond_oxc(
         ),
         pos,
         ignore: false,
+        is_expression_local: false,
         is_shorthand: false,
+        usage: crate::utils::oxc::ReferenceUse::Read,
     };
     crate::template::oxc::types::OxcParsedExpression {
         offset: inner_start,
@@ -2838,7 +2848,7 @@ fn condition_prefix_compound_props_map_each_identifier() {
     let mut out = CodeGenOutput::new(&alloc);
     children::emit_condition_prefix_mapped(&mut out, 0, &cond);
     let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
-    out.apply_to(&mut ct);
+    out.apply_to(&mut ct).expect("recorded edits apply");
     assert_eq!(
         ct.build_string(),
         "(__props.foo && __props.bar) ? x foo && bar"

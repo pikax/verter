@@ -77,8 +77,7 @@ fn artifact_for(
     carrier_source: &str,
 ) -> Arc<verter_compiler::framework_common::FrameworkParseArtifact> {
     use verter_language::carrier_grammar::{
-        CarrierGrammarAuthority, CarrierGrammarConfig, CarrierParserGrammarVersion,
-        FrameworkAdapterSemanticVersion,
+        CarrierGrammarAuthority, CarrierParserGrammarVersion, FrameworkAdapterSemanticVersion,
     };
     use verter_language::registered_source_authority::{
         CanonicalFileId, FileIncarnation, RegisteredSourceAuthority, SourceGeneration,
@@ -86,7 +85,12 @@ fn artifact_for(
 
     let source_authority = RegisteredSourceAuthority::new().unwrap();
     let grammar_authority = CarrierGrammarAuthority::new().unwrap();
-    let config = CarrierGrammarConfig::vue("{{", "}}", std::iter::empty::<&str>()).unwrap();
+    let config = verter_compiler::framework_common::vue_grammar_config(
+        "{{",
+        "}}",
+        std::iter::empty::<&str>(),
+    )
+    .unwrap();
     grammar_authority
         .register_carrier_grammar(
             verter_language::FileLanguage::vue(),

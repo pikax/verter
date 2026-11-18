@@ -1441,7 +1441,7 @@ fn dynamic_component_is_setup_ref_keeps_value_unmapped() {
     binding_map.insert("currentView", BindingType::SetupRef);
     let resolver = BindingResolver::new(binding_map, true);
 
-    let mut out = CodeGenOutput::new(&alloc);
+    let mut out = EditRecorder::new(&alloc);
     let rewrite = rewrite_component_is(
         el,
         oxc_el,
@@ -1457,7 +1457,7 @@ fn dynamic_component_is_setup_ref_keeps_value_unmapped() {
     assert!(rewrite.needs_iife_close);
 
     let mut ct = CodeTransform::new(source, &alloc);
-    out.apply_to(&mut ct);
+    out.apply(&mut ct).expect("recorded edits apply");
     let built = ct.build_string();
 
     // The resolved expression keeps its `.value` (inline setup ref); bytes unchanged.
@@ -1471,7 +1471,9 @@ fn dynamic_component_is_setup_ref_keeps_value_unmapped() {
     let cv_gen = el.tag_open.start + iife_prefix.len() as u32;
     let cv_src = source.find("currentView").unwrap() as u32;
 
-    let map = ct.generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"));
+    let map = ct
+        .generate_map(crate::code_transform::SourceMapOptions::new().with_source("t.vue"))
+        .expect("mapped transform");
     let tokens: Vec<_> = map.get_tokens().collect();
     let dump: Vec<_> = tokens
         .iter()

@@ -1391,7 +1391,11 @@ argument substituted for each binder occurrence; a deferred callable's own
 parameters and source images), holding the one walk it stands in. Driven
 in place it is `apply_typeof_instantiation_args`; an overload set with
 explicit type arguments drives it as a continuation, its walk's template
-read being the set's need. Whether a candidate takes the arguments at all
+read being the set's need. A walk standing at that read keeps its cost
+recordings open on the connected demand, so its holder keeps the demand
+open until the walk answers (`InstantiationDemand`): a suspending holder
+for its whole extent, an in-place lowering driver around each substitution.
+Whether a candidate takes the arguments at all
 is read from its clause alone (`explicit_clause_fit`), the drop the
 machine itself starts with, so a call walk pairs its raw candidates with
 the set's survivors without instantiating them a second time.

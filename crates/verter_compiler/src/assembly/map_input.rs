@@ -296,9 +296,34 @@ pub struct DecodedFragmentMap {
     /// ignore-list bounds, again, independently).
     ignore_list: Vec<f64>,
     segments: Vec<WireSegment>,
+    /// Identity of the decoded tables. Parts sliced from one map share it,
+    /// so an artifact that writes them carries those tables once.
+    tables: TablesId,
+}
+
+/// Identity of one decoded map's tables, unique in the process.
+#[derive(Debug, Clone, Copy, Eq)]
+pub(crate) struct TablesId(u64);
+
+impl TablesId {
+    fn fresh() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+impl PartialEq for TablesId {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
 }
 
 impl DecodedFragmentMap {
+    /// Identity of this map's tables; slices of one map share it.
+    pub(crate) fn tables(&self) -> TablesId {
+        self.tables
+    }
+
     #[must_use]
     pub fn sources(&self) -> &[String] {
         &self.sources
@@ -328,9 +353,200 @@ impl DecodedFragmentMap {
     pub fn segments(&self) -> &[WireSegment] {
         &self.segments
     }
+
+    /// A map from a crate-internal producer whose segments are valid by
+    /// construction: every index lies in its table and every generated
+    /// position lies in `fragment_code`. Debug builds check the same bounds
+    /// [`validate_and_decode`] enforces.
+    pub(crate) fn from_segments(
+        fragment_code: &str,
+        sources: Vec<String>,
+        sources_content: Option<Vec<Option<String>>>,
+        names: Vec<String>,
+        segments: Vec<WireSegment>,
+    ) -> Self {
+        verter_debug_assert!(
+            !cfg!(debug_assertions)
+                || (sources_content
+                    .as_ref()
+                    .is_none_or(|rows| rows.len() == sources.len())
+                    && check_table_indices(&segments, sources.len(), names.len()).is_ok()
+                    && check_generated_positions(&segments, fragment_code).is_ok()),
+            "a crate-built fragment map stays inside its tables and its code"
+        );
+        Self {
+            sources,
+            names,
+            sources_content,
+            source_root: None,
+            ignore_list: Vec::new(),
+            segments,
+            tables: TablesId::fresh(),
+        }
+    }
+
+    /// The part of this map, decoded against `code`, that describes the
+    /// bytes from `start` on: its segments at or after that position (and
+    /// before `end`, when one is given), placed relative to it. The tables
+    /// are kept whole. `None` when a bound is not a position of `code`.
+    pub(crate) fn slice(&self, code: &str, start: u32, end: Option<u32>) -> Option<Self> {
+        let origin = generated_position(code, start)?;
+        let end = match end {
+            Some(end) => Some(generated_position(code, end)?),
+            None => None,
+        };
+        let segments = self
+            .segments
+            .iter()
+            .filter(|segment| {
+                let at = GeneratedPosition {
+                    line: segment.generated_line,
+                    column: segment.generated_column,
+                };
+                at >= origin && end.is_none_or(|end| at < end)
+            })
+            .map(|segment| WireSegment {
+                generated_line: segment.generated_line - origin.line,
+                generated_column: if segment.generated_line == origin.line {
+                    segment.generated_column - origin.column
+                } else {
+                    segment.generated_column
+                },
+                ..*segment
+            })
+            .collect();
+        Some(Self {
+            sources: self.sources.clone(),
+            names: self.names.clone(),
+            sources_content: self.sources_content.clone(),
+            source_root: self.source_root.clone(),
+            ignore_list: self.ignore_list.clone(),
+            segments,
+            tables: self.tables,
+        })
+    }
+
+    /// The same segments over one source row named `name` with `content`:
+    /// every mapped segment names that row, and names are dropped.
+    pub(crate) fn as_single_source(&self, name: &str, content: &str) -> Self {
+        Self {
+            sources: vec![name.to_owned()],
+            names: Vec::new(),
+            sources_content: Some(vec![Some(content.to_owned())]),
+            source_root: None,
+            ignore_list: Vec::new(),
+            tables: TablesId::fresh(),
+            segments: self
+                .segments
+                .iter()
+                .map(|segment| WireSegment {
+                    payload: segment.payload.map(|payload| SourcePayload {
+                        source_index: 0,
+                        name_index: None,
+                        ..payload
+                    }),
+                    ..*segment
+                })
+                .collect(),
+        }
+    }
+
+    /// The same map with `source_root` and the ignore-listed rows of its
+    /// source table. Debug builds check that every entry names a row.
+    pub(crate) fn with_layout(
+        mut self,
+        source_root: Option<String>,
+        ignore_list: Vec<f64>,
+    ) -> Self {
+        verter_debug_assert!(
+            ignore_list
+                .iter()
+                .all(|entry| *entry >= 0.0 && (*entry as usize) < self.sources.len()),
+            "an ignore-list entry names a source row"
+        );
+        self.source_root = source_root;
+        self.ignore_list = ignore_list;
+        self
+    }
+}
+
+/// A zero-based generated line and UTF-16 column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct GeneratedPosition {
+    pub(crate) line: u32,
+    pub(crate) column: u32,
+}
+
+/// Generated position of byte `offset` in `code`, when the offset is a
+/// position of it.
+pub(crate) fn generated_position(code: &str, offset: u32) -> Option<GeneratedPosition> {
+    let offset = usize::try_from(offset).ok()?;
+    if offset > code.len() || !code.is_char_boundary(offset) {
+        return None;
+    }
+    let (mut line, mut column) = (0, 0);
+    crate::code_transform::advance_generated_position(&code[..offset], &mut line, &mut column);
+    Some(GeneratedPosition { line, column })
+}
+
+/// Every source and name index lies in its table. A sourceless segment
+/// carries no index.
+fn check_table_indices(
+    segments: &[WireSegment],
+    sources: usize,
+    names: usize,
+) -> Result<(), UncomposableCode> {
+    for segment in segments {
+        if let Some(payload) = segment.payload {
+            if payload.source_index as usize >= sources {
+                return Err(UncomposableCode::SourceIndexOutOfTable);
+            }
+            if let Some(name_index) = payload.name_index {
+                if name_index as usize >= names {
+                    return Err(UncomposableCode::NameIndexOutOfTable);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every generated position is a position of `fragment_code`.
+fn check_generated_positions(
+    segments: &[WireSegment],
+    fragment_code: &str,
+) -> Result<(), UncomposableCode> {
+    let lines: Vec<&str> = fragment_code.split('\n').collect();
+    for segment in segments {
+        let line = *lines
+            .get(segment.generated_line as usize)
+            .ok_or(UncomposableCode::GeneratedLineOutOfFragment)?;
+        match classify_column(line, segment.generated_column) {
+            ColumnKind::InBounds => {}
+            ColumnKind::OutOfBounds => {
+                return Err(UncomposableCode::GeneratedColumnOutOfFragment);
+            }
+            ColumnKind::SplitsSurrogatePair => {
+                return Err(UncomposableCode::GeneratedColumnSplitsASurrogatePair);
+            }
+        }
+    }
+    Ok(())
 }
 
 const I32_MAX: i64 = 2_147_483_647;
+
+#[cfg(test)]
+thread_local! {
+    static JSON_MAP_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Encoded maps decoded on this thread since the last call; resets the
+/// count.
+#[cfg(test)]
+pub(crate) fn take_json_map_decodes() -> usize {
+    JSON_MAP_DECODES.with(|decodes| decodes.replace(0))
+}
 
 /// Validate and decode one contributing map against the fragment's own,
 /// PRE-REWRITE code, in the specified total order.
@@ -339,6 +555,9 @@ pub fn validate_and_decode(
     fragment_code: &str,
 ) -> Result<DecodedFragmentMap, UncomposableCode> {
     use UncomposableCode as C;
+
+    #[cfg(test)]
+    JSON_MAP_DECODES.with(|decodes| decodes.set(decodes.get() + 1));
 
     // 1.1 — the bytes are an admissible JSON document. Three ordered clauses,
     // first failure wins, all three BEFORE any member is read, so the outcome
@@ -456,18 +675,7 @@ pub fn validate_and_decode(
     // an earlier one. Both checks are guarded on the field being non-null,
     // because a sourceless segment carries null in every authored field and
     // null is in no index range.
-    for segment in &segments {
-        if let Some(payload) = segment.payload {
-            if payload.source_index as usize >= source_rows.len() {
-                return Err(C::SourceIndexOutOfTable);
-            }
-            if let Some(name_index) = payload.name_index {
-                if name_index as usize >= name_rows.len() {
-                    return Err(C::NameIndexOutOfTable);
-                }
-            }
-        }
-    }
+    check_table_indices(&segments, source_rows.len(), name_rows.len())?;
 
     // 1.23 — `entry` is a validated finite, non-negative, integral binary64
     // value with no upper bound imposed at step 1.15 (unlike a VLQ-decoded
@@ -482,17 +690,7 @@ pub fn validate_and_decode(
     }
 
     // 1.24 — against the fragment's own code, in its own pre-rewrite space.
-    let lines: Vec<&str> = fragment_code.split('\n').collect();
-    for segment in &segments {
-        let line = *lines
-            .get(segment.generated_line as usize)
-            .ok_or(C::GeneratedLineOutOfFragment)?;
-        match classify_column(line, segment.generated_column) {
-            ColumnKind::InBounds => {}
-            ColumnKind::OutOfBounds => return Err(C::GeneratedColumnOutOfFragment),
-            ColumnKind::SplitsSurrogatePair => return Err(C::GeneratedColumnSplitsASurrogatePair),
-        }
-    }
+    check_generated_positions(&segments, fragment_code)?;
 
     Ok(DecodedFragmentMap {
         sources: source_rows,
@@ -501,6 +699,7 @@ pub fn validate_and_decode(
         source_root,
         ignore_list,
         segments,
+        tables: TablesId::fresh(),
     })
 }
 

@@ -19,6 +19,7 @@
 
 pub mod analysis;
 pub mod analyzers;
+pub mod compiler_view;
 pub mod db;
 pub mod extract;
 pub mod input;

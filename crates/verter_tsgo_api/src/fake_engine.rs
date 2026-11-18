@@ -27,6 +27,7 @@
 //! | `apihollow`      | `PIN`                    | full surface BUT the snapshot returns a hollow `projects: []` |
 //! | `declfail`       | `PIN`                    | full surface (incl. standalone `--api`); `--project <cfg>` exits 2 with NO output |
 //! | `declhang`       | `PIN`                    | `--project <cfg>` spawns a pipe-holding grandchild and hangs forever |
+//! | `buildfail`      | `PIN`                    | full surface (incl. standalone `--api`); `-b` exits 1 with NO output |
 //! | `hang-version`   | hangs forever            | (unused)                                         |
 //! | `hold-pipe`      | prints `PIN`, then spawns a child that HOLDS the stdout/stderr pipes open and exits 0 |
 //! | `hang-lsp`       | `PIN`                    | hangs forever (never answers `initialize`)       |
@@ -38,11 +39,21 @@
 //! the standalone `--api` surface as `apiok` does. `VERTER_TSGO_FAKE_PID_DIR`
 //! (or a `<exe>.pids` directory beside the copy) makes every `--api` /
 //! `--lsp` process record `<mode>-<pid>.pid` there (and a standalone
-//! `--api` session `diagnostics-<pid>.done` once it served semantic
-//! diagnostics), `VERTER_TSGO_FAKE_STDERR` makes it announce itself on
+//! `--api` session append a line to `diagnostics-<pid>.done` each time it
+//! serves semantic diagnostics), `VERTER_TSGO_FAKE_STDERR` makes it announce itself on
 //! stderr, `VERTER_TSGO_FAKE_LSP_DELAY_MS` delays its `--lsp` `initialize`
 //! answer, and `VERTER_TSGO_FAKE_STANDALONE_HOLLOW` makes the standalone
-//! `--api` session answer a hollow project set.
+//! `--api` session answer a hollow project set. A `<exe>.hollow` file beside
+//! the copy, listing config file names one per line, makes the standalone
+//! `--api` session answer a hollow project set for those configs only.
+//!
+//! Two more files beside the copy shape the standalone `--api` session's
+//! semantic-diagnostics answer. A `<exe>.probes` file, listing paths one per
+//! line, makes it first ask the host `directoryExists` for each, as a real
+//! engine probes module lookup locations. A `<exe>.gate` file holding a
+//! loopback port makes the one session that takes it connect to that port and
+//! answer only after a byte arrives, so a test can act while a check waits
+//! between its binding and its publication.
 //!
 //! The `hold-pipe` grandchild writes its pid to `<exe>.child.pid` so the wedge
 //! tests can prove the bounded probe leaves NO live descendant after the tree
@@ -66,6 +77,7 @@ enum Scenario {
     ApiHollow,
     DeclFail,
     DeclHang,
+    BuildFail,
     HangVersion,
     HoldPipe,
     HangLsp,
@@ -113,6 +125,7 @@ impl Scenario {
             "apihollow" => Self::ApiHollow,
             "declfail" => Self::DeclFail,
             "declhang" => Self::DeclHang,
+            "buildfail" => Self::BuildFail,
             "hang-version" => Self::HangVersion,
             "hold-pipe" => Self::HoldPipe,
             "hang-lsp" => Self::HangLsp,
@@ -152,7 +165,12 @@ impl Scenario {
     fn serves_api_pipe(self) -> bool {
         matches!(
             self,
-            Self::ApiOk | Self::ApiHollow | Self::ApiMismatch | Self::DeclFail | Self::HangApi
+            Self::ApiOk
+                | Self::ApiHollow
+                | Self::ApiMismatch
+                | Self::DeclFail
+                | Self::BuildFail
+                | Self::HangApi
         )
     }
 
@@ -204,7 +222,7 @@ pub fn main() {
         }
     }
     // The standalone `--api` MessagePack stdio surface: `hang-api`/`declhang`
-    // never write a frame; `apiok`/`declfail` serve the tuple wire; every
+    // never write a frame; `apiok`/`declfail`/`buildfail` serve the tuple wire; every
     // other scenario refuses.
     if args.iter().any(|a| a == "--api") {
         record_mode_pid("api");
@@ -213,11 +231,19 @@ pub fn main() {
                 write_server_pid_file();
                 hang_forever();
             }
-            Scenario::ApiOk | Scenario::DeclFail => serve_api_stdio(scenario),
+            Scenario::ApiOk | Scenario::DeclFail | Scenario::BuildFail => serve_api_stdio(scenario),
             _ if standalone_api() => serve_api_stdio(scenario),
             _ => std::process::exit(2),
         }
         return;
+    }
+    // The build CLI surface uses the same successful/failed process scenarios.
+    if args.iter().any(|a| a == "-b") {
+        record_mode_pid("build");
+        match scenario {
+            Scenario::ApiOk => return,
+            _ => std::process::exit(1),
+        }
     }
     // The declaration-stage CLI surface (`tsc --project <cfg> --declaration`):
     // `apiok` exits 0 cleanly (its emit is a no-op); `declfail` dies INSTANTLY
@@ -306,6 +332,23 @@ fn record_mode_pid(mode: &str) {
 /// When set, the standalone `--api` surface answers `createSnapshot` with a
 /// hollow `projects: []`, whatever the `--lsp` surface does.
 const STANDALONE_HOLLOW_ENV: &str = "VERTER_TSGO_FAKE_STANDALONE_HOLLOW";
+
+/// Whether a `<exe>.hollow` file beside the engine copy lists `config`'s file
+/// name on a line of its own: the standalone `--api` surface then answers
+/// `createSnapshot` for that config with a hollow `projects: []`, so one
+/// project of a run fails while the others are served.
+fn hollow_config(config: &str) -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let mut name = exe.into_os_string();
+    name.push(".hollow");
+    let Ok(listed) = std::fs::read_to_string(PathBuf::from(name)) else {
+        return false;
+    };
+    let file = config.rsplit(['/', '\\']).next().unwrap_or(config);
+    listed.lines().any(|line| line.trim() == file)
+}
 
 /// When set to a number of milliseconds, the `--lsp` surface waits that long
 /// before answering `initialize`.
@@ -644,6 +687,56 @@ const MSGPACK_BIN32: u8 = 0xc6;
 const MSGPACK_UINT8: u8 = 0xcc;
 /// Child → parent response (`MSG_RESPONSE`).
 const MSG_RESPONSE: u8 = 4;
+/// Child → parent host callback (`MSG_CALL`).
+const MSG_CALL: u8 = 6;
+
+/// A switch file beside the engine copy (`<exe><suffix>`).
+fn beside_exe(suffix: &str) -> Option<PathBuf> {
+    let mut name = std::env::current_exe().ok()?.into_os_string();
+    name.push(suffix);
+    Some(PathBuf::from(name))
+}
+
+/// Ask the host `directoryExists` for every path a `<exe>.probes` file lists,
+/// reading each answer before the next call, as a real engine probes module
+/// lookup locations while it answers a request.
+fn probe_host_directories(reader: &mut impl BufRead, writer: &mut impl Write) {
+    let Some(Ok(listed)) = beside_exe(".probes").map(std::fs::read_to_string) else {
+        return;
+    };
+    for path in listed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let argument = serde_json::to_vec(path).unwrap();
+        write_tuple(writer, MSG_CALL, b"directoryExists", &argument);
+        if read_tuple(reader).is_none() {
+            return;
+        }
+    }
+}
+
+/// Wait at the loopback port a `<exe>.gate` file holds, when this session is
+/// the one that takes the file: connect, then go on once a byte arrives.
+fn hold_at_gate() {
+    let Some(gate) = beside_exe(".gate") else {
+        return;
+    };
+    let Ok(port) = std::fs::read_to_string(&gate) else {
+        return;
+    };
+    if std::fs::remove_file(&gate).is_err() {
+        return;
+    }
+    let Ok(port) = port.trim().parse::<u16>() else {
+        return;
+    };
+    if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+        let mut byte = [0u8; 1];
+        let _ = stream.read_exact(&mut byte);
+    }
+}
 
 /// Serve the standalone `--api` MessagePack tuple wire on stdio until EOF:
 /// `initialize`, `createSnapshot` (integer handle + the scenario's projects),
@@ -670,7 +763,9 @@ fn serve_api_stdio(scenario: Scenario) {
                     .and_then(|c| c.as_str())
                     .unwrap_or("")
                     .to_string();
-                let projects = if std::env::var_os(STANDALONE_HOLLOW_ENV).is_some() {
+                let projects = if std::env::var_os(STANDALONE_HOLLOW_ENV).is_some()
+                    || hollow_config(&config)
+                {
                     serde_json::json!([])
                 } else {
                     scenario.snapshot_projects(&config)
@@ -688,11 +783,19 @@ fn serve_api_stdio(scenario: Scenario) {
             "getSemanticDiagnostics" => {
                 if let Some(dir) = pid_dir() {
                     let pid = std::process::id();
-                    let _ = std::fs::write(dir.join(format!("diagnostics-{pid}.done")), "");
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(dir.join(format!("diagnostics-{pid}.done")))
+                        .and_then(|mut done| done.write_all(b"served\n"));
                 }
+                probe_host_directories(&mut reader, &mut stdout.lock());
+                hold_at_gate();
                 b"[]".to_vec()
             }
-            "getSyntacticDiagnostics" | "getConfigFileParsingDiagnostics" => b"[]".to_vec(),
+            "getSyntacticDiagnostics"
+            | "getConfigFileParsingDiagnostics"
+            | "getProgramDiagnostics" => b"[]".to_vec(),
             // Anything else: an empty (null-ish) payload resolves the caller
             // without a wire error.
             _ => Vec::new(),

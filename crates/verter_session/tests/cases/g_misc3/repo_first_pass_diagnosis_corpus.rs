@@ -26,10 +26,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::resolution::IdeProjectCompilerOptions;
 use verter_type_engine::capture_token::CaptureToken;
 use verter_workspace::{
-    FilesystemOptions, FilesystemWorkspace, IdeProjectCompilerOptions, ProjectRank,
-    VfsProjectConfig, WorkspaceAccess,
+    FilesystemOptions, FilesystemWorkspace, ProjectRank, VfsProjectConfig, WorkspaceAccess,
 };
 
 /// Full component list — the 12 components the diagnosis curve is

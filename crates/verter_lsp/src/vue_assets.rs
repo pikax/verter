@@ -344,7 +344,7 @@ mod tests {
         std::fs::create_dir_all(package.join("jsx-runtime")).unwrap();
         std::fs::write(
             package.join("package.json"),
-            r#"{"name":"vue","version":"3.5.40","exports":{"./jsx-runtime":{"types":"./jsx-runtime/index.d.ts"}}}"#,
+            r#"{"name":"vue","version":"3.6.0-rc.15","exports":{"./jsx-runtime":{"types":"./jsx-runtime/index.d.ts"}}}"#,
         )
         .unwrap();
         std::fs::write(

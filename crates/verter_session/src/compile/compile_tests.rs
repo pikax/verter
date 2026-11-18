@@ -486,36 +486,57 @@ fn assemble_main_module_render_function_binding() {
     );
 }
 
+/// Compile `source` through the registered Vue host integration as one
+/// JavaScript client runtime product. The carrier parse goes through the
+/// counted chokepoint (the dedup rail authority), not a raw carrier parse.
+fn host_js_runtime(
+    source: &str,
+    inline: Option<bool>,
+) -> verter_compiler::framework_common::VueHostCompiledProducts {
+    use oxc_allocator::Allocator;
+    use verter_compiler::compile_request::{CompileProduct, RuntimeProductRequest};
+    use verter_compiler::framework_common::{
+        FrameworkHostIntegrationBackend as _, VueHostExecutionInputs, VueHostIntegrationBackend,
+        VueHostMultiProductDemand,
+    };
+
+    let provenance = crate::meta_provenance::MetaProvenance::default();
+    let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
+    let backend = VueHostIntegrationBackend::registered();
+    let admission = backend
+        .admit_host_products(
+            &artifact,
+            VueHostMultiProductDemand {
+                products: vec![CompileProduct::RuntimeClient(RuntimeProductRequest {
+                    inline,
+                    ..Default::default()
+                })],
+                force_js: true,
+                ..Default::default()
+            },
+        )
+        .expect("the Vue runtime demand admits");
+    backend
+        .compile_host_products(
+            admission,
+            &artifact,
+            &VueHostExecutionInputs::default(),
+            &Allocator::new(),
+        )
+        .expect("the Vue carrier produces a runtime surface; it never refuses one")
+}
+
 /// @ai-generated - Regression: template-only SFC must produce valid assembled output
 /// with _sfc_main defined (no script block → fallback to empty object).
 #[test]
 fn assemble_main_module_template_only_sfc() {
-    use oxc_allocator::Allocator;
-    use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-    use verter_compiler::framework_common::RuntimeCompileOptions;
-
-    // Drive the Vue carrier `compile_bundle` producer so this end-to-end
-    // assembly test exercises the neutral bundle path.
+    // Drive the Vue host integration so this end-to-end assembly test
+    // exercises the neutral bundle path.
     let source = "<template><div>hello</div></template>";
-    let alloc = Allocator::new();
-    let compiler = VueCarrierCompiler;
-    // Route the carrier parse through the counted chokepoint (the dedup
-    // rail authority), not a raw `compiler.parse`.
-    let provenance = crate::meta_provenance::MetaProvenance::default();
-    let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
-    let result = compiler
-        .compile_bundle(
-            source,
-            &artifact,
-            &RuntimeCompileOptions {
-                force_js: true,
-                ..RuntimeCompileOptions::default()
-            },
-            &alloc,
-        )
-        .expect("vue carrier produces a runtime bundle")
-        .into_produced()
-        .expect("the Vue carrier produces a runtime surface; it never refuses one");
+    let products = host_js_runtime(source, None);
+    let result = products
+        .runtime_client_bundle()
+        .expect("the client runtime product publishes");
 
     // script should be None for template-only SFC
     assert!(
@@ -532,7 +553,7 @@ fn assemble_main_module_template_only_sfc() {
         has_template: true,
         ..FileMeta::default()
     };
-    let assembled = assemble_vue_main_module("NoScript.vue", &result, &meta, &profile)
+    let assembled = assemble_vue_main_module("NoScript.vue", result, &meta, &profile)
         .expect("assembly with maps disabled cannot fail")
         .code;
 
@@ -560,29 +581,11 @@ fn assemble_main_module_template_only_sfc() {
 /// function — the render closure already lives inside `setup()`.
 #[test]
 fn assemble_main_module_inline_topology() {
-    use oxc_allocator::Allocator;
-    use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-    use verter_compiler::framework_common::RuntimeCompileOptions;
-
     let source = "<script setup>\nimport { ref } from 'vue'\nconst msg = ref('hello')\n</script>\n<template><div>{{ msg }}</div></template>";
-    let alloc = Allocator::new();
-    let compiler = VueCarrierCompiler;
-    let provenance = crate::meta_provenance::MetaProvenance::default();
-    let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
-    let result = compiler
-        .compile_bundle(
-            source,
-            &artifact,
-            &RuntimeCompileOptions {
-                force_js: true,
-                inline: Some(true),
-                ..RuntimeCompileOptions::default()
-            },
-            &alloc,
-        )
-        .expect("vue carrier produces a runtime bundle")
-        .into_produced()
-        .expect("the Vue carrier produces a runtime surface; it never refuses one");
+    let products = host_js_runtime(source, Some(true));
+    let result = products
+        .runtime_client_bundle()
+        .expect("the client runtime product publishes");
 
     // Inline compile: no separate template block, topology flag set.
     assert!(result.inline, "bundle must carry the inline topology flag");
@@ -597,7 +600,7 @@ fn assemble_main_module_inline_topology() {
         has_template: true,
         ..FileMeta::default()
     };
-    let assembled = assemble_vue_main_module("App.vue", &result, &meta, &profile)
+    let assembled = assemble_vue_main_module("App.vue", result, &meta, &profile)
         .expect("assembly with maps disabled cannot fail")
         .code;
 
@@ -641,30 +644,13 @@ fn assemble_main_module_inline_topology() {
 /// text post-pass.
 #[test]
 fn assemble_passes_compiler_returned_bindings_verbatim() {
-    use oxc_allocator::Allocator;
-    use verter_compiler::framework_common::vue_bridge::VueCarrierCompiler;
-    use verter_compiler::framework_common::RuntimeCompileOptions;
-
     // UnusedSetupImport must be elided by the COMPILER (not by any
     // assembly-level text filtering); `msg` is template-used and stays.
     let source = "<script setup>\nimport { ref } from 'vue'\nimport UnusedComp from './UnusedComp.vue'\nconst msg = ref('hello')\n</script>\n<template><div>{{ msg }}</div></template>";
-    let alloc = Allocator::new();
-    let compiler = VueCarrierCompiler;
-    let provenance = crate::meta_provenance::MetaProvenance::default();
-    let artifact = crate::parse::build_vue_parse_artifact_from_source(source, &provenance);
-    let result = compiler
-        .compile_bundle(
-            source,
-            &artifact,
-            &RuntimeCompileOptions {
-                force_js: true,
-                ..RuntimeCompileOptions::default()
-            },
-            &alloc,
-        )
-        .expect("vue carrier produces a runtime bundle")
-        .into_produced()
-        .expect("the Vue carrier produces a runtime surface; it never refuses one");
+    let products = host_js_runtime(source, None);
+    let result = products
+        .runtime_client_bundle()
+        .expect("the client runtime product publishes");
 
     let profile = CompileProfile::default();
     let meta = FileMeta {
@@ -672,7 +658,7 @@ fn assemble_passes_compiler_returned_bindings_verbatim() {
         has_template: true,
         ..FileMeta::default()
     };
-    let assembled = assemble_vue_main_module("App.vue", &result, &meta, &profile)
+    let assembled = assemble_vue_main_module("App.vue", result, &meta, &profile)
         .expect("assembly with maps disabled cannot fail")
         .code;
 

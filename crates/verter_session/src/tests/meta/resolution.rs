@@ -6218,22 +6218,21 @@ defineProps<{
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
         )
         .expect("resolved component meta should exist");
+    // The `defineProps` shape is the publication authority for the macro's
+    // members; the flat `props` lane is evaluator metadata.
     let editor_field = resolved
         .evaluated_types
         .as_ref()
-        .and_then(|types| types.props.iter().find(|field| field.name == "editor"))
-        .expect("expanded evaluated types should keep the editor prop");
+        .into_iter()
+        .flat_map(|types| types.define_props.iter())
+        .flat_map(|shape| shape.result.value.properties.iter())
+        .find(|property| property.name == "editor")
+        .expect("the defineProps shape should publish the `editor` prop");
 
     let editor_field_ty = shallow_published_type(
         project.host(),
         "/src/App.vue",
-        Some(
-            editor_field
-                .authority
-                .source_position()
-                .present()
-                .expect("present source"),
-        ),
+        Some(editor_field.ty.present().expect("present source")),
         "editor prop",
     );
     assert!(
@@ -6298,22 +6297,21 @@ defineProps<{
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
         )
         .expect("resolved component meta should exist");
+    // The `defineProps` shape is the publication authority for the macro's
+    // members; the flat `props` lane is evaluator metadata.
     let external_field = resolved
         .evaluated_types
         .as_ref()
-        .and_then(|types| types.props.iter().find(|field| field.name == "external"))
-        .expect("expanded evaluated types should keep the imported external prop");
+        .into_iter()
+        .flat_map(|types| types.define_props.iter())
+        .flat_map(|shape| shape.result.value.properties.iter())
+        .find(|property| property.name == "external")
+        .expect("the defineProps shape should publish the imported external prop");
 
     let external_field_ty = shallow_published_type(
         project.host(),
         "/src/App.vue",
-        Some(
-            external_field
-                .authority
-                .source_position()
-                .present()
-                .expect("present source"),
-        ),
+        Some(external_field.ty.present().expect("present source")),
         "external prop",
     );
     assert!(
@@ -6761,22 +6759,21 @@ defineProps<{
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
         )
         .expect("resolved component meta should exist");
+    // The `defineProps` shape is the publication authority for the macro's
+    // members; the flat `props` lane is evaluator metadata.
     let close_field = resolved
         .evaluated_types
         .as_ref()
-        .and_then(|types| types.props.iter().find(|field| field.name == "close"))
-        .expect("expanded evaluated types should keep the close prop");
+        .into_iter()
+        .flat_map(|types| types.define_props.iter())
+        .flat_map(|shape| shape.result.value.properties.iter())
+        .find(|property| property.name == "close")
+        .expect("the defineProps shape should publish the `close` prop");
 
     let close_field_ty = shallow_published_type(
         project.host(),
         "/src/App.vue",
-        Some(
-            close_field
-                .authority
-                .source_position()
-                .present()
-                .expect("present source"),
-        ),
+        Some(close_field.ty.present().expect("present source")),
         "close prop",
     );
     let has_symbolic_omit = match &close_field_ty {

@@ -5,72 +5,91 @@
 //! when generated scaffolding embeds authored lexemes at known offsets
 //! (interpolation inside `_toDisplayString(...)`).
 //!
-//! `try_overwrite_segmented` is a separate crate-private entry; it does
-//! not change `overwrite`/`update`. Target range must lie in one live
-//! `Original` chunk with no affinity-anchored insertion — otherwise a
-//! typed refusal, not a best-effort splice.
+//! The correspondence between the replacement and the source is a claim the
+//! producer makes and this owner checks: [`CodeTransform::check_correspondence`]
+//! is the only way to obtain a [`SegmentedCorrespondence`], and it refuses
+//! anchors that are out of order, out of bounds, off a character boundary,
+//! or that claim exact bytes the source does not hold. The target range of
+//! [`CodeTransform::try_overwrite_segmented`] must lie in one live,
+//! unedited `Original` chunk with no affinity-anchored insertion — otherwise
+//! a typed refusal, not a best-effort splice.
+
+use verter_span::Span;
 
 use super::chunk::Chunk;
 use super::code_transform::CodeTransform;
 use super::fallible::CodeTransformError;
-use crate::template::code_gen::types::SegmentedOverwriteAuthority;
 
-/// Authored lexeme inside a segmented overwrite:
-/// `content[content_offset..content_offset + length]` maps to
-/// `[source_pos, source_pos + length)`. Bytes outside anchors are synthetic
-/// (no source-map token).
+/// What an anchor claims about its bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorKind {
+    /// The anchored bytes are the authored bytes at `source_pos`, copied
+    /// unchanged: `content[anchor] == source[source_pos..][..length]`.
+    Exact,
+    /// The anchored bytes stand for the authored position `source_pos`
+    /// without being a copy of it (rewritten text, a delimiter that marks
+    /// where an authored construct starts).
+    Point,
+}
+
+/// Authored correspondence inside a segmented overwrite:
+/// `content[content_offset..content_offset + length]` maps to `source_pos`,
+/// byte for byte when `kind` is [`AnchorKind::Exact`]. Bytes outside anchors
+/// are synthetic (no source-map token).
 ///
 /// `pub` to match the `pub` carriers that hold it (`VaporTextPart::Dynamic`,
-/// …). Operations that produce a `SegmentAnchor` chunk stay restricted to
-/// Vue runtime emitters ([`SegmentedOverwriteAuthority`]).
+/// …). A `SegmentAnchor` reaches a chunk only through
+/// [`CodeTransform::check_correspondence`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SegmentAnchor {
     pub content_offset: u32,
     pub length: u32,
     pub source_pos: u32,
+    pub kind: AnchorKind,
 }
 
 impl SegmentAnchor {
     /// Test-only; production builds a struct literal from AST/segment-plan data.
     #[cfg(test)]
-    pub(crate) fn new(content_offset: u32, length: u32, source_pos: u32) -> Self {
+    pub(crate) fn new(content_offset: u32, length: u32, source_pos: u32, kind: AnchorKind) -> Self {
         Self {
             content_offset,
             length,
             source_pos,
+            kind,
         }
-    }
-
-    fn content_end(&self) -> u32 {
-        self.content_offset + self.length
     }
 }
 
-impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
-    /// Checked segmented overwrite. Fails atomically (no mutation on `Err`)
-    /// for a malformed/empty range, out-of-order or overlapping anchors,
-    /// out-of-range/`source_pos` mid-character, a target not entirely in one
-    /// live `Original` chunk, or any affinity-anchored insertion.
-    ///
-    /// `_authority` is the static call-site guard ([`SegmentedOverwriteAuthority`]).
-    pub(crate) fn try_overwrite_segmented(
-        &mut self,
-        start: u32,
-        end: u32,
-        content: &str,
-        anchors: &[SegmentAnchor],
-        _authority: SegmentedOverwriteAuthority,
-    ) -> Result<&mut Self, CodeTransformError> {
-        self.record_audit_op();
-        self.check_range(start, end)?;
-        if start == end {
-            return Err(CodeTransformError::ZeroLengthRange { offset: start });
-        }
-        if self.anchored_present {
-            return Err(CodeTransformError::ReplacedContentSplit { offset: start });
-        }
+/// A replacement and its anchors, checked against one transform's source by
+/// [`CodeTransform::check_correspondence`]. The fields are private: the
+/// checked constructor is the only way to build one.
+#[derive(Debug, Clone, Copy)]
+pub struct SegmentedCorrespondence<'c> {
+    content: &'c str,
+    anchors: &'c [SegmentAnchor],
+    checked_against: &'c str,
+}
 
-        let content_len = content.len() as u32;
+impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
+    /// Check a producer's correspondence claim: anchors in content order and
+    /// non-overlapping, inside `content` on character boundaries, with
+    /// arithmetic that stays in `u32`; every source position inside this
+    /// transform's source on a character boundary; and every
+    /// [`AnchorKind::Exact`] anchor naming source bytes equal to its own.
+    pub(crate) fn check_correspondence<'c>(
+        &self,
+        content: &'c str,
+        anchors: &'c [SegmentAnchor],
+    ) -> Result<SegmentedCorrespondence<'c>, CodeTransformError>
+    where
+        'a: 'c,
+    {
+        let content_len =
+            u32::try_from(content.len()).map_err(|_| CodeTransformError::OutOfRange {
+                offset: u32::MAX,
+                len: u32::MAX,
+            })?;
         let mut prev_end = 0u32;
         for anchor in anchors {
             if anchor.content_offset < prev_end {
@@ -79,24 +98,77 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
                     end: prev_end,
                 });
             }
-            let anchor_end = anchor.content_end();
-            if anchor_end > content_len {
-                return Err(CodeTransformError::OutOfRange {
-                    offset: anchor_end,
+            let anchor_end = anchor
+                .content_offset
+                .checked_add(anchor.length)
+                .filter(|end| *end <= content_len)
+                .ok_or(CodeTransformError::OutOfRange {
+                    offset: anchor.content_offset,
                     len: content_len,
-                });
-            }
-            if !content.is_char_boundary(anchor.content_offset as usize)
-                || !content.is_char_boundary(anchor_end as usize)
-            {
+                })?;
+            if !content.is_char_boundary(anchor.content_offset as usize) {
                 return Err(CodeTransformError::MidChar {
                     offset: anchor.content_offset,
                 });
             }
+            if !content.is_char_boundary(anchor_end as usize) {
+                return Err(CodeTransformError::MidChar { offset: anchor_end });
+            }
             self.check_offset(anchor.source_pos)?;
-            let source_end = anchor.source_pos + anchor.length;
-            self.check_offset(source_end)?;
+            if anchor.kind == AnchorKind::Exact {
+                let not_exact = CodeTransformError::CorrespondenceNotExact {
+                    content_offset: anchor.content_offset,
+                    source_pos: anchor.source_pos,
+                };
+                let source_end = anchor
+                    .source_pos
+                    .checked_add(anchor.length)
+                    .ok_or(not_exact)?;
+                self.check_offset(source_end).map_err(|_| not_exact)?;
+                if content[anchor.content_offset as usize..anchor_end as usize]
+                    != self.original[anchor.source_pos as usize..source_end as usize]
+                {
+                    return Err(not_exact);
+                }
+            }
             prev_end = anchor_end;
+        }
+        Ok(SegmentedCorrespondence {
+            content,
+            anchors,
+            checked_against: self.original,
+        })
+    }
+
+    /// Checked segmented overwrite of `[start, end)` with a checked
+    /// correspondence. Fails atomically (no mutation on `Err`) for a
+    /// malformed/empty range, a target not entirely in one live unedited
+    /// `Original` chunk, or any affinity-anchored insertion. A
+    /// correspondence checked against another source is checked again here.
+    pub(crate) fn try_overwrite_segmented(
+        &mut self,
+        start: u32,
+        end: u32,
+        correspondence: SegmentedCorrespondence<'_>,
+    ) -> Result<&mut Self, CodeTransformError> {
+        self.record_audit_op();
+        self.check_range(start, end)?;
+        if start == end {
+            return Err(CodeTransformError::ZeroLengthRange { offset: start });
+        }
+        let SegmentedCorrespondence {
+            content,
+            anchors,
+            checked_against,
+        } = correspondence;
+        if !std::ptr::eq(checked_against, self.original) {
+            self.check_correspondence(content, anchors)?;
+        }
+        let not_live = CodeTransformError::SegmentedTargetNotLive {
+            range: Span::new(start, end),
+        };
+        if self.anchored_present {
+            return Err(not_live);
         }
 
         // Narrow precondition: the range must fall entirely inside ONE
@@ -104,7 +176,7 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
         // already isolates for the unchecked splice — reused here as a
         // read-only classification, never mutating on a `false` result).
         let Some(chunk_index) = self.find_sole_containing_original(start, end) else {
-            return Err(CodeTransformError::ReplacedContentSplit { offset: start });
+            return Err(not_live);
         };
 
         let content_ref = if content.is_empty() {
@@ -144,7 +216,7 @@ impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
                 }
                 Chunk::Overwritten { .. }
                 | Chunk::OverwrittenSegmented { .. }
-                | Chunk::Moved { .. }
+                | Chunk::Relocated { .. }
                 | Chunk::Inserted { .. }
                 | Chunk::InsertedMapped { .. }
                 | Chunk::InsertedAnchored { .. } => {

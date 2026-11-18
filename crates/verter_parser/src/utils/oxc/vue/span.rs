@@ -25,1062 +25,1190 @@ pub(super) fn adjust_span(span: &mut Span, offset: u32) {
     span.end += offset;
 }
 
-/// Adjust all spans in an Expression by adding the given offset.
-///
-/// This recursively walks through the expression tree and adjusts
-/// all span values to reflect positions in the original source string.
+/// Normalize retained template expression spans, including nested type arguments.
 pub fn adjust_expression_spans(expr: &mut Expression<'_>, offset: u32) {
+    if offset != 0 {
+        use oxc_ast_visit::VisitMut;
+        SpanShift {
+            wrapper: 0,
+            file: offset,
+        }
+        .visit_expression(expr);
+    }
+}
+
+/// One coordinate conversion for retained template expression and slot spans.
+/// Synthetic wrapper boundaries map to the start of the authored window.
+pub(super) struct SpanShift {
+    pub(super) wrapper: u32,
+    pub(super) file: u32,
+}
+impl<'a> oxc_ast_visit::VisitMut<'a> for SpanShift {
+    fn visit_span(&mut self, span: &mut Span) {
+        span.start = span.start.saturating_sub(self.wrapper) + self.file;
+        span.end = span.end.saturating_sub(self.wrapper) + self.file;
+    }
+    fn visit_ts_type_annotation(&mut self, annotation: &mut oxc_ast::ast::TSTypeAnnotation<'a>) {
+        // Annotation positions preserve their published wrapper prefix; nested
+        // type references remain parse-relative for the existing extractor.
+        adjust_span(&mut annotation.span, self.file);
+    }
+}
+
+/// Pending nodes of the Program coordinate conversion. Each task borrows a
+/// disjoint subtree; scalar span edits keep the existing policy, including
+/// intentionally unshifted type interiors and expression-only function shells.
+enum SpanTask<'n, 'a> {
+    ProgramExpression(&'n mut Expression<'a>),
+    TemplateLiteral(&'n mut TemplateLiteral<'a>),
+    ArrayExpression(&'n mut ArrayExpression<'a>),
+    SpreadElement(&'n mut SpreadElement<'a>),
+    ObjectExpression(&'n mut ObjectExpression<'a>),
+    PropertyKey(&'n mut PropertyKey<'a>),
+    ParenthesizedExpression(&'n mut ParenthesizedExpression<'a>),
+    SequenceExpression(&'n mut SequenceExpression<'a>),
+    StaticMemberExpression(&'n mut StaticMemberExpression<'a>),
+    ComputedMemberExpression(&'n mut ComputedMemberExpression<'a>),
+    PrivateFieldExpression(&'n mut PrivateFieldExpression<'a>),
+    CallExpression(&'n mut CallExpression<'a>),
+    Argument(&'n mut Argument<'a>),
+    NewExpression(&'n mut NewExpression<'a>),
+    TaggedTemplateExpression(&'n mut TaggedTemplateExpression<'a>),
+    UnaryExpression(&'n mut UnaryExpression<'a>),
+    UpdateExpression(&'n mut UpdateExpression<'a>),
+    MemberExpression(&'n mut MemberExpression<'a>),
+    BinaryExpression(&'n mut BinaryExpression<'a>),
+    LogicalExpression(&'n mut LogicalExpression<'a>),
+    ConditionalExpression(&'n mut ConditionalExpression<'a>),
+    ArrowFunctionExpression(&'n mut ArrowFunctionExpression<'a>),
+    YieldExpression(&'n mut YieldExpression<'a>),
+    AwaitExpression(&'n mut AwaitExpression<'a>),
+    ChainExpression(&'n mut ChainExpression<'a>),
+    TsAsExpression(&'n mut TSAsExpression<'a>),
+    TsSatisfiesExpression(&'n mut TSSatisfiesExpression<'a>),
+    TsNonNullExpression(&'n mut TSNonNullExpression<'a>),
+    TsTypeAssertion(&'n mut TSTypeAssertion<'a>),
+    ImportExpression(&'n mut ImportExpression<'a>),
+    AssignmentTarget(&'n mut AssignmentTarget<'a>),
+    AssignmentTargetRest(&'n mut AssignmentTargetRest<'a>),
+    AssignmentTargetMaybeDefault(&'n mut AssignmentTargetMaybeDefault<'a>),
+    AssignmentTargetProperty(&'n mut AssignmentTargetProperty<'a>),
+    SimpleAssignmentTarget(&'n mut SimpleAssignmentTarget<'a>),
+    FormalParameters(&'n mut FormalParameters<'a>),
+    FormalParameter(&'n mut FormalParameter<'a>),
+    BindingRestElement(&'n mut BindingRestElement<'a>),
+    BindingPattern(&'n mut BindingPattern<'a>),
+    ObjectPattern(&'n mut ObjectPattern<'a>),
+    BindingProperty(&'n mut BindingProperty<'a>),
+    ArrayPattern(&'n mut ArrayPattern<'a>),
+    Program(&'n mut Program<'a>),
+    Statement(&'n mut Statement<'a>),
+    ForStatementInit(&'n mut ForStatementInit<'a>),
+    ForStatementLeft(&'n mut oxc_ast::ast::ForStatementLeft<'a>),
+    VariableDeclaration(&'n mut oxc_ast::ast::VariableDeclaration<'a>),
+    Function(&'n mut oxc_ast::ast::Function<'a>),
+    Class(&'n mut oxc_ast::ast::Class<'a>),
+    Declaration(&'n mut oxc_ast::ast::Declaration<'a>),
+}
+
+fn adjust_pending_spans(task: SpanTask<'_, '_>, offset: u32) {
     if offset == 0 {
         return;
     }
-
-    match expr {
-        Expression::Identifier(id) => {
-            adjust_span(&mut id.span, offset);
-        }
-        Expression::BooleanLiteral(lit) => {
-            adjust_span(&mut lit.span, offset);
-        }
-        Expression::NullLiteral(lit) => {
-            adjust_span(&mut lit.span, offset);
-        }
-        Expression::NumericLiteral(lit) => {
-            adjust_span(&mut lit.span, offset);
-        }
-        Expression::BigIntLiteral(lit) => {
-            adjust_span(&mut lit.span, offset);
-        }
-        Expression::StringLiteral(lit) => {
-            adjust_span(&mut lit.span, offset);
-        }
-        Expression::RegExpLiteral(lit) => {
-            adjust_span(&mut lit.span, offset);
-        }
-        Expression::TemplateLiteral(tpl) => {
-            adjust_template_literal_spans(tpl, offset);
-        }
-        Expression::ArrayExpression(arr) => {
-            adjust_array_expression_spans(arr, offset);
-        }
-        Expression::ObjectExpression(obj) => {
-            adjust_object_expression_spans(obj, offset);
-        }
-        Expression::ParenthesizedExpression(paren) => {
-            adjust_parenthesized_expression_spans(paren, offset);
-        }
-        Expression::SequenceExpression(seq) => {
-            adjust_sequence_expression_spans(seq, offset);
-        }
-        Expression::StaticMemberExpression(mem) => {
-            adjust_static_member_expression_spans(mem, offset);
-        }
-        Expression::ComputedMemberExpression(mem) => {
-            adjust_computed_member_expression_spans(mem, offset);
-        }
-        Expression::PrivateFieldExpression(mem) => {
-            adjust_private_field_expression_spans(mem, offset);
-        }
-        Expression::CallExpression(call) => {
-            adjust_call_expression_spans(call, offset);
-        }
-        Expression::NewExpression(new) => {
-            adjust_new_expression_spans(new, offset);
-        }
-        Expression::TaggedTemplateExpression(tagged) => {
-            adjust_tagged_template_expression_spans(tagged, offset);
-        }
-        Expression::UnaryExpression(unary) => {
-            adjust_unary_expression_spans(unary, offset);
-        }
-        Expression::UpdateExpression(update) => {
-            adjust_update_expression_spans(update, offset);
-        }
-        Expression::BinaryExpression(binary) => {
-            adjust_binary_expression_spans(binary, offset);
-        }
-        Expression::LogicalExpression(logical) => {
-            adjust_logical_expression_spans(logical, offset);
-        }
-        Expression::ConditionalExpression(cond) => {
-            adjust_conditional_expression_spans(cond, offset);
-        }
-        Expression::ArrowFunctionExpression(arrow) => {
-            adjust_arrow_function_expression_spans(arrow, offset);
-        }
-        Expression::YieldExpression(yield_expr) => {
-            adjust_yield_expression_spans(yield_expr, offset);
-        }
-        Expression::AwaitExpression(await_expr) => {
-            adjust_await_expression_spans(await_expr, offset);
-        }
-        Expression::ChainExpression(chain) => {
-            adjust_chain_expression_spans(chain, offset);
-        }
-        Expression::TSAsExpression(ts_as) => {
-            adjust_ts_as_expression_spans(ts_as, offset);
-        }
-        Expression::TSSatisfiesExpression(ts_sat) => {
-            adjust_ts_satisfies_expression_spans(ts_sat, offset);
-        }
-        Expression::TSNonNullExpression(ts_non_null) => {
-            adjust_ts_non_null_expression_spans(ts_non_null, offset);
-        }
-        Expression::TSTypeAssertion(ts_assert) => {
-            adjust_ts_type_assertion_spans(ts_assert, offset);
-        }
-        Expression::ImportExpression(import) => {
-            adjust_import_expression_spans(import, offset);
-        }
-        Expression::ThisExpression(this) => {
-            adjust_span(&mut this.span, offset);
-        }
-        Expression::Super(sup) => {
-            adjust_span(&mut sup.span, offset);
-        }
-        Expression::ImportMeta(meta) => {
-            adjust_span(&mut meta.span, offset);
-        }
-        Expression::NewTarget(meta) => {
-            adjust_span(&mut meta.span, offset);
-        }
-        // FunctionExpression, ClassExpression, etc. are less common in v-for/v-slot
-        // but we handle them for completeness
-        Expression::FunctionExpression(func) => {
-            adjust_span(&mut func.span, offset);
-            // Could recurse into body, params, etc. if needed
-        }
-        Expression::ClassExpression(class) => {
-            adjust_span(&mut class.span, offset);
-        }
-        Expression::AssignmentExpression(assign) => {
-            adjust_span(&mut assign.span, offset);
-            adjust_assignment_target_spans(&mut assign.left, offset);
-            adjust_expression_spans(&mut assign.right, offset);
-        }
-        Expression::JSXElement(_)
-        | Expression::JSXFragment(_)
-        | Expression::PrivateInExpression(_)
-        | Expression::TSInstantiationExpression(_)
-        | Expression::V8IntrinsicExpression(_) => {
-            // These are less common in Vue templates, skip for now
-        }
-    }
-}
-
-fn adjust_template_literal_spans(tpl: &mut TemplateLiteral<'_>, offset: u32) {
-    adjust_span(&mut tpl.span, offset);
-    for quasi in &mut tpl.quasis {
-        adjust_span(&mut quasi.span, offset);
-    }
-    for expr in &mut tpl.expressions {
-        adjust_expression_spans(expr, offset);
-    }
-}
-
-fn adjust_array_expression_spans(arr: &mut ArrayExpression<'_>, offset: u32) {
-    adjust_span(&mut arr.span, offset);
-    for elem in &mut arr.elements {
-        match elem {
-            ArrayExpressionElement::SpreadElement(spread) => {
-                adjust_spread_element_spans(spread, offset);
-            }
-            ArrayExpressionElement::Elision(elision) => {
-                adjust_span(&mut elision.span, offset);
-            }
-            _ => {
-                if let Some(expr) = elem.as_expression_mut() {
-                    adjust_expression_spans(expr, offset);
+    let mut stack = vec![task];
+    while let Some(task) = stack.pop() {
+        match task {
+            SpanTask::ProgramExpression(expr) => {
+                match expr {
+                    Expression::Identifier(id) => {
+                        let id = &mut **id;
+                        adjust_span(&mut id.span, offset);
+                    }
+                    Expression::BooleanLiteral(lit) => {
+                        let lit = &mut **lit;
+                        adjust_span(&mut lit.span, offset);
+                    }
+                    Expression::NullLiteral(lit) => {
+                        let lit = &mut **lit;
+                        adjust_span(&mut lit.span, offset);
+                    }
+                    Expression::NumericLiteral(lit) => {
+                        let lit = &mut **lit;
+                        adjust_span(&mut lit.span, offset);
+                    }
+                    Expression::BigIntLiteral(lit) => {
+                        let lit = &mut **lit;
+                        adjust_span(&mut lit.span, offset);
+                    }
+                    Expression::StringLiteral(lit) => {
+                        let lit = &mut **lit;
+                        adjust_span(&mut lit.span, offset);
+                    }
+                    Expression::RegExpLiteral(lit) => {
+                        let lit = &mut **lit;
+                        adjust_span(&mut lit.span, offset);
+                    }
+                    Expression::TemplateLiteral(tpl) => {
+                        let tpl = &mut **tpl;
+                        stack.push(SpanTask::TemplateLiteral(tpl));
+                    }
+                    Expression::ArrayExpression(arr) => {
+                        let arr = &mut **arr;
+                        stack.push(SpanTask::ArrayExpression(arr));
+                    }
+                    Expression::ObjectExpression(obj) => {
+                        let obj = &mut **obj;
+                        stack.push(SpanTask::ObjectExpression(obj));
+                    }
+                    Expression::ParenthesizedExpression(paren) => {
+                        let paren = &mut **paren;
+                        stack.push(SpanTask::ParenthesizedExpression(paren));
+                    }
+                    Expression::SequenceExpression(seq) => {
+                        let seq = &mut **seq;
+                        stack.push(SpanTask::SequenceExpression(seq));
+                    }
+                    Expression::StaticMemberExpression(mem) => {
+                        let mem = &mut **mem;
+                        stack.push(SpanTask::StaticMemberExpression(mem));
+                    }
+                    Expression::ComputedMemberExpression(mem) => {
+                        let mem = &mut **mem;
+                        stack.push(SpanTask::ComputedMemberExpression(mem));
+                    }
+                    Expression::PrivateFieldExpression(mem) => {
+                        let mem = &mut **mem;
+                        stack.push(SpanTask::PrivateFieldExpression(mem));
+                    }
+                    Expression::CallExpression(call) => {
+                        let call = &mut **call;
+                        stack.push(SpanTask::CallExpression(call));
+                    }
+                    Expression::NewExpression(new) => {
+                        let new = &mut **new;
+                        stack.push(SpanTask::NewExpression(new));
+                    }
+                    Expression::TaggedTemplateExpression(tagged) => {
+                        let tagged = &mut **tagged;
+                        stack.push(SpanTask::TaggedTemplateExpression(tagged));
+                    }
+                    Expression::UnaryExpression(unary) => {
+                        let unary = &mut **unary;
+                        stack.push(SpanTask::UnaryExpression(unary));
+                    }
+                    Expression::UpdateExpression(update) => {
+                        let update = &mut **update;
+                        stack.push(SpanTask::UpdateExpression(update));
+                    }
+                    Expression::BinaryExpression(binary) => {
+                        let binary = &mut **binary;
+                        stack.push(SpanTask::BinaryExpression(binary));
+                    }
+                    Expression::LogicalExpression(logical) => {
+                        let logical = &mut **logical;
+                        stack.push(SpanTask::LogicalExpression(logical));
+                    }
+                    Expression::ConditionalExpression(cond) => {
+                        let cond = &mut **cond;
+                        stack.push(SpanTask::ConditionalExpression(cond));
+                    }
+                    Expression::ArrowFunctionExpression(arrow) => {
+                        let arrow = &mut **arrow;
+                        stack.push(SpanTask::ArrowFunctionExpression(arrow));
+                    }
+                    Expression::YieldExpression(yield_expr) => {
+                        let yield_expr = &mut **yield_expr;
+                        stack.push(SpanTask::YieldExpression(yield_expr));
+                    }
+                    Expression::AwaitExpression(await_expr) => {
+                        let await_expr = &mut **await_expr;
+                        stack.push(SpanTask::AwaitExpression(await_expr));
+                    }
+                    Expression::ChainExpression(chain) => {
+                        let chain = &mut **chain;
+                        stack.push(SpanTask::ChainExpression(chain));
+                    }
+                    Expression::TSAsExpression(ts_as) => {
+                        let ts_as = &mut **ts_as;
+                        stack.push(SpanTask::TsAsExpression(ts_as));
+                    }
+                    Expression::TSSatisfiesExpression(ts_sat) => {
+                        let ts_sat = &mut **ts_sat;
+                        stack.push(SpanTask::TsSatisfiesExpression(ts_sat));
+                    }
+                    Expression::TSNonNullExpression(ts_non_null) => {
+                        let ts_non_null = &mut **ts_non_null;
+                        stack.push(SpanTask::TsNonNullExpression(ts_non_null));
+                    }
+                    Expression::TSTypeAssertion(ts_assert) => {
+                        let ts_assert = &mut **ts_assert;
+                        stack.push(SpanTask::TsTypeAssertion(ts_assert));
+                    }
+                    Expression::ImportExpression(import) => {
+                        let import = &mut **import;
+                        stack.push(SpanTask::ImportExpression(import));
+                    }
+                    Expression::ThisExpression(this) => {
+                        let this = &mut **this;
+                        adjust_span(&mut this.span, offset);
+                    }
+                    Expression::Super(sup) => {
+                        let sup = &mut **sup;
+                        adjust_span(&mut sup.span, offset);
+                    }
+                    Expression::ImportMeta(meta) => {
+                        let meta = &mut **meta;
+                        adjust_span(&mut meta.span, offset);
+                    }
+                    Expression::NewTarget(meta) => {
+                        let meta = &mut **meta;
+                        adjust_span(&mut meta.span, offset);
+                    }
+                    // FunctionExpression, ClassExpression, etc. are less common in v-for/v-slot
+                    // but we handle them for completeness
+                    Expression::FunctionExpression(func) => {
+                        let func = &mut **func;
+                        adjust_span(&mut func.span, offset);
+                        // Could recurse into body, params, etc. if needed
+                    }
+                    Expression::ClassExpression(class) => {
+                        let class = &mut **class;
+                        adjust_span(&mut class.span, offset);
+                    }
+                    Expression::AssignmentExpression(assign) => {
+                        let assign = &mut **assign;
+                        adjust_span(&mut assign.span, offset);
+                        stack.push(SpanTask::AssignmentTarget(&mut assign.left));
+                        stack.push(SpanTask::ProgramExpression(&mut assign.right));
+                    }
+                    Expression::JSXElement(_)
+                    | Expression::JSXFragment(_)
+                    | Expression::PrivateInExpression(_)
+                    | Expression::TSInstantiationExpression(_)
+                    | Expression::V8IntrinsicExpression(_) => {
+                        // These are less common in Vue templates, skip for now
+                    }
                 }
             }
-        }
-    }
-}
-
-fn adjust_spread_element_spans(spread: &mut SpreadElement<'_>, offset: u32) {
-    adjust_span(&mut spread.span, offset);
-    adjust_expression_spans(&mut spread.argument, offset);
-}
-
-fn adjust_object_expression_spans(obj: &mut ObjectExpression<'_>, offset: u32) {
-    adjust_span(&mut obj.span, offset);
-    for prop in &mut obj.properties {
-        match prop {
-            ObjectPropertyKind::ObjectProperty(p) => {
-                adjust_span(&mut p.span, offset);
-                adjust_property_key_spans(&mut p.key, offset);
-                adjust_expression_spans(&mut p.value, offset);
+            SpanTask::TemplateLiteral(tpl) => {
+                adjust_span(&mut tpl.span, offset);
+                for quasi in &mut tpl.quasis {
+                    adjust_span(&mut quasi.span, offset);
+                }
+                for expr in &mut tpl.expressions {
+                    stack.push(SpanTask::ProgramExpression(expr));
+                }
             }
-            ObjectPropertyKind::SpreadProperty(spread) => {
+            SpanTask::ArrayExpression(arr) => {
+                adjust_span(&mut arr.span, offset);
+                for elem in &mut arr.elements {
+                    match elem {
+                        ArrayExpressionElement::SpreadElement(spread) => {
+                            let spread = &mut **spread;
+                            stack.push(SpanTask::SpreadElement(spread));
+                        }
+                        ArrayExpressionElement::Elision(elision) => {
+                            let elision = &mut **elision;
+                            adjust_span(&mut elision.span, offset);
+                        }
+                        elem => {
+                            if let Some(expr) = elem.as_expression_mut() {
+                                stack.push(SpanTask::ProgramExpression(expr));
+                            }
+                        }
+                    }
+                }
+            }
+            SpanTask::SpreadElement(spread) => {
                 adjust_span(&mut spread.span, offset);
-                adjust_expression_spans(&mut spread.argument, offset);
+                stack.push(SpanTask::ProgramExpression(&mut spread.argument));
             }
-        }
-    }
-}
-
-/// Adjust the span of an object/property key.
-///
-/// Identifier-name keys (`{ foo }`, `{ foo: bar }`) and private keys are not
-/// `Expression` variants, so `as_expression_mut()` returns `None` for them and
-/// they would otherwise be left at their pre-shift positions. Shorthand keys in
-/// particular are the binding sites consumers read for v-for locals, so the key
-/// span must move with the rest of the tree to stay source-relative.
-fn adjust_property_key_spans(key: &mut PropertyKey<'_>, offset: u32) {
-    match key {
-        PropertyKey::StaticIdentifier(ident) => adjust_span(&mut ident.span, offset),
-        PropertyKey::PrivateIdentifier(ident) => adjust_span(&mut ident.span, offset),
-        _ => {
-            if let Some(key_expr) = key.as_expression_mut() {
-                adjust_expression_spans(key_expr, offset);
-            }
-        }
-    }
-}
-
-fn adjust_parenthesized_expression_spans(paren: &mut ParenthesizedExpression<'_>, offset: u32) {
-    adjust_span(&mut paren.span, offset);
-    adjust_expression_spans(&mut paren.expression, offset);
-}
-
-fn adjust_sequence_expression_spans(seq: &mut SequenceExpression<'_>, offset: u32) {
-    adjust_span(&mut seq.span, offset);
-    for expr in &mut seq.expressions {
-        adjust_expression_spans(expr, offset);
-    }
-}
-
-fn adjust_static_member_expression_spans(mem: &mut StaticMemberExpression<'_>, offset: u32) {
-    adjust_span(&mut mem.span, offset);
-    adjust_expression_spans(&mut mem.object, offset);
-    adjust_span(&mut mem.property.span, offset);
-}
-
-fn adjust_computed_member_expression_spans(mem: &mut ComputedMemberExpression<'_>, offset: u32) {
-    adjust_span(&mut mem.span, offset);
-    adjust_expression_spans(&mut mem.object, offset);
-    adjust_expression_spans(&mut mem.expression, offset);
-}
-
-fn adjust_private_field_expression_spans(mem: &mut PrivateFieldExpression<'_>, offset: u32) {
-    adjust_span(&mut mem.span, offset);
-    adjust_expression_spans(&mut mem.object, offset);
-    adjust_span(&mut mem.field.span, offset);
-}
-
-fn adjust_call_expression_spans(call: &mut CallExpression<'_>, offset: u32) {
-    adjust_span(&mut call.span, offset);
-    adjust_expression_spans(&mut call.callee, offset);
-    for arg in &mut call.arguments {
-        adjust_argument_spans(arg, offset);
-    }
-}
-
-fn adjust_argument_spans(arg: &mut Argument<'_>, offset: u32) {
-    match arg {
-        Argument::SpreadElement(spread) => {
-            adjust_spread_element_spans(spread, offset);
-        }
-        _ => {
-            if let Some(expr) = arg.as_expression_mut() {
-                adjust_expression_spans(expr, offset);
-            }
-        }
-    }
-}
-
-fn adjust_new_expression_spans(new: &mut NewExpression<'_>, offset: u32) {
-    adjust_span(&mut new.span, offset);
-    adjust_expression_spans(&mut new.callee, offset);
-    for arg in &mut new.arguments {
-        adjust_argument_spans(arg, offset);
-    }
-}
-
-fn adjust_tagged_template_expression_spans(tagged: &mut TaggedTemplateExpression<'_>, offset: u32) {
-    adjust_span(&mut tagged.span, offset);
-    adjust_expression_spans(&mut tagged.tag, offset);
-    adjust_template_literal_spans(&mut tagged.quasi, offset);
-}
-
-fn adjust_unary_expression_spans(unary: &mut UnaryExpression<'_>, offset: u32) {
-    adjust_span(&mut unary.span, offset);
-    adjust_expression_spans(&mut unary.argument, offset);
-}
-
-fn adjust_update_expression_spans(update: &mut UpdateExpression<'_>, offset: u32) {
-    adjust_span(&mut update.span, offset);
-    match &mut update.argument {
-        SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
-            adjust_span(&mut id.span, offset);
-        }
-        SimpleAssignmentTarget::TSAsExpression(ts_as) => {
-            adjust_ts_as_expression_spans(ts_as, offset);
-        }
-        SimpleAssignmentTarget::TSSatisfiesExpression(ts_sat) => {
-            adjust_ts_satisfies_expression_spans(ts_sat, offset);
-        }
-        SimpleAssignmentTarget::TSNonNullExpression(ts_non_null) => {
-            adjust_ts_non_null_expression_spans(ts_non_null, offset);
-        }
-        SimpleAssignmentTarget::TSTypeAssertion(ts_assert) => {
-            adjust_ts_type_assertion_spans(ts_assert, offset);
-        }
-        _ => {
-            if let Some(mem) = update.argument.as_member_expression_mut() {
-                adjust_member_expression_spans(mem, offset);
-            }
-        }
-    }
-}
-
-fn adjust_member_expression_spans(mem: &mut MemberExpression<'_>, offset: u32) {
-    match mem {
-        MemberExpression::ComputedMemberExpression(computed) => {
-            adjust_computed_member_expression_spans(computed, offset);
-        }
-        MemberExpression::StaticMemberExpression(static_mem) => {
-            adjust_static_member_expression_spans(static_mem, offset);
-        }
-        MemberExpression::PrivateFieldExpression(private) => {
-            adjust_private_field_expression_spans(private, offset);
-        }
-    }
-}
-
-fn adjust_binary_expression_spans(binary: &mut BinaryExpression<'_>, offset: u32) {
-    adjust_span(&mut binary.span, offset);
-    adjust_expression_spans(&mut binary.left, offset);
-    adjust_expression_spans(&mut binary.right, offset);
-}
-
-fn adjust_logical_expression_spans(logical: &mut LogicalExpression<'_>, offset: u32) {
-    adjust_span(&mut logical.span, offset);
-    adjust_expression_spans(&mut logical.left, offset);
-    adjust_expression_spans(&mut logical.right, offset);
-}
-
-fn adjust_conditional_expression_spans(cond: &mut ConditionalExpression<'_>, offset: u32) {
-    adjust_span(&mut cond.span, offset);
-    adjust_expression_spans(&mut cond.test, offset);
-    adjust_expression_spans(&mut cond.consequent, offset);
-    adjust_expression_spans(&mut cond.alternate, offset);
-}
-
-fn adjust_arrow_function_expression_spans(arrow: &mut ArrowFunctionExpression<'_>, offset: u32) {
-    adjust_span(&mut arrow.span, offset);
-    if let Some(tp) = &mut arrow.type_parameters {
-        adjust_span(&mut tp.span, offset);
-    }
-    if let Some(rt) = &mut arrow.return_type {
-        adjust_span(&mut rt.span, offset);
-    }
-    adjust_formal_parameters_spans(&mut arrow.params, offset);
-    match &mut arrow.body {
-        oxc_ast::ast::ArrowFunctionBody::FunctionBody(body) => {
-            // Block body: (x) => { return x + 1; }
-            adjust_span(&mut body.span, offset);
-            for stmt in &mut body.statements {
-                adjust_statement_spans(stmt, offset);
-            }
-        }
-        body => {
-            // Expression body: (x) => x + 1
-            if let Some(expression) = body.as_expression_mut() {
-                adjust_expression_spans(expression, offset);
-            }
-        }
-    }
-}
-
-fn adjust_yield_expression_spans(yield_expr: &mut YieldExpression<'_>, offset: u32) {
-    adjust_span(&mut yield_expr.span, offset);
-    if let Some(arg) = &mut yield_expr.argument {
-        adjust_expression_spans(arg, offset);
-    }
-}
-
-fn adjust_await_expression_spans(await_expr: &mut AwaitExpression<'_>, offset: u32) {
-    adjust_span(&mut await_expr.span, offset);
-    adjust_expression_spans(&mut await_expr.argument, offset);
-}
-
-fn adjust_chain_expression_spans(chain: &mut ChainExpression<'_>, offset: u32) {
-    adjust_span(&mut chain.span, offset);
-    match &mut chain.expression {
-        ChainElement::CallExpression(call) => {
-            adjust_call_expression_spans(call, offset);
-        }
-        ChainElement::TSNonNullExpression(ts_non_null) => {
-            adjust_ts_non_null_expression_spans(ts_non_null, offset);
-        }
-        _ => {
-            if let Some(mem) = chain.expression.as_member_expression_mut() {
-                adjust_member_expression_spans(mem, offset);
-            }
-        }
-    }
-}
-
-fn adjust_ts_as_expression_spans(ts_as: &mut TSAsExpression<'_>, offset: u32) {
-    adjust_span(&mut ts_as.span, offset);
-    adjust_expression_spans(&mut ts_as.expression, offset);
-    // Type annotation spans could also be adjusted if needed
-}
-
-fn adjust_ts_satisfies_expression_spans(ts_sat: &mut TSSatisfiesExpression<'_>, offset: u32) {
-    adjust_span(&mut ts_sat.span, offset);
-    adjust_expression_spans(&mut ts_sat.expression, offset);
-}
-
-fn adjust_ts_non_null_expression_spans(ts_non_null: &mut TSNonNullExpression<'_>, offset: u32) {
-    adjust_span(&mut ts_non_null.span, offset);
-    adjust_expression_spans(&mut ts_non_null.expression, offset);
-}
-
-fn adjust_ts_type_assertion_spans(ts_assert: &mut TSTypeAssertion<'_>, offset: u32) {
-    adjust_span(&mut ts_assert.span, offset);
-    adjust_expression_spans(&mut ts_assert.expression, offset);
-}
-
-fn adjust_import_expression_spans(import: &mut ImportExpression<'_>, offset: u32) {
-    adjust_span(&mut import.span, offset);
-    adjust_expression_spans(&mut import.source, offset);
-    if let Some(options) = &mut import.options {
-        adjust_expression_spans(options, offset);
-    }
-}
-
-pub(super) fn adjust_assignment_target_spans(target: &mut AssignmentTarget<'_>, offset: u32) {
-    match target {
-        AssignmentTarget::ArrayAssignmentTarget(arr) => {
-            adjust_span(&mut arr.span, offset);
-            for elem in arr.elements.iter_mut().flatten() {
-                adjust_assignment_target_maybe_default_spans(elem, offset);
-            }
-            if let Some(rest) = &mut arr.rest {
-                adjust_assignment_target_rest_spans(rest, offset);
-            }
-        }
-        AssignmentTarget::ObjectAssignmentTarget(obj) => {
-            adjust_span(&mut obj.span, offset);
-            for prop in &mut obj.properties {
-                adjust_assignment_target_property_spans(prop, offset);
-            }
-            if let Some(rest) = &mut obj.rest {
-                adjust_assignment_target_rest_spans(rest, offset);
-            }
-        }
-        _ => {
-            if let Some(simple) = target.as_simple_assignment_target_mut() {
-                adjust_simple_assignment_target_spans(simple, offset);
-            }
-        }
-    }
-}
-
-fn adjust_assignment_target_rest_spans(rest: &mut AssignmentTargetRest<'_>, offset: u32) {
-    adjust_span(&mut rest.span, offset);
-    adjust_assignment_target_spans(&mut rest.target, offset);
-}
-
-fn adjust_assignment_target_maybe_default_spans(
-    target: &mut AssignmentTargetMaybeDefault<'_>,
-    offset: u32,
-) {
-    match target {
-        AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with_default) => {
-            adjust_span(&mut with_default.span, offset);
-            adjust_assignment_target_spans(&mut with_default.binding, offset);
-            adjust_expression_spans(&mut with_default.init, offset);
-        }
-        _ => {
-            if let Some(simple) = target.as_assignment_target_mut() {
-                adjust_assignment_target_spans(simple, offset);
-            }
-        }
-    }
-}
-
-fn adjust_assignment_target_property_spans(prop: &mut AssignmentTargetProperty<'_>, offset: u32) {
-    match prop {
-        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(id) => {
-            adjust_span(&mut id.span, offset);
-            adjust_span(&mut id.binding.span, offset);
-            if let Some(init) = &mut id.init {
-                adjust_expression_spans(init, offset);
-            }
-        }
-        AssignmentTargetProperty::AssignmentTargetPropertyProperty(p) => {
-            adjust_span(&mut p.span, offset);
-            // Name might not be convertible to expression (e.g., shorthand properties)
-            if let Some(name_expr) = p.name.as_expression_mut() {
-                adjust_expression_spans(name_expr, offset);
-            }
-            adjust_assignment_target_maybe_default_spans(&mut p.binding, offset);
-        }
-    }
-}
-
-fn adjust_simple_assignment_target_spans(target: &mut SimpleAssignmentTarget<'_>, offset: u32) {
-    match target {
-        SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
-            adjust_span(&mut id.span, offset);
-        }
-        SimpleAssignmentTarget::TSAsExpression(ts_as) => {
-            adjust_ts_as_expression_spans(ts_as, offset);
-        }
-        SimpleAssignmentTarget::TSSatisfiesExpression(ts_sat) => {
-            adjust_ts_satisfies_expression_spans(ts_sat, offset);
-        }
-        SimpleAssignmentTarget::TSNonNullExpression(ts_non_null) => {
-            adjust_ts_non_null_expression_spans(ts_non_null, offset);
-        }
-        SimpleAssignmentTarget::TSTypeAssertion(ts_assert) => {
-            adjust_ts_type_assertion_spans(ts_assert, offset);
-        }
-        _ => {
-            if let Some(mem) = target.as_member_expression_mut() {
-                adjust_member_expression_spans(mem, offset);
-            }
-        }
-    }
-}
-
-/// Adjust all spans in FormalParameters by adding the given offset.
-pub fn adjust_formal_parameters_spans(params: &mut FormalParameters<'_>, offset: u32) {
-    if offset == 0 {
-        return;
-    }
-
-    adjust_span(&mut params.span, offset);
-    for param in &mut params.items {
-        adjust_formal_parameter_spans(param, offset);
-    }
-    if let Some(rest) = &mut params.rest {
-        adjust_span(&mut rest.span, offset);
-        if let Some(ta) = &mut rest.type_annotation {
-            adjust_span(&mut ta.span, offset);
-        }
-        adjust_binding_pattern_spans(&mut rest.rest.argument, offset);
-    }
-}
-
-fn adjust_formal_parameter_spans(param: &mut FormalParameter<'_>, offset: u32) {
-    adjust_span(&mut param.span, offset);
-    adjust_binding_pattern_spans(&mut param.pattern, offset);
-    if let Some(ta) = &mut param.type_annotation {
-        adjust_span(&mut ta.span, offset);
-    }
-    if let Some(init) = &mut param.initializer {
-        adjust_expression_spans(init, offset);
-    }
-}
-
-fn adjust_binding_rest_element_spans(rest: &mut BindingRestElement<'_>, offset: u32) {
-    adjust_span(&mut rest.span, offset);
-    adjust_binding_pattern_spans(&mut rest.argument, offset);
-}
-
-fn adjust_binding_pattern_spans(pattern: &mut BindingPattern<'_>, offset: u32) {
-    match pattern {
-        BindingPattern::BindingIdentifier(id) => {
-            adjust_span(&mut id.span, offset);
-        }
-        BindingPattern::ObjectPattern(obj) => {
-            adjust_object_pattern_spans(obj, offset);
-        }
-        BindingPattern::ArrayPattern(arr) => {
-            adjust_array_pattern_spans(arr, offset);
-        }
-        BindingPattern::AssignmentPattern(assign) => {
-            adjust_span(&mut assign.span, offset);
-            adjust_binding_pattern_spans(&mut assign.left, offset);
-            adjust_expression_spans(&mut assign.right, offset);
-        }
-    }
-    // Type annotation spans could be adjusted if needed
-}
-
-fn adjust_object_pattern_spans(obj: &mut ObjectPattern<'_>, offset: u32) {
-    adjust_span(&mut obj.span, offset);
-    for prop in &mut obj.properties {
-        adjust_binding_property_spans(prop, offset);
-    }
-    if let Some(rest) = &mut obj.rest {
-        adjust_binding_rest_element_spans(rest, offset);
-    }
-}
-
-fn adjust_binding_property_spans(prop: &mut BindingProperty<'_>, offset: u32) {
-    adjust_span(&mut prop.span, offset);
-    // Key might not be convertible to expression (e.g., shorthand properties)
-    if let Some(key_expr) = prop.key.as_expression_mut() {
-        adjust_expression_spans(key_expr, offset);
-    }
-    adjust_binding_pattern_spans(&mut prop.value, offset);
-}
-
-fn adjust_array_pattern_spans(arr: &mut ArrayPattern<'_>, offset: u32) {
-    adjust_span(&mut arr.span, offset);
-    for elem in arr.elements.iter_mut().flatten() {
-        adjust_binding_pattern_spans(elem, offset);
-    }
-    if let Some(rest) = &mut arr.rest {
-        adjust_binding_rest_element_spans(rest, offset);
-    }
-}
-
-// =============================================================================
-// Program / Statement span adjustment
-// =============================================================================
-
-/// Adjust all spans in a Program by adding the given offset.
-///
-/// This walks the entire AST (statements, declarations, expressions) and
-/// offsets every span so they reflect positions in the original source file
-/// rather than the parsed substring.
-pub fn adjust_program_spans(program: &mut Program<'_>, offset: u32) {
-    if offset == 0 {
-        return;
-    }
-
-    adjust_span(&mut program.span, offset);
-    for stmt in &mut program.body {
-        adjust_statement_spans(stmt, offset);
-    }
-}
-
-fn adjust_statement_spans(stmt: &mut Statement<'_>, offset: u32) {
-    match stmt {
-        // ---- Core statements ----
-        Statement::ExpressionStatement(s) => {
-            adjust_span(&mut s.span, offset);
-            adjust_expression_spans(&mut s.expression, offset);
-        }
-        Statement::BlockStatement(block) => {
-            adjust_span(&mut block.span, offset);
-            for s in &mut block.body {
-                adjust_statement_spans(s, offset);
-            }
-        }
-        Statement::ReturnStatement(s) => {
-            adjust_span(&mut s.span, offset);
-            if let Some(arg) = &mut s.argument {
-                adjust_expression_spans(arg, offset);
-            }
-        }
-        Statement::IfStatement(s) => {
-            adjust_span(&mut s.span, offset);
-            adjust_expression_spans(&mut s.test, offset);
-            adjust_statement_spans(&mut s.consequent, offset);
-            if let Some(alt) = &mut s.alternate {
-                adjust_statement_spans(alt, offset);
-            }
-        }
-        Statement::ForStatement(s) => {
-            adjust_span(&mut s.span, offset);
-            if let Some(init) = &mut s.init {
-                adjust_for_statement_init_spans(init, offset);
-            }
-            if let Some(test) = &mut s.test {
-                adjust_expression_spans(test, offset);
-            }
-            if let Some(update) = &mut s.update {
-                adjust_expression_spans(update, offset);
-            }
-            adjust_statement_spans(&mut s.body, offset);
-        }
-        Statement::ForInStatement(s) => {
-            adjust_span(&mut s.span, offset);
-            adjust_for_statement_left_spans(&mut s.left, offset);
-            adjust_expression_spans(&mut s.right, offset);
-            adjust_statement_spans(&mut s.body, offset);
-        }
-        Statement::ForOfStatement(s) => {
-            adjust_span(&mut s.span, offset);
-            adjust_for_statement_left_spans(&mut s.left, offset);
-            adjust_expression_spans(&mut s.right, offset);
-            adjust_statement_spans(&mut s.body, offset);
-        }
-        Statement::WhileStatement(s) => {
-            adjust_span(&mut s.span, offset);
-            adjust_expression_spans(&mut s.test, offset);
-            adjust_statement_spans(&mut s.body, offset);
-        }
-        Statement::DoWhileStatement(s) => {
-            adjust_span(&mut s.span, offset);
-            adjust_statement_spans(&mut s.body, offset);
-            adjust_expression_spans(&mut s.test, offset);
-        }
-        Statement::SwitchStatement(s) => {
-            adjust_span(&mut s.span, offset);
-            adjust_expression_spans(&mut s.discriminant, offset);
-            for case in &mut s.cases {
-                adjust_span(&mut case.span, offset);
-                if let Some(test) = &mut case.test {
-                    adjust_expression_spans(test, offset);
-                }
-                for stmt in &mut case.consequent {
-                    adjust_statement_spans(stmt, offset);
+            SpanTask::ObjectExpression(obj) => {
+                adjust_span(&mut obj.span, offset);
+                for prop in &mut obj.properties {
+                    match prop {
+                        ObjectPropertyKind::ObjectProperty(p) => {
+                            let p = &mut **p;
+                            adjust_span(&mut p.span, offset);
+                            stack.push(SpanTask::PropertyKey(&mut p.key));
+                            stack.push(SpanTask::ProgramExpression(&mut p.value));
+                        }
+                        ObjectPropertyKind::SpreadProperty(spread) => {
+                            let spread = &mut **spread;
+                            adjust_span(&mut spread.span, offset);
+                            stack.push(SpanTask::ProgramExpression(&mut spread.argument));
+                        }
+                    }
                 }
             }
-        }
-        Statement::TryStatement(s) => {
-            adjust_span(&mut s.span, offset);
-            adjust_span(&mut s.block.span, offset);
-            for stmt in &mut s.block.body {
-                adjust_statement_spans(stmt, offset);
-            }
-            if let Some(handler) = &mut s.handler {
-                adjust_span(&mut handler.span, offset);
-                if let Some(param) = &mut handler.param {
-                    adjust_binding_pattern_spans(&mut param.pattern, offset);
+            SpanTask::PropertyKey(key) => match key {
+                PropertyKey::StaticIdentifier(ident) => adjust_span(&mut ident.span, offset),
+                PropertyKey::PrivateIdentifier(ident) => adjust_span(&mut ident.span, offset),
+                key => {
+                    if let Some(key_expr) = key.as_expression_mut() {
+                        stack.push(SpanTask::ProgramExpression(key_expr));
+                    }
                 }
-                adjust_span(&mut handler.body.span, offset);
-                for stmt in &mut handler.body.body {
-                    adjust_statement_spans(stmt, offset);
-                }
+            },
+            SpanTask::ParenthesizedExpression(paren) => {
+                adjust_span(&mut paren.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut paren.expression));
             }
-            if let Some(finalizer) = &mut s.finalizer {
-                adjust_span(&mut finalizer.span, offset);
-                for stmt in &mut finalizer.body {
-                    adjust_statement_spans(stmt, offset);
+            SpanTask::SequenceExpression(seq) => {
+                adjust_span(&mut seq.span, offset);
+                for expr in &mut seq.expressions {
+                    stack.push(SpanTask::ProgramExpression(expr));
                 }
             }
-        }
-        Statement::ThrowStatement(s) => {
-            adjust_span(&mut s.span, offset);
-            adjust_expression_spans(&mut s.argument, offset);
-        }
-        Statement::LabeledStatement(s) => {
-            adjust_span(&mut s.span, offset);
-            adjust_span(&mut s.label.span, offset);
-            adjust_statement_spans(&mut s.body, offset);
-        }
-        Statement::BreakStatement(s) => {
-            adjust_span(&mut s.span, offset);
-            if let Some(label) = &mut s.label {
-                adjust_span(&mut label.span, offset);
+            SpanTask::StaticMemberExpression(mem) => {
+                adjust_span(&mut mem.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut mem.object));
+                adjust_span(&mut mem.property.span, offset);
             }
-        }
-        Statement::ContinueStatement(s) => {
-            adjust_span(&mut s.span, offset);
-            if let Some(label) = &mut s.label {
-                adjust_span(&mut label.span, offset);
+            SpanTask::ComputedMemberExpression(mem) => {
+                adjust_span(&mut mem.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut mem.object));
+                stack.push(SpanTask::ProgramExpression(&mut mem.expression));
             }
-        }
-        Statement::EmptyStatement(s) => {
-            adjust_span(&mut s.span, offset);
-        }
-        Statement::WithStatement(s) => {
-            adjust_span(&mut s.span, offset);
-            adjust_expression_spans(&mut s.object, offset);
-            adjust_statement_spans(&mut s.body, offset);
-        }
-        Statement::DebuggerStatement(s) => {
-            adjust_span(&mut s.span, offset);
-        }
+            SpanTask::PrivateFieldExpression(mem) => {
+                adjust_span(&mut mem.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut mem.object));
+                adjust_span(&mut mem.field.span, offset);
+            }
+            SpanTask::CallExpression(call) => {
+                adjust_span(&mut call.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut call.callee));
+                for arg in &mut call.arguments {
+                    stack.push(SpanTask::Argument(arg));
+                }
+            }
+            SpanTask::Argument(arg) => match arg {
+                Argument::SpreadElement(spread) => {
+                    let spread = &mut **spread;
+                    stack.push(SpanTask::SpreadElement(spread));
+                }
+                arg => {
+                    if let Some(expr) = arg.as_expression_mut() {
+                        stack.push(SpanTask::ProgramExpression(expr));
+                    }
+                }
+            },
+            SpanTask::NewExpression(new) => {
+                adjust_span(&mut new.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut new.callee));
+                for arg in &mut new.arguments {
+                    stack.push(SpanTask::Argument(arg));
+                }
+            }
+            SpanTask::TaggedTemplateExpression(tagged) => {
+                adjust_span(&mut tagged.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut tagged.tag));
+                stack.push(SpanTask::TemplateLiteral(&mut tagged.quasi));
+            }
+            SpanTask::UnaryExpression(unary) => {
+                adjust_span(&mut unary.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut unary.argument));
+            }
+            SpanTask::UpdateExpression(update) => {
+                adjust_span(&mut update.span, offset);
+                match &mut update.argument {
+                    SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
+                        let id = &mut **id;
+                        adjust_span(&mut id.span, offset);
+                    }
+                    SimpleAssignmentTarget::TSAsExpression(ts_as) => {
+                        let ts_as = &mut **ts_as;
+                        stack.push(SpanTask::TsAsExpression(ts_as));
+                    }
+                    SimpleAssignmentTarget::TSSatisfiesExpression(ts_sat) => {
+                        let ts_sat = &mut **ts_sat;
+                        stack.push(SpanTask::TsSatisfiesExpression(ts_sat));
+                    }
+                    SimpleAssignmentTarget::TSNonNullExpression(ts_non_null) => {
+                        let ts_non_null = &mut **ts_non_null;
+                        stack.push(SpanTask::TsNonNullExpression(ts_non_null));
+                    }
+                    SimpleAssignmentTarget::TSTypeAssertion(ts_assert) => {
+                        let ts_assert = &mut **ts_assert;
+                        stack.push(SpanTask::TsTypeAssertion(ts_assert));
+                    }
+                    argument => {
+                        if let Some(mem) = argument.as_member_expression_mut() {
+                            stack.push(SpanTask::MemberExpression(mem));
+                        }
+                    }
+                }
+            }
+            SpanTask::MemberExpression(mem) => match mem {
+                MemberExpression::ComputedMemberExpression(computed) => {
+                    let computed = &mut **computed;
+                    stack.push(SpanTask::ComputedMemberExpression(computed));
+                }
+                MemberExpression::StaticMemberExpression(static_mem) => {
+                    let static_mem = &mut **static_mem;
+                    stack.push(SpanTask::StaticMemberExpression(static_mem));
+                }
+                MemberExpression::PrivateFieldExpression(private) => {
+                    let private = &mut **private;
+                    stack.push(SpanTask::PrivateFieldExpression(private));
+                }
+            },
+            SpanTask::BinaryExpression(binary) => {
+                adjust_span(&mut binary.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut binary.left));
+                stack.push(SpanTask::ProgramExpression(&mut binary.right));
+            }
+            SpanTask::LogicalExpression(logical) => {
+                adjust_span(&mut logical.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut logical.left));
+                stack.push(SpanTask::ProgramExpression(&mut logical.right));
+            }
+            SpanTask::ConditionalExpression(cond) => {
+                adjust_span(&mut cond.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut cond.test));
+                stack.push(SpanTask::ProgramExpression(&mut cond.consequent));
+                stack.push(SpanTask::ProgramExpression(&mut cond.alternate));
+            }
+            SpanTask::ArrowFunctionExpression(arrow) => {
+                adjust_span(&mut arrow.span, offset);
+                if let Some(tp) = &mut arrow.type_parameters {
+                    adjust_span(&mut tp.span, offset);
+                }
+                if let Some(rt) = &mut arrow.return_type {
+                    adjust_span(&mut rt.span, offset);
+                }
+                stack.push(SpanTask::FormalParameters(&mut arrow.params));
+                match &mut arrow.body {
+                    oxc_ast::ast::ArrowFunctionBody::FunctionBody(body) => {
+                        let body = &mut **body;
+                        // Block body: (x) => { return x + 1; }
+                        adjust_span(&mut body.span, offset);
+                        for stmt in &mut body.statements {
+                            stack.push(SpanTask::Statement(stmt));
+                        }
+                    }
+                    body => {
+                        // Expression body: (x) => x + 1
+                        if let Some(expression) = body.as_expression_mut() {
+                            stack.push(SpanTask::ProgramExpression(expression));
+                        }
+                    }
+                }
+            }
+            SpanTask::YieldExpression(yield_expr) => {
+                adjust_span(&mut yield_expr.span, offset);
+                if let Some(arg) = &mut yield_expr.argument {
+                    stack.push(SpanTask::ProgramExpression(arg));
+                }
+            }
+            SpanTask::AwaitExpression(await_expr) => {
+                adjust_span(&mut await_expr.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut await_expr.argument));
+            }
+            SpanTask::ChainExpression(chain) => {
+                adjust_span(&mut chain.span, offset);
+                match &mut chain.expression {
+                    ChainElement::CallExpression(call) => {
+                        let call = &mut **call;
+                        stack.push(SpanTask::CallExpression(call));
+                    }
+                    ChainElement::TSNonNullExpression(ts_non_null) => {
+                        let ts_non_null = &mut **ts_non_null;
+                        stack.push(SpanTask::TsNonNullExpression(ts_non_null));
+                    }
+                    expression => {
+                        if let Some(mem) = expression.as_member_expression_mut() {
+                            stack.push(SpanTask::MemberExpression(mem));
+                        }
+                    }
+                }
+            }
+            SpanTask::TsAsExpression(ts_as) => {
+                adjust_span(&mut ts_as.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut ts_as.expression));
+                // Type annotation spans could also be adjusted if needed
+            }
+            SpanTask::TsSatisfiesExpression(ts_sat) => {
+                adjust_span(&mut ts_sat.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut ts_sat.expression));
+            }
+            SpanTask::TsNonNullExpression(ts_non_null) => {
+                adjust_span(&mut ts_non_null.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut ts_non_null.expression));
+            }
+            SpanTask::TsTypeAssertion(ts_assert) => {
+                adjust_span(&mut ts_assert.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut ts_assert.expression));
+            }
+            SpanTask::ImportExpression(import) => {
+                adjust_span(&mut import.span, offset);
+                stack.push(SpanTask::ProgramExpression(&mut import.source));
+                if let Some(options) = &mut import.options {
+                    stack.push(SpanTask::ProgramExpression(options));
+                }
+            }
+            SpanTask::AssignmentTarget(target) => match target {
+                AssignmentTarget::ArrayAssignmentTarget(arr) => {
+                    let arr = &mut **arr;
+                    adjust_span(&mut arr.span, offset);
+                    for elem in arr.elements.iter_mut().flatten() {
+                        stack.push(SpanTask::AssignmentTargetMaybeDefault(elem));
+                    }
+                    if let Some(rest) = &mut arr.rest {
+                        stack.push(SpanTask::AssignmentTargetRest(rest));
+                    }
+                }
+                AssignmentTarget::ObjectAssignmentTarget(obj) => {
+                    let obj = &mut **obj;
+                    adjust_span(&mut obj.span, offset);
+                    for prop in &mut obj.properties {
+                        stack.push(SpanTask::AssignmentTargetProperty(prop));
+                    }
+                    if let Some(rest) = &mut obj.rest {
+                        stack.push(SpanTask::AssignmentTargetRest(rest));
+                    }
+                }
+                target => {
+                    if let Some(simple) = target.as_simple_assignment_target_mut() {
+                        stack.push(SpanTask::SimpleAssignmentTarget(simple));
+                    }
+                }
+            },
+            SpanTask::AssignmentTargetRest(rest) => {
+                adjust_span(&mut rest.span, offset);
+                stack.push(SpanTask::AssignmentTarget(&mut rest.target));
+            }
+            SpanTask::AssignmentTargetMaybeDefault(target) => match target {
+                AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with_default) => {
+                    let with_default = &mut **with_default;
+                    adjust_span(&mut with_default.span, offset);
+                    stack.push(SpanTask::AssignmentTarget(&mut with_default.binding));
+                    stack.push(SpanTask::ProgramExpression(&mut with_default.init));
+                }
+                target => {
+                    if let Some(simple) = target.as_assignment_target_mut() {
+                        stack.push(SpanTask::AssignmentTarget(simple));
+                    }
+                }
+            },
+            SpanTask::AssignmentTargetProperty(prop) => {
+                match prop {
+                    AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(id) => {
+                        let id = &mut **id;
+                        adjust_span(&mut id.span, offset);
+                        adjust_span(&mut id.binding.span, offset);
+                        if let Some(init) = &mut id.init {
+                            stack.push(SpanTask::ProgramExpression(init));
+                        }
+                    }
+                    AssignmentTargetProperty::AssignmentTargetPropertyProperty(p) => {
+                        let p = &mut **p;
+                        adjust_span(&mut p.span, offset);
+                        // Name might not be convertible to expression (e.g., shorthand properties)
+                        if let Some(name_expr) = p.name.as_expression_mut() {
+                            stack.push(SpanTask::ProgramExpression(name_expr));
+                        }
+                        stack.push(SpanTask::AssignmentTargetMaybeDefault(&mut p.binding));
+                    }
+                }
+            }
+            SpanTask::SimpleAssignmentTarget(target) => match target {
+                SimpleAssignmentTarget::AssignmentTargetIdentifier(id) => {
+                    let id = &mut **id;
+                    adjust_span(&mut id.span, offset);
+                }
+                SimpleAssignmentTarget::TSAsExpression(ts_as) => {
+                    let ts_as = &mut **ts_as;
+                    stack.push(SpanTask::TsAsExpression(ts_as));
+                }
+                SimpleAssignmentTarget::TSSatisfiesExpression(ts_sat) => {
+                    let ts_sat = &mut **ts_sat;
+                    stack.push(SpanTask::TsSatisfiesExpression(ts_sat));
+                }
+                SimpleAssignmentTarget::TSNonNullExpression(ts_non_null) => {
+                    let ts_non_null = &mut **ts_non_null;
+                    stack.push(SpanTask::TsNonNullExpression(ts_non_null));
+                }
+                SimpleAssignmentTarget::TSTypeAssertion(ts_assert) => {
+                    let ts_assert = &mut **ts_assert;
+                    stack.push(SpanTask::TsTypeAssertion(ts_assert));
+                }
+                target => {
+                    if let Some(mem) = target.as_member_expression_mut() {
+                        stack.push(SpanTask::MemberExpression(mem));
+                    }
+                }
+            },
+            SpanTask::FormalParameters(params) => {
+                adjust_span(&mut params.span, offset);
+                for param in &mut params.items {
+                    stack.push(SpanTask::FormalParameter(param));
+                }
+                if let Some(rest) = &mut params.rest {
+                    adjust_span(&mut rest.span, offset);
+                    if let Some(ta) = &mut rest.type_annotation {
+                        adjust_span(&mut ta.span, offset);
+                    }
+                    stack.push(SpanTask::BindingPattern(&mut rest.rest.argument));
+                }
+            }
+            SpanTask::FormalParameter(param) => {
+                adjust_span(&mut param.span, offset);
+                stack.push(SpanTask::BindingPattern(&mut param.pattern));
+                if let Some(ta) = &mut param.type_annotation {
+                    adjust_span(&mut ta.span, offset);
+                }
+                if let Some(init) = &mut param.initializer {
+                    stack.push(SpanTask::ProgramExpression(init));
+                }
+            }
+            SpanTask::BindingRestElement(rest) => {
+                adjust_span(&mut rest.span, offset);
+                stack.push(SpanTask::BindingPattern(&mut rest.argument));
+            }
+            SpanTask::BindingPattern(pattern) => {
+                match pattern {
+                    BindingPattern::BindingIdentifier(id) => {
+                        let id = &mut **id;
+                        adjust_span(&mut id.span, offset);
+                    }
+                    BindingPattern::ObjectPattern(obj) => {
+                        let obj = &mut **obj;
+                        stack.push(SpanTask::ObjectPattern(obj));
+                    }
+                    BindingPattern::ArrayPattern(arr) => {
+                        let arr = &mut **arr;
+                        stack.push(SpanTask::ArrayPattern(arr));
+                    }
+                    BindingPattern::AssignmentPattern(assign) => {
+                        let assign = &mut **assign;
+                        adjust_span(&mut assign.span, offset);
+                        stack.push(SpanTask::BindingPattern(&mut assign.left));
+                        stack.push(SpanTask::ProgramExpression(&mut assign.right));
+                    }
+                }
+                // Type annotation spans could be adjusted if needed
+            }
+            SpanTask::ObjectPattern(obj) => {
+                adjust_span(&mut obj.span, offset);
+                for prop in &mut obj.properties {
+                    stack.push(SpanTask::BindingProperty(prop));
+                }
+                if let Some(rest) = &mut obj.rest {
+                    stack.push(SpanTask::BindingRestElement(rest));
+                }
+            }
+            SpanTask::BindingProperty(prop) => {
+                adjust_span(&mut prop.span, offset);
+                // Key might not be convertible to expression (e.g., shorthand properties)
+                if let Some(key_expr) = prop.key.as_expression_mut() {
+                    stack.push(SpanTask::ProgramExpression(key_expr));
+                }
+                stack.push(SpanTask::BindingPattern(&mut prop.value));
+            }
+            SpanTask::ArrayPattern(arr) => {
+                adjust_span(&mut arr.span, offset);
+                for elem in arr.elements.iter_mut().flatten() {
+                    stack.push(SpanTask::BindingPattern(elem));
+                }
+                if let Some(rest) = &mut arr.rest {
+                    stack.push(SpanTask::BindingRestElement(rest));
+                }
+            }
+            SpanTask::Program(program) => {
+                adjust_span(&mut program.span, offset);
+                for stmt in &mut program.body {
+                    stack.push(SpanTask::Statement(stmt));
+                }
+            }
+            SpanTask::Statement(stmt) => {
+                match stmt {
+                    // ---- Core statements ----
+                    Statement::ExpressionStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                        stack.push(SpanTask::ProgramExpression(&mut s.expression));
+                    }
+                    Statement::BlockStatement(block) => {
+                        let block = &mut **block;
+                        adjust_span(&mut block.span, offset);
+                        for s in &mut block.body {
+                            stack.push(SpanTask::Statement(s));
+                        }
+                    }
+                    Statement::ReturnStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                        if let Some(arg) = &mut s.argument {
+                            stack.push(SpanTask::ProgramExpression(arg));
+                        }
+                    }
+                    Statement::IfStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                        stack.push(SpanTask::ProgramExpression(&mut s.test));
+                        stack.push(SpanTask::Statement(&mut s.consequent));
+                        if let Some(alt) = &mut s.alternate {
+                            stack.push(SpanTask::Statement(alt));
+                        }
+                    }
+                    Statement::ForStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                        if let Some(init) = &mut s.init {
+                            stack.push(SpanTask::ForStatementInit(init));
+                        }
+                        if let Some(test) = &mut s.test {
+                            stack.push(SpanTask::ProgramExpression(test));
+                        }
+                        if let Some(update) = &mut s.update {
+                            stack.push(SpanTask::ProgramExpression(update));
+                        }
+                        stack.push(SpanTask::Statement(&mut s.body));
+                    }
+                    Statement::ForInStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                        stack.push(SpanTask::ForStatementLeft(&mut s.left));
+                        stack.push(SpanTask::ProgramExpression(&mut s.right));
+                        stack.push(SpanTask::Statement(&mut s.body));
+                    }
+                    Statement::ForOfStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                        stack.push(SpanTask::ForStatementLeft(&mut s.left));
+                        stack.push(SpanTask::ProgramExpression(&mut s.right));
+                        stack.push(SpanTask::Statement(&mut s.body));
+                    }
+                    Statement::WhileStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                        stack.push(SpanTask::ProgramExpression(&mut s.test));
+                        stack.push(SpanTask::Statement(&mut s.body));
+                    }
+                    Statement::DoWhileStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                        stack.push(SpanTask::Statement(&mut s.body));
+                        stack.push(SpanTask::ProgramExpression(&mut s.test));
+                    }
+                    Statement::SwitchStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                        stack.push(SpanTask::ProgramExpression(&mut s.discriminant));
+                        for case in &mut s.cases {
+                            adjust_span(&mut case.span, offset);
+                            if let Some(test) = &mut case.test {
+                                stack.push(SpanTask::ProgramExpression(test));
+                            }
+                            for stmt in &mut case.consequent {
+                                stack.push(SpanTask::Statement(stmt));
+                            }
+                        }
+                    }
+                    Statement::TryStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                        adjust_span(&mut s.block.span, offset);
+                        for stmt in &mut s.block.body {
+                            stack.push(SpanTask::Statement(stmt));
+                        }
+                        if let Some(handler) = &mut s.handler {
+                            let handler = &mut **handler;
+                            adjust_span(&mut handler.span, offset);
+                            if let Some(param) = &mut handler.param {
+                                stack.push(SpanTask::BindingPattern(&mut param.pattern));
+                            }
+                            adjust_span(&mut handler.body.span, offset);
+                            for stmt in &mut handler.body.body {
+                                stack.push(SpanTask::Statement(stmt));
+                            }
+                        }
+                        if let Some(finalizer) = &mut s.finalizer {
+                            adjust_span(&mut finalizer.span, offset);
+                            for stmt in &mut finalizer.body {
+                                stack.push(SpanTask::Statement(stmt));
+                            }
+                        }
+                    }
+                    Statement::ThrowStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                        stack.push(SpanTask::ProgramExpression(&mut s.argument));
+                    }
+                    Statement::LabeledStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                        adjust_span(&mut s.label.span, offset);
+                        stack.push(SpanTask::Statement(&mut s.body));
+                    }
+                    Statement::BreakStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                        if let Some(label) = &mut s.label {
+                            adjust_span(&mut label.span, offset);
+                        }
+                    }
+                    Statement::ContinueStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                        if let Some(label) = &mut s.label {
+                            adjust_span(&mut label.span, offset);
+                        }
+                    }
+                    Statement::EmptyStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                    }
+                    Statement::WithStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                        stack.push(SpanTask::ProgramExpression(&mut s.object));
+                        stack.push(SpanTask::Statement(&mut s.body));
+                    }
+                    Statement::DebuggerStatement(s) => {
+                        let s = &mut **s;
+                        adjust_span(&mut s.span, offset);
+                    }
 
-        // ---- Declarations ----
-        Statement::VariableDeclaration(decl) => {
-            adjust_variable_declaration_spans(decl, offset);
-        }
-        Statement::FunctionDeclaration(func) => {
-            adjust_function_spans(func, offset);
-        }
-        Statement::ClassDeclaration(class) => {
-            adjust_class_spans(class, offset);
-        }
+                    // ---- Declarations ----
+                    Statement::VariableDeclaration(decl) => {
+                        let decl = &mut **decl;
+                        stack.push(SpanTask::VariableDeclaration(decl));
+                    }
+                    Statement::FunctionDeclaration(func) => {
+                        let func = &mut **func;
+                        stack.push(SpanTask::Function(func));
+                    }
+                    Statement::ClassDeclaration(class) => {
+                        let class = &mut **class;
+                        stack.push(SpanTask::Class(class));
+                    }
 
-        // ---- Module declarations ----
-        Statement::ImportDeclaration(decl) => {
-            adjust_span(&mut decl.span, offset);
-            adjust_span(&mut decl.source.span, offset);
-            if let Some(specifiers) = &mut decl.specifiers {
-                for spec in specifiers {
-                    match spec {
+                    // ---- Module declarations ----
+                    Statement::ImportDeclaration(decl) => {
+                        let decl = &mut **decl;
+                        adjust_span(&mut decl.span, offset);
+                        adjust_span(&mut decl.source.span, offset);
+                        if let Some(specifiers) = &mut decl.specifiers {
+                            for spec in specifiers {
+                                match spec {
                         oxc_ast::ast::ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                            let s = &mut **s;
                             adjust_span(&mut s.span, offset);
                             adjust_span(s.imported.span_mut(), offset);
                             adjust_span(&mut s.local.span, offset);
                         }
                         oxc_ast::ast::ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
+                            let s = &mut **s;
                             adjust_span(&mut s.span, offset);
                             adjust_span(&mut s.local.span, offset);
                         }
                         oxc_ast::ast::ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
+                            let s = &mut **s;
                             adjust_span(&mut s.span, offset);
                             adjust_span(&mut s.local.span, offset);
                         }
                     }
-                }
-            }
-            if let Some(with_clause) = &mut decl.with_clause {
-                adjust_span(&mut with_clause.span, offset);
-            }
-        }
-        Statement::ExportAllDeclaration(decl) => {
-            adjust_span(&mut decl.span, offset);
-            adjust_span(&mut decl.source.span, offset);
-            if let Some(exported) = &mut decl.exported {
-                adjust_span(exported.span_mut(), offset);
-            }
-        }
-        Statement::ExportDefaultDeclaration(decl) => {
-            adjust_span(&mut decl.span, offset);
-            match &mut decl.declaration {
-                ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-                    adjust_function_spans(func, offset);
-                }
-                ExportDefaultDeclarationKind::ClassDeclaration(class) => {
-                    adjust_class_spans(class, offset);
-                }
-                _ => {
-                    if let Some(expr) = decl.declaration.as_expression_mut() {
-                        adjust_expression_spans(expr, offset);
+                            }
+                        }
+                        if let Some(with_clause) = &mut decl.with_clause {
+                            adjust_span(&mut with_clause.span, offset);
+                        }
+                    }
+                    Statement::ExportAllDeclaration(decl) => {
+                        let decl = &mut **decl;
+                        adjust_span(&mut decl.span, offset);
+                        adjust_span(&mut decl.source.span, offset);
+                        if let Some(exported) = &mut decl.exported {
+                            adjust_span(exported.span_mut(), offset);
+                        }
+                    }
+                    Statement::ExportDefaultDeclaration(decl) => {
+                        let decl = &mut **decl;
+                        adjust_span(&mut decl.span, offset);
+                        match &mut decl.declaration {
+                            ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                                let func = &mut **func;
+                                stack.push(SpanTask::Function(func));
+                            }
+                            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                                let class = &mut **class;
+                                stack.push(SpanTask::Class(class));
+                            }
+                            declaration => {
+                                if let Some(expr) = declaration.as_expression_mut() {
+                                    stack.push(SpanTask::ProgramExpression(expr));
+                                }
+                            }
+                        }
+                    }
+                    Statement::ExportDeclaration(decl) => {
+                        let decl = &mut **decl;
+                        adjust_span(&mut decl.span, offset);
+                        stack.push(SpanTask::Declaration(&mut decl.declaration));
+                    }
+                    Statement::ExportNamedDeclaration(decl) => {
+                        let decl = &mut **decl;
+                        adjust_span(&mut decl.span, offset);
+                        for spec in &mut decl.specifiers {
+                            adjust_span(&mut spec.span, offset);
+                            adjust_span(spec.local.span_mut(), offset);
+                            adjust_span(spec.exported.span_mut(), offset);
+                        }
+                    }
+                    Statement::ExportFromDeclaration(decl) => {
+                        let decl = &mut **decl;
+                        adjust_span(&mut decl.span, offset);
+                        for spec in &mut decl.specifiers {
+                            adjust_span(&mut spec.span, offset);
+                            adjust_span(spec.local.span_mut(), offset);
+                            adjust_span(spec.exported.span_mut(), offset);
+                        }
+                        adjust_span(&mut decl.source.span, offset);
+                    }
+
+                    // ---- TypeScript declarations ----
+                    Statement::TSTypeAliasDeclaration(d) => {
+                        let d = &mut **d;
+                        adjust_span(&mut d.span, offset);
+                        adjust_span(&mut d.id.span, offset);
+                    }
+                    Statement::TSInterfaceDeclaration(d) => {
+                        let d = &mut **d;
+                        adjust_span(&mut d.span, offset);
+                        adjust_span(&mut d.id.span, offset);
+                    }
+                    Statement::TSEnumDeclaration(d) => {
+                        let d = &mut **d;
+                        adjust_span(&mut d.span, offset);
+                        adjust_span(&mut d.id.span, offset);
+                        for member in &mut d.body.members {
+                            adjust_span(&mut member.span, offset);
+                            if let Some(init) = &mut member.initializer {
+                                stack.push(SpanTask::ProgramExpression(init));
+                            }
+                        }
+                    }
+                    Statement::TSExternalModuleDeclaration(d) => {
+                        let d = &mut **d;
+                        adjust_span(&mut d.span, offset);
+                    }
+                    Statement::TSNamespaceDeclaration(d) => {
+                        let d = &mut **d;
+                        adjust_span(&mut d.span, offset);
+                    }
+                    Statement::TSImportEqualsDeclaration(d) => {
+                        let d = &mut **d;
+                        adjust_span(&mut d.span, offset);
+                        adjust_span(&mut d.id.span, offset);
+                    }
+                    Statement::TSExportAssignment(d) => {
+                        let d = &mut **d;
+                        adjust_span(&mut d.span, offset);
+                        stack.push(SpanTask::ProgramExpression(&mut d.expression));
+                    }
+                    Statement::TSNamespaceExportDeclaration(d) => {
+                        let d = &mut **d;
+                        adjust_span(&mut d.span, offset);
+                        adjust_span(&mut d.id.span, offset);
+                    }
+                    Statement::TSGlobalDeclaration(d) => {
+                        let d = &mut **d;
+                        adjust_span(&mut d.span, offset);
                     }
                 }
             }
-        }
-        Statement::ExportDeclaration(decl) => {
-            adjust_span(&mut decl.span, offset);
-            adjust_declaration_spans(&mut decl.declaration, offset);
-        }
-        Statement::ExportNamedDeclaration(decl) => {
-            adjust_span(&mut decl.span, offset);
-            for spec in &mut decl.specifiers {
-                adjust_span(&mut spec.span, offset);
-                adjust_span(spec.local.span_mut(), offset);
-                adjust_span(spec.exported.span_mut(), offset);
-            }
-        }
-        Statement::ExportFromDeclaration(decl) => {
-            adjust_span(&mut decl.span, offset);
-            for spec in &mut decl.specifiers {
-                adjust_span(&mut spec.span, offset);
-                adjust_span(spec.local.span_mut(), offset);
-                adjust_span(spec.exported.span_mut(), offset);
-            }
-            adjust_span(&mut decl.source.span, offset);
-        }
-
-        // ---- TypeScript declarations ----
-        Statement::TSTypeAliasDeclaration(d) => {
-            adjust_span(&mut d.span, offset);
-            adjust_span(&mut d.id.span, offset);
-        }
-        Statement::TSInterfaceDeclaration(d) => {
-            adjust_span(&mut d.span, offset);
-            adjust_span(&mut d.id.span, offset);
-        }
-        Statement::TSEnumDeclaration(d) => {
-            adjust_span(&mut d.span, offset);
-            adjust_span(&mut d.id.span, offset);
-            for member in &mut d.body.members {
-                adjust_span(&mut member.span, offset);
-                if let Some(init) = &mut member.initializer {
-                    adjust_expression_spans(init, offset);
+            SpanTask::ForStatementInit(init) => match init {
+                ForStatementInit::VariableDeclaration(decl) => {
+                    let decl = &mut **decl;
+                    stack.push(SpanTask::VariableDeclaration(decl));
+                }
+                init => {
+                    if let Some(expr) = init.as_expression_mut() {
+                        stack.push(SpanTask::ProgramExpression(expr));
+                    }
+                }
+            },
+            SpanTask::ForStatementLeft(left) => match left {
+                oxc_ast::ast::ForStatementLeft::VariableDeclaration(decl) => {
+                    let decl = &mut **decl;
+                    stack.push(SpanTask::VariableDeclaration(decl));
+                }
+                left => {
+                    if let Some(target) = left.as_assignment_target_mut() {
+                        stack.push(SpanTask::AssignmentTarget(target));
+                    }
+                }
+            },
+            SpanTask::VariableDeclaration(decl) => {
+                adjust_span(&mut decl.span, offset);
+                for declarator in &mut decl.declarations {
+                    adjust_span(&mut declarator.span, offset);
+                    stack.push(SpanTask::BindingPattern(&mut declarator.id));
+                    if let Some(ta) = &mut declarator.type_annotation {
+                        adjust_span(&mut ta.span, offset);
+                    }
+                    if let Some(init) = &mut declarator.init {
+                        stack.push(SpanTask::ProgramExpression(init));
+                    }
                 }
             }
-        }
-        Statement::TSExternalModuleDeclaration(d) => {
-            adjust_span(&mut d.span, offset);
-        }
-        Statement::TSNamespaceDeclaration(d) => {
-            adjust_span(&mut d.span, offset);
-        }
-        Statement::TSImportEqualsDeclaration(d) => {
-            adjust_span(&mut d.span, offset);
-            adjust_span(&mut d.id.span, offset);
-        }
-        Statement::TSExportAssignment(d) => {
-            adjust_span(&mut d.span, offset);
-            adjust_expression_spans(&mut d.expression, offset);
-        }
-        Statement::TSNamespaceExportDeclaration(d) => {
-            adjust_span(&mut d.span, offset);
-            adjust_span(&mut d.id.span, offset);
-        }
-        Statement::TSGlobalDeclaration(d) => {
-            adjust_span(&mut d.span, offset);
+            SpanTask::Function(func) => {
+                adjust_span(&mut func.span, offset);
+                if let Some(id) = &mut func.id {
+                    adjust_span(&mut id.span, offset);
+                }
+                if let Some(tp) = &mut func.type_parameters {
+                    adjust_span(&mut tp.span, offset);
+                }
+                if let Some(rt) = &mut func.return_type {
+                    adjust_span(&mut rt.span, offset);
+                }
+                stack.push(SpanTask::FormalParameters(&mut func.params));
+                if let Some(body) = &mut func.body {
+                    adjust_span(&mut body.span, offset);
+                    for stmt in &mut body.statements {
+                        stack.push(SpanTask::Statement(stmt));
+                    }
+                }
+            }
+            SpanTask::Class(class) => {
+                adjust_span(&mut class.span, offset);
+                if let Some(id) = &mut class.id {
+                    adjust_span(&mut id.span, offset);
+                }
+                if let Some(tp) = &mut class.type_parameters {
+                    adjust_span(&mut tp.span, offset);
+                }
+                if let Some(sta) = class
+                    .heritage
+                    .as_mut()
+                    .and_then(|h| h.type_arguments.as_mut())
+                {
+                    adjust_span(&mut sta.span, offset);
+                }
+                for impl_clause in &mut class.implements {
+                    adjust_span(&mut impl_clause.span, offset);
+                }
+                if let Some(heritage) = &mut class.heritage {
+                    stack.push(SpanTask::ProgramExpression(&mut heritage.expression));
+                }
+                adjust_span(&mut class.body.span, offset);
+                for element in &mut class.body.body {
+                    match element {
+                        oxc_ast::ast::ClassElement::MethodDefinition(method) => {
+                            let method = &mut **method;
+                            adjust_span(&mut method.span, offset);
+                            if let Some(key_expr) = method.key.as_expression_mut() {
+                                stack.push(SpanTask::ProgramExpression(key_expr));
+                            }
+                            stack.push(SpanTask::Function(&mut method.value));
+                        }
+                        oxc_ast::ast::ClassElement::PropertyDefinition(prop) => {
+                            let prop = &mut **prop;
+                            adjust_span(&mut prop.span, offset);
+                            if let Some(key_expr) = prop.key.as_expression_mut() {
+                                stack.push(SpanTask::ProgramExpression(key_expr));
+                            }
+                            if let Some(ta) = &mut prop.type_annotation {
+                                adjust_span(&mut ta.span, offset);
+                            }
+                            if let Some(value) = &mut prop.value {
+                                stack.push(SpanTask::ProgramExpression(value));
+                            }
+                        }
+                        oxc_ast::ast::ClassElement::StaticBlock(block) => {
+                            let block = &mut **block;
+                            adjust_span(&mut block.span, offset);
+                            for stmt in &mut block.body {
+                                stack.push(SpanTask::Statement(stmt));
+                            }
+                        }
+                        oxc_ast::ast::ClassElement::AccessorProperty(prop) => {
+                            let prop = &mut **prop;
+                            adjust_span(&mut prop.span, offset);
+                            if let Some(key_expr) = prop.key.as_expression_mut() {
+                                stack.push(SpanTask::ProgramExpression(key_expr));
+                            }
+                            if let Some(ta) = &mut prop.type_annotation {
+                                adjust_span(&mut ta.span, offset);
+                            }
+                            if let Some(value) = &mut prop.value {
+                                stack.push(SpanTask::ProgramExpression(value));
+                            }
+                        }
+                        oxc_ast::ast::ClassElement::TSIndexSignature(sig) => {
+                            let sig = &mut **sig;
+                            adjust_span(&mut sig.span, offset);
+                        }
+                    }
+                }
+            }
+            SpanTask::Declaration(decl) => match decl {
+                oxc_ast::ast::Declaration::VariableDeclaration(d) => {
+                    let d = &mut **d;
+                    stack.push(SpanTask::VariableDeclaration(d));
+                }
+                oxc_ast::ast::Declaration::FunctionDeclaration(f) => {
+                    let f = &mut **f;
+                    stack.push(SpanTask::Function(f));
+                }
+                oxc_ast::ast::Declaration::ClassDeclaration(c) => {
+                    let c = &mut **c;
+                    stack.push(SpanTask::Class(c));
+                }
+                oxc_ast::ast::Declaration::TSTypeAliasDeclaration(d) => {
+                    let d = &mut **d;
+                    adjust_span(&mut d.span, offset);
+                    adjust_span(&mut d.id.span, offset);
+                }
+                oxc_ast::ast::Declaration::TSInterfaceDeclaration(d) => {
+                    let d = &mut **d;
+                    adjust_span(&mut d.span, offset);
+                    adjust_span(&mut d.id.span, offset);
+                }
+                oxc_ast::ast::Declaration::TSEnumDeclaration(d) => {
+                    let d = &mut **d;
+                    adjust_span(&mut d.span, offset);
+                    adjust_span(&mut d.id.span, offset);
+                    for member in &mut d.body.members {
+                        adjust_span(&mut member.span, offset);
+                        if let Some(init) = &mut member.initializer {
+                            stack.push(SpanTask::ProgramExpression(init));
+                        }
+                    }
+                }
+                oxc_ast::ast::Declaration::TSExternalModuleDeclaration(d) => {
+                    let d = &mut **d;
+                    adjust_span(&mut d.span, offset);
+                }
+                oxc_ast::ast::Declaration::TSNamespaceDeclaration(d) => {
+                    let d = &mut **d;
+                    adjust_span(&mut d.span, offset);
+                }
+                oxc_ast::ast::Declaration::TSGlobalDeclaration(d) => {
+                    let d = &mut **d;
+                    adjust_span(&mut d.span, offset);
+                }
+                oxc_ast::ast::Declaration::TSImportEqualsDeclaration(d) => {
+                    let d = &mut **d;
+                    adjust_span(&mut d.span, offset);
+                    adjust_span(&mut d.id.span, offset);
+                }
+            },
         }
     }
 }
 
-fn adjust_for_statement_init_spans(init: &mut ForStatementInit<'_>, offset: u32) {
-    match init {
-        ForStatementInit::VariableDeclaration(decl) => {
-            adjust_variable_declaration_spans(decl, offset);
-        }
-        _ => {
-            if let Some(expr) = init.as_expression_mut() {
-                adjust_expression_spans(expr, offset);
-            }
-        }
-    }
+/// Adjust formal parameters using the Program coordinate policy.
+pub fn adjust_formal_parameters_spans(params: &mut FormalParameters<'_>, offset: u32) {
+    adjust_pending_spans(SpanTask::FormalParameters(params), offset);
 }
 
-fn adjust_for_statement_left_spans(left: &mut oxc_ast::ast::ForStatementLeft<'_>, offset: u32) {
-    match left {
-        oxc_ast::ast::ForStatementLeft::VariableDeclaration(decl) => {
-            adjust_variable_declaration_spans(decl, offset);
-        }
-        _ => {
-            if let Some(target) = left.as_assignment_target_mut() {
-                adjust_assignment_target_spans(target, offset);
-            }
-        }
-    }
-}
-
-fn adjust_variable_declaration_spans(
-    decl: &mut oxc_ast::ast::VariableDeclaration<'_>,
-    offset: u32,
-) {
-    adjust_span(&mut decl.span, offset);
-    for declarator in &mut decl.declarations {
-        adjust_span(&mut declarator.span, offset);
-        adjust_binding_pattern_spans(&mut declarator.id, offset);
-        if let Some(ta) = &mut declarator.type_annotation {
-            adjust_span(&mut ta.span, offset);
-        }
-        if let Some(init) = &mut declarator.init {
-            adjust_expression_spans(init, offset);
-        }
-    }
-}
-
-fn adjust_function_spans(func: &mut oxc_ast::ast::Function<'_>, offset: u32) {
-    adjust_span(&mut func.span, offset);
-    if let Some(id) = &mut func.id {
-        adjust_span(&mut id.span, offset);
-    }
-    if let Some(tp) = &mut func.type_parameters {
-        adjust_span(&mut tp.span, offset);
-    }
-    if let Some(rt) = &mut func.return_type {
-        adjust_span(&mut rt.span, offset);
-    }
-    adjust_formal_parameters_spans(&mut func.params, offset);
-    if let Some(body) = &mut func.body {
-        adjust_span(&mut body.span, offset);
-        for stmt in &mut body.statements {
-            adjust_statement_spans(stmt, offset);
-        }
-    }
-}
-
-fn adjust_class_spans(class: &mut oxc_ast::ast::Class<'_>, offset: u32) {
-    adjust_span(&mut class.span, offset);
-    if let Some(id) = &mut class.id {
-        adjust_span(&mut id.span, offset);
-    }
-    if let Some(tp) = &mut class.type_parameters {
-        adjust_span(&mut tp.span, offset);
-    }
-    if let Some(sta) = class
-        .heritage
-        .as_mut()
-        .and_then(|h| h.type_arguments.as_mut())
-    {
-        adjust_span(&mut sta.span, offset);
-    }
-    for impl_clause in &mut class.implements {
-        adjust_span(&mut impl_clause.span, offset);
-    }
-    if let Some(heritage) = &mut class.heritage {
-        adjust_expression_spans(&mut heritage.expression, offset);
-    }
-    adjust_span(&mut class.body.span, offset);
-    for element in &mut class.body.body {
-        match element {
-            oxc_ast::ast::ClassElement::MethodDefinition(method) => {
-                adjust_span(&mut method.span, offset);
-                if let Some(key_expr) = method.key.as_expression_mut() {
-                    adjust_expression_spans(key_expr, offset);
-                }
-                adjust_function_spans(&mut method.value, offset);
-            }
-            oxc_ast::ast::ClassElement::PropertyDefinition(prop) => {
-                adjust_span(&mut prop.span, offset);
-                if let Some(key_expr) = prop.key.as_expression_mut() {
-                    adjust_expression_spans(key_expr, offset);
-                }
-                if let Some(ta) = &mut prop.type_annotation {
-                    adjust_span(&mut ta.span, offset);
-                }
-                if let Some(value) = &mut prop.value {
-                    adjust_expression_spans(value, offset);
-                }
-            }
-            oxc_ast::ast::ClassElement::StaticBlock(block) => {
-                adjust_span(&mut block.span, offset);
-                for stmt in &mut block.body {
-                    adjust_statement_spans(stmt, offset);
-                }
-            }
-            oxc_ast::ast::ClassElement::AccessorProperty(prop) => {
-                adjust_span(&mut prop.span, offset);
-                if let Some(key_expr) = prop.key.as_expression_mut() {
-                    adjust_expression_spans(key_expr, offset);
-                }
-                if let Some(ta) = &mut prop.type_annotation {
-                    adjust_span(&mut ta.span, offset);
-                }
-                if let Some(value) = &mut prop.value {
-                    adjust_expression_spans(value, offset);
-                }
-            }
-            oxc_ast::ast::ClassElement::TSIndexSignature(sig) => {
-                adjust_span(&mut sig.span, offset);
-            }
-        }
-    }
-}
-
-fn adjust_declaration_spans(decl: &mut oxc_ast::ast::Declaration<'_>, offset: u32) {
-    match decl {
-        oxc_ast::ast::Declaration::VariableDeclaration(d) => {
-            adjust_variable_declaration_spans(d, offset);
-        }
-        oxc_ast::ast::Declaration::FunctionDeclaration(f) => {
-            adjust_function_spans(f, offset);
-        }
-        oxc_ast::ast::Declaration::ClassDeclaration(c) => {
-            adjust_class_spans(c, offset);
-        }
-        oxc_ast::ast::Declaration::TSTypeAliasDeclaration(d) => {
-            adjust_span(&mut d.span, offset);
-            adjust_span(&mut d.id.span, offset);
-        }
-        oxc_ast::ast::Declaration::TSInterfaceDeclaration(d) => {
-            adjust_span(&mut d.span, offset);
-            adjust_span(&mut d.id.span, offset);
-        }
-        oxc_ast::ast::Declaration::TSEnumDeclaration(d) => {
-            adjust_span(&mut d.span, offset);
-            adjust_span(&mut d.id.span, offset);
-            for member in &mut d.body.members {
-                adjust_span(&mut member.span, offset);
-                if let Some(init) = &mut member.initializer {
-                    adjust_expression_spans(init, offset);
-                }
-            }
-        }
-        oxc_ast::ast::Declaration::TSExternalModuleDeclaration(d) => {
-            adjust_span(&mut d.span, offset);
-        }
-        oxc_ast::ast::Declaration::TSNamespaceDeclaration(d) => {
-            adjust_span(&mut d.span, offset);
-        }
-        oxc_ast::ast::Declaration::TSGlobalDeclaration(d) => {
-            adjust_span(&mut d.span, offset);
-        }
-        oxc_ast::ast::Declaration::TSImportEqualsDeclaration(d) => {
-            adjust_span(&mut d.span, offset);
-            adjust_span(&mut d.id.span, offset);
-        }
-    }
+/// Adjust a Program while preserving its expression and type coordinate policy.
+pub fn adjust_program_spans(program: &mut Program<'_>, offset: u32) {
+    adjust_pending_spans(SpanTask::Program(program), offset);
 }
 
 // =============================================================================
@@ -1104,5 +1232,36 @@ pub fn adjust_diagnostics_spans(errors: &mut [oxc_diagnostics::OxcDiagnostic], o
                 label.len(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod coordinate_policy_tests {
+    use super::*;
+    use oxc_span::GetSpan;
+
+    #[test]
+    fn program_macro_type_arguments_keep_their_existing_coordinate_policy() {
+        let allocator = oxc_allocator::Allocator::default();
+        let source = "const props = defineProps<Props>()";
+        let mut parsed =
+            crate::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts()).parse();
+        assert!(parsed.diagnostics.is_empty());
+        adjust_program_spans(&mut parsed.program, 17);
+        let Statement::VariableDeclaration(declaration) = &parsed.program.body[0] else {
+            panic!("variable declaration");
+        };
+        let Expression::CallExpression(call) = declaration.declarations[0].init.as_ref().unwrap()
+        else {
+            panic!("macro call");
+        };
+        assert_eq!(
+            call.type_arguments.as_ref().unwrap().span.start,
+            source.find("<Props>").unwrap() as u32
+        );
+        assert_eq!(
+            call.callee.span().start,
+            17 + source.find("defineProps").unwrap() as u32
+        );
     }
 }

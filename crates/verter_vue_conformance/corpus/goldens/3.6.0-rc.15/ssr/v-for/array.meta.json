@@ -1,0 +1,56 @@
+{
+  "schema": 2,
+  "caseId": "v-for/array",
+  "backend": "ssr",
+  "topology": "non-inline",
+  "generator": {
+    "name": "@verter/vue-conformance-oracle",
+    "version": 4
+  },
+  "versions": {
+    "vue": "3.6.0-rc.15",
+    "@vue/compiler-dom": "3.6.0-rc.15",
+    "@vue/compiler-sfc": "3.6.0-rc.15",
+    "@vue/compiler-vapor": "3.6.0-rc.15",
+    "esbuild": "0.28.0"
+  },
+  "source": {
+    "path": "cases/v-for/array.vue",
+    "sha256": "b33fe7618fa189ecf317c17a53d18cbca609dba31fe97362e45f9a166afa41ea"
+  },
+  "options": {
+    "sha256": "3a0a68e629aba7a8ff75d3a6a4a291a0c92ad836a5fdcf940a38e955d36bb430",
+    "summary": {
+      "backend": "ssr",
+      "vapor": false,
+      "ssr": true,
+      "filename": "cases/v-for/array.vue",
+      "id": "v-for/array",
+      "pipeline": "compileScript:nonInline+compileTemplate",
+      "topology": "non-inline",
+      "inlineTemplate": false,
+      "bindingMetadata": true,
+      "sourceMap": true,
+      "postprocess": null
+    }
+  },
+  "artifacts": {
+    "code": {
+      "path": "goldens/3.6.0-rc.15/ssr/v-for/array.js",
+      "sha256": "cfe7312778664b587288f4460fd8451e7900ae7e9398dd4c89616f4b527647b3",
+      "bytes": 764
+    },
+    "map": {
+      "path": "goldens/3.6.0-rc.15/ssr/v-for/array.map.json",
+      "sha256": "12d01a20247e6f7d53e158f1af2e8c61c31d5ef1b649ff96bd43f22e0d77a87f"
+    }
+  },
+  "disposition": "compiled",
+  "diagnostics": [],
+  "helpers": [
+    {
+      "imported": "ref",
+      "alias": "ref"
+    }
+  ]
+}

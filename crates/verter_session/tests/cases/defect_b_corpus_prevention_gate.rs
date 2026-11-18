@@ -54,9 +54,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use verter_session::{HostConfig, VerterHost};
+use verter_session_query::resolution::IdeProjectCompilerOptions;
 use verter_workspace::{
-    FilesystemOptions, FilesystemWorkspace, IdeProjectCompilerOptions, ProjectRank,
-    VfsProjectConfig, WorkspaceAccess,
+    FilesystemOptions, FilesystemWorkspace, ProjectRank, VfsProjectConfig, WorkspaceAccess,
 };
 
 /// Components that MUST resolve without timeout (#1). The set includes
@@ -438,15 +438,22 @@ fn published_surface_is_degraded(
     owner_canonical: &str,
     meta: &verter_session_query::analysis::component_meta::ComponentMetaAnalysis,
 ) -> bool {
-    let degraded = |position| source_position_is_degraded(host, owner_canonical, position);
-    let props = meta.props.iter().any(|p| degraded(&p.type_source));
+    let degraded = |position: &verter_type_expr::facts::SourcePosition| {
+        source_position_is_degraded(host, owner_canonical, position)
+    };
+    let props = meta
+        .props
+        .iter()
+        .any(|p| degraded(&p.publication.source_position()));
     let models = meta.models.iter().any(|m| degraded(&m.type_source));
     let events = meta.events.iter().any(|e| degraded(&e.payload));
     let slots = meta.slots.iter().any(|s| {
         s.return_publication
             .as_ref()
             .is_some_and(|publication| degraded(&publication.source_position()))
-            || s.bindings.iter().any(|b| degraded(&b.type_source))
+            || s.bindings
+                .iter()
+                .any(|b| degraded(&b.publication.source_position()))
     });
     props || models || events || slots
 }
@@ -533,8 +540,10 @@ defineProps<{ present?: import('./types').Present, broken?: Deep['a'] }>()
         .unwrap();
     let host = project.host();
     let canonical = "/Masking.vue";
-    let (resolved, facts) =
-        host.with_fact_tracer(|| host.get_component_meta_with_resolution(canonical));
+    let (resolved, facts) = host.with_fact_tracer(
+        verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+        || host.get_component_meta_with_resolution(canonical),
+    );
     let (meta, resolution) = resolved.expect("the clean resolve returns metadata");
 
     // Every published field reads NOT-degraded on the independent probe
@@ -566,12 +575,12 @@ defineProps<{ present?: import('./types').Present, broken?: Deep['a'] }>()
         verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
             verter_type_expr::locators::TypeBodySlot {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
-                    canonical_id: std::sync::Arc::from("/definitely-missing.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/definitely-missing.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: std::sync::Arc::from("NoSuchType"),
+                    symbol: verter_type_expr::OwnedStr::from("NoSuchType"),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                 },
-                path: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::from([]),
             },
         ),
     );
@@ -617,8 +626,8 @@ defineProps<{ present?: string, broken?: DefinitelyMissingType['k'] }>()
         .iter()
         .find(|p| p.name == "broken")
         .expect("the `broken` prop publishes");
-    let source = broken
-        .type_source
+    let broken_position = broken.publication.source_position();
+    let source = broken_position
         .present()
         .expect("the `broken` prop carries a present source");
 
@@ -650,8 +659,8 @@ defineProps<{ present?: string, broken?: DefinitelyMissingType['k'] }>()
         .iter()
         .find(|p| p.name == "present")
         .expect("the `present` prop publishes");
-    let clean = present
-        .type_source
+    let present_position = present.publication.source_position();
+    let clean = present_position
         .present()
         .expect("the `present` prop carries a present source");
     assert_eq!(

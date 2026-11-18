@@ -24,8 +24,11 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::Visit;
+use oxc_sourcemap::SourceMap;
 use oxc_span::SourceType;
 use verter_parser::oxc_parse::{leased_program_walk, refusals_within, Parser, StackUnavailable};
+
+use crate::code_transform::{CodeTransform, SourceMapChainError, SourceMapOptions};
 
 /// One module specifier: the byte range of its whole string literal, the
 /// DECODED specifier it denotes, and the quote character it was written with.
@@ -125,16 +128,131 @@ pub fn collect_module_specifier_spans(
 }
 
 fn collect_unrecorded(source: &str) -> Option<Vec<ModuleSpecifierSpan>> {
+    inventory_unrecorded(source, false).map(|inventory| inventory.specifiers)
+}
+
+/// A source's module specifiers and the `/// <reference path="…" />` files
+/// its program reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleInventory {
+    pub specifiers: Vec<ModuleSpecifierSpan>,
+    /// `/// <reference path="…" />` values, each as the span of its quoted
+    /// literal, from the shared program-reference inventory
+    /// (`triple_slash_path_references`). They are file paths, not module
+    /// names; a rewrite treats them as such.
+    pub reference_paths: Vec<ModuleSpecifierSpan>,
+}
+
+/// [`collect_module_specifier_spans`] and the source's `path` references,
+/// from one parse. `None` and `Err` exactly as there.
+pub fn collect_module_inventory(source: &str) -> Result<Option<ModuleInventory>, StackUnavailable> {
+    match refusals_within(|| inventory_unrecorded(source, true)) {
+        (inventory, None) => Ok(inventory),
+        (_, Some(unavailable)) => Err(unavailable),
+    }
+}
+
+fn inventory_unrecorded(source: &str, references: bool) -> Option<ModuleInventory> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::tsx()).parse();
     if parsed.fatal_error || !parsed.diagnostics.is_empty() {
         return None;
     }
+    let specifiers = collect_module_specifier_spans_from_program(source, &parsed.program)?;
+    let reference_paths = if references {
+        verter_parser::utils::oxc::script::route_inventory::triple_slash_path_references(
+            &parsed.program,
+        )
+        .into_iter()
+        .filter_map(|(range, text)| {
+            let quote = source.get(range.clone())?.chars().next()?;
+            Some(ModuleSpecifierSpan {
+                start: range.start,
+                end: range.end,
+                text,
+                quote,
+            })
+        })
+        .collect()
+    } else {
+        Vec::new()
+    };
+    Some(ModuleInventory {
+        specifiers,
+        reference_paths,
+    })
+}
+
+/// A source whose module specifiers were replaced through [`CodeTransform`].
+#[derive(Debug, Clone)]
+pub struct RewrittenSpecifiers {
+    pub text: String,
+    /// Each replaced specifier as `(new, old)` values, in text order.
+    pub replaced: Vec<(String, String)>,
+    /// The map of `text`: back to the source, or, when the rewrite carried
+    /// a map whose generated text is the source, that map's positions.
+    pub map: SourceMap<'static>,
+}
+
+/// Replace each specifier of `spans` (the inventory of `source`) that
+/// `rewrite` answers `Some` for, re-emitting the whole literal in its quote
+/// style. `carried` is a map whose generated text is `source`; the result's
+/// map then answers that map's positions for the rewritten text
+/// ([`CodeTransform::chain_source_map`]).
+///
+/// # Errors
+///
+/// [`SourceMapChainError`] when `carried` names a position `source` does
+/// not have.
+pub fn rewrite_module_specifiers(
+    source: &str,
+    spans: &[ModuleSpecifierSpan],
+    rewrite: impl Fn(&str) -> Option<String>,
+    carried: Option<&SourceMap<'_>>,
+) -> Result<RewrittenSpecifiers, SourceMapChainError> {
+    let allocator = Allocator::default();
+    let mut transform = CodeTransform::new(source, &allocator);
+    let mut replaced = Vec::new();
+    for span in spans {
+        let Some(replacement) = rewrite(&span.text) else {
+            continue;
+        };
+        transform.overwrite(
+            span.start as u32,
+            span.end as u32,
+            &quote_module_specifier(&replacement, span.quote),
+        );
+        replaced.push((replacement, span.text.clone()));
+    }
+    let map = match carried {
+        Some(map) => transform.chain_source_map(map)?,
+        // The map's one source is `source`; a map without a source row
+        // carries no source positions.
+        None => transform
+            .generate_map(
+                SourceMapOptions::new()
+                    .with_source("source")
+                    .include_content(false),
+            )
+            .map_err(|_| SourceMapChainError::MapNotCaptured)?,
+    };
+    Ok(RewrittenSpecifiers {
+        text: transform.build_string(),
+        replaced,
+        map,
+    })
+}
+
+/// Inventory an already-parsed generated contract without parsing it again.
+pub(crate) fn collect_module_specifier_spans_from_program(
+    source: &str,
+    program: &Program<'_>,
+) -> Option<Vec<ModuleSpecifierSpan>> {
     let mut collector = SpecifierCollector {
         source,
         spans: Vec::new(),
     };
-    leased_program_walk(&parsed.program, || collector.visit_program(&parsed.program)).ok()?;
+    leased_program_walk(program, || collector.visit_program(program)).ok()?;
     collector.spans.sort_by_key(|span| span.start);
     collector.spans.dedup_by_key(|span| span.start);
     Some(collector.spans)

@@ -1,6 +1,7 @@
 //! Ordered Vue attribute operations and runtime-key interpretation.
 //!
-//! Three products per component use of an admitted [`ProjectionPlan`]:
+//! Ordered operations and effective keys for the component and element uses
+//! of an admitted [`ProjectionPlan`], plus component consumer relations:
 //!
 //! - [`VueAttributeSequence`] — static attrs, `v-bind` arguments/objects,
 //!   `v-on` arguments/objects, `v-model`, directives and modifiers in
@@ -28,12 +29,13 @@
 
 use crate::ast::types::{AstNodeKind, ElementNode};
 use crate::framework_common::projection_plan::{
-    classify_op, AdmittedExpressionId, AttributeOpKind, ComponentUse, ComponentUseId,
-    PlanSnapshotId, ProjectionPlan,
+    classify_op, AdmittedExpressionId, AttributeOpKind, ComponentUseId, ElementUseId,
+    ElementUseKind, OrderedAttributeOp, PlanSnapshotId, ProjectionPlan,
 };
 use crate::ide::get_directive_name;
+use crate::ide::vue_projection::script_setup::SourceRange;
 use crate::parser::types::ParsedSfc;
-use crate::template::code_gen::vdom::props::{camelize, format_event_handler_key_into};
+use crate::template::vue_syntax::{camelize, format_event_handler_key_into};
 use crate::types::NodeProp;
 
 /// Authored syntax family of one attribute operation.
@@ -77,13 +79,17 @@ pub struct VueAttributeOp {
     pub value: Option<AdmittedExpressionId>,
     /// Literal text of a static attribute (`""` when bare).
     pub static_text: Option<String>,
+    /// Authored bytes the runtime key is spelled from: a static attribute's
+    /// name, or a directive's static argument (`:title`, `@save`,
+    /// `v-model:title`). `None` when the key has no authored spelling.
+    pub key_source: Option<SourceRange>,
 }
 
-/// Authored attribute operations of one component use.
+/// Authored attribute operations of one typed use host.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VueAttributeSequence {
-    /// Logical component use.
-    pub use_id: ComponentUseId,
+pub struct VueAttributeSequence<H = ComponentUseId> {
+    /// Logical use host (a component by default).
+    pub use_id: H,
     /// Written as `<component>`: its `is` operation selects the component.
     pub component_tag: bool,
     /// Operations in authored order.
@@ -191,11 +197,11 @@ pub struct EffectiveProperty {
     pub overridden: Vec<u32>,
 }
 
-/// Runtime property keys of one component use.
+/// Runtime property keys of one typed use host.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimePropertyKeyPlan {
-    /// Logical component use.
-    pub use_id: ComponentUseId,
+pub struct RuntimePropertyKeyPlan<H = ComponentUseId> {
+    /// Logical use host (a component by default).
+    pub use_id: H,
     /// Property writes in authored order.
     pub writes: Vec<RuntimePropertyWrite>,
     /// Opaque object spreads in authored order.
@@ -206,7 +212,7 @@ pub struct RuntimePropertyKeyPlan {
     pub effective: Vec<EffectiveProperty>,
 }
 
-impl RuntimePropertyKeyPlan {
+impl<H> RuntimePropertyKeyPlan<H> {
     /// Effective interpretation of `key`, when statically known.
     #[must_use]
     pub fn effective(&self, key: &str) -> Option<&EffectiveProperty> {
@@ -287,6 +293,10 @@ pub struct AttributeOperationsProjection {
     pub key_plans: Vec<RuntimePropertyKeyPlan>,
     /// Consumer relations for every effective static key.
     pub relations: Vec<AttributeConsumerRelation>,
+    /// Element sequences retain element identities and share the component op path.
+    pub element_sequences: Vec<VueAttributeSequence<ElementUseId>>,
+    /// Effective runtime keys for the admitted elements.
+    pub element_key_plans: Vec<RuntimePropertyKeyPlan<ElementUseId>>,
 }
 
 impl AttributeOperationsProjection {
@@ -320,14 +330,29 @@ pub fn project_attribute_operations(
         let element = plan
             .expression(&use_.component_expression)
             .and_then(|occurrence| element_at(&elements, occurrence.start));
-        let Some(sequence) = element.and_then(|el| join_sequence(use_, el, source)) else {
+        let Some(sequence) =
+            element.and_then(|el| join_sequence(&use_.id, &use_.operations, el, source))
+        else {
             complete = false;
             continue;
         };
-        let key_plan = plan_runtime_keys(&sequence);
+        let key_plan = plan_runtime_keys(&sequence, false);
         relations.extend(relate_consumers(&sequence, &key_plan));
         sequences.push(sequence);
         key_plans.push(key_plan);
+    }
+    let mut element_sequences = Vec::with_capacity(plan.elements.len());
+    let mut element_key_plans = Vec::with_capacity(plan.elements.len());
+    for use_ in &plan.elements {
+        let Some(sequence) = element_at(&elements, use_.tag_start)
+            .and_then(|el| join_sequence(&use_.id, &use_.operations, el, source))
+        else {
+            complete = false;
+            continue;
+        };
+        let keys = plan_runtime_keys(&sequence, use_.kind == ElementUseKind::SlotOutlet);
+        element_sequences.push(sequence);
+        element_key_plans.push(keys);
     }
     AttributeOperationsProjection {
         snapshot: plan.snapshot.clone(),
@@ -335,6 +360,8 @@ pub fn project_attribute_operations(
         sequences,
         key_plans,
         relations,
+        element_sequences,
+        element_key_plans,
     }
 }
 
@@ -362,21 +389,22 @@ fn element_at<'e>(elements: &[&'e ElementNode], offset: u32) -> Option<&'e Eleme
     (offset < candidate.tag_open.end).then_some(*candidate)
 }
 
-fn join_sequence(
-    use_: &ComponentUse,
+fn join_sequence<H: Clone>(
+    use_id: &H,
+    admitted: &[OrderedAttributeOp],
     el: &ElementNode,
     source: &str,
-) -> Option<VueAttributeSequence> {
+) -> Option<VueAttributeSequence<H>> {
     let props: Vec<&NodeProp> = el
         .props
         .iter()
         .filter(|prop| classify_op(prop, source).is_some())
         .collect();
-    if props.len() != use_.operations.len() {
+    if props.len() != admitted.len() {
         return None;
     }
     let mut operations = Vec::with_capacity(props.len());
-    for (prop, op) in props.into_iter().zip(&use_.operations) {
+    for (prop, op) in props.into_iter().zip(admitted) {
         let directive = prop
             .is_directive
             .then(|| get_directive_name(prop, source).to_string());
@@ -407,6 +435,13 @@ fn join_sequence(
         };
         let static_text = (syntax == AttributeSyntax::Static)
             .then(|| slice(source, prop.value_start, prop.value_end).unwrap_or_default());
+        let key_source = if prop.is_directive {
+            prop.arg_start.zip(prop.arg_end).filter(|_| !dynamic)
+        } else {
+            Some((prop.start, prop.name_end))
+        }
+        .filter(|(start, end)| start < end)
+        .map(|(start, end)| SourceRange { start, end });
         operations.push(VueAttributeOp {
             index: op.index,
             syntax,
@@ -417,13 +452,14 @@ fn join_sequence(
             modifiers,
             value: op.expression.clone(),
             static_text,
+            key_source,
         });
     }
     let tag = source
         .get(el.tag_open.start as usize + 1..el.tag_open.name_end as usize)
         .unwrap_or_default();
     Some(VueAttributeSequence {
-        use_id: use_.id.clone(),
+        use_id: use_id.clone(),
         component_tag: tag == "component" || tag == "Component",
         operations,
     })
@@ -455,7 +491,10 @@ fn raw_spelling(prop: &NodeProp, source: &str) -> String {
 
 /// Assemble runtime property writes the way the runtime compiler builds
 /// component props: literal groups between `mergeProps` arguments.
-fn plan_runtime_keys(sequence: &VueAttributeSequence) -> RuntimePropertyKeyPlan {
+fn plan_runtime_keys<H: Clone>(
+    sequence: &VueAttributeSequence<H>,
+    outlet: bool,
+) -> RuntimePropertyKeyPlan<H> {
     let mut writes = Vec::new();
     let mut spreads = Vec::new();
     let mut no_property = Vec::new();
@@ -471,10 +510,29 @@ fn plan_runtime_keys(sequence: &VueAttributeSequence) -> RuntimePropertyKeyPlan 
         };
         let literal = |key: String| RuntimeKey::Static(key);
         match op.syntax {
+            _ if outlet
+                && !matches!(
+                    op.syntax,
+                    AttributeSyntax::Static | AttributeSyntax::Bind | AttributeSyntax::BindObject
+                ) =>
+            {
+                no_property.push(op.index)
+            }
+            AttributeSyntax::Static if outlet && op.raw_spelling == "name" => {
+                no_property.push(op.index)
+            }
+            AttributeSyntax::Static if outlet && op.value.is_none() => no_property.push(op.index),
+            AttributeSyntax::Bind if outlet && op.argument_spelling.as_deref() == Some("name") => {
+                no_property.push(op.index)
+            }
             _ if selects_component(sequence, op) => no_property.push(op.index),
             AttributeSyntax::Static => {
                 writes.push(write(
-                    literal(op.raw_spelling.clone()),
+                    literal(if outlet {
+                        camelize(&op.raw_spelling).into_owned()
+                    } else {
+                        op.raw_spelling.clone()
+                    }),
                     WriteValue::StaticText,
                     group,
                 ));
@@ -485,7 +543,11 @@ fn plan_runtime_keys(sequence: &VueAttributeSequence) -> RuntimePropertyKeyPlan 
                     .argument_spelling
                     .as_deref()
                     .map_or(RuntimeKey::Dynamic, |arg| {
-                        literal(bind_key(arg, &op.modifiers))
+                        literal(if outlet {
+                            bind_key(&camelize(arg), &op.modifiers)
+                        } else {
+                            bind_key(arg, &op.modifiers)
+                        })
                     });
                 writes.push(write(key, WriteValue::Expression, group));
                 group_open = true;
@@ -576,7 +638,7 @@ fn plan_runtime_keys(sequence: &VueAttributeSequence) -> RuntimePropertyKeyPlan 
 
 /// The runtime compiler drops `is` / `:is` on `<component>` and a static
 /// `is="vue:..."`: they select the component instead of writing a prop.
-fn selects_component(sequence: &VueAttributeSequence, op: &VueAttributeOp) -> bool {
+fn selects_component<H>(sequence: &VueAttributeSequence<H>, op: &VueAttributeOp) -> bool {
     match op.syntax {
         AttributeSyntax::Static if op.raw_spelling == "is" => {
             sequence.component_tag
@@ -593,7 +655,7 @@ fn selects_component(sequence: &VueAttributeSequence, op: &VueAttributeOp) -> bo
 }
 
 /// `v-bind` key: `.camel` camelizes, `.prop` / `.attr` prefix `.` / `^`.
-fn bind_key(arg: &str, modifiers: &[String]) -> String {
+pub(super) fn bind_key(arg: &str, modifiers: &[String]) -> String {
     let has = |name: &str| modifiers.iter().any(|m| m == name);
     let mut key = if has("camel") {
         camelize(arg).into_owned()
@@ -634,7 +696,7 @@ pub(super) fn handler_key(event: &str, modifiers: &[String]) -> String {
 /// (`modelModifiers` only when there is no arg). Matches
 /// `transformModel` in `@vue/compiler-core`, which uses the raw static
 /// arg spelling verbatim (`model-value` keeps its hyphen).
-fn modifier_prop_name(model: &str) -> String {
+pub(super) fn modifier_prop_name(model: &str) -> String {
     format!("{model}Modifiers")
 }
 
@@ -850,4 +912,561 @@ fn relate_consumers(
             }
         })
         .collect()
+}
+
+impl crate::framework_common::vue_projection_backend::VueProjectionProduct
+    for AttributeOperationsProjection
+{
+    fn project(
+        backend: &crate::framework_common::vue_projection_backend::VueProjectionBackend,
+        input: &crate::framework_common::vue_projection_backend::VueProductInput<'_>,
+    ) -> Result<Self, super::script_setup::SetupProjectionRefusal> {
+        backend.attribute_operations(input.source, input.artifact, input.canonical_id)
+    }
+}
+
+/// A spread may have keys only TypeScript can see. These checking contracts
+/// preserve its optional keys and Vue's merge behavior without a Rust type
+/// reader. Normalizing a style array always produces an object.
+///
+/// The props-normalizing type shares its name with its function, and
+/// TypeScript does not count that self-reference as a use. It is declared
+/// ambient, which `noUnusedLocals` never reports, so a module that emits the
+/// prelude without normalizing props stays clean.
+pub const ATTRIBUTE_PAYLOAD_PRELUDE: super::checking_fragment::PreludeDeclaration =
+    super::checking_fragment::PreludeDeclaration {
+        key: "14-attribute-payload",
+        text: concat!(
+            "declare function __VerterPayloadField<S, K extends PropertyKey>(spread: S, key: K): K extends keyof S ? S[K] : undefined;\n",
+            "declare function __VerterPayloadStyle(values: readonly unknown[]): Extract<ReturnType<typeof import(\"vue\")[\"normalizeStyle\"]>, object>;\n",
+            "type __VerterPayloadFalsy = false | 0 | 0n | \"\" | null | undefined;\n",
+            "type __VerterPayloadStyleValue<T> = unknown extends T ? ReturnType<typeof import(\"vue\")[\"normalizeStyle\"]> : T extends readonly unknown[] ? Extract<ReturnType<typeof import(\"vue\")[\"normalizeStyle\"]>, object> : T extends (...args: any[]) => unknown ? undefined : T extends abstract new (...args: any[]) => unknown ? undefined : T extends string | object ? T : undefined;\n",
+            "declare function __VerterPayloadStyleValue<T>(value: T): __VerterPayloadStyleValue<T>;\n",
+            "type __VerterPayloadClassProp<T> = T extends __VerterPayloadFalsy | string ? T : unknown extends T ? string | __VerterPayloadFalsy : string;\n",
+            "type __VerterPayloadStyleProp<T> = T extends __VerterPayloadFalsy ? T : unknown extends T ? ReturnType<typeof import(\"vue\")[\"normalizeStyle\"]> | __VerterPayloadFalsy : __VerterPayloadStyleValue<T>;\n",
+            "declare type __VerterPayloadNormalizeProps<S> = S extends object ? { [K in keyof S]: K extends \"class\" ? __VerterPayloadClassProp<S[K]> : K extends \"style\" ? __VerterPayloadStyleProp<S[K]> : S[K] } : S;\n",
+            "declare function __VerterPayloadNormalizeProps<S>(props: S): __VerterPayloadNormalizeProps<S>;\n",
+            "type __VerterPayloadRequired<T> = keyof { [K in keyof T as {} extends Pick<T, K> ? never : K]: T[K] };\n",
+            "type __VerterPayloadWithout<T, K> = { [P in keyof T as P extends K ? never : P]: T[P] };\n",
+            "type __VerterPayloadObject<T> = T extends object ? T : {};\n",
+            "type __VerterPayloadSpread<A, B> = __VerterPayloadWithout<A, keyof B> & __VerterPayloadWithout<B, keyof A> & { [K in keyof A & __VerterPayloadRequired<B>]: B[K] } & { [K in __VerterPayloadRequired<A> & Exclude<keyof B, __VerterPayloadRequired<B>>]: A[K] | B[K] } & { [K in Exclude<keyof A, __VerterPayloadRequired<A>> & Exclude<keyof B, __VerterPayloadRequired<B>>]?: A[K] | B[K] };\n",
+            "type __VerterPayloadAt<T, K> = K extends keyof T ? T[K] : never;\n",
+            "type __VerterPayloadCertain<T, K> = K extends __VerterPayloadRequired<T> ? undefined extends __VerterPayloadAt<T, K> ? false : true : false;\n",
+            "type __VerterPayloadElement<T> = T extends readonly (infer E)[] ? E : T;\n",
+            "type __VerterPayloadHandlers<A, B, K> = __VerterPayloadCertain<A, K> extends true ? __VerterPayloadCertain<B, K> extends true ? __VerterPayloadElement<Exclude<__VerterPayloadAt<A, K> | __VerterPayloadAt<B, K>, __VerterPayloadFalsy>>[] : __VerterPayloadAt<A, K> | __VerterPayloadElement<Exclude<__VerterPayloadAt<A, K> | __VerterPayloadAt<B, K>, __VerterPayloadFalsy>>[] : __VerterPayloadAt<A, K> | __VerterPayloadAt<B, K> | __VerterPayloadElement<Exclude<__VerterPayloadAt<A, K> | __VerterPayloadAt<B, K>, __VerterPayloadFalsy>>[];\n",
+            "type __VerterPayloadIsListener<K> = K extends `on${infer C}${string}` ? C extends \"a\" | \"b\" | \"c\" | \"d\" | \"e\" | \"f\" | \"g\" | \"h\" | \"i\" | \"j\" | \"k\" | \"l\" | \"m\" | \"n\" | \"o\" | \"p\" | \"q\" | \"r\" | \"s\" | \"t\" | \"u\" | \"v\" | \"w\" | \"x\" | \"y\" | \"z\" | \"\" ? false : true : false;\n",
+            "type __VerterPayloadMerged<A, B, R = __VerterPayloadSpread<A, B>> = { [K in keyof R]: K extends \"class\" ? __VerterPayloadCertain<A, K> extends true ? string : __VerterPayloadCertain<B, K> extends true ? string : string | undefined : K extends \"style\" ? Extract<ReturnType<typeof import(\"vue\")[\"normalizeStyle\"]>, object> : K extends keyof A & keyof B ? __VerterPayloadIsListener<K> extends true ? __VerterPayloadHandlers<A, B, K> : R[K] : R[K] };\n",
+            "type __VerterPayloadMergePair<A, B> = A extends unknown ? B extends unknown ? __VerterPayloadMerged<__VerterPayloadObject<A>, __VerterPayloadObject<B>> : never : never;\n",
+            "type __VerterPayloadFold<T extends readonly unknown[], A> = T extends readonly [infer H, ...infer R] ? __VerterPayloadFold<R, __VerterPayloadMergePair<A, H>> : A;\n",
+            "declare function __VerterPayloadMerge<T extends readonly unknown[]>(...groups: T): T extends readonly [infer H, ...infer R] ? __VerterPayloadFold<R, H> : {};\n",
+        ),
+    };
+
+impl RuntimePropertyKeyPlan<ElementUseId> {
+    /// Emit the payload from effective writes, preserving the admitted value
+    /// identities. A sole spread uses guarded props normalization; literal
+    /// groups with computed keys use the same props normalization. Static
+    /// literal groups and ordered merges use their own normalization contracts.
+    /// TypeScript checks spread-only keys. The key plan owns dead writes.
+    #[must_use]
+    pub fn payload_fragment(
+        &self,
+        sequence: &VueAttributeSequence<ElementUseId>,
+        plan: &ProjectionPlan,
+    ) -> Option<super::checking_fragment::CheckingFragment> {
+        use super::checking_fragment::CheckingFragment;
+        if self.spreads.is_empty() {
+            let Some(dynamic) = self.writes.iter().find(|w| w.key == RuntimeKey::Dynamic) else {
+                return self.literal_payload_fragment(sequence, plan, true);
+            };
+            let span = sequence
+                .operations
+                .iter()
+                .find(|op| op.index == dynamic.op_index)?
+                .value
+                .as_ref()
+                .and_then(|id| plan.expression(id))?;
+            let mut out = CheckingFragment::new();
+            out.push_alias(
+                "__VerterPayloadNormalizeProps",
+                SourceRange {
+                    start: span.start,
+                    end: span.end,
+                },
+            )
+            .push_synth("(")
+            .append(self.literal_payload_fragment(sequence, plan, false)?)
+            .push_synth(")");
+            return Some(out);
+        }
+        let mut groups: Vec<u32> = self
+            .writes
+            .iter()
+            .map(|w| w.group)
+            .chain(self.spreads.iter().map(|s| s.group))
+            .collect();
+        groups.sort_unstable();
+        groups.dedup();
+        let mut arguments = Vec::new();
+        for group in groups {
+            if let Some(spread) = self.spreads.iter().find(|s| s.group == group) {
+                let id = sequence
+                    .operations
+                    .iter()
+                    .find(|op| op.index == spread.op_index)?
+                    .value
+                    .as_ref()?;
+                plan.expression(id)?;
+                let mut argument = CheckingFragment::synth("(");
+                argument.push_expression(id.clone()).push_synth(")");
+                arguments.push(argument);
+            } else {
+                let writes: Vec<_> = self
+                    .writes
+                    .iter()
+                    .filter(|w| w.group == group)
+                    .filter(|w| match &w.key {
+                        RuntimeKey::Static(key) => self
+                            .effective(key)
+                            .is_some_and(|p| !p.overridden.contains(&w.op_index)),
+                        RuntimeKey::Dynamic => true,
+                    })
+                    .cloned()
+                    .collect();
+                if writes.is_empty() {
+                    continue;
+                }
+                let effective = self
+                    .effective
+                    .iter()
+                    .filter(|p| {
+                        writes
+                            .iter()
+                            .any(|w| matches!(&w.key, RuntimeKey::Static(key) if *key == p.key))
+                    })
+                    .map(|p| EffectiveProperty {
+                        key: p.key.clone(),
+                        rule: p.rule,
+                        contributors: p
+                            .contributors
+                            .iter()
+                            .filter(|c| writes.iter().any(|w| w.op_index == c.op_index))
+                            .copied()
+                            .collect(),
+                        overridden: p
+                            .overridden
+                            .iter()
+                            .filter(|op| writes.iter().any(|w| w.op_index == **op))
+                            .copied()
+                            .collect(),
+                    })
+                    .collect();
+                let literal = Self {
+                    use_id: self.use_id.clone(),
+                    writes,
+                    spreads: Vec::new(),
+                    no_property: Vec::new(),
+                    effective,
+                };
+                arguments.push(literal.literal_payload_fragment(sequence, plan, false)?);
+            }
+        }
+        let span = self
+            .spreads
+            .first()
+            .and_then(|s| sequence.operations.iter().find(|op| op.index == s.op_index))
+            .and_then(|op| op.value.as_ref())
+            .and_then(|id| plan.expression(id))?;
+        let mut out = CheckingFragment::new();
+        out.push_alias(
+            if arguments.len() == 1 {
+                "__VerterPayloadNormalizeProps"
+            } else {
+                "__VerterPayloadMerge"
+            },
+            SourceRange {
+                start: span.start,
+                end: span.end,
+            },
+        )
+        .push_synth("(");
+        for (index, argument) in arguments.into_iter().enumerate() {
+            if index != 0 {
+                out.push_synth(", ");
+            }
+            out.append(argument);
+        }
+        out.push_synth(")");
+        Some(out)
+    }
+
+    fn literal_payload_fragment(
+        &self,
+        sequence: &VueAttributeSequence<ElementUseId>,
+        plan: &ProjectionPlan,
+        normalize: bool,
+    ) -> Option<super::checking_fragment::CheckingFragment> {
+        use super::checking_fragment::CheckingFragment;
+        use super::component_use::quote;
+        let mut out = CheckingFragment::synth("{ ");
+        let mut emitted = rustc_hash::FxHashSet::default();
+        let mut value = |out: &mut CheckingFragment, op: &VueAttributeOp| -> Option<()> {
+            if op.syntax == AttributeSyntax::Static {
+                let text = quote(op.static_text.as_deref().unwrap_or_default());
+                if let Some(span) = op.value.as_ref().and_then(|id| plan.expression(id)) {
+                    out.push_alias(
+                        text,
+                        SourceRange {
+                            start: span.start,
+                            end: span.end,
+                        },
+                    );
+                } else {
+                    out.push_synth(text);
+                }
+                out.push_synth(" as const");
+            } else {
+                let id = op.value.as_ref()?;
+                plan.expression(id)?;
+                out.push_synth("(");
+                if emitted.insert(id.clone()) {
+                    out.push_expression(id.clone());
+                } else {
+                    out.push_replay(id.clone());
+                }
+                out.push_synth(")");
+            }
+            Some(())
+        };
+        for op in &sequence.operations {
+            if self
+                .spreads
+                .iter()
+                .any(|spread| spread.op_index == op.index)
+            {
+                out.push_synth("...");
+                value(&mut out, op)?;
+                out.push_synth(", ");
+            }
+            for write in self.writes.iter().filter(|w| w.op_index == op.index) {
+                match &write.key {
+                    RuntimeKey::Static(key) => {
+                        let effective = self.effective(key)?;
+                        if effective.overridden.contains(&op.index)
+                            || effective.rule == MergeRule::Combine
+                            || (effective.rule == MergeRule::Accumulate
+                                && effective.contributors.len() > 1)
+                        {
+                            continue;
+                        }
+                        let text = quote(key);
+                        // TypeScript often locates a contextual property error
+                        // on its key. Attribute it to the authored value.
+                        if let Some(span) = op.value.as_ref().and_then(|id| plan.expression(id)) {
+                            out.push_alias(
+                                text,
+                                SourceRange {
+                                    start: span.start,
+                                    end: span.end,
+                                },
+                            );
+                        } else {
+                            out.push_synth(text);
+                        }
+                    }
+                    RuntimeKey::Dynamic => {
+                        let id = op.dynamic_argument.as_ref()?;
+                        plan.expression(id)?;
+                        out.push_synth("[")
+                            .push_expression(id.clone())
+                            .push_synth("]");
+                    }
+                }
+                out.push_synth(": ");
+                value(&mut out, op)?;
+                out.push_synth(", ");
+            }
+        }
+        for property in self.effective.iter().filter(|p| {
+            p.rule == MergeRule::Combine
+                || (p.rule == MergeRule::Accumulate && p.contributors.len() > 1)
+        }) {
+            let normalizer = if property.key == "class" {
+                "normalizeClass"
+            } else {
+                "normalizeStyle"
+            };
+            let anchor = property.contributors.iter().find_map(|c| {
+                sequence
+                    .operations
+                    .iter()
+                    .find(|op| op.index == c.op_index)
+                    .and_then(|op| op.value.as_ref())
+                    .and_then(|id| plan.expression(id))
+            });
+            if let Some(span) = anchor {
+                out.push_alias(
+                    quote(&property.key),
+                    SourceRange {
+                        start: span.start,
+                        end: span.end,
+                    },
+                );
+            } else {
+                out.push_synth(quote(&property.key));
+            }
+            if property.rule == MergeRule::Combine && property.contributors.len() == 1 {
+                let op = sequence
+                    .operations
+                    .iter()
+                    .find(|op| op.index == property.contributors[0].op_index)?;
+                out.push_synth(": ");
+                if op.syntax == AttributeSyntax::Static || !normalize {
+                    value(&mut out, op)?;
+                } else {
+                    out.push_synth(if property.key == "style" {
+                        "__VerterPayloadStyleValue("
+                    } else {
+                        "(null! as typeof import(\"vue\")[\"normalizeClass\"])("
+                    });
+                    value(&mut out, op)?;
+                    out.push_synth(")");
+                }
+                out.push_synth(", ");
+                continue;
+            }
+            let array_only = property.rule == MergeRule::Accumulate || !normalize;
+            if array_only {
+                out.push_synth(": [");
+            } else if property.key == "style" {
+                out.push_synth(": __VerterPayloadStyle([");
+            } else {
+                out.push_synth(format!(
+                    ": (null! as typeof import(\"vue\")[{}])([",
+                    quote(normalizer)
+                ));
+            }
+            for contribution in &property.contributors {
+                let op = sequence
+                    .operations
+                    .iter()
+                    .find(|op| op.index == contribution.op_index)?;
+                if contribution.certainty == Certainty::Possible {
+                    out.push_synth("__VerterPayloadField(");
+                    if op.syntax == AttributeSyntax::BindObject {
+                        value(&mut out, op)?;
+                    } else {
+                        out.push_synth("{ [")
+                            .push_replay(op.dynamic_argument.clone()?)
+                            .push_synth("]: ");
+                        value(&mut out, op)?;
+                        out.push_synth(" }");
+                    }
+                    out.push_synth(format!(", {})", quote(&property.key)));
+                } else {
+                    value(&mut out, op)?;
+                }
+                out.push_synth(", ");
+            }
+            out.push_synth(if array_only { "], " } else { "]), " });
+        }
+        out.push_synth("}");
+        Some(out)
+    }
+}
+
+#[cfg(test)]
+mod element_payload_tests {
+    use super::*;
+    use crate::framework_common::projection_plan::{build_projection_plan, PlanInput};
+
+    #[test]
+    fn slot_outlets_computed_payload_keys_normalize_props() {
+        let source = r#"<template><slot :[key]="classes" /></template>"#;
+        let parsed = crate::framework_common::vue_bridge::parse_sfc(source, None, None);
+        let plan = build_projection_plan(PlanInput {
+            canonical_id: "file:///Computed.vue",
+            source,
+            parsed: &parsed,
+            parse_key: None,
+            syntax_profile: None,
+            custom_elements: None,
+        });
+        let attributes = project_attribute_operations(&plan, &parsed, source);
+        let fragment = attributes.element_key_plans[0]
+            .payload_fragment(&attributes.element_sequences[0], &plan)
+            .expect("payload");
+        let text = fragment.flatten(source, &|id| plan.expression(id).unwrap().spelling.clone());
+        assert!(
+            text.starts_with("__VerterPayloadNormalizeProps({ "),
+            "{text}"
+        );
+        assert!(text.contains("[key]: (classes)"), "{text}");
+        assert_eq!(text.matches("classes").count(), 1);
+    }
+
+    #[test]
+    fn slot_outlets_listener_array_contract_filters_absent_contributors() {
+        // Array accumulation must filter the incoming value before unwrapping
+        // an authored array: absent listeners never become array elements.
+        let handlers = ATTRIBUTE_PAYLOAD_PRELUDE
+            .text
+            .lines()
+            .find(|line| line.starts_with("type __VerterPayloadHandlers<"))
+            .expect("listener accumulation contract");
+        let array_element = "__VerterPayloadElement<Exclude<__VerterPayloadAt<A, K> | __VerterPayloadAt<B, K>, __VerterPayloadFalsy>>[]";
+        assert_eq!(handlers.matches(array_element).count(), 3, "{handlers}");
+    }
+
+    #[test]
+    fn slot_outlets_share_effective_keys_and_keep_element_identity() {
+        let source = r#"<template><Child :title="title"/><slot name="card" :item-id="123" v-bind="{ itemId: 'ok' }" :item-id="'last'" /></template>"#;
+        let parsed = crate::framework_common::vue_bridge::parse_sfc(source, None, None);
+        let plan = build_projection_plan(PlanInput {
+            canonical_id: "file:///Payload.vue",
+            source,
+            parsed: &parsed,
+            parse_key: None,
+            syntax_profile: None,
+            custom_elements: None,
+        });
+        let attributes = project_attribute_operations(&plan, &parsed, source);
+        assert!(attributes.complete);
+        assert_eq!(attributes.sequences.len(), 1);
+        assert_eq!(attributes.element_sequences.len(), 1);
+        assert_eq!(attributes.element_sequences[0].use_id, plan.elements[0].id);
+        let keys = &attributes.element_key_plans[0];
+        assert!(keys.effective("name").is_none());
+        let item = keys.effective("itemId").expect("camelized key");
+        assert_eq!(item.contributors, vec![definite(3)]);
+        assert!(item.overridden.contains(&1) && item.overridden.contains(&2));
+        let fragment = keys
+            .payload_fragment(&attributes.element_sequences[0], &plan)
+            .expect("payload");
+        let text = fragment.flatten(source, &|id| plan.expression(id).unwrap().spelling.clone());
+        assert!(!text.contains("123"), "{text}");
+        assert!(text.contains("'last'"), "{text}");
+        let output = format!("const payload = {text};");
+        let alloc = oxc_allocator::Allocator::default();
+        let parsed =
+            verter_parser::oxc_parse::Parser::new(&alloc, &output, oxc_span::SourceType::ts())
+                .parse();
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{:?}\n{output}",
+            parsed.diagnostics
+        );
+    }
+
+    #[test]
+    fn slot_outlets_combined_fields_preserve_each_authored_value() {
+        let source = r#"<template><slot :class="firstClass" v-bind="attrs" :class="lastClass" /></template>"#;
+        let parsed = crate::framework_common::vue_bridge::parse_sfc(source, None, None);
+        let plan = build_projection_plan(PlanInput {
+            canonical_id: "file:///Classes.vue",
+            source,
+            parsed: &parsed,
+            parse_key: None,
+            syntax_profile: None,
+            custom_elements: None,
+        });
+        let attributes = project_attribute_operations(&plan, &parsed, source);
+        assert!(attributes.complete);
+        let fragment = attributes.element_key_plans[0]
+            .payload_fragment(&attributes.element_sequences[0], &plan)
+            .expect("payload");
+        let text = fragment.flatten(source, &|id| plan.expression(id).unwrap().spelling.clone());
+        assert_eq!(text.matches("firstClass").count(), 1);
+        assert_eq!(text.matches("lastClass").count(), 1);
+        assert!(text.contains("__VerterPayloadMerge("));
+        let output = format!("const payload = {text};");
+        let alloc = oxc_allocator::Allocator::default();
+        let parsed =
+            verter_parser::oxc_parse::Parser::new(&alloc, &output, oxc_span::SourceType::ts())
+                .parse();
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{:?}\n{output}",
+            parsed.diagnostics
+        );
+    }
+
+    #[test]
+    fn slot_outlets_spread_groups_use_a_merge_instead_of_object_spreads() {
+        use oxc_ast::ast::{Expression, Statement};
+        for template in [
+            r#"<slot id="x" v-bind="attrs" />"#,
+            r#"<slot :onSave="first" v-bind="extra" />"#,
+            r#"<slot v-bind="left" v-bind="right" />"#,
+        ] {
+            let source = format!("<template>{template}</template>");
+            let parsed = crate::framework_common::vue_bridge::parse_sfc(&source, None, None);
+            let plan = build_projection_plan(PlanInput {
+                canonical_id: "file:///Merge.vue",
+                source: &source,
+                parsed: &parsed,
+                parse_key: None,
+                syntax_profile: None,
+                custom_elements: None,
+            });
+            let attributes = project_attribute_operations(&plan, &parsed, &source);
+            assert!(attributes.complete);
+            let fragment = attributes.element_key_plans[0]
+                .payload_fragment(&attributes.element_sequences[0], &plan)
+                .expect("payload");
+            let text =
+                fragment.flatten(&source, &|id| plan.expression(id).unwrap().spelling.clone());
+            let output = format!(
+                "{}\nconst payload = {text};",
+                ATTRIBUTE_PAYLOAD_PRELUDE.text
+            );
+            let alloc = oxc_allocator::Allocator::default();
+            let parsed =
+                verter_parser::oxc_parse::Parser::new(&alloc, &output, oxc_span::SourceType::ts())
+                    .parse();
+            assert!(
+                parsed.diagnostics.is_empty(),
+                "{:?}\n{output}",
+                parsed.diagnostics
+            );
+            let Statement::VariableDeclaration(declaration) =
+                parsed.program.body.last().expect("payload declaration")
+            else {
+                panic!("variable declaration")
+            };
+            let Expression::CallExpression(call) =
+                declaration.declarations[0].init.as_ref().expect("payload")
+            else {
+                panic!("spread groups must be merged: {text}")
+            };
+            assert_eq!(call.arguments.len(), 2);
+            let mut expressions = rustc_hash::FxHashSet::default();
+            for piece in fragment.pieces {
+                if let super::super::checking_fragment::CheckingPiece::Expression(id) = piece {
+                    assert!(expressions.insert(id));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn slot_outlets_repeated_listener_fields_form_one_array() {
+        let source = r#"<template><slot :onSave="first" :on-save="second" /></template>"#;
+        let parsed = crate::framework_common::vue_bridge::parse_sfc(source, None, None);
+        let plan = build_projection_plan(PlanInput {
+            canonical_id: "file:///Listeners.vue",
+            source,
+            parsed: &parsed,
+            parse_key: None,
+            syntax_profile: None,
+            custom_elements: None,
+        });
+        let attributes = project_attribute_operations(&plan, &parsed, source);
+        let fragment = attributes.element_key_plans[0]
+            .payload_fragment(&attributes.element_sequences[0], &plan)
+            .expect("payload");
+        let text = fragment.flatten(source, &|id| plan.expression(id).unwrap().spelling.clone());
+        assert_eq!(text.matches("\"onSave\":").count(), 1);
+        assert!(text.contains("[(first), (second), ]"), "{text}");
+    }
 }

@@ -34,7 +34,7 @@ use base64::prelude::*;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_parser::{config::TokensParserConfig, Kind, Token};
-use oxc_semantic::SemanticBuilder;
+use oxc_semantic::{Scoping, SemanticBuilder};
 use oxc_sourcemap::SourceMapBuilder;
 use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::constant_value::ConstantValue;
@@ -45,7 +45,7 @@ use verter_macro_dto::{
     TscDeclarationFailureReason, TscExposeMemberType, TscInferredClassMember,
     TscInferredClassTypePosition, TscModelProjection, TscOwnerValueDependency, TscPropRow,
     TscPublicPropsProjection, TscRetainedValueCarrier, TscScopeRequirements, TscScriptOwner,
-    TscSemanticInferenceUnavailableReason, UnresolvedReason, UnsupportedReason,
+    TscSemanticInferenceUnavailableReason, TscSpliceText, UnresolvedReason, UnsupportedReason,
 };
 use verter_parser::oxc_parse::Parser;
 use verter_type_expr::facts::TypeDependencyPathFact;
@@ -56,13 +56,14 @@ use crate::cursor::position::PositionResolver;
 use crate::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
 use crate::parser::types::SfcScriptDialect;
 use crate::parser::Syntax;
-use crate::template::code_gen::binding::BindingType;
-use crate::template::code_gen::shared::helpers::escape_js_string_into;
+use crate::template::binding::BindingType;
+use crate::template::vue_syntax::escape_js_string_into;
 use crate::tokenizer::byte::tokenize_sfc;
 use crate::utils::oxc::vue::{
-    extract_options_component_macro_args, parse_script, CallableShape, DefaultExportType,
-    ImportSpecifierKind, MacroArrayArg, MacroObjectArg, MacroTypeParams, OptionsComponentMacroArgs,
+    extract_options_component_macro_args, parse_script, CallableShape, ImportSpecifierKind,
+    MacroArrayArg, MacroObjectArg, MacroTypeParams, OptionsComponentMacroArgs,
     RuntimeConstructorSyntax, ScriptItem, ScriptMacro, ScriptMode, ScriptParseContext,
+    ScriptParseResult,
 };
 
 /// Macro stub declarations shared between `generate_code` (when expose entries
@@ -1261,6 +1262,28 @@ struct AuthoredFragment {
     token_starts: Vec<u32>,
 }
 
+impl AuthoredFragment {
+    fn from_source(
+        source: &str,
+        source_offset: u32,
+        span: oxc_span::Span,
+        tokens: &[Token],
+    ) -> Option<Self> {
+        let first = tokens.partition_point(|token| token.start() < span.start);
+        let end = tokens.partition_point(|token| token.start() < span.end);
+        Some(Self {
+            text: source
+                .get(span.start as usize..span.end as usize)?
+                .to_owned(),
+            source_start: source_offset.saturating_add(span.start),
+            token_starts: tokens[first..end]
+                .iter()
+                .map(|token| token.start() - span.start)
+                .collect(),
+        })
+    }
+}
+
 #[derive(Clone)]
 enum DeclarationEdit {
     Insert {
@@ -1334,7 +1357,7 @@ struct RetainedValueImport {
 /// (the Svelte public-API projector maps its generated prop-name tokens back
 /// to the authored `$props()` annotation members through the same
 /// [`build_tsc_source_map`] V3 JSON the store/plugin consume for `.vue`).
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GeneratedMapping {
     /// Byte offset of the ownership transition in the generated code.
     pub generated_offset: usize,
@@ -1342,6 +1365,25 @@ pub struct GeneratedMapping {
     /// entering compiler-generated text. Generated transitions are required:
     /// without them a V3 lookup inherits the preceding authored segment.
     pub source_span: Option<Span>,
+}
+
+/// An owned declaration emitted while its original syntax snapshot is live.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclarationEmissionFragment {
+    /// Declaration-safe TypeScript, without an implementation body.
+    text: String,
+    /// Correspondence from the same CodeTransform that emitted `text`.
+    mappings: Vec<GeneratedMapping>,
+}
+
+impl DeclarationEmissionFragment {
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn mappings(&self) -> &[GeneratedMapping] {
+        &self.mappings
+    }
 }
 
 #[derive(Default, Clone)]
@@ -1878,7 +1920,14 @@ fn extract_tsc_state_unrecorded(
     let program = parse_result.program;
 
     // ── 3. Extract script items (macros + imports) — NO external types ─
-    let parsed = parse_script(&program, ScriptMode::Setup, 0, content_str);
+    // The companion block's imports join the setup classification, as Vue's
+    // `userImports` do.
+    let companion_alloc = Allocator::default();
+    let companion_source_type = setup_source_type(authored_dialect);
+    let companion =
+        CompanionScript::parse(&syntax, sfc_source, companion_source_type, &companion_alloc);
+    let companion_items = companion.as_ref().map_or(&[][..], CompanionScript::items);
+    let parsed = parse_script(&program, ScriptMode::Setup, 0, content_str, companion_items);
     let test_bindings = collect_test_bindings(&parsed.bindings, content_str, content_span.start);
 
     // ── 4. Collect type-only imports ──────────────────────────────────
@@ -1915,8 +1964,8 @@ fn extract_tsc_state_unrecorded(
     // ── 7. Extract root element tag for attrs fallthrough ──────────
     type_usage_tracker.mark_dependency_paths(attrs_type.dependency_paths());
     type_usage_tracker.snapshot_scope_inventory(&mut state);
-    if let Some(script_span) = syntax.script().and_then(|script| script.content) {
-        append_companion_scope_inventory(sfc_source, script_span, &mut state);
+    if let Some(companion) = &companion {
+        companion.append_scope_inventory(&mut state);
     }
     type_usage_tracker.finalize(&mut state);
 
@@ -2190,8 +2239,15 @@ fn generate_tsc_output_with_options_unrecorded(
     let program = parse_result.program;
 
     // ── 3. Extract script items (macros + imports) ────────────────────
-    // content_offset = 0: all spans are relative to content_str
-    let parsed = parse_script(&program, ScriptMode::Setup, 0, content_str);
+    // content_offset = 0: all spans are relative to content_str. The
+    // companion block's imports join the setup classification, as Vue's
+    // `userImports` do.
+    let companion_alloc = Allocator::default();
+    let companion_source_type = setup_source_type(authored_dialect);
+    let companion =
+        CompanionScript::parse(&syntax, sfc_source, companion_source_type, &companion_alloc);
+    let companion_items = companion.as_ref().map_or(&[][..], CompanionScript::items);
+    let parsed = parse_script(&program, ScriptMode::Setup, 0, content_str, companion_items);
     let test_bindings = if matches!(tsc_options.mode, TscMode::Testing) {
         collect_test_bindings(&parsed.bindings, content_str, content_span.start)
     } else {
@@ -2219,8 +2275,8 @@ fn generate_tsc_output_with_options_unrecorded(
         &mut type_usage_tracker,
     );
     type_usage_tracker.snapshot_scope_inventory(&mut state);
-    if let Some(script_span) = syntax.script().and_then(|script| script.content) {
-        append_companion_scope_inventory(sfc_source, script_span, &mut state);
+    if let Some(companion) = &companion {
+        companion.append_scope_inventory(&mut state);
     }
     apply_tsc_bundle(&mut state, macro_tsc)?;
 
@@ -2504,17 +2560,13 @@ fn collect_local_type_inventory(
         let statement_span = statement.span();
         let authored_start = leading_jsdoc_start(statement_span.start, &program.comments);
         let authored_end = statement_span.end;
-        let Some(authored_text) = source.get(authored_start as usize..authored_end as usize) else {
+        let Some(authored) = AuthoredFragment::from_source(
+            source,
+            source_offset,
+            oxc_span::Span::new(authored_start, authored_end),
+            tokens,
+        ) else {
             continue;
-        };
-        let authored = AuthoredFragment {
-            text: authored_text.to_owned(),
-            source_start: source_offset.saturating_add(authored_start),
-            token_starts: tokens
-                .iter()
-                .filter(|token| token.start() >= authored_start && token.start() < authored_end)
-                .map(|token| token.start() - authored_start)
-                .collect(),
         };
         let public = if matches!(statement, Statement::ExportDefaultDeclaration(_)) {
             let (Some(export), Some(default)) = (
@@ -2677,7 +2729,7 @@ fn render_authored_fragment(
 ) -> RenderedText {
     verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
     let allocator = Allocator::default();
-    let mut transform = CodeTransform::<M>::new_in(&fragment.text, &allocator);
+    let mut transform = CodeTransform::<M>::new_mapped_in(&fragment.text, &allocator);
     for token_start in &fragment.token_starts {
         let _ = transform.try_add_sourcemap_location(*token_start);
     }
@@ -2720,6 +2772,104 @@ fn render_authored_fragment(
         transform.build_string_with_source_ranges_and_unmapped_boundaries();
     compose_authored_transform(text, ranges, unmapped_boundaries, fragment.source_start)
 
+    })
+}
+
+/// Render a selected public dependency through the existing declaration
+/// plans and CodeTransform. Values require an authored annotation; syntax
+/// alone cannot supply the type of an arbitrary initializer.
+pub(crate) fn render_declaration_dependency(
+    declaration: &Declaration<'_>,
+    tokens: &[Token],
+    scoping: &Scoping,
+    source: &str,
+    source_start: u32,
+    name: &str,
+) -> Option<DeclarationEmissionFragment> {
+    let span = if let Declaration::VariableDeclaration(vars) = declaration {
+        let variable = vars.declarations.iter().find(|variable| {
+            variable
+                .id
+                .get_binding_identifier()
+                .is_some_and(|id| id.name == name)
+        })?;
+        oxc_span::Span::new(
+            variable.span.start,
+            variable.type_annotation.as_ref()?.span.end,
+        )
+    } else {
+        declaration.span()
+    };
+    let authored_start = span.start;
+    let authored = AuthoredFragment::from_source(source, source_start, span, tokens)?;
+    let rendered = match declaration {
+        Declaration::VariableDeclaration(vars) => {
+            let keyword = match vars.kind {
+                VariableDeclarationKind::Const => "const",
+                VariableDeclarationKind::Let => "let",
+                VariableDeclarationKind::Var => "var",
+                _ => return None,
+            };
+            render_authored_fragment(
+                &authored,
+                &[
+                    DeclarationEdit::Insert {
+                        offset: 0,
+                        text: format!("declare {keyword} "),
+                    },
+                    DeclarationEdit::Insert {
+                        offset: authored.text.len() as u32,
+                        text: ";".into(),
+                    },
+                ],
+            )
+        }
+        Declaration::FunctionDeclaration(function) => {
+            if function.id.as_ref()?.name != name
+                || function.return_type.is_none()
+                || function.r#async
+                || function.generator
+                || function.params.items.iter().any(|parameter| {
+                    parameter.type_annotation.is_none() || parameter.initializer.is_some()
+                })
+            {
+                return None;
+            }
+            let mut edits = Vec::new();
+            if let Some(body) = &function.body {
+                edits.push(DeclarationEdit::Overwrite {
+                    start: body.span.start - authored_start,
+                    end: body.span.end - authored_start,
+                    text: ";".into(),
+                });
+            }
+            if !function.declare {
+                edits.push(DeclarationEdit::Insert {
+                    offset: function.span.start - authored_start,
+                    text: "declare ".into(),
+                });
+            }
+            render_authored_fragment(&authored, &edits)
+        }
+        Declaration::TSTypeAliasDeclaration(_) | Declaration::TSInterfaceDeclaration(_) => {
+            render_authored_fragment(&authored, &[])
+        }
+        Declaration::ClassDeclaration(class) => {
+            if unsupported_class_shape(class).is_some() {
+                return None;
+            }
+            let plan =
+                build_class_declaration_plan(class, &authored, authored_start, source, tokens)?;
+            render_class_declaration(&plan, &[])?
+        }
+        Declaration::TSEnumDeclaration(enumeration) => {
+            build_enum_declaration_projection(enumeration, &authored, authored_start, scoping)?
+        }
+        _ => return None,
+    };
+    Some(DeclarationEmissionFragment {
+        text: rendered.text,
+        mappings: rendered.mappings,
     })
 }
 
@@ -3485,41 +3635,69 @@ impl<'a> TypeUsageTracker<'a> {
     }
 }
 
-fn append_companion_scope_inventory(
-    sfc_source: &str,
-    content_span: Span,
-    state: &mut TscMacroState,
-) {
-    let Some(content) = sfc_source.get(content_span.start as usize..content_span.end as usize)
-    else {
-        return;
-    };
-    let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, content, SourceType::ts())
-        .with_config(TokensParserConfig)
-        .parse();
-    let script = parse_script(&parsed.program, ScriptMode::Options, 0, content);
-    let type_imports = collect_type_imports(&script.items);
-    let tracker = TypeUsageTracker::new(
-        &script.items,
-        &parsed.program,
-        &parsed.tokens,
-        content,
-        content_span.start,
-        &type_imports,
-        TscScriptOwner::Companion,
-    );
-    tracker.append_scope_inventory(state);
-    state
-        .available_scope_declarations
-        .sort_by_key(|declaration| declaration.source_start);
-    let mut ordinals = FxHashMap::<(TscScriptOwner, String), u32>::default();
-    for declaration in &mut state.available_scope_declarations {
-        let ordinal = ordinals
-            .entry((declaration.owner, declaration.name.clone()))
-            .or_default();
-        declaration.contributor_ordinal = *ordinal;
-        *ordinal = ordinal.saturating_add(1);
+/// The companion `<script>` block of a component with `<script setup>`,
+/// parsed once: its imports reach the setup block's binding classification
+/// and its declarations the shared scope inventory.
+struct CompanionScript<'a> {
+    content: &'a str,
+    content_start: u32,
+    program: &'a Program<'a>,
+    tokens: oxc_allocator::Vec<'a, Token>,
+    script: ScriptParseResult<'a>,
+}
+
+impl<'a> CompanionScript<'a> {
+    /// Parse the companion block of `syntax`, if it has content, in the
+    /// component's authored dialect.
+    fn parse(
+        syntax: &Syntax,
+        sfc_source: &'a str,
+        source_type: SourceType,
+        allocator: &'a Allocator,
+    ) -> Option<Self> {
+        let content_span = syntax.script()?.content?;
+        let content = sfc_source.get(content_span.start as usize..content_span.end as usize)?;
+        let parsed = Parser::new(allocator, content, source_type)
+            .with_config(TokensParserConfig)
+            .parse();
+        let program: &'a Program<'a> = allocator.alloc(parsed.program);
+        let script = parse_script(program, ScriptMode::Options, 0, content, &[]);
+        Some(Self {
+            content,
+            content_start: content_span.start,
+            program,
+            tokens: parsed.tokens,
+            script,
+        })
+    }
+
+    fn items(&self) -> &[ScriptItem<'a>] {
+        &self.script.items
+    }
+
+    fn append_scope_inventory(&self, state: &mut TscMacroState) {
+        let type_imports = collect_type_imports(&self.script.items);
+        let tracker = TypeUsageTracker::new(
+            &self.script.items,
+            self.program,
+            &self.tokens,
+            self.content,
+            self.content_start,
+            &type_imports,
+            TscScriptOwner::Companion,
+        );
+        tracker.append_scope_inventory(state);
+        state
+            .available_scope_declarations
+            .sort_by_key(|declaration| declaration.source_start);
+        let mut ordinals = FxHashMap::<(TscScriptOwner, String), u32>::default();
+        for declaration in &mut state.available_scope_declarations {
+            let ordinal = ordinals
+                .entry((declaration.owner, declaration.name.clone()))
+                .or_default();
+            declaration.contributor_ordinal = *ordinal;
+            *ordinal = ordinal.saturating_add(1);
+        }
     }
 }
 
@@ -5348,24 +5526,12 @@ fn generate_options_api_stub(
     // Parse to detect if the default export is a plain object (needs wrapping)
     let alloc = Allocator::default();
     let parser_ret = Parser::new(&alloc, script_content, SourceType::tsx()).parse();
-    let parse_result = parse_script(&parser_ret.program, ScriptMode::Options, 0, script_content);
-
-    // Find a plain object default export that needs defineComponent wrapping
-    let obj_span = parse_result.items.iter().find_map(|item| {
-        if let ScriptItem::DefaultExport(de) = item {
-            if de.export_type == DefaultExportType::Object {
-                return de.object_span;
-            }
-        }
-        None
-    });
-    // The `export default` statement start, for the widening rebind.
-    let default_export_start = parse_result.items.iter().find_map(|item| {
-        if let ScriptItem::DefaultExport(de) = item {
-            return Some(de.span.start as usize);
-        }
-        None
-    });
+    let wrapping = crate::ide::vue_projection::public_constructor::options_api_wrap(
+        &parser_ret.program,
+        script_content,
+    );
+    let obj_span = wrapping.object_span;
+    let default_export_start = wrapping.default_export_start;
 
     // The widened tail, and the offset at which `export default` must become a
     // local binding. Both must be available, or the stub stays un-widened.
@@ -5415,19 +5581,7 @@ fn generate_options_api_stub(
     // plain object export and — when widening — `export default` rewritten to a
     // local `const`.
     let mut body = String::with_capacity(script_content.len() + 96);
-    let needs_dc_import = obj_span.is_some()
-        && !parse_result.items.iter().any(|item| {
-            if let ScriptItem::Import(imp) = item {
-                imp.source == "vue"
-                    && imp.bindings.iter().any(|b| {
-                        b.name == "defineComponent"
-                            && b.import_kind == Some(ImportSpecifierKind::Named)
-                    })
-            } else {
-                false
-            }
-        });
-    if needs_dc_import {
+    if wrapping.needs_import {
         body.push_str("import { defineComponent } from \"vue\"\n");
     }
 
@@ -5581,6 +5735,7 @@ fn generate_options_api_declaration(
         ScriptMode::Options,
         0,
         options_script_content,
+        &[],
     );
     let type_imports = collect_type_imports(&script.items);
     let mut type_usage_tracker = TypeUsageTracker::new(
@@ -6829,7 +6984,7 @@ fn render_authored_props_argument(
 ) -> (RenderedText, Vec<String>) {
     verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
     let allocator = Allocator::default();
-    let mut transform = CodeTransform::<M>::new_in(&argument.text, &allocator);
+    let mut transform = CodeTransform::<M>::new_mapped_in(&argument.text, &allocator);
     let mut handled_defaults = FxHashSet::default();
     for member in &argument.members {
         transform
@@ -6951,13 +7106,20 @@ fn render_model_props_type(models: &[ModelEntry]) -> Vec<RenderedText> {
             rendered.push_str("?: (v: ");
             rendered.push_str(&model.ts_type);
             rendered.push_str(") => void; ");
-            rendered.push_str(&render_member_key(&model.modifiers_prop.name));
-            rendered.push_str("?: ");
-            rendered.push_str(model.modifiers_prop.type_text.as_str());
+            rendered.push_str(&render_model_modifiers_member(
+                &model.modifiers_prop.name,
+                &model.modifiers_prop.type_text,
+            ));
             rendered.push_str(" }");
             rendered
         })
         .collect()
+}
+
+/// Render one model's optional modifiers prop member. Every public props
+/// surface that publishes a model's modifiers prop renders it here.
+pub(crate) fn render_model_modifiers_member(prop_name: &str, record: &TscSpliceText) -> String {
+    format!("{}?: {}", render_member_key(prop_name), record.as_str())
 }
 
 /// Render the PARENT-FACING props type: declared props ∪ models ∪

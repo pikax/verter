@@ -87,8 +87,8 @@ pub struct ResolvedComponentMetaState {
     /// Zero is reserved for "not populated" — emitted by internal
     /// tests / FFI fixtures that do not stamp a real request id.
     pub request_id: u64,
-    /// Macro-expansion diagnostics produced by graph-native slot-binding
-    /// synthesis. Merged into
+    /// Macro-expansion diagnostics retained by the surface producer and
+    /// graph-native slot-binding synthesis. Merged into
     /// [`ComponentMetaAnalysis::macro_expansion_diagnostics`] by
     /// [`crate::host_manage::component_meta_extract::extract_component_meta_from_resolved`]
     /// and projected onto the audit substrate via

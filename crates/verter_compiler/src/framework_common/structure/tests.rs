@@ -91,3 +91,84 @@ fn sparse_facts_and_capacity_boundary() {
         Err(StructureError::Capacity)
     );
 }
+
+// One owner can nest a region inside another of its own regions (a branch
+// around a loop body); the inner region still answers to the same owner.
+#[test]
+fn two_regions_nest_under_one_owner() {
+    let mut tree = Structure::<VueNode, Branch, u8>::new("abc");
+    let root_region = tree.add_region(None, None, 0).unwrap();
+    let p = tree.push(None, root_region, Span::new(0, 3), 0).unwrap();
+    let outer = tree.add_region(Some(root_region), Some(p), 1).unwrap();
+    let inner = tree.add_region(Some(outer), Some(p), 2).unwrap();
+    let c = tree.push(Some(p), inner, Span::new(1, 2), 1).unwrap();
+    let tree = tree.finish();
+    assert_eq!(tree.region(c), Some(inner));
+    assert_eq!(tree.region_parent(inner), Some(outer));
+    assert_eq!(tree.region_owner(inner), Some(p));
+    assert_eq!(tree.region_parent(outer), Some(root_region));
+}
+
+// Nesting under a region is only allowed for that region's owner or for a
+// node inside it; any other owner would break the owner chain.
+#[test]
+fn a_nested_region_under_another_owner_is_refused() {
+    let mut tree = Structure::<VueNode, Branch, u8>::new("abc");
+    let root_region = tree.add_region(None, None, 0).unwrap();
+    let root = tree.push(None, root_region, Span::new(0, 3), 0).unwrap();
+    let q = tree
+        .push(Some(root), root_region, Span::new(0, 1), 1)
+        .unwrap();
+    let owned_by_q = tree.add_region(Some(root_region), Some(q), 1).unwrap();
+    let p = tree
+        .push(Some(root), root_region, Span::new(1, 2), 2)
+        .unwrap();
+    assert_eq!(
+        tree.add_region(Some(owned_by_q), Some(p), 2),
+        Err(StructureError::RegionOwnership)
+    );
+}
+
+// Node iteration is preorder, and sibling links agree with it.
+#[test]
+fn node_ids_are_preorder() {
+    let mut tree = Structure::<VueNode, Branch, u8>::new("abcde");
+    let region = tree.add_region(None, None, 0).unwrap();
+    let root = tree.push(None, region, Span::new(0, 5), 0).unwrap();
+    let a = tree.push(Some(root), region, Span::new(1, 2), 1).unwrap();
+    let a_child = tree.push(Some(a), region, Span::new(1, 2), 2).unwrap();
+    let b = tree.push(Some(root), region, Span::new(3, 4), 3).unwrap();
+    tree.push(None, region, Span::new(4, 5), 4).unwrap();
+    let tree = tree.finish();
+    let ids = tree.node_ids().collect::<Vec<_>>();
+    let indices = ids.iter().map(|id| id.index()).collect::<Vec<_>>();
+    assert_eq!(indices, [0, 1, 2, 3, 4]);
+    assert_eq!(tree.first_child(root), Some(a));
+    assert_eq!(tree.next_sibling(a), Some(b));
+    assert_eq!(tree.first_child(a), Some(a_child));
+    assert_eq!(tree.next_sibling(b), None);
+    assert_eq!(tree.next_sibling(root), Some(ids[4]));
+    assert_eq!(tree.source(), "abcde");
+}
+
+// Region iteration follows insertion, not nesting depth or owner position.
+#[test]
+fn region_ids_follow_insertion() {
+    let mut tree = Structure::<VueNode, Branch, u8>::new("ab");
+    let root_region = tree.add_region(None, None, 10).unwrap();
+    let root = tree.push(None, root_region, Span::new(0, 2), 0).unwrap();
+    let outer = tree.add_region(Some(root_region), Some(root), 11).unwrap();
+    let inner = tree.add_region(Some(outer), Some(root), 12).unwrap();
+    let second_root = tree.add_region(None, None, 13).unwrap();
+    let tree = tree.finish();
+    assert_eq!(
+        tree.region_ids().collect::<Vec<_>>(),
+        [root_region, outer, inner, second_root]
+    );
+    assert_eq!(
+        tree.region_ids()
+            .map(|id| *tree.region_data(id).unwrap())
+            .collect::<Vec<_>>(),
+        [10, 11, 12, 13]
+    );
+}

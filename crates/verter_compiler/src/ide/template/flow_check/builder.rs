@@ -20,11 +20,11 @@ use super::seam::{
 use crate::ast::types::{
     AstNodeKind, ConditionalChain, ElementNode, ElementNodeConditionKind, TemplateAst,
 };
+use crate::code_transform::MappedGeneratedText;
 use crate::ide::get_directive_name;
 use crate::ide::template::flow::{self, CallbackSource, HandlerBody};
-use crate::template::code_gen::binding::{BindingResolver, BindingType};
-use crate::template::code_gen::expression::build_prefixed_expr_segments;
-use crate::template::code_gen::types::MappedGeneratedText;
+use crate::template::binding::prefixed_expr::build_prefixed_expr_segments;
+use crate::template::binding::{BindingResolver, BindingType};
 use crate::template::oxc::scope::LexicalScopeId;
 use crate::template::oxc::types::{
     OxcNodeData, OxcParsedAst, OxcParsedElement, OxcParsedExpression,

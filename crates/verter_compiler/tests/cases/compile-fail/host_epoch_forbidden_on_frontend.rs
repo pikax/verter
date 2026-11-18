@@ -1,5 +1,5 @@
 use verter_compiler::framework_common::{
-    CarrierFrontend, FrameworkEpoch, HostEpochId, Present, TypedCapabilityRegistration,
+    CarrierFrontend, FrameworkEpoch, HostEpoch, HostEpochId, Present, TypedCapabilityRegistration,
 };
 use verter_language::{FrameworkAdapterId, LanguageId};
 
@@ -21,14 +21,26 @@ impl CarrierFrontend for ToolingFrontend {
 
 struct HtmlEpoch;
 impl FrameworkEpoch for HtmlEpoch {
-    const ID: &'static str = "html-v1";
+    const MANIFEST: verter_compiler::framework_common::profile::FrameworkProfileManifest =
+        verter_compiler::framework_common::profile::FrameworkProfileManifest {
+        family: "html-v1",
+        release: "1",
+        admitted_majors: &[1],
+        claimed_carriers: &[],
+    };
+}
+
+struct SessionHostEpoch;
+impl HostEpoch for SessionHostEpoch {
+    const ID: &'static str = "session-v1";
 }
 
 fn main() {
     let _ = TypedCapabilityRegistration::register_frontend::<HtmlEpoch, _>(
         FrameworkAdapterId::new("tooling"),
         LanguageId::new("html"),
-        HostEpochId::new("session-v1"),
+        HostEpochId::from_type::<SessionHostEpoch>(),
         Present(ToolingFrontend),
-    );
+    )
+    .expect("the test manifest is admitted");
 }

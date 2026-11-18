@@ -63,9 +63,7 @@ use verter_compiler::compile_request::{
     FrameworkCompileRequest, IdeProductRequest, ResolvedVueBackend, RuntimeProductRequest,
     VueBackendRequest, VueOptionAttempt,
 };
-use verter_compiler::framework_common::vue_bridge::{
-    compile_registered_vue_artifact, resolve_vue_backend_for_audit,
-};
+use verter_compiler::standalone::{registered_audit_backend, registered_audit_compile};
 
 /// The only options `compile_with_audit_options` callers have ever actually
 /// overridden (verified by a workspace-wide read-site audit of the deleted
@@ -233,7 +231,7 @@ fn resolved_backend_tag(
     artifact: &verter_compiler::framework_common::FrameworkParseArtifact,
     request: &CompileRequest,
 ) -> CompileBackendTag {
-    match resolve_vue_backend_for_audit(artifact, request) {
+    match registered_audit_backend(artifact, request) {
         Some(Ok(ResolvedVueBackend::Vdom)) => CompileBackendTag::Vdom,
         Some(Ok(ResolvedVueBackend::Vapor)) => CompileBackendTag::Vapor,
         Some(Err(_)) | None => declared_backend_tag(request),
@@ -390,13 +388,11 @@ impl VerterHost {
         };
         let source: &str = source_arc.as_ref();
 
-        // Vue-only guard. Every arm below drives
-        // `compile_registered_vue_artifact` — the Vue SFC producer, named by
-        // THIS function rather than selected from the request's registered
-        // framework identity. Driving a NON-Vue framework carrier (a
-        // `.svelte` file) through it would silently produce WRONG output
-        // (Vue-compiling a Svelte component), so it FAILS CLOSED on a non-Vue
-        // carrier with a typed diagnostic instead of emitting wrong bytes.
+        // Early refusal. The audited compile reaches its producer only through
+        // the runtime catalog (`registered_audit_compile`), and only the Vue
+        // runtime row produces the audited compile result. A non-Vue framework
+        // carrier (a `.svelte` file) is refused here, before its artifact is
+        // loaded, with a typed diagnostic instead of wrong bytes.
         //
         // The framework-neutral answer is the host-backed compile route,
         // which selects its producer from a request-scoped host binding's
@@ -505,20 +501,25 @@ impl VerterHost {
             match self.vue_macro_semantic_input(canonical_id, target) {
                 Ok(macro_input) => {
                     attempt.stage_vue_macro_semantics(macro_input);
-                    compile_registered_vue_artifact(
+                    match registered_audit_compile(
                         source,
                         &framework_parse,
                         &request,
                         &execution_inputs,
                         &attempt,
                         &allocator,
-                    )
-                    .unwrap_or_else(|_| {
-                        registered_compile_rejected(
+                    ) {
+                        Some(Ok(result)) => result,
+                        Some(Err(_)) => registered_compile_rejected(
                             "VerterE003",
                             "registered Vue artifact rejected by its adapter".to_string(),
-                        )
-                    })
+                        ),
+                        None => registered_compile_rejected(
+                            "VerterE001",
+                            "the runtime catalog registers no audited compile for this carrier"
+                                .to_string(),
+                        ),
+                    }
                 }
                 Err(abort) => aborted_compile(abort),
             }
@@ -804,9 +805,9 @@ pub(crate) fn debug_assert_compile_bound_attribution(
         "{route} bound attribution must name the executed artifact's carrier language"
     );
     verter_debug_assert_eq!(
-        identity.epoch(),
-        artifact.epoch(),
-        "{route} bound attribution must name the executed artifact's framework epoch"
+        identity.framework_profile(),
+        artifact.framework_profile(),
+        "{route} bound attribution must name the executed artifact's framework profile"
     );
     verter_debug_assert!(
         identity.host_epoch().is_some(),

@@ -50,7 +50,7 @@
 //! ## Shared vs unique logic
 //!
 //! Binding resolution, runtime helper constants, and the DFS walker are shared
-//! with the VDOM backend (see [`super::binding`], [`super::shared`],
+//! with the VDOM backend (see [`crate::template::binding`], [`super::shared`],
 //! [`super::walker`]). The `needs_quoted_key()` utility is reused from `vdom::props`.
 //! This backend's unique elements are its stacked element state model,
 //! counter-based naming, and root element assembly pattern.
@@ -63,6 +63,9 @@ pub mod props;
 mod repeated_reads;
 pub mod text;
 
+use crate::template::binding::destructure::{
+    collect_binding_destructure_paths, collect_destructure_paths, DestructureAccessor,
+};
 use nav_request::PendingNavRequest;
 // Shared types import the opaque `PendingNavQueue`, not `PendingNavRequest`.
 pub(in crate::template::code_gen) use nav_request::PendingNavQueue;
@@ -71,25 +74,22 @@ use crate::ast::types::{
     AstNodeKind, ChildrenFlags, CommentNode, ElementNode, ElementNodeConditionKind,
     InterpolationNode, TagType, TemplateAst, TextNode,
 };
-use crate::code_transform::SegmentAnchor;
+use crate::code_transform::{AnchorKind, SegmentAnchor};
 use crate::parser::types::RootNodeTemplate;
 use crate::template::oxc::types::{Dynamism, OxcParsedElement, OxcParsedExpression};
 use crate::types::NodeId;
 
-use oxc_ast::ast::{
-    ArrayExpressionElement, AssignmentTarget, BindingPattern, Expression, ObjectPropertyKind,
-    PropertyKey,
-};
+use oxc_ast::ast::{BindingPattern, Expression};
 use rustc_hash::FxHashSet;
 
-use super::binding::BindingResolver;
 use super::shared::helpers::{self, VaporHelper};
 use super::types::{
-    CodeGenOutput, MergedConstructKind, SegmentedOverwriteAuthority, VaporCounters, VaporEffect,
-    VaporElementState, VaporRootElement,
+    CodeGenOutput, MergedConstructKind, VaporCounters, VaporEffect, VaporElementState,
+    VaporRootElement,
 };
 use super::vdom::props::needs_quoted_key;
 use super::{TemplateCodeGen, TemplateCodeGenOptions};
+use crate::template::binding::BindingResolver;
 
 /// Append `body` to `stmt`, shifting `body_anchors` to absolute offsets in `stmt`.
 fn push_body_with_anchors(
@@ -102,8 +102,7 @@ fn push_body_with_anchors(
     stmt.push_str(body);
     out_anchors.extend(body_anchors.iter().map(|a| SegmentAnchor {
         content_offset: base + a.content_offset,
-        length: a.length,
-        source_pos: a.source_pos,
+        ..*a
     }));
 }
 
@@ -112,7 +111,7 @@ fn push_body_with_anchors(
 fn push_prop_key(buf: &mut String, key: &str) {
     if needs_quoted_key(key) {
         buf.push('"');
-        helpers::escape_js_string_into(buf, key);
+        crate::template::vue_syntax::escape_js_string_into(buf, key);
         buf.push('"');
     } else {
         buf.push_str(key);
@@ -167,17 +166,7 @@ fn extract_v_memo_expr(el: &ElementNode, source: &str) -> Option<String> {
     None
 }
 
-/// Look up the OXC-parsed expression data for a given prop index.
-///
-/// `OxcParsedProp.prop_index` maps back to `ElementNode.props[prop_index]`. This
-/// is an O(1) wrapper over the element's dense `prop_lookup` table
-/// ([`OxcParsedElement::prop`]) — no linear scan over the sparse `props` vec.
-pub(crate) fn find_prop_oxc_exp<'a, 'alloc>(
-    oxc_el: Option<&'a OxcParsedElement<'alloc>>,
-    prop_index: usize,
-) -> Option<&'a OxcParsedExpression<'alloc>> {
-    oxc_el?.prop(prop_index).and_then(|p| p.exp.as_ref())
-}
+use crate::template::binding::prefixed_expr::find_prop_oxc_exp;
 
 /// Resolve an expression using OXC binding data when available, falling back
 /// to simple identifier resolution.
@@ -202,7 +191,13 @@ fn resolve_expr(
         } else {
             Vec::new()
         };
-        interpolation::build_prefixed_expr(expr, value_start, oxc, resolver, &ts_skip)
+        crate::template::binding::prefixed_expr::build_prefixed_expr(
+            expr,
+            value_start,
+            oxc,
+            resolver,
+            &ts_skip,
+        )
     } else {
         resolver.resolve_simple_expr(expr)
     }
@@ -275,31 +270,36 @@ struct VIfBranch<'alloc> {
     /// Official `context.root.nextIfIndex()`, once per `v-if`/`v-else-if`.
     /// `None` for `v-else`.
     own_if_index: Option<u32>,
+    /// Official `getBlockShape`: MULTI_ROOT rather than SINGLE_ROOT.
+    multi_root: bool,
 }
 
-/// Official `getNegativeIfBranchShape`: `v-else-if` is never NO_SCOPE
-/// (`negative.type !== 14`); a terminal `v-else` carries its own static-ness
-/// for FALSE_NO_SCOPE.
+/// Official `getNegativeIfBranchShape`: a `v-else-if` is the ELSE_IF shape
+/// and never NO_SCOPE; a terminal `v-else` carries its own static-ness for
+/// FALSE_NO_SCOPE and whether its shape is MULTI_ROOT.
 #[derive(Clone, Copy)]
 enum IfNegative {
     /// No `v-else`/`v-else-if`.
     None,
     /// Continuing `v-else-if`.
     Chain,
-    /// Terminal `v-else`, with whether its own branch is static.
-    Terminal(bool),
+    /// Terminal `v-else`: whether its own branch is static, and whether it
+    /// is MULTI_ROOT.
+    Terminal(bool, bool),
 }
 
-/// Official `_createIf` 4th argument (`genIfFlags`/`genIfFlagNames`, vendored
-/// rc.5). `None` when official omits it (`flags === 1`: bare v-if, positive
+/// Official `_createIf` 4th argument (`genIfFlags`/`genIfFlagNames`).
+/// `None` when official omits it (`flags === 1`: bare v-if, positive
 /// branch not NO_SCOPE-eligible, not nested where NO_SCOPE is disallowed).
 ///
-/// Reachable space is SINGLE_ROOT only (`build_closure_body` always returns
-/// one node; no `v-once`/slot-root `v-if`):
-/// `1 | (has_negative ? 4 : 0) | (positive NO_SCOPE ? 32 : 0) |
-/// (negative NO_SCOPE ? 64 : 0) | (has_negative ? (own_if_index + 1) << 8 : 0)`.
+/// No `v-once`/slot-root `v-if` is reachable. A branch's shape is
+/// SINGLE_ROOT (1) or MULTI_ROOT (2); a `v-else-if` false branch is ELSE_IF (3):
+/// `(positive multi ? 2 : 1) | (negative shape << 2) |
+/// (positive NO_SCOPE ? 32 : 0) | (negative NO_SCOPE ? 64 : 0) |
+/// (has_negative ? (own_if_index + 1) << 8 : 0)`.
 fn compute_if_flags(
     positive_static: bool,
+    positive_multi_root: bool,
     negative: IfNegative,
     own_if_index: Option<u32>,
     allow_no_scope: bool,
@@ -307,18 +307,27 @@ fn compute_if_flags(
 ) -> Option<String> {
     let has_negative = !matches!(negative, IfNegative::None);
 
-    let mut flags: u32 = 1; // TRUE_SINGLE_ROOT
-    let mut names: Vec<String> = vec!["TRUE_SINGLE_ROOT".to_string()];
+    let (mut flags, positive_shape): (u32, &str) = if positive_multi_root {
+        (2, "TRUE_MULTI_ROOT")
+    } else {
+        (1, "TRUE_SINGLE_ROOT")
+    };
+    let mut names: Vec<String> = vec![positive_shape.to_string()];
 
     if has_negative {
-        flags |= 1 << 2; // FALSE_SINGLE_ROOT
-        names.push("FALSE_SINGLE_ROOT".to_string());
+        let (shape, name) = match negative {
+            IfNegative::Chain => (3, "FALSE_ELSE_IF"),
+            IfNegative::Terminal(_, true) => (2, "FALSE_MULTI_ROOT"),
+            _ => (1, "FALSE_SINGLE_ROOT"),
+        };
+        flags |= shape << 2;
+        names.push(name.to_string());
     }
     if allow_no_scope && positive_static {
         flags |= 32;
         names.push("TRUE_NO_SCOPE".to_string());
     }
-    if let IfNegative::Terminal(negative_static) = negative {
+    if let IfNegative::Terminal(negative_static, _) = negative {
         if allow_no_scope && negative_static {
             flags |= 64;
             names.push("FALSE_NO_SCOPE".to_string());
@@ -371,209 +380,20 @@ fn compute_for_flags(only_child: bool, is_production: bool) -> Option<String> {
     })
 }
 
-/// A destructured leaf's accessor, relative to the shared wrapper base
-/// (`_for_item{depth}.value` / `_slotProps{depth}`) `render` is given.
-enum DestructureAccessor {
-    /// Plain member-path suffix appended directly to the base:
-    /// `{base}{suffix}`.
-    Path(String),
-    /// A rest element (`{ id, ...rest }`) — official's
-    /// `_getRestElement({base}{suffix}, [excludedKeys...])`, excluding the
-    /// STATIC sibling keys already destructured at the SAME nesting level
-    /// (rc.5 `packages/compiler-vapor/src/transforms/vFor.ts`, confirmed
-    /// directly against the vendored dist and the real with-vapor runtime).
-    Rest {
-        suffix: String,
-        excluded_keys: Vec<String>,
-    },
-    /// A default value (`{ id = 99 }`) — official's
-    /// `_getDefaultValue({base}{suffix}, () => (resolvedDefaultExpr))`.
-    Default {
-        suffix: String,
-        resolved_default_expr: String,
-    },
-}
-
-impl DestructureAccessor {
-    /// Register the Vapor runtime helper this accessor needs, if any.
-    fn register_import(&self, out: &mut CodeGenOutput<'_>) {
-        match self {
-            DestructureAccessor::Path(_) => {}
-            DestructureAccessor::Rest { .. } => out.add_vapor_import(VaporHelper::GetRestElement),
-            DestructureAccessor::Default { .. } => {
-                out.add_vapor_import(VaporHelper::GetDefaultValue)
-            }
-        }
+/// Register the target's runtime helper for a shared binding accessor.
+fn register_destructure_import(accessor: &DestructureAccessor, out: &mut CodeGenOutput<'_>) {
+    match accessor {
+        DestructureAccessor::Path(_) => {}
+        DestructureAccessor::Rest { .. } => out.add_vapor_import(VaporHelper::GetRestElement),
+        DestructureAccessor::Default { .. } => out.add_vapor_import(VaporHelper::GetDefaultValue),
     }
-
-    /// Render the final accessor expression against a shared `base`.
-    fn render(&self, base: &str) -> String {
-        match self {
-            DestructureAccessor::Path(suffix) => format!("{base}{suffix}"),
-            DestructureAccessor::Rest {
-                suffix,
-                excluded_keys,
-            } => {
-                let mut keys = String::with_capacity(excluded_keys.len() * 8);
-                for (i, key) in excluded_keys.iter().enumerate() {
-                    if i > 0 {
-                        keys.push_str(", ");
-                    }
-                    keys.push('"');
-                    helpers::escape_js_string_into(&mut keys, key);
-                    keys.push('"');
-                }
-                format!("_getRestElement({base}{suffix}, [{keys}])")
-            }
-            DestructureAccessor::Default {
-                suffix,
-                resolved_default_expr,
-            } => {
-                format!("_getDefaultValue({base}{suffix}, () => ({resolved_default_expr}))")
-            }
-        }
-    }
-}
-
-/// Per-leaf-identifier accessor for a destructuring pattern (`{ id, name }`,
-/// `[a, b]`, a rest element, a default value, arbitrary nesting/shorthand/
-/// renamed-key/string-literal-key mixes), walked off an already-parsed OXC
-/// AST — mirrors official `parseValueDestructure` (rc.5
-/// `packages/compiler-vapor/src/transforms/vFor.ts`, confirmed directly
-/// against the vendored dist). Returns `false` only for a construct official
-/// ALSO doesn't destructure structurally (a computed key, or a rest/default
-/// target that is itself a nested pattern) — the caller then leaves the
-/// pattern's raw authored text as the closure's own param (still valid JS,
-/// just not official's `_for_item{depth}`/`_slotProps{depth}`-renamed form).
-fn collect_destructure_paths(
-    expr: &Expression<'_>,
-    path: &str,
-    source: &str,
-    resolver: &BindingResolver<'_>,
-    out: &mut Vec<(String, DestructureAccessor)>,
-) -> bool {
-    use oxc_span::GetSpan;
-    match expr {
-        Expression::Identifier(id) => {
-            out.push((
-                id.name.as_str().to_string(),
-                DestructureAccessor::Path(path.to_string()),
-            ));
-            true
-        }
-        Expression::ParenthesizedExpression(p) => {
-            collect_destructure_paths(&p.expression, path, source, resolver, out)
-        }
-        Expression::AssignmentExpression(assign) => {
-            // Default value (`id = 99`) in a destructuring position — the
-            // v-for LHS parses leniently as a plain expression (not a
-            // formal `BindingPattern`), so a default surfaces as an
-            // `AssignmentExpression` here. A nested-pattern default
-            // (`{ a } = {}`) is unsupported; only a bare identifier target is.
-            let AssignmentTarget::AssignmentTargetIdentifier(target_id) = &assign.left else {
-                return false;
-            };
-            let default_span = assign.right.span();
-            let default_text = source
-                .get(default_span.start as usize..default_span.end as usize)
-                .unwrap_or_default();
-            let resolved_default_expr = resolver.resolve_simple_expr(default_text);
-            out.push((
-                target_id.name.as_str().to_string(),
-                DestructureAccessor::Default {
-                    suffix: path.to_string(),
-                    resolved_default_expr,
-                },
-            ));
-            true
-        }
-        Expression::ObjectExpression(obj) => {
-            // A rest element must be syntactically last, so every sibling
-            // key seen before it in this loop is already the complete
-            // exclusion list official's `_getRestElement` needs.
-            let mut declared_keys: Vec<String> = Vec::new();
-            for prop in &obj.properties {
-                match prop {
-                    ObjectPropertyKind::ObjectProperty(p) => {
-                        if p.computed {
-                            return false;
-                        }
-                        let mut child = String::with_capacity(path.len() + 8);
-                        child.push_str(path);
-                        let key_name = match &p.key {
-                            PropertyKey::StaticIdentifier(name) => {
-                                child.push('.');
-                                child.push_str(name.name.as_str());
-                                name.name.as_str().to_string()
-                            }
-                            PropertyKey::StringLiteral(s) => {
-                                child.push_str("[\"");
-                                helpers::escape_js_string_into(&mut child, s.value.as_str());
-                                child.push_str("\"]");
-                                s.value.as_str().to_string()
-                            }
-                            _ => return false,
-                        };
-                        declared_keys.push(key_name);
-                        if !collect_destructure_paths(&p.value, &child, source, resolver, out) {
-                            return false;
-                        }
-                    }
-                    ObjectPropertyKind::SpreadProperty(spread) => {
-                        let Expression::Identifier(rest_id) = &spread.argument else {
-                            return false; // nested rest target, unsupported
-                        };
-                        out.push((
-                            rest_id.name.as_str().to_string(),
-                            DestructureAccessor::Rest {
-                                suffix: path.to_string(),
-                                excluded_keys: declared_keys.clone(),
-                            },
-                        ));
-                    }
-                }
-            }
-            true
-        }
-        Expression::ArrayExpression(arr) => {
-            let mut idx = 0usize;
-            for elem in &arr.elements {
-                match elem {
-                    ArrayExpressionElement::Elision(_) => idx += 1,
-                    ArrayExpressionElement::SpreadElement(_) => return false,
-                    _ => {
-                        let Some(e) = elem.as_expression() else {
-                            return false;
-                        };
-                        let mut child = String::with_capacity(path.len() + 8);
-                        child.push_str(path);
-                        child.push('[');
-                        push_usize(&mut child, idx);
-                        child.push(']');
-                        if !collect_destructure_paths(e, &child, source, resolver, out) {
-                            return false;
-                        }
-                        idx += 1;
-                    }
-                }
-            }
-            true
-        }
-        _ => false,
-    }
-}
-
-/// `usize` decimal writer — `super::shared::helpers::push_u32` is `u32`-only.
-fn push_usize(buf: &mut String, n: usize) {
-    use std::fmt::Write as _;
-    let _ = write!(buf, "{n}");
 }
 
 /// Leaf-name → accessor list for a v-for VALUE position's destructuring
 /// pattern, or `None` if it isn't an object/array pattern at all (bare
 /// identifier — handled by the existing simple-ident path) or hits an
 /// unsupported construct. Official only destructures the value position —
-/// key/index stay identifier-only ([`collect_destructure_paths`]'s doc).
+/// key/index stay identifier-only (the shared collector's eligibility).
 fn destructure_value_paths(
     expr: &Expression<'_>,
     source: &str,
@@ -585,12 +405,9 @@ fn destructure_value_paths(
     ) {
         return None;
     }
-    let mut out = Vec::new();
-    if collect_destructure_paths(expr, "", source, resolver, &mut out) {
-        Some(out)
-    } else {
-        None
-    }
+    collect_destructure_paths(expr, |expression| {
+        resolve_destructure_default(expression, source, resolver)
+    })
 }
 
 /// The v-for value (item) position's own expression — first element of a
@@ -617,114 +434,6 @@ fn v_for_value_pattern<'r, 'e>(
     Some(for_value_expr(left))
 }
 
-/// Per-leaf-identifier accessor for a v-slot scoped-slot param's
-/// destructuring pattern, walked off the OXC-parsed `BindingPattern` — the
-/// v-slot counterpart of [`collect_destructure_paths`] (same rules:
-/// shorthand/renamed/nested keys, string-literal keys, rest elements, and
-/// default values all resolve; only a computed key or a nested-pattern
-/// rest/default target bails to `false`, leaving the caller's raw authored
-/// text as the closure's own param). Confirmed against the pinned oracle:
-/// `_getRestElement`/`_getDefaultValue` are the SAME helpers v-for uses,
-/// just against a `_slotProps{depth}` base instead of `_for_item{depth}.value`.
-fn collect_binding_destructure_paths(
-    pattern: &BindingPattern<'_>,
-    path: &str,
-    source: &str,
-    resolver: &BindingResolver<'_>,
-    out: &mut Vec<(String, DestructureAccessor)>,
-) -> bool {
-    use oxc_span::GetSpan;
-    match pattern {
-        BindingPattern::BindingIdentifier(id) => {
-            out.push((
-                id.name.as_str().to_string(),
-                DestructureAccessor::Path(path.to_string()),
-            ));
-            true
-        }
-        BindingPattern::ObjectPattern(obj) => {
-            // Sibling keys declared before a rest element are its complete
-            // exclusion list — same reasoning as `collect_destructure_paths`.
-            let mut declared_keys: Vec<String> = Vec::new();
-            for prop in &obj.properties {
-                if prop.computed {
-                    return false;
-                }
-                let mut child = String::with_capacity(path.len() + 8);
-                child.push_str(path);
-                let key_name = match &prop.key {
-                    PropertyKey::StaticIdentifier(name) => {
-                        child.push('.');
-                        child.push_str(name.name.as_str());
-                        name.name.as_str().to_string()
-                    }
-                    PropertyKey::StringLiteral(s) => {
-                        child.push_str("[\"");
-                        helpers::escape_js_string_into(&mut child, s.value.as_str());
-                        child.push_str("\"]");
-                        s.value.as_str().to_string()
-                    }
-                    _ => return false,
-                };
-                declared_keys.push(key_name);
-                if !collect_binding_destructure_paths(&prop.value, &child, source, resolver, out) {
-                    return false;
-                }
-            }
-            if let Some(rest) = &obj.rest {
-                let BindingPattern::BindingIdentifier(rest_id) = &rest.argument else {
-                    return false; // nested rest target, unsupported
-                };
-                out.push((
-                    rest_id.name.as_str().to_string(),
-                    DestructureAccessor::Rest {
-                        suffix: path.to_string(),
-                        excluded_keys: declared_keys,
-                    },
-                ));
-            }
-            true
-        }
-        BindingPattern::ArrayPattern(arr) => {
-            if arr.rest.is_some() {
-                return false;
-            }
-            for (idx, elem) in arr.elements.iter().enumerate() {
-                let Some(elem_pattern) = elem else {
-                    continue; // elision/hole
-                };
-                let mut child = String::with_capacity(path.len() + 8);
-                child.push_str(path);
-                child.push('[');
-                push_usize(&mut child, idx);
-                child.push(']');
-                if !collect_binding_destructure_paths(elem_pattern, &child, source, resolver, out) {
-                    return false;
-                }
-            }
-            true
-        }
-        BindingPattern::AssignmentPattern(assign) => {
-            let BindingPattern::BindingIdentifier(target_id) = &assign.left else {
-                return false; // nested-pattern default, unsupported
-            };
-            let default_span = assign.right.span();
-            let default_text = source
-                .get(default_span.start as usize..default_span.end as usize)
-                .unwrap_or_default();
-            let resolved_default_expr = resolver.resolve_simple_expr(default_text);
-            out.push((
-                target_id.name.as_str().to_string(),
-                DestructureAccessor::Default {
-                    suffix: path.to_string(),
-                    resolved_default_expr,
-                },
-            ));
-            true
-        }
-    }
-}
-
 /// The v-slot scoped-slot destructure leaves, if this `<template
 /// v-slot="…">` wrapper's own param is an object/array PATTERN (never a
 /// bare identifier — official only enters a fresh scope for a pattern; a
@@ -749,12 +458,9 @@ fn v_slot_destructure_leaves<'e>(
     ) {
         return None;
     }
-    let mut out = Vec::new();
-    if collect_binding_destructure_paths(pattern, "", source, resolver, &mut out) {
-        Some(out)
-    } else {
-        None
-    }
+    collect_binding_destructure_paths(pattern, |expression| {
+        resolve_destructure_default(expression, source, resolver)
+    })
 }
 
 /// Loop-variable rename map for [`BindingResolver::push_for_scope`] —
@@ -776,8 +482,8 @@ fn build_for_scope_map(
     resolver: &BindingResolver<'_>,
     out: &mut CodeGenOutput<'_>,
 ) -> rustc_hash::FxHashMap<String, String> {
-    use super::binding::is_simple_ident;
     use super::shared::helpers::{push_u32, split_v_for_params};
+    use crate::template::binding::is_simple_ident;
 
     let mut map = rustc_hash::FxHashMap::default();
     let parts = split_v_for_params(param_part);
@@ -803,7 +509,7 @@ fn build_for_scope_map(
                 value_pattern.and_then(|p| destructure_value_paths(p, source, resolver))
             {
                 for (leaf_name, accessor) in leaves {
-                    accessor.register_import(out);
+                    register_destructure_import(&accessor, out);
                     map.insert(leaf_name, accessor.render(&accessor_base));
                 }
             }
@@ -825,8 +531,8 @@ fn build_for_callback_params(
     source: &str,
     resolver: &BindingResolver<'_>,
 ) -> String {
-    use super::binding::is_simple_ident;
     use super::shared::helpers::{push_u32, split_v_for_params};
+    use crate::template::binding::is_simple_ident;
 
     let parts = split_v_for_params(param_part);
     let prefixes = ["_for_item", "_for_key", "_for_index"];
@@ -1133,6 +839,9 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         if state.child_nav.iter().any(|nav| nav.contains("_next(")) {
             out.add_vapor_import(VaporHelper::Next);
         }
+        if state.child_nav.iter().any(|nav| nav.contains("_nthChild(")) {
+            out.add_vapor_import(VaporHelper::NthChild);
+        }
 
         // Text node creations
         for tc in &state.child_text_creations {
@@ -1246,6 +955,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         let is_root = self.template_single_root && self.depth == 0;
         let (body, is_static, body_anchors) =
             self.build_closure_body(state, has_dynamic_text, "  ", is_root, out);
+        let multi_root = self.if_branch_multi_root(el, source);
 
         match cond.kind {
             ElementNodeConditionKind::If => {
@@ -1280,6 +990,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                         anchors: body_anchors,
                         is_static,
                         own_if_index: Some(own_if_index),
+                        multi_root,
                     }],
                     last_branch_id: id,
                     // This element's stack entry is already popped; `element_stack.last()`
@@ -1314,6 +1025,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                         anchors: body_anchors,
                         is_static,
                         own_if_index: Some(own_if_index),
+                        multi_root,
                     });
                     chain.last_branch_id = id;
                 }
@@ -1329,6 +1041,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                         anchors: body_anchors,
                         is_static,
                         own_if_index: None,
+                        multi_root,
                     });
                 }
                 // Flush immediately — chain is complete
@@ -1429,11 +1142,12 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                     stmt.push_str("{\n");
                     push_body_with_anchors(stmt, &next.body, &next.anchors, anchors);
                     stmt.push('}');
-                    IfNegative::Terminal(next.is_static)
+                    IfNegative::Terminal(next.is_static, next.multi_root)
                 };
                 // A negative branch always yields flags (at least FALSE_SINGLE_ROOT).
                 let flags = compute_if_flags(
                     branch.is_static,
+                    branch.multi_root,
                     negative,
                     branch.own_if_index,
                     allow_no_scope,
@@ -1449,6 +1163,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                 // explicit `null` placeholder for the skipped 3rd arg (rc.5 `genCall`).
                 match compute_if_flags(
                     branch.is_static,
+                    branch.multi_root,
                     IfNegative::None,
                     branch.own_if_index,
                     allow_no_scope,
@@ -1485,7 +1200,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
     /// scope-local reference spans (`VForWithBindings::scope_local_reference_names`
     /// currently exposes only names).
     fn resolve_v_for_source(&self, source_part: &str) -> String {
-        use super::binding::is_simple_ident;
+        use crate::template::binding::is_simple_ident;
 
         let trimmed = source_part.trim();
         if is_simple_ident(trimmed) {
@@ -1656,8 +1371,9 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
     }
 
     /// Emit `const n{target} = _child(n{container})` (first nav in this parent
-    /// scope) or `const n{target} = _next(n{prev})` (chained). Official
-    /// single-arg `next(node) => node.nextSibling` (rc.5). Separate from
+    /// scope) or `const n{target} = _next(n{prev})` (chained). `text` marks a
+    /// text node inside a plain element, which Vue 3.6 hints to the runtime
+    /// as a trailing `true` (`_next(n{prev}, true)`). Separate from
     /// `element::merge_into_parent`'s dom-index nav — this backs multi-anchor
     /// nav inside one parent, which a parent-absolute index cannot express.
     ///
@@ -1666,9 +1382,9 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
     /// it would have lived on is already popped. Updated to `target_ref` so
     /// the next call for this scope chains from here.
     fn emit_chained_nav(
-        &self,
         target_ref: u32,
         container_ref: u32,
+        text: bool,
         chain: &mut Option<u32>,
         child_nav_sink: &mut [&'alloc str],
         slot: usize,
@@ -1684,16 +1400,15 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             Some(prev_ref) => {
                 stmt.push_str("_next(n");
                 push_u32(&mut stmt, prev_ref);
-                stmt.push(')');
                 out.add_vapor_import(VaporHelper::Next);
             }
             None => {
                 stmt.push_str("_child(n");
                 push_u32(&mut stmt, container_ref);
-                stmt.push(')');
                 out.add_vapor_import(VaporHelper::Child);
             }
         }
+        stmt.push_str(if text { ", true)" } else { ")" });
         child_nav_sink[slot] = out.alloc_str(&stmt);
         *chain = Some(target_ref);
     }
@@ -1963,9 +1678,10 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                         let anchor_ref = self.counters.next_node();
                         let container_ref = state.ensure_node_ref(&mut self.counters);
                         let nav_slot = nav_slot.expect("has_following always reserves a nav slot");
-                        self.emit_chained_nav(
+                        Self::emit_chained_nav(
                             anchor_ref,
                             container_ref,
+                            false,
                             &mut chain,
                             &mut state.child_nav,
                             nav_slot,
@@ -1991,9 +1707,10 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                 }
                 PendingNavRequest::OwnRef { own_ref, nav_slot } => {
                     let container_ref = state.ensure_node_ref(&mut self.counters);
-                    self.emit_chained_nav(
+                    Self::emit_chained_nav(
                         own_ref,
                         container_ref,
+                        false,
                         &mut chain,
                         &mut state.child_nav,
                         nav_slot,
@@ -2006,9 +1723,10 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                     stmt_slot,
                 } => {
                     let container_ref = state.ensure_node_ref(&mut self.counters);
-                    self.emit_chained_nav(
+                    Self::emit_chained_nav(
                         own_ref,
                         container_ref,
+                        true,
                         &mut chain,
                         &mut state.child_nav,
                         nav_slot,
@@ -2168,6 +1886,53 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         }
     }
 
+    /// Official `getBlockShape` for a `v-if` branch: one root only when its
+    /// content is exactly one element (a component, slot outlet or
+    /// `<template>` included) without its own `v-if`. Text, a comment,
+    /// several children, no content or a nested `v-if` make the branch
+    /// MULTI_ROOT. A branch on any element other than `<template>` is that
+    /// element alone.
+    fn if_branch_multi_root(&self, el: &ElementNode, source: &str) -> bool {
+        if el.tag_type != TagType::Template {
+            return false;
+        }
+        let children: &[NodeId] = el
+            .content
+            .as_ref()
+            .map(|c| c.children.as_slice())
+            .unwrap_or(&[]);
+        let mut content = children
+            .iter()
+            .filter(|&&child| self.is_meaningful_sibling(child, source));
+        match (content.next(), content.next()) {
+            (Some(&only), None) => match &self.ast.nodes[only.0].kind {
+                AstNodeKind::Element(child) => {
+                    child.v_condition.as_ref().is_some_and(|condition| {
+                        matches!(condition.kind, ElementNodeConditionKind::If)
+                    })
+                }
+                _ => true,
+            },
+            _ => true,
+        }
+    }
+
+    /// Whether `id`'s parent is a `<KeepAlive>`/`<Transition>`.
+    fn parent_hosts_single_root_child(&self, id: NodeId, source: &str) -> bool {
+        let Some(parent_id) = self.ast.nodes.get(id.0).and_then(|n| n.parent) else {
+            return false;
+        };
+        match &self.ast.nodes[parent_id.0].kind {
+            AstNodeKind::Element(parent) => {
+                parent.tag_type == TagType::Component
+                    && source
+                        .get(parent.tag_open.start as usize + 1..parent.tag_open.name_end as usize)
+                        .is_some_and(super::shared::helpers::hosts_single_root_child)
+            }
+            _ => false,
+        }
+    }
+
     /// Whether `id` is the ONLY meaningful child of its parent (any kind of
     /// parent) — unlike [`Self::v_for_is_only_child`], not restricted to a
     /// plain-element parent. Used to gate the "this plain element IS its
@@ -2232,6 +1997,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
     #[allow(clippy::too_many_arguments)]
     fn build_component_root(
         &mut self,
+        id: NodeId,
         el: &ElementNode,
         tag_name: &str,
         node_ref: u32,
@@ -2240,7 +2006,8 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         oxc_el: Option<&OxcParsedElement<'alloc>>,
         out: &mut CodeGenOutput<'alloc>,
     ) -> VaporRootElement<'alloc> {
-        use super::shared::helpers::{is_builtin_component, push_u32, to_pascal_case};
+        use super::shared::helpers::{is_builtin_component, push_u32};
+        use crate::template::vue_syntax::to_pascal_case;
 
         // `<component :is="expr">` — official Vapor routes this through
         // `_createDynamicComponent(() => (expr), props, slots)`, a
@@ -2256,8 +2023,9 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             self.options.force_js,
         );
         if let Some((is_expr, _is_prop_idx)) = dynamic_is {
-            return self
-                .build_dynamic_component_root(el, is_expr, node_ref, source, state, oxc_el, out);
+            return self.build_dynamic_component_root(
+                id, el, is_expr, node_ref, source, state, oxc_el, out,
+            );
         }
 
         // Resolve the component reference.
@@ -2402,7 +2170,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         // Official `hasStableSlotRoot`/`markSlotRootOperations`: an implicit
         // default slot whose ENTIRE content is one non-stable construct (a
         // bare `<slot>` forward or a `<component :is>`, with no static HTML
-        // at all) forwards through `_extend(() => {...}, { _: 8 /*
+        // at all) forwards through `_extend(() => {...}, { _: 1 /*
         // NON_STABLE */ })` directly as the slots argument — ahead of both
         // the raw-children (Teleport/KeepAlive) and named-slots forms below.
         if named_slots.is_empty() {
@@ -2460,7 +2228,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
     /// nav/effects/text extraction. That is never a "stable" root (a bare
     /// `<slot>` forward has no template of its own; a dynamic `<component
     /// :is>` isn't statically resolved), so it forwards as `_extend(() => {
-    /// ...; return n{ref} }, { _: 8 /* NON_STABLE */ })` — the merged
+    /// ...; return n{ref} }, { _: 1 /* NON_STABLE */ })` — the merged
     /// construct's OWN statements verbatim, no synthetic empty template and
     /// no `_setInsertionState` (there is no real DOM container to insert
     /// into). Returns `None` when the shape doesn't match; the caller falls
@@ -2505,7 +2273,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         result.push_str("    return n");
         push_u32(&mut result, child_ref);
         result.push('\n');
-        result.push_str("  }, { _: 8 /* NON_STABLE */ })");
+        result.push_str("  }, { _: 1 /* NON_STABLE */ })");
         Some(result)
     }
 
@@ -2517,6 +2285,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
     #[allow(clippy::too_many_arguments)]
     fn build_dynamic_component_root(
         &mut self,
+        id: NodeId,
         el: &ElementNode,
         is_expr: String,
         node_ref: u32,
@@ -2530,10 +2299,12 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         // This construct's OWN parent is still on the stack — `leave_element`
         // pops this element's entry before calling here.
         let is_sole_template_root = self.template_single_root && self.depth == 0;
-        let is_slot_content_root = self
+        let sole_slot_root = self
             .element_stack
             .last()
-            .is_some_and(|parent| parent.is_component_scope);
+            .is_some_and(|parent| parent.is_component_scope)
+            && self.is_sole_meaningful_child(id, source);
+        let single_root_host = sole_slot_root && self.parent_hosts_single_root_child(id, source);
         let props_str = self.build_component_props(el, source, oxc_el, true, out);
         let slots_str = self.build_component_slots(state, el, false, out);
 
@@ -2554,24 +2325,27 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         } else {
             create_line.push_str("null");
         }
-        // Trailing block-topology flag: the sole template root gets
-        // SINGLE_ROOT (1); a dynamic component nested inside another
-        // component's slot content gets SLOT_ROOT (4) — verified against
-        // `components/component-is` (root) and `built-ins/keep-alive`'s
-        // inner dynamic child (slot content). A dynamic component that is
-        // neither (e.g. one sibling of a multi-root template) gets no
-        // trailing flag at all — verified against `components/dynamic-multi-root`.
-        if is_sole_template_root {
-            if self.options.is_production {
-                create_line.push_str(", 1");
-            } else {
-                create_line.push_str(", 1 /* SINGLE_ROOT */");
-            }
-        } else if is_slot_content_root {
-            if self.options.is_production {
-                create_line.push_str(", 4");
-            } else {
-                create_line.push_str(", 4 /* SLOT_ROOT */");
+        // Trailing block-topology flag (official `genDynamicComponentFlags`):
+        // the sole template root gets SINGLE_ROOT (1); a component's sole slot
+        // root gets SLOT_ROOT plus SINGLE_ROOT under a `<KeepAlive>`/
+        // `<Transition>` (5, `built-ins/keep-alive`) or SLOT_SINGLE_ROOT under
+        // any other component (36). A dynamic component that is none of these
+        // (one sibling of a multi-root template or of other slot children)
+        // gets no trailing flag at all (`components/dynamic-multi-root`).
+        let flag = if is_sole_template_root {
+            Some(("1", " /* SINGLE_ROOT */"))
+        } else if single_root_host {
+            Some(("5", " /* SINGLE_ROOT, SLOT_ROOT */"))
+        } else if sole_slot_root {
+            Some(("36", " /* SLOT_SINGLE_ROOT, SLOT_ROOT */"))
+        } else {
+            None
+        };
+        if let Some((number, comment)) = flag {
+            create_line.push_str(", ");
+            create_line.push_str(number);
+            if !self.options.is_production {
+                create_line.push_str(comment);
             }
         }
         create_line.push(')');
@@ -2698,10 +2472,11 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                     let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
                     let resolved_value =
                         resolve_expr(value, vs, oxc_exp, &self.resolver, self.options.force_js);
-                    let trimmed_value = helpers::trim_handler_body(&resolved_value);
+                    let trimmed_value =
+                        crate::template::vue_syntax::trim_handler_body(&resolved_value);
                     if trimmed_value.is_empty() {
                         entry.push_str(": () => {}");
-                    } else if helpers::is_multi_statement_handler(oxc_exp) {
+                    } else if crate::template::vue_syntax::is_multi_statement_handler(oxc_exp) {
                         // Statement list: wrap in a block
                         entry.push_str(": () => { ");
                         entry.push_str(trimmed_value);
@@ -2857,7 +2632,10 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                 buf.push_str(": ");
                 if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
                     buf.push('"');
-                    helpers::escape_js_string_into(&mut buf, &source[vs as usize..ve as usize]);
+                    crate::template::vue_syntax::escape_js_string_into(
+                        &mut buf,
+                        &source[vs as usize..ve as usize],
+                    );
                     buf.push('"');
                 } else {
                     buf.push_str("true");
@@ -2880,7 +2658,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             if count > 0 {
                 buf.push_str(", ");
             }
-            let key = super::vdom::props::camelize(arg);
+            let key = crate::template::vue_syntax::camelize(arg);
             push_prop_key(&mut buf, &key);
             buf.push_str(": ");
             if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
@@ -2973,17 +2751,16 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
         // component's implicit default slot (this construct's immediate
         // parent — still on the stack, `leave_element` pops its own entry
         // before calling here — has no real DOM container) is never a
-        // stable slot root (official `markSlotRootOperations`'s type-12
-        // branch): SLOT_ROOT (4) always, INHERIT_FALLBACK (32) since this
-        // backend does not yet detect the SHARED_FALLBACK (v-for-forced)
-        // case. `try_build_non_stable_slot_root` decides whether the WHOLE
+        // stable slot root (official `markSlotRootOperations`'s slot-outlet
+        // branch): it forwards its parent's slot, flagged FORWARDED (4).
+        // `try_build_non_stable_slot_root` decides whether the WHOLE
         // slot ends up NON_STABLE-forwarded; this only needs to know
         // whether trailing flags apply to ITS OWN `_createSlot(...)` call.
         let is_slot_content_root = self
             .element_stack
             .last()
             .is_some_and(|parent| parent.is_component_scope);
-        let flags: u32 = if is_slot_content_root { 4 | 32 } else { 0 };
+        let flags: u32 = if is_slot_content_root { 4 } else { 0 };
 
         // Omit trailing defaults: fallback, then props (`null`), then name (`"default"`).
         let props_arg = self.build_slot_outlet_props(el, oxc_el, source);
@@ -3010,6 +2787,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                     content_offset: quote_offset,
                     length: 1,
                     source_pos,
+                    kind: AnchorKind::Point,
                 });
             }
             first_arg = false;
@@ -3039,7 +2817,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
             }
             push_u32(&mut create_line, flags);
             if !self.options.is_production {
-                create_line.push_str(" /* SLOT_ROOT, INHERIT_FALLBACK */");
+                create_line.push_str(" /* FORWARDED */");
             }
         }
         create_line.push(')');
@@ -3138,7 +2916,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                     buf.push_str(", ");
                 }
                 buf.push('"');
-                helpers::escape_js_string_into(&mut buf, event);
+                crate::template::vue_syntax::escape_js_string_into(&mut buf, event);
                 buf.push('"');
             }
             buf.push_str(")\n");
@@ -3363,13 +3141,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
                 .map(|c| c.end)
                 .unwrap_or(root.tag_open.end),
         };
-        out.overwrite_segmented(
-            start,
-            end,
-            &output,
-            &anchors,
-            SegmentedOverwriteAuthority::new(),
-        );
+        out.overwrite_segmented(start, end, &output, &anchors);
     }
 
     fn enter_element(
@@ -3527,7 +3299,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
                 helpers::push_u32(&mut base, self.for_scope_depth - 1);
                 let mut map = rustc_hash::FxHashMap::default();
                 for (name, accessor) in leaves {
-                    accessor.register_import(out);
+                    register_destructure_import(&accessor, out);
                     map.insert(name, accessor.render(&base));
                 }
                 self.resolver.push_for_scope(map);
@@ -3646,7 +3418,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             };
             let node_ref = state.ensure_node_ref(&mut self.counters);
             let root =
-                self.build_component_root(el, tag_name, node_ref, source, state, oxc_el, out);
+                self.build_component_root(id, el, tag_name, node_ref, source, state, oxc_el, out);
             if self.depth == 0 {
                 self.root_elements.push(root);
             } else {
@@ -3716,7 +3488,7 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
             // needs-quoting-only rule.
             let mut entry = String::with_capacity(128);
             entry.push('"');
-            helpers::escape_js_string_into(&mut entry, slot_name);
+            crate::template::vue_syntax::escape_js_string_into(&mut entry, slot_name);
             entry.push_str("\": (");
             if v_slot_leaves.is_some() {
                 // Destructured pattern renames to `_slotProps{depth}` —
@@ -4177,3 +3949,16 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VaporCodeGen<'ast, 'alloc> {
 
 #[cfg(test)]
 mod tests;
+
+fn resolve_destructure_default(
+    expression: &Expression<'_>,
+    source: &str,
+    resolver: &BindingResolver<'_>,
+) -> String {
+    use oxc_span::GetSpan;
+    let span = expression.span();
+    let text = source
+        .get(span.start as usize..span.end as usize)
+        .unwrap_or_default();
+    resolver.resolve_simple_expr(text)
+}

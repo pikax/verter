@@ -16,7 +16,6 @@ pub mod carrier_sync;
 pub mod membership_ledger;
 pub mod membership_reconciler;
 pub mod publish_coordinator;
-pub mod tsgo_backend;
 pub mod tsserver_backend;
 
 pub use carrier_publish_store::{
@@ -36,7 +35,6 @@ pub(crate) use carrier_sync::{
 };
 pub(crate) use publish_coordinator::{resolve_carrier_ownership_over_vfs, CompanionContent};
 pub use publish_coordinator::{CarrierCompanion, CarrierPublishCoordinator, CarrierPublishError};
-pub use tsgo_backend::TsgoEngineBackend;
 pub use tsserver_backend::TsserverEngineBackend;
 
 pub use membership_ledger::{

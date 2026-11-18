@@ -15,7 +15,7 @@ use crate::code_transform::CodeTransform;
 use crate::cursor::ScriptLanguage;
 use crate::parser::types::RootNodeScript;
 use crate::script::prepared::{PreparedCompanion, PreparedScript};
-use crate::template::code_gen::binding::BindingType;
+use crate::template::binding::BindingType;
 use crate::utils::oxc::vue::{AsyncKind, ImportSpecifierKind, ScriptImport, ScriptItem};
 
 use super::{push_default_export_statement, push_sfc_binding};
@@ -48,7 +48,7 @@ pub(super) fn is_ref_bindable_import(source: &str, kind: Option<ImportSpecifierK
 ///
 /// Default is TypeScript (not TSX) because Vue's `<script lang="ts">` uses angle-bracket
 /// type assertions which conflict with JSX parsing.
-pub(super) fn source_type_from_lang(lang: Option<&ScriptLanguage>) -> SourceType {
+pub(crate) fn source_type_from_lang(lang: Option<&ScriptLanguage>) -> SourceType {
     match lang {
         Some(ScriptLanguage::TSX) | Some(ScriptLanguage::JSX) => SourceType::tsx(),
         Some(ScriptLanguage::JavaScript) => SourceType::mjs(),
@@ -140,23 +140,11 @@ pub fn process_script_setup<'alloc>(
     let mut macro_state = MacroState::new();
 
     // Apply the companion <script> codegen FIRST: remove its duplicate default
-    // export, lift `export default { ... }` options, and collect non-type import
-    // names for template resolution. Its type inventory was already folded into
-    // the setup parse, so only the import names flow back here.
-    let companion_import_names = match prepared.companion() {
-        Some(companion) => process_companion_script(companion, &mut ctx.out, &mut macro_state),
-        None => Vec::new(),
-    };
-
-    // Merge the companion's ref-bindable imports into the context set
-    // (companion imports are in scope at runtime — same official rule).
-    if !macro_state.ref_bindable_imports.is_empty() {
-        let names: Vec<&str> = macro_state
-            .ref_bindable_imports
-            .iter()
-            .map(|n| ctx.out.alloc_str(n))
-            .collect();
-        ctx.ref_bindable_imports.extend(names);
+    // export and lift `export default { ... }` options. Its type inventory was
+    // already folded into the setup parse; the names it exposes to the
+    // template are already in `ctx.bindings` (see `script_lane_bindings`).
+    if let Some(companion) = prepared.companion() {
+        process_companion_script(companion, &mut ctx.out, &mut macro_state);
     }
 
     let parse_result = prepared_setup.parse_result();
@@ -192,18 +180,6 @@ pub fn process_script_setup<'alloc>(
             ScriptItem::Import(imp) => {
                 let abs_start = content_start + imp.span.start;
                 let abs_end = content_start + imp.span.end;
-
-                // Record official `setup-maybe-ref` import bindings — inline
-                // template refs to these names bind `ref_key`/`ref: name`
-                // (named/default user imports except vue-source, default
-                // `.vue`-source, and namespace imports).
-                if !imp.is_type_only {
-                    for b in &imp.bindings {
-                        if !b.is_type_only && is_ref_bindable_import(imp.source, b.import_kind) {
-                            ctx.ref_bindable_imports.insert(ctx.out.alloc_str(b.name));
-                        }
-                    }
-                }
 
                 if !options.keep_ts_types && imp.is_type_only {
                     // Type-only import — strip entirely. process.rs is the SOLE
@@ -298,61 +274,42 @@ pub fn process_script_setup<'alloc>(
         }
     }
 
-    // Extract bindings from parse result.
-    // Binding spans are content-relative (0-based within content_str).
-    // Skip `Props` bindings — those are extracted directly during macro processing
-    // via `extract_individual_props_from_expr` and have inconsistent span coordinate
-    // systems (object-syntax keys are SFC-absolute, array-syntax keys are content-relative).
-    // Allow `PropsAliased` through — those come from `extract_destructured_props` with
-    // consistent content-relative spans, and are needed for destructured defineProps
-    // (especially when the type parameter is unresolvable, e.g., an imported type).
+    // Register each script binding declaration's identifier (its classes are
+    // already in `ctx.bindings`, see `script_lane_bindings`). A declaration's
+    // own identifier is a required `verbatim-carry` source-map anchor: a
+    // top-level `const count = ref(0)` must map a segment to `count`'s OWN
+    // position, not merely to its LINE's start (confirmed against the mapping
+    // oracle). The identifier text stays verbatim passthrough in the vast
+    // majority of cases; when it doesn't (e.g. this binding's declaration was
+    // itself overwritten elsewhere), the registered offset simply lands outside
+    // any surviving `Original` chunk and is never consulted — a harmless
+    // no-op, not a wrong mapping.
     for (span, bt) in &parse_result.bindings {
-        if *bt == BindingType::Props {
-            continue;
-        }
-        let name = &content_str[span.start as usize..span.end as usize];
-        if ctx.bindings.insert(name, *bt).is_none() {
-            ctx.binding_order.push(name);
-        }
-        // A declaration's own identifier is a required `verbatim-carry`
-        // source-map anchor: a top-level `const count = ref(0)` must map a
-        // segment to `count`'s OWN position, not merely to its LINE's
-        // start (confirmed against the mapping oracle). The identifier
-        // text stays verbatim passthrough in the vast majority of cases;
-        // when it doesn't (e.g. this binding's declaration was itself
-        // overwritten elsewhere), the registered offset simply lands
-        // outside any surviving `Original` chunk and is never consulted —
-        // a harmless no-op, not a wrong mapping.
-        ctx.out.add_sourcemap_location(content_start + span.start);
-    }
-
-    // Add companion script import names as SetupImport bindings.
-    // Imports in the companion <script> block are available to the template at
-    // runtime because the component factory merges both script blocks.
-    // `build_returned_object` includes a SetupImport iff it is genuinely
-    // runtime-used (script body or template) — see that function's doc
-    // comment for the full unconditional-inclusion rule and its disclosed
-    // companion-script-body-usage gap. Type-only imports (e.g., CurrencyCodes
-    // used only as `"EUR" as CurrencyCodes`) never reach here as a runtime
-    // binding in the first place — official excludes those too.
-    for name in &companion_import_names {
-        // Skip if setup script already declares the same name (setup takes precedence)
-        let alloc_name = ctx.out.alloc_str(name);
-        if let std::collections::hash_map::Entry::Vacant(entry) = ctx.bindings.entry(alloc_name) {
-            entry.insert(BindingType::SetupImport);
-            ctx.binding_order.push(alloc_name);
+        if *bt != BindingType::Props {
+            ctx.out.add_sourcemap_location(content_start + span.start);
         }
     }
 
     // Inject _useCssVars if CSS v-bind vars are present
     if !options.css_v_binds.is_empty() {
-        super::css_vars::inject_use_css_vars(
-            options.css_v_binds,
-            &ctx.bindings,
-            content_start, // Insert at start of setup body
-            &mut ctx.out,
-            &mut ctx.imports,
-        );
+        if let Some(expressions) = prepared.css_var_expressions() {
+            super::css_vars::inject_prepared_use_css_vars(
+                options.css_v_binds,
+                &ctx.bindings,
+                content_start,
+                &mut ctx.out,
+                &mut ctx.imports,
+                expressions,
+            );
+        } else {
+            super::css_vars::inject_use_css_vars(
+                options.css_v_binds,
+                &ctx.bindings,
+                content_start, // Insert at start of setup body
+                &mut ctx.out,
+                &mut ctx.imports,
+            );
+        }
     }
 
     // Merge defineModel declarations into props/emits sections.
@@ -576,15 +533,7 @@ pub fn process_script_only<'alloc>(
         return;
     };
     let content_start = prepared_companion.content_start();
-    let content_str = prepared_companion.content_str();
     let parse_result = prepared_companion.parse_result();
-
-    // Extract Options API bindings (data, props, computed, methods, inject)
-    // so the template codegen can use the correct accessor prefix ($data., $props., _ctx.).
-    for (span, bt) in &parse_result.bindings {
-        let name = &content_str[span.start as usize..span.end as usize];
-        ctx.bindings.insert(name, *bt);
-    }
 
     // Find default export and replace it.
     // Regular <script> content is passed through as-is to the bundler

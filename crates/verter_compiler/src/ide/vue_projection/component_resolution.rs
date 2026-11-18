@@ -17,7 +17,7 @@ use crate::ide::vue_projection::component_use::{
 use crate::ide::vue_projection::public_constructor::PUBLIC_COMPONENT;
 use crate::ide::vue_projection::script_setup::{ScriptProjectionFacts, SetupStatementKind};
 use crate::ide::{matches_custom_element, sanitize_js_identifier, GlobalComponentFallback};
-use crate::template::code_gen::shared::helpers::{is_member_expression, to_pascal_case};
+use crate::template::vue_syntax::{is_member_expression, to_pascal_case};
 
 /// The type-level correlation check distributes over each branch of an
 /// authored choice object. It refuses the entire value if any branch's props
@@ -379,4 +379,20 @@ fn is_property_name(key: &str) -> bool {
     };
     (first.is_ascii_alphabetic() || first == '_' || first == '$')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+impl crate::framework_common::vue_projection_backend::VueProjectionProduct
+    for ComponentResolutionProjection
+{
+    fn project(
+        backend: &crate::framework_common::vue_projection_backend::VueProjectionBackend,
+        input: &crate::framework_common::vue_projection_backend::VueProductInput<'_>,
+    ) -> Result<Self, super::script_setup::SetupProjectionRefusal> {
+        backend.component_resolution(
+            input.source,
+            input.artifact,
+            input.canonical_id,
+            input.custom_elements,
+        )
+    }
 }
