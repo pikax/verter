@@ -681,6 +681,11 @@ impl VuePublicConstructorContract {
             } else {
                 returned
             };
+            let returned = if matches!(provider, "__VerterSetupScope") {
+                format!("Exclude<{returned}, {{ readonly __verterRootArm: unknown }}>")
+            } else {
+                returned
+            };
             format!("import(\"vue\").ShallowUnwrapRef<{returned}>")
         });
         if self.normal_default.is_some() {
@@ -823,7 +828,7 @@ impl VuePublicConstructorContract {
     }
 
     /// `<T, U>`: the binder parameter names as type arguments.
-    fn binder_args(&self) -> String {
+    pub(super) fn binder_args(&self) -> String {
         if self.binder.is_empty() {
             return String::new();
         }
