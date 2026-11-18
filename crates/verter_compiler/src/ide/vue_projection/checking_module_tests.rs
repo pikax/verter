@@ -3258,3 +3258,31 @@ defineExpose({ value: props.value });
         parsed.diagnostics
     );
 }
+
+#[test]
+fn fallthrough_component_root_fixtures_are_fully_checked() {
+    macro_rules! fixture {
+        ($path:literal) => {
+            ($path, include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../verter_tsc/tests/cases/fixtures/", $path)))
+        };
+    }
+    for (path, source) in [
+        fixture!("fallthrough/src/AcceptChildPropThroughComponentRoot.vue"),
+        fixture!("fallthrough/src/AcceptCollidingPropThroughComponentRoot.vue"),
+        fixture!("fallthrough/src/AcceptLeafPropThroughNoInheritRoot.vue"),
+        fixture!("fallthrough/src/AcceptNumberTitleOnMixedConditionalRoot.vue"),
+        fixture!("fallthrough/src/AcceptStringTitleOnMixedConditionalRoot.vue"),
+        fixture!("fallthrough/src/AcceptThroughComponentRoot.vue"),
+        fixture!("fallthrough/src/ChildWrapsComp.vue"),
+        fixture!("fallthrough/src/MixedConditionalRoot.vue"),
+        fixture!("fallthrough/src/WrapsCollidingChild.vue"),
+        fixture!("fallthrough/src/WrapsNoInheritLeaf.vue"),
+        fixture!("fallthrough/src/WrapsTypedChild.vue"),
+        fixture!("js_carrier/src/TsParent.vue"),
+        fixture!("js_carrier/src/TsParentArity.vue"),
+    ] {
+        let source = source.replace("\r\n", "\n");
+        let module = composed(&source);
+        assert!(module.is_complete(), "{path}: {:?}", module.withheld);
+    }
+}
