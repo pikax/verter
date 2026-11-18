@@ -4324,6 +4324,42 @@ fn v_else_branches_with_distinct_keys_are_accepted() {
     assert_eq!(if_same_key_count(input), 0);
 }
 
+/// A key repeated across a whole chain is one warning on each branch that
+/// repeats an earlier branch's key, never an error: the chain is well formed.
+#[test]
+fn same_key_across_a_three_branch_chain_warns_once_per_repeating_branch() {
+    let input = r#"<template><div><p v-if="a" :key="`k:${id}`">a</p><p v-else-if="b" :key="`k:${id}`">b</p><p v-else :key="`k:${id}`">c</p></div></template>"#;
+    let parsed = parse_sfc(input);
+    let same_key = parsed
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == CompilerErrorCode::XVIfSameKey)
+        .collect::<Vec<_>>();
+    let starts = same_key.iter().map(|d| d.span.start).collect::<Vec<_>>();
+    assert_eq!(
+        starts,
+        [
+            input.find("<p v-else-if").unwrap() as u32,
+            input.find("<p v-else ").unwrap() as u32,
+        ],
+        "one per repeating branch, at its tag: {same_key:?}"
+    );
+    assert!(
+        same_key
+            .iter()
+            .all(|d| d.severity == crate::diagnostics::DiagnosticSeverity::Warning),
+        "{same_key:?}"
+    );
+    assert!(
+        !parsed
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == crate::diagnostics::DiagnosticSeverity::Error),
+        "{:?}",
+        parsed.diagnostics
+    );
+}
+
 // ========================================================================
 // An unclosed element inside a v-if branch keeps the branch's siblings
 // ========================================================================
