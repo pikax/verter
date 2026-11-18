@@ -113,7 +113,10 @@ fn materialize() -> Option<(tempfile::TempDir, PathBuf)> {
         "private": true,
         "typescript": {
             "contentMapper": {
-                "exec": [env!("CARGO_BIN_EXE_verter-tsc"), "--content-mapper"],
+                "exec": [
+                    verter_test_support::cargo_test_binary_path!("verter-tsc"),
+                    "--content-mapper",
+                ],
             },
         },
     });
