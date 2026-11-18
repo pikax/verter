@@ -187,6 +187,10 @@ pub enum MemberValue {
     },
     /// Literal static attribute text (a string at runtime).
     StaticText(String),
+    /// A static attribute written without a value (`<Child flag />`). It
+    /// renders as `true`, as vue-tsc does, so a boolean prop accepts it; an
+    /// attribute with a value, even `flag=""`, stays [`Self::StaticText`].
+    Valueless,
 }
 
 impl MemberValue {
@@ -204,6 +208,7 @@ impl MemberValue {
                 format!("{EXPRESSION_HANDLER_OPEN}{})", trim_handler_body(spelling))
             }
             Self::StaticText(text) => quote(text),
+            Self::Valueless => "true".to_string(),
         }
     }
 
@@ -212,7 +217,7 @@ impl MemberValue {
     pub fn expression(&self) -> Option<&AdmittedExpressionId> {
         match self {
             Self::Expression { id, .. } | Self::InlineHandler { id, .. } => Some(id),
-            Self::StaticText(_) => None,
+            Self::StaticText(_) | Self::Valueless => None,
         }
     }
 }
@@ -685,6 +690,9 @@ impl<'w> FragmentWriter<'w> {
             MemberValue::StaticText(text) => {
                 fragment.push_synth(quote(text));
             }
+            MemberValue::Valueless => {
+                fragment.push_synth("true");
+            }
         }
     }
 }
@@ -890,6 +898,9 @@ fn assemble_transaction(
                 continue;
             }
             let carried = match write.value {
+                // A static value is admitted whenever one is written, even
+                // an empty `flag=""`; only a bare attribute has none.
+                WriteValue::StaticText if op.value.is_none() => MemberValue::Valueless,
                 WriteValue::StaticText => {
                     MemberValue::StaticText(op.static_text.clone().unwrap_or_default())
                 }
