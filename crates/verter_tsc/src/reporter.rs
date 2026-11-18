@@ -79,6 +79,10 @@ verter_codes! {
     /// withheld, so their checks did not run. A warning: the exit status is
     /// unaffected.
     PartialCheck => "VTER1009",
+    /// `VTER1010` — two branches of one `v-if` chain carry the same `key`.
+    /// A warning: the carrier is still fully checked, and the exit status is
+    /// unaffected.
+    RepeatedBranchKey => "VTER1010",
 }
 
 impl fmt::Display for VerterCode {

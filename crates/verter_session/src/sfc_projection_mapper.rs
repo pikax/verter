@@ -213,6 +213,9 @@ pub enum MapperDiagnosticCode {
     ProjectionRefused,
     /// A defect in the projection itself. Never filtered.
     ProjectionInternal,
+    /// Two branches of one `v-if` chain carry the same `key`. A warning:
+    /// the chain is well formed, so the carrier is still fully checked.
+    RepeatedBranchKey,
 }
 
 impl MapperDiagnosticCode {
@@ -224,6 +227,20 @@ impl MapperDiagnosticCode {
             Self::Syntax | Self::ScriptLangConflict => 1001,
             Self::ProjectionRefused => 1002,
             Self::ProjectionInternal => 1003,
+            Self::RepeatedBranchKey => 1004,
+        }
+    }
+
+    /// True for a diagnostic that reports advice, not a failure: it neither
+    /// makes the result incomplete nor fails a run.
+    #[must_use]
+    pub fn is_warning(self) -> bool {
+        match self {
+            Self::RepeatedBranchKey => true,
+            Self::Syntax
+            | Self::ScriptLangConflict
+            | Self::ProjectionRefused
+            | Self::ProjectionInternal => false,
         }
     }
 }
@@ -431,10 +448,10 @@ impl ContentMapperProjectionAdapter {
         // Recovery's syntax errors, after the carrier's own parse errors; a
         // range the carrier parser already reported is not reported twice.
         for recovered in module.recovery.syntax_diagnostics() {
-            if diagnostics
-                .iter()
-                .any(|reported| (reported.start, reported.end) == (recovered.start, recovered.end))
-            {
+            if diagnostics.iter().any(|reported| {
+                !reported.code.is_warning()
+                    && (reported.start, reported.end) == (recovered.start, recovered.end)
+            }) {
                 continue;
             }
             diagnostics.push(MapperDiagnostic {
@@ -454,7 +471,12 @@ impl ContentMapperProjectionAdapter {
             dialect: module.dialect,
             text: Arc::from(module.checking_text()),
             mappings: lower_wire_mappings(&module),
-            complete: module.is_complete() && diagnostics.is_empty(),
+            // A warning is advice on a fully composed module; only an error
+            // keeps the result from warming the complete cache.
+            complete: module.is_complete()
+                && diagnostics
+                    .iter()
+                    .all(|diagnostic| diagnostic.code.is_warning()),
             diagnostics,
             module: Some(Arc::new(module)),
             plane: Some(Arc::new(plane)),
@@ -585,13 +607,13 @@ pub(crate) fn compose_carrier(
         Err(failure) => return failure.into(),
     };
     // The carrier parser's own errors (a missing entry block, a malformed
-    // template) are reported whether or not a module composes.
+    // template), and the warnings the checker reports, are reported whether
+    // or not a module composes.
     let parse_diagnostics = artifact
         .common()
         .diagnostics
         .iter()
-        .filter(|diagnostic| diagnostic.severity == LanguageDiagnosticSeverity::Error)
-        .map(carrier_parse_diagnostic)
+        .filter_map(reported_parse_diagnostic)
         .collect();
     // A `src` script or template has its text in another file, which only a
     // host binds; composing without it would check a carrier that is not
@@ -625,7 +647,7 @@ pub(crate) fn compose_carrier(
     }
 }
 
-fn accepted_artifact(
+pub(crate) fn accepted_artifact(
     grammars: &CarrierGrammarAuthority,
     canonical: &str,
     content: &str,
@@ -658,7 +680,27 @@ fn accepted_artifact(
         .into_framework_parse_artifact())
 }
 
-/// One carrier parser diagnostic, classified by the parser's stable code.
+/// The mapper's report of one carrier parser diagnostic: every error, and the
+/// one warning the checker reports, a `key` repeated within a `v-if` chain.
+/// Other warnings describe markup Vue accepts and are not reported.
+fn reported_parse_diagnostic(diagnostic: &LanguageDiagnostic) -> Option<MapperDiagnostic> {
+    match diagnostic.severity {
+        LanguageDiagnosticSeverity::Error => Some(carrier_parse_diagnostic(diagnostic)),
+        LanguageDiagnosticSeverity::Warning
+            if diagnostic.code == CompilerErrorCode::XVIfSameKey.code_str() =>
+        {
+            Some(MapperDiagnostic {
+                start: diagnostic.span.start,
+                end: diagnostic.span.end,
+                code: MapperDiagnosticCode::RepeatedBranchKey,
+                message: diagnostic.message.clone(),
+            })
+        }
+        LanguageDiagnosticSeverity::Warning | LanguageDiagnosticSeverity::Info => None,
+    }
+}
+
+/// One carrier parser error, classified by the parser's stable code.
 fn carrier_parse_diagnostic(diagnostic: &LanguageDiagnostic) -> MapperDiagnostic {
     MapperDiagnostic {
         start: diagnostic.span.start,

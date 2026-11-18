@@ -1838,6 +1838,69 @@ defineProps<{ tenant: string; item: { kind: string; id: string } }>();
     assert_ne!(exit_status(&outcome), ExitStatus::Clean);
 }
 
+/// A key repeated across a three-branch chain is a warning on each repeating
+/// branch, and the rest of the template is still checked: the error seeded
+/// outside the chain is reported, and nothing says the file was partly checked.
+#[test]
+fn a_same_key_three_branch_chain_warns_and_its_template_is_still_checked() {
+    let f = Fixture::new();
+    f.base();
+    f.write(
+        "tsconfig.json",
+        r#"{"extends":"./base.json","include":["*.vue"]}"#,
+    );
+    f.write(
+        "Repeated.vue",
+        r#"<script setup lang="ts">
+const kind = 'a' as string;
+const id = 1;
+</script>
+
+<template>
+  <div>
+    <p v-if="kind === 'a'" :key="`k:${id}`">a</p>
+    <p v-else-if="kind === 'b'" :key="`k:${id}`">b</p>
+    <p v-else :key="`k:${id}`">c</p>
+    <span>{{ id.toUpperCase() }}</span>
+  </div>
+</template>
+"#,
+    );
+    let outcome = f.run();
+    assert_eq!(outcome.carriers_checked, 1);
+    let diagnostics = outcome_diagnostics(&outcome);
+    let warned = diagnostics
+        .iter()
+        .filter(|d| d.verter_code == Some(crate::reporter::VerterCode::RepeatedBranchKey))
+        .map(|d| (d.line, d.col, d.severity))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        warned,
+        [
+            (9, 5, crate::reporter::Severity::Warning),
+            (10, 5, crate::reporter::Severity::Warning),
+        ],
+        "{diagnostics:?}"
+    );
+    assert!(
+        !diagnostics.iter().any(|d| matches!(
+            d.verter_code,
+            Some(
+                crate::reporter::VerterCode::CarrierSyntax
+                    | crate::reporter::VerterCode::PartialCheck
+            )
+        )),
+        "{diagnostics:?}"
+    );
+    let seeded = diagnostics
+        .iter()
+        .filter(|d| d.verter_code.is_none())
+        .map(|d| (d.ts_code, d.line))
+        .collect::<Vec<_>>();
+    assert_eq!(seeded, [(2339, 11)], "{diagnostics:?}");
+    assert_eq!(exit_status(&outcome), ExitStatus::Diagnostics);
+}
+
 #[test]
 fn type_declared_events_reach_the_public_emit_and_listener_props() {
     let f = Fixture::new();

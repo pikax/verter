@@ -1711,7 +1711,9 @@ impl Syntax {
                         // Check if previous sibling has same key value
                         if let Some(prev_key) = find_key_value(prev_el, ctx.bytes) {
                             if my_key == prev_key {
-                                self.diagnostics.push(Diagnostic::error(
+                                // A warning: the chain is well formed, so the
+                                // template's structure stays trustworthy.
+                                self.diagnostics.push(Diagnostic::warning(
                                     "syntax",
                                     CompilerErrorCode::XVIfSameKey,
                                     key_span,

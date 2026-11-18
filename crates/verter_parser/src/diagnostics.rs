@@ -65,7 +65,9 @@ pub enum CompilerErrorCode {
     // -- Directive validation errors --
     /// v-if/v-else-if is missing expression.
     XVIfNoExpression,
-    /// v-if/else branches must use unique keys.
+    /// v-if/else branches must use unique keys. Reported as a warning: the
+    /// chain itself is well formed, so the repeated key never makes the
+    /// template's structure untrustworthy.
     XVIfSameKey,
     /// v-else/v-else-if has no adjacent v-if or v-else-if.
     XVElseNoAdjacentIf,
