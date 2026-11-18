@@ -89,6 +89,36 @@ pub(super) fn compute_if_flags(
     })
 }
 
+/// Official `encodeIfBlockShape` under `shouldForceMultiRoot`: a `v-if`
+/// directly inside a `<template v-for>` is MULTI_ROOT on both sides,
+/// whatever its branches hold. The false side is ELSE_IF for a continuing
+/// `v-else-if` and MULTI_ROOT otherwise, even with no `v-else`; no branch is
+/// NO_SCOPE. The keyed index follows a present negative branch, as in
+/// [`compute_if_flags`].
+pub(super) fn compute_forced_multi_root_if_flags(
+    negative: IfNegative,
+    own_if_index: Option<u32>,
+    is_production: bool,
+) -> String {
+    let (false_shape, false_name) = match negative {
+        IfNegative::Chain => (3, "FALSE_ELSE_IF"),
+        _ => (2, "FALSE_MULTI_ROOT"),
+    };
+    let mut flags = 2 | (false_shape << 2);
+    let mut names = vec!["TRUE_MULTI_ROOT".to_string(), false_name.to_string()];
+    if !matches!(negative, IfNegative::None) {
+        if let Some(index) = own_if_index {
+            flags |= (index + 1) << 8;
+            names.push(format!("KEYED_INDEX_{index}"));
+        }
+    }
+    if is_production {
+        flags.to_string()
+    } else {
+        format!("{flags} /* {} */", names.join(", "))
+    }
+}
+
 /// Official loop flags consume the producer's returned block kind, including
 /// through transparent wrappers. Components and fragments never use DOM-node ops.
 /// `wrapped_rows` is independent of the returned kind: a `<template v-for>`
@@ -694,6 +724,20 @@ impl<'c> VaporCompiler<'c> {
         let Some(chain) = self.pending_if.take() else {
             return Ok(());
         };
+        // Official `shouldForceMultiRoot`: the chain's parent is a
+        // `<template v-for>`.
+        let force_multi_root = self
+            .inputs
+            .topology
+            .parent(self.inputs.structure.template_id(chain.last_branch))
+            .is_some_and(|parent| {
+                self.inputs.topology.kind(parent) == VueTemplateNodeKind::Template
+                    && self
+                        .inputs
+                        .topology
+                        .element(parent)
+                        .is_some_and(|element| element.v_for.is_some())
+            });
         let mut parts = vec![
             Part::Text("const "),
             Part::Name(NameKind::Node, chain.outer_ref),
@@ -718,14 +762,22 @@ impl<'c> VaporCompiler<'c> {
                         multi_root: next.multi_root,
                     },
                 };
-                let flags = compute_if_flags(
-                    branch.body.is_static,
-                    branch.multi_root,
-                    shape,
-                    branch.own_if_index,
-                    self.block_depth == 0,
-                    self.inputs.options.is_production,
-                );
+                let flags = if force_multi_root {
+                    Some(compute_forced_multi_root_if_flags(
+                        shape,
+                        branch.own_if_index,
+                        self.inputs.options.is_production,
+                    ))
+                } else {
+                    compute_if_flags(
+                        branch.body.is_static,
+                        branch.multi_root,
+                        shape,
+                        branch.own_if_index,
+                        self.block_depth == 0,
+                        self.inputs.options.is_production,
+                    )
+                };
                 if let Some(next) = negative {
                     current.extend([Part::Text("  }, () => "), Part::Run(next)]);
                     if let Some(flags) = flags {

@@ -99,14 +99,51 @@ fn static_markup_preserves_template_payloads() {
             "<template><div><span>inner</span></div></template>",
             "<div><span>inner",
         ),
-        (
-            "<template><div><!-- hello --><span/>tail</div></template>",
-            "<div><!-- hello --><span>tail",
-        ),
         ("<template><br/></template>", "<br>"),
     ] {
         let output = super::test_support::assert_legacy(source);
         assert!(output.code.contains(expected), "{}", output.code);
+    }
+}
+
+#[test]
+fn an_empty_non_void_element_keeps_its_end_tag_before_later_siblings() {
+    // Vue 3.6.0-rc.15 writes `<span></span>tail`: without the end tag the
+    // static template makes the text a child of the empty `<span>`.
+    for (source, expected) in [
+        (
+            "<template><div><!-- hello --><span/>tail</div></template>",
+            "_template(\"<div><!-- hello --><span></span>tail\", 3)",
+        ),
+        (
+            "<template><div><textarea rows=6></textarea><div class=\"x\">{{ b }}</div></div></template>",
+            "_template(\"<div><textarea rows=6></textarea><div class=x> \", 1)",
+        ),
+        (
+            "<template><div><input v-model=\"a\"><span/><b>{{ x }}</b></div></template>",
+            "_template(\"<div><input><span></span><b> \", 1)",
+        ),
+    ] {
+        let output = super::test_support::render(source);
+        assert!(output.code.contains(expected), "{expected}\n{}", output.code);
+    }
+}
+
+#[test]
+fn text_after_the_last_element_child_keeps_its_node() {
+    // Vue 3.6.0-rc.15: `<div><p>x</p> ` keeps the text node the effect sets,
+    // reached as the paragraph's next sibling.
+    let output = super::test_support::render("<template><div><p>x</p> {{ a }}</div></template>");
+    for expected in [
+        "_template(\"<div><p>x</p> \", 1)",
+        "= _next(_child(n1), true)",
+        "_setText(n0, \" \" + _toDisplayString(_ctx.a))",
+    ] {
+        assert!(
+            output.code.contains(expected),
+            "{expected}\n{}",
+            output.code
+        );
     }
 }
 

@@ -18,6 +18,9 @@ pub(super) struct TemplateDeclaration {
     pub(super) html: String,
     pub(super) is_root: bool,
     pub(super) is_static: bool,
+    /// The namespace runtime-vapor parses the payload in: 0 for HTML, 1 for
+    /// SVG, 2 for MathML (Vue's `Namespaces`).
+    pub(super) namespace: u8,
 }
 
 /// A component the render function resolves by name.
@@ -164,7 +167,13 @@ impl<'c> VaporState<'c> {
         name
     }
 
-    pub(super) fn declare_template(&mut self, html: String, is_root: bool, is_static: bool) -> u32 {
+    pub(super) fn declare_template(
+        &mut self,
+        html: String,
+        is_root: bool,
+        is_static: bool,
+        namespace: u8,
+    ) -> u32 {
         let index = self.counters.next_template();
         self.use_helper(VaporHelper::Template);
         self.templates.push(TemplateDeclaration {
@@ -172,6 +181,7 @@ impl<'c> VaporState<'c> {
             html,
             is_root,
             is_static,
+            namespace,
         });
         index
     }

@@ -10,7 +10,7 @@ use super::state::VaporState;
 use super::VaporCompiler;
 use crate::emission::EmissionBuilder;
 use crate::framework::vue::target::VueTargetRefusal;
-use crate::template::code_gen::shared::helpers::{write_template_declaration_into, VaporHelper};
+use crate::template::code_gen::shared::helpers::{push_u32, VaporHelper};
 use crate::template::vue_syntax::escape_js_string_into;
 
 impl<'c> VaporCompiler<'c> {
@@ -213,8 +213,12 @@ impl<'c> VaporState<'c> {
             scope.text_ref_generated = false;
         }
         super::element::strip_trailing_close_tags(&mut scope.html);
-        let template_idx =
-            Some(self.declare_template(std::mem::take(&mut scope.html), is_root, is_static));
+        let template_idx = Some(self.declare_template(
+            std::mem::take(&mut scope.html),
+            is_root,
+            is_static,
+            scope.namespace,
+        ));
         let node_ref = scope.ensure_node_ref(&mut self.counters);
         let mut parts = Vec::new();
         if let Some(template) = template_idx {
@@ -400,13 +404,7 @@ impl<'c> VaporState<'c> {
         let mut line = String::new();
         for template in &self.templates {
             line.clear();
-            write_template_declaration_into(
-                &mut line,
-                template.index,
-                &template.html,
-                template.is_root,
-                template.is_static,
-            );
+            write_template_declaration(&mut line, template);
             line.push('\n');
             self.preamble.push_unmapped(&line);
         }
@@ -474,6 +472,28 @@ impl<'c> VaporState<'c> {
     }
 }
 
+/// `const t<index> = _template("<html>", flags, namespace)`, as
+/// runtime-vapor 3.6.0-rc.15 `template(html, flags, ns)` reads it: the
+/// flags are omitted when zero and no namespace follows, and the namespace
+/// is written only for an SVG or MathML payload.
+fn write_template_declaration(line: &mut String, template: &super::state::TemplateDeclaration) {
+    line.push_str("const t");
+    push_u32(line, template.index);
+    line.push_str(" = _template(\"");
+    escape_js_string_into(line, &template.html);
+    line.push('"');
+    let flags = u32::from(template.is_root) | (u32::from(template.is_static) << 1);
+    if flags != 0 || template.namespace != 0 {
+        line.push_str(", ");
+        push_u32(line, flags);
+    }
+    if template.namespace != 0 {
+        line.push_str(", ");
+        push_u32(line, u32::from(template.namespace));
+    }
+    line.push(')');
+}
+
 /// The last child a closure declared under one container.
 struct NavCursor {
     container: u32,
@@ -511,36 +531,70 @@ pub(super) fn record_effect<'c>(effect: &VaporEffect<'c>, parts: &mut RunBuf<'c>
             }
             parts.push(Part::Text(")"));
         }
-        VaporEffect::Class { node_ref, expr } => {
-            record_setter(parts, "_setClass(", *node_ref, None, *expr, false)
-        }
+        VaporEffect::Class {
+            node_ref,
+            expr,
+            svg,
+        } => record_setter(parts, "_setClass(", *node_ref, None, *expr, false, *svg),
         VaporEffect::Style { node_ref, expr } => {
-            record_setter(parts, "_setStyle(", *node_ref, None, *expr, false)
+            record_setter(parts, "_setStyle(", *node_ref, None, *expr, false, false)
         }
         VaporEffect::Prop {
             node_ref,
             attr,
             expr,
-        } => record_setter(parts, "_setProp(", *node_ref, Some(attr), *expr, false),
+        } => record_setter(
+            parts,
+            "_setProp(",
+            *node_ref,
+            Some(attr),
+            *expr,
+            false,
+            false,
+        ),
         VaporEffect::Attr {
             node_ref,
             attr,
             expr,
-        } => record_setter(parts, "_setAttr(", *node_ref, Some(attr), *expr, false),
+            svg,
+        } => record_setter(
+            parts,
+            "_setAttr(",
+            *node_ref,
+            Some(attr),
+            *expr,
+            false,
+            *svg,
+        ),
         VaporEffect::DomProp {
             node_ref,
             attr,
             expr,
-        } => record_setter(parts, "_setDOMProp(", *node_ref, Some(attr), *expr, false),
+        } => record_setter(
+            parts,
+            "_setDOMProp(",
+            *node_ref,
+            Some(attr),
+            *expr,
+            false,
+            false,
+        ),
         VaporEffect::Html { node_ref, expr } => {
-            record_setter(parts, "_setHtml(", *node_ref, None, *expr, false)
+            record_setter(parts, "_setHtml(", *node_ref, None, *expr, false, false)
         }
-        VaporEffect::DynamicProps { node_ref, expr } => {
-            record_setter(parts, "_setDynamicProps(", *node_ref, None, *expr, true)
-        }
+        VaporEffect::DynamicProps { node_ref, expr } => record_setter(
+            parts,
+            "_setDynamicProps(",
+            *node_ref,
+            None,
+            *expr,
+            true,
+            false,
+        ),
     }
 }
 
+/// One setter call; `svg` appends runtime-vapor's trailing SVG flag.
 fn record_setter<'c>(
     parts: &mut RunBuf<'c>,
     helper: &'static str,
@@ -548,6 +602,7 @@ fn record_setter<'c>(
     attr: Option<&'c str>,
     expr: RunId,
     array: bool,
+    svg: bool,
 ) {
     parts.extend([
         Part::Text(helper),
@@ -561,7 +616,10 @@ fn record_setter<'c>(
         parts.push(Part::Text("["));
     }
     parts.push(Part::Run(expr));
-    parts.push(Part::Text(if array { "])" } else { ")" }));
+    if array {
+        parts.push(Part::Text("]"));
+    }
+    parts.push(Part::Text(if svg { ", true)" } else { ")" }));
 }
 
 fn write_effect_group<'c>(

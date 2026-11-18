@@ -611,9 +611,14 @@ enum Contract {
     /// slot templates beside default content leave it its own roots, and the
     /// slots, dynamic slot order and refs are Vue's.
     SlotRoots,
+    /// Dynamic attribute, class and style setters pass Vue's arguments,
+    /// including the trailing SVG flag.
+    Setters,
+    /// Each static template is parsed in the namespace Vue declares for it.
+    TemplateNamespaces,
 }
 
-const CASES: [(&str, Contract); 12] = [
+const CASES: [(&str, Contract); 21] = [
     ("generated-local-container", Contract::GeneratedLocals),
     ("setup-read-loop-key", Contract::LoopKeys),
     ("component-asset-repeat", Contract::ComponentAssets),
@@ -626,6 +631,15 @@ const CASES: [(&str, Contract); 12] = [
     ("slot-fallback-locals", Contract::Templates),
     ("dynamic-slot-name", Contract::ComponentSlots),
     ("slot-roots", Contract::SlotRoots),
+    ("empty-element-siblings", Contract::Templates),
+    ("trailing-text-run", Contract::Templates),
+    ("text-runs-beside-elements", Contract::Templates),
+    ("multi-root-slot-body", Contract::Templates),
+    ("svg-attributes", Contract::Setters),
+    ("template-namespace", Contract::TemplateNamespaces),
+    ("insertion-anchor-whitespace", Contract::Templates),
+    ("forced-multi-root", Contract::Templates),
+    ("conditional-slot-template", Contract::ComponentSlots),
 ];
 
 /// Each component creation's props and slots, in a stable order.
@@ -648,6 +662,51 @@ fn component_slots_difference(ours: &ModuleFacts, vue: &ModuleFacts) -> Option<S
     } else {
         None
     }
+}
+
+/// Setter calls with every argument after the node, in a stable order.
+fn setters(facts: &ModuleFacts) -> Vec<(String, Vec<String>)> {
+    const SETTERS: [&str; 6] = [
+        "setAttr",
+        "setProp",
+        "setClass",
+        "setStyle",
+        "setDOMProp",
+        "setValue",
+    ];
+    let mut calls: Vec<_> = facts
+        .calls
+        .iter()
+        .filter(|(helper, _)| SETTERS.contains(&helper.as_str()))
+        .map(|(helper, arguments)| {
+            let rest: Vec<_> = arguments
+                .iter()
+                .skip(1)
+                .map(|argument| argument.text.clone())
+                .collect();
+            (helper.clone(), rest)
+        })
+        .collect();
+    calls.sort();
+    calls
+}
+
+/// Each static template's node forest with its namespace argument, sorted.
+fn template_namespaces(facts: &ModuleFacts) -> Vec<(String, String)> {
+    let mut templates: Vec<_> = facts
+        .calls
+        .iter()
+        .filter(|(helper, _)| helper == "template")
+        .map(|(_, arguments)| {
+            let payload = arguments[0].string.as_deref().expect("literal payload");
+            let namespace = arguments
+                .get(2)
+                .map_or_else(String::new, |argument| argument.text.clone());
+            (template_shape(payload), namespace)
+        })
+        .collect();
+    templates.sort();
+    templates
 }
 
 /// Template ref calls with every argument after the node.
@@ -766,6 +825,26 @@ fn contract_difference(
             } else {
                 component_slots_difference(ours, vue)
             }
+        }
+        Contract::Setters => {
+            assert!(!setters(vue).is_empty(), "oracle setter inventory");
+            (setters(ours) != setters(vue))
+                .then(|| format!("setters {:?} against {:?}", setters(ours), setters(vue)))
+        }
+        Contract::TemplateNamespaces => {
+            assert!(
+                template_namespaces(vue)
+                    .iter()
+                    .any(|(_, namespace)| !namespace.is_empty()),
+                "oracle namespace inventory"
+            );
+            (template_namespaces(ours) != template_namespaces(vue)).then(|| {
+                format!(
+                    "template namespaces {:?} against {:?}",
+                    template_namespaces(ours),
+                    template_namespaces(vue)
+                )
+            })
         }
     }
 }

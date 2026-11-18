@@ -43,6 +43,7 @@ impl<'c> VaporCompiler<'c> {
             }
         }
         let has_content = !scope.html.is_empty()
+            || !scope.roots.is_empty()
             || !scope.child_nav.is_empty()
             || !scope.child_effects.is_empty()
             || !scope.child_statements.is_empty()
@@ -172,6 +173,20 @@ impl<'c> VaporCompiler<'c> {
         indent: &'c str,
         node: VueCompileNodeId,
     ) -> Result<SlotBody, VueTargetRefusal> {
+        if scope.is_transparent_wrapper {
+            // Several roots: each closed its own template as a root of the
+            // slot block. An element, a text run, a comment or a component
+            // is a stable root.
+            let non_stable = !scope
+                .roots
+                .iter()
+                .any(|root| matches!(root.kind, BlockKind::Node | BlockKind::Component));
+            let body = self.close_roots(scope, self.span_of(node))?;
+            return Ok(SlotBody {
+                run: body.run,
+                non_stable,
+            });
+        }
         let constructs_only = scope.html.is_empty()
             && !scope.merged_construct_kinds.is_empty()
             && scope.child_nav.is_empty()
@@ -253,7 +268,8 @@ impl<'c> VaporCompiler<'c> {
         &mut self,
         scope: &VaporScope<'c>,
     ) -> Result<Option<RunId>, VueTargetRefusal> {
-        if !scope.html.is_empty()
+        if scope.is_transparent_wrapper
+            || !scope.html.is_empty()
             || scope.merged_construct_kinds.len() != 1
             || !scope.child_nav.is_empty()
             || !scope.child_effects.is_empty()
