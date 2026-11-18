@@ -123,6 +123,112 @@ fn noemit_checks_a_shared_carrier_once_in_each_owning_project() {
     }
 }
 
+/// Two sibling projects: `a` lists its carriers and is not strict; `b` lists
+/// only its TypeScript sources, is strict, and imports `a/C.vue`.
+fn sibling_projects(f: &Fixture) {
+    f.base();
+    f.write(
+        "tsconfig.json",
+        r#"{"files":[],"references":[{"path":"./a"},{"path":"./b"}]}"#,
+    );
+    f.write(
+        "a/tsconfig.json",
+        r#"{"extends":"../base.json","compilerOptions":{"strict":false},"include":["*.vue"]}"#,
+    );
+    f.write(
+        "b/tsconfig.json",
+        r#"{"extends":"../base.json","include":["*.ts"]}"#,
+    );
+    f.write(
+        "b/x.ts",
+        "import C from \"../a/C.vue\";\n\nexport const component = C;\n",
+    );
+}
+
+fn project_named<'a>(outcome: &'a RunOutcome, config: &str) -> &'a ProjectCheck {
+    outcome
+        .projects
+        .iter()
+        .find(|project| project.config.ends_with(config))
+        .unwrap_or_else(|| panic!("no project {config}"))
+}
+
+/// A carrier reached only by import from a project that does not list it
+/// resolves there, as vue-tsc gives every carrier its program reaches a
+/// virtual file. It is served, not checked as a member.
+#[test]
+fn a_carrier_imported_from_outside_the_membership_resolves() {
+    let f = Fixture::new();
+    sibling_projects(&f);
+    f.write(
+        "a/C.vue",
+        r#"<script setup lang="ts">const label: string = "text";</script><template>{{ label }}</template>"#,
+    );
+    let outcome = f.run();
+    for project in &outcome.projects {
+        assert!(
+            project.attributed.is_empty(),
+            "{}: {:?}",
+            project.config,
+            project.attributed
+        );
+    }
+    let b = project_named(&outcome, "b/tsconfig.json");
+    assert!(b.carriers.is_empty());
+    let [imported] = b.imported_carriers.as_slice() else {
+        panic!("one imported carrier: {:?}", b.imported_carriers);
+    };
+    assert!(
+        imported.carrier.ends_with("a/C.vue"),
+        "{}",
+        imported.carrier
+    );
+    assert!(project_named(&outcome, "a/tsconfig.json")
+        .imported_carriers
+        .is_empty());
+    assert_eq!(outcome.carriers_checked, 1);
+    assert_eq!(exit_status(&outcome), ExitStatus::Clean);
+}
+
+/// A carrier reached by import is checked under the importing project's
+/// options, and its errors are reported at its authored position, as tsc
+/// reports a non-root source file of the program.
+#[test]
+fn a_carrier_imported_from_outside_the_membership_is_checked_with_the_importers_options() {
+    let f = Fixture::new();
+    sibling_projects(&f);
+    f.write(
+        "a/C.vue",
+        r#"<script setup lang="ts">const value: number = null;</script><template>{{ value }}</template>"#,
+    );
+    let outcome = f.run();
+    assert!(project_named(&outcome, "a/tsconfig.json")
+        .attributed
+        .is_empty());
+    let b = project_named(&outcome, "b/tsconfig.json");
+    let [diagnostic] = b.attributed.as_slice() else {
+        panic!("one diagnostic: {:?}", b.attributed);
+    };
+    assert_eq!(diagnostic.code, 2322);
+    assert!(
+        diagnostic.carrier.ends_with("a/C.vue"),
+        "{}",
+        diagnostic.carrier
+    );
+    assert!(!diagnostic.message.contains(".vue.ts"));
+    assert!(matches!(
+        diagnostic.anchor,
+        verter_session::sfc_projection_diagnostics::DiagnosticAnchor::Authored { .. }
+    ));
+    let printed = outcome_diagnostics(&outcome);
+    let [line] = printed.as_slice() else {
+        panic!("one printed line: {printed:?}");
+    };
+    assert!(line.file.ends_with("a/C.vue"), "{}", line.file);
+    assert_eq!((line.line, line.ts_code), (1, 2322));
+    assert_eq!(exit_status(&outcome), ExitStatus::Diagnostics);
+}
+
 #[test]
 fn generated_solution_projects_keep_ambient_alias_component_and_server_options() {
     let f = Fixture::new();
@@ -1582,6 +1688,7 @@ mod watch_session {
     type Reported = (
         Arc<str>,
         Vec<Arc<str>>,
+        Vec<Arc<str>>,
         Vec<ProjectionDiagnosticAttribution>,
         String,
         Option<String>,
@@ -1596,6 +1703,11 @@ mod watch_session {
                 (
                     project.config.clone(),
                     project.carriers.iter().map(|c| c.carrier.clone()).collect(),
+                    project
+                        .imported_carriers
+                        .iter()
+                        .map(|c| c.carrier.clone())
+                        .collect(),
                     project.attributed.clone(),
                     format!("{:?}", project.diagnostics),
                     project.engine_failure.clone(),
@@ -1807,6 +1919,24 @@ mod watch_session {
         assert!(codes(&w.changed(&["shared/types.d.ts"])).is_empty());
         w.f.write("app/View.vue", IMPORTS);
         assert!(codes(&w.changed(&["app/View.vue"])).is_empty());
+    }
+
+    /// A carrier reached only by import from another project is watched for
+    /// that project's program too, and an edit to it is checked there under
+    /// that project's options.
+    #[test]
+    fn watch_session_carrier_imported_from_outside_the_membership_matches_fresh_runs() {
+        let f = Fixture::new();
+        sibling_projects(&f);
+        f.write("a/C.vue", CLEAN);
+        let mut w = Watched::open(f);
+        w.f.write(
+            "a/C.vue",
+            r#"<script setup lang="ts">const value: number = null;</script><template>{{ value }}</template>"#,
+        );
+        assert_eq!(codes(&w.changed(&["a/C.vue"])), vec![2322]);
+        w.f.write("a/C.vue", CLEAN);
+        assert!(codes(&w.changed(&["a/C.vue"])).is_empty());
     }
 
     /// A module created where the program's resolution probed is a change it

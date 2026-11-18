@@ -125,6 +125,7 @@ fn project(config: &Path) -> ProjectCheck {
     ProjectCheck {
         config: Arc::from(config.to_string_lossy().replace('\\', "/")),
         carriers: vec![],
+        imported_carriers: vec![],
         unowned_carriers: vec![],
         foreign_surfaces: vec![],
         diagnostics: vec![],

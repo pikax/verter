@@ -514,6 +514,30 @@ impl ContentMapperProjectionAdapter {
             .is_some()
     }
 
+    /// The carrier whose checking module, in some dialect, sits at `path`:
+    /// what an engine looking for `path` resolves an authored import of that
+    /// carrier to. `None` for any other path, the carrier's other companions
+    /// included.
+    #[must_use]
+    pub fn carrier_of_checking_module(&self, path: &str) -> Option<String> {
+        let path = canonicalize_path(path);
+        let carrier = self
+            .descriptor
+            .virtual_file_naming
+            .as_ref()?
+            .carrier_source_for_companion(&path, self.descriptor.carrier_extension().as_deref())?
+            .source;
+        [
+            CheckingDialect::Ts,
+            CheckingDialect::Tsx,
+            CheckingDialect::Js,
+            CheckingDialect::Jsx,
+        ]
+        .into_iter()
+        .any(|dialect| self.virtual_file(&carrier, dialect).as_deref() == Some(path.as_str()))
+        .then_some(carrier)
+    }
+
     #[must_use]
     pub fn open_projects(&self) -> usize {
         self.projects.lock().len()
