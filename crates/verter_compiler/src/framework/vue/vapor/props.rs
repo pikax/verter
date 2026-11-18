@@ -8,7 +8,7 @@ use super::scope::VaporScope;
 use super::VaporCompiler;
 use crate::ast::types::PropFlags;
 use crate::framework::vue::structure::{
-    VueAttr, VueAttrKind, VueBuiltinDirective, VueCompileNodeId,
+    VueAttr, VueAttrKind, VueBuiltinDirective, VueCompileNodeId, VueNodeFlags,
 };
 use crate::template::binding::is_simple_ident;
 use crate::template::binding::prefixed_expr::find_prop_oxc_exp;
@@ -185,9 +185,25 @@ impl<'c> VaporCompiler<'c> {
                     _ => {}
                 }
             }
+            // Vue 3.6.0-rc.15 `getRuntimeHelper`: an SVG element's
+            // attributes are written as attributes, flagged as SVG, because
+            // its geometry IDL properties (`width`, `cx`, `viewBox`, ...)
+            // are read-only `SVGAnimated*` objects a property write misses.
+            let svg = inputs
+                .structure
+                .facts(node)
+                .flags
+                .has(VueNodeFlags::SVG_NAMESPACE);
             let (effect, helper) =
                 if arg == "class" && element.prop_flag.has(PropFlags::HasDynamicClass) {
-                    (VaporEffect::Class { node_ref, expr }, VaporHelper::SetClass)
+                    (
+                        VaporEffect::Class {
+                            node_ref,
+                            expr,
+                            svg,
+                        },
+                        VaporHelper::SetClass,
+                    )
                 } else if arg == "style" && element.prop_flag.has(PropFlags::HasDynamicStyle) {
                     (VaporEffect::Style { node_ref, expr }, VaporHelper::SetStyle)
                 } else if force_prop {
@@ -199,12 +215,13 @@ impl<'c> VaporCompiler<'c> {
                         },
                         VaporHelper::SetDomProp,
                     )
-                } else if force_attr || is_attr_not_prop(arg) {
+                } else if force_attr || svg || is_attr_not_prop(arg) {
                     (
                         VaporEffect::Attr {
                             node_ref,
                             attr: arg,
                             expr,
+                            svg,
                         },
                         VaporHelper::SetAttr,
                     )

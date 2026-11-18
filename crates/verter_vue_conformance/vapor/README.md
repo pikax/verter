@@ -62,6 +62,22 @@ native output's. Each then compares the one construct it isolates:
 - `slot-roots`: slot templates beside default content, slot functions whose
   roots may render nothing (`{ _: 1 }` NON_STABLE flags), refs inside looped
   slot templates, and dynamic slot order.
+- `empty-element-siblings`, `trailing-text-run`, `text-runs-beside-elements`,
+  `insertion-anchor-whitespace` and `forced-multi-root` use the template
+  comparison: an empty or self-closing non-void element keeps its end tag
+  before later siblings; text after the last element child keeps its node;
+  every text run beside other nodes is its own navigated node with its own
+  text; a block before kept whitespace is inserted before its `<!>` anchor;
+  and a `v-if` directly inside a `<template v-for>` carries Vue's forced
+  MULTI_ROOT flags.
+- `multi-root-slot-body`: a default or named slot body with several roots
+  gives each root its own template and returns them all.
+- `svg-attributes`: the arguments of every attribute, class and style setter,
+  including the trailing SVG flag on SVG attributes and classes.
+- `template-namespace`: the namespace argument of each static template whose
+  root is an SVG element.
+- `conditional-slot-template`: a `v-if`/`v-else` slot template pair is one
+  conditional entry of the dynamic slot list.
 
 Every case also compares the DOM node each runtime operation receives. Each
 node local is followed to its structural path under runtime-vapor

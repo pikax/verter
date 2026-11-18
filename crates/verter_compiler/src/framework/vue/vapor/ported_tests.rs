@@ -986,13 +986,20 @@ fn dom_child_index_counts_preceding_siblings_exactly() {
     );
 
     // Coalescing: a leading text+interpolation run is ONE child, so the
-    // following element is index 1 (not 2). `<div>t{{i}}<span>{{d}}</span></div>`
-    // → the span is DOM child 1, the first child's next sibling.
-    let r = run_full_pipeline("<template><div>t{{ i }}<span>{{ d }}</span></div></template>");
-    assert!(
-        r.contains("= _next(_child(n0))"),
-        "a leading text+interpolation run coalesces to one child; the span must be DOM index 1, got:\n{r}"
-    );
+    // following element is index 1 (not 2). Beside the span, the run is its
+    // own node, reached as the div's first child (Vue 3.6.0-rc.15:
+    // `n0 = _child(n2, true)`, `n1 = _next(n0)`).
+    let r = render_code("<template><div>t{{ i }}<span>{{ d }}</span></div></template>");
+    for expected in [
+        "const n0 = _child(n2, true)",
+        " = _next(n0)",
+        "_setText(n0, \"t\" + _toDisplayString(_ctx.i))",
+    ] {
+        assert!(
+            r.contains(expected),
+            "a leading text+interpolation run coalesces to one child; the span must be DOM index 1: {expected}\n{r}"
+        );
+    }
 }
 
 #[test]
