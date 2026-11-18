@@ -304,10 +304,7 @@ fn root_type(
                 }
             }
             (
-                format!(
-                    "typeof {}[\"$props\"]",
-                    observation.witness.binding
-                ),
+                format!("typeof {}[\"$props\"]", observation.witness.binding),
                 keys,
             )
         }

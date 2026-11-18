@@ -3439,9 +3439,15 @@ defineExpose({ value: props.value });
             .any(|p| p.family == ObligationFamily::Fallthrough),
         "{text}"
     );
-    assert!(text.contains("readonly $attrs: Record<string, unknown>"), "{text}");
+    assert!(
+        text.contains("readonly $attrs: Record<string, unknown>"),
+        "{text}"
+    );
     assert!(text.contains("Exclude<ReturnType<typeof __VerterSetupScope<T>>, { readonly __verterRootArm: unknown }>"), "{text}");
-    assert!(text.contains("if (__VerterRootProbe) return __VerterRootArm"), "{text}");
+    assert!(
+        text.contains("if (__VerterRootProbe) return __VerterRootArm"),
+        "{text}"
+    );
     let allocator = oxc_allocator::Allocator::default();
     let parsed =
         verter_parser::oxc_parse::Parser::new(&allocator, text, oxc_span::SourceType::ts()).parse();
@@ -3456,7 +3462,14 @@ defineExpose({ value: props.value });
 fn fallthrough_component_root_fixtures_are_fully_checked() {
     macro_rules! fixture {
         ($path:literal) => {
-            ($path, include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../verter_tsc/tests/cases/fixtures/", $path)))
+            (
+                $path,
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../verter_tsc/tests/cases/fixtures/",
+                    $path
+                )),
+            )
         };
     }
     for (path, source) in [
